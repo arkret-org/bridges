@@ -1,0 +1,35 @@
+# cokret <-> Slack 桥接示例配置(snake_case)。
+
+bridge:
+  bridge_id: "slack"
+  port: 9103
+  bind_address: "0.0.0.0"
+  admin_did: "did:web:admin.example"
+  disable_presence: false
+  disable_typing_notifications: false
+  disable_read_receipts: false
+  disable_deletion_forwarding: false
+
+cokret:
+  server_url: "http://localhost:8008"
+  service_did: "did:web:slack-bridge.example"
+  applet_id: "ck:applet:00000000-0000-7000-8000-0000000000d3"
+  access_token: "CHANGE_ME_COKRET_ACCESS_TOKEN"
+  signing_key_seed_hex: "0000000000000000000000000000000000000000000000000000000000000000"
+  verification_method_id: "#key-1"
+  default_realm_id: null
+
+database:
+  url: "sqlite://slack-bridge.db"
+  pool_size: 8
+
+logging:
+  level: "info"
+  format: "pretty"
+
+# Slack 适配器专属
+app:
+  # Web API(chat.postMessage)用的 Bot User OAuth Token,形如 xoxb-...
+  bot_token: "CHANGE_ME_SLACK_BOT_TOKEN"
+  # Socket Mode 建连用的 App-Level Token,形如 xapp-...
+  app_token: "CHANGE_ME_SLACK_APP_TOKEN"

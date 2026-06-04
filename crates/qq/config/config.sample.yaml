@@ -1,0 +1,38 @@
+# cokret <-> QQ 桥接示例配置(snake_case)。
+
+bridge:
+  bridge_id: "qq"
+  port: 9110
+  bind_address: "0.0.0.0"
+  admin_did: "did:web:admin.example"
+  disable_presence: false
+  disable_typing_notifications: false
+  disable_read_receipts: false
+  disable_deletion_forwarding: false
+
+cokret:
+  server_url: "http://localhost:8008"
+  service_did: "did:web:qq-bridge.example"
+  applet_id: "ck:applet:00000000-0000-7000-8000-0000000000qq"
+  access_token: "CHANGE_ME_COKRET_ACCESS_TOKEN"
+  signing_key_seed_hex: "0000000000000000000000000000000000000000000000000000000000000000"
+  verification_method_id: "#key-1"
+  default_realm_id: null
+
+database:
+  url: "sqlite://qq-bridge.db"
+  pool_size: 8
+
+logging:
+  level: "info"
+  format: "pretty"
+
+# QQ 适配器专属(OneBot HTTP API)
+app:
+  # OneBot 实现(如 go-cqhttp / NapCat / Lagrange)的 HTTP API 基址。
+  onebot_url: "http://127.0.0.1:5700"
+  # OneBot access_token(可选,作 Bearer 鉴权)。
+  access_token: "CHANGE_ME_ONEBOT_ACCESS_TOKEN"
+  # —— 若改用 QQ 官方机器人,改填以下两项,并调整 send_to_app 的 endpoint:
+  # app_id: "CHANGE_ME_QQ_APP_ID"
+  # token: "CHANGE_ME_QQ_BOT_TOKEN"

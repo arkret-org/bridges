@@ -1,0 +1,33 @@
+# cokret <-> Telegram 桥接示例配置(snake_case)。
+
+bridge:
+  bridge_id: "telegram"
+  port: 9102
+  bind_address: "0.0.0.0"
+  admin_did: "did:web:admin.example"
+  disable_presence: false
+  disable_typing_notifications: false
+  disable_read_receipts: false
+  disable_deletion_forwarding: false
+
+cokret:
+  server_url: "http://localhost:8008"
+  service_did: "did:web:telegram-bridge.example"
+  applet_id: "ck:applet:00000000-0000-7000-8000-0000000000d2"
+  access_token: "CHANGE_ME_COKRET_ACCESS_TOKEN"
+  signing_key_seed_hex: "0000000000000000000000000000000000000000000000000000000000000000"
+  verification_method_id: "#key-1"
+  default_realm_id: null
+
+database:
+  url: "sqlite://telegram-bridge.db"
+  pool_size: 8
+
+logging:
+  level: "info"
+  format: "pretty"
+
+# Telegram 适配器专属
+app:
+  # 从 @BotFather 取得的 bot token。
+  bot_token: "CHANGE_ME_TELEGRAM_BOT_TOKEN"

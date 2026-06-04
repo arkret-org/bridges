@@ -1,0 +1,35 @@
+# cokret <-> iMessage 桥接示例配置(snake_case)。
+
+bridge:
+  bridge_id: "imessage"
+  port: 9112
+  bind_address: "0.0.0.0"
+  admin_did: "did:web:admin.example"
+  disable_presence: false
+  disable_typing_notifications: false
+  disable_read_receipts: false
+  disable_deletion_forwarding: false
+
+cokret:
+  server_url: "http://localhost:8008"
+  service_did: "did:web:imessage-bridge.example"
+  applet_id: "ck:applet:00000000-0000-7000-8000-0000000imsg"
+  access_token: "CHANGE_ME_COKRET_ACCESS_TOKEN"
+  signing_key_seed_hex: "0000000000000000000000000000000000000000000000000000000000000000"
+  verification_method_id: "#key-1"
+  default_realm_id: null
+
+database:
+  url: "sqlite://imessage-bridge.db"
+  pool_size: 8
+
+logging:
+  level: "info"
+  format: "pretty"
+
+# iMessage 适配器专属(BlueBubbles / AirMessage HTTP 网关)
+app:
+  # 网关基址。BlueBubbles 默认 http://127.0.0.1:1234。
+  gateway_url: "http://127.0.0.1:1234"
+  # 网关访问口令(BlueBubbles 作 ?guid= 查询参数)。
+  password: "CHANGE_ME_GATEWAY_PASSWORD"

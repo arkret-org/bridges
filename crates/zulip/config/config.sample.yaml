@@ -1,0 +1,36 @@
+# cokret <-> Zulip 桥接示例配置(snake_case)。
+
+bridge:
+  bridge_id: "zulip"
+  port: 9107
+  bind_address: "0.0.0.0"
+  admin_did: "did:web:admin.example"
+  disable_presence: false
+  disable_typing_notifications: false
+  disable_read_receipts: false
+  disable_deletion_forwarding: false
+
+cokret:
+  server_url: "http://localhost:8008"
+  service_did: "did:web:zulip-bridge.example"
+  applet_id: "ck:applet:00000000-0000-7000-8000-0000000000d7"
+  access_token: "CHANGE_ME_COKRET_ACCESS_TOKEN"
+  signing_key_seed_hex: "0000000000000000000000000000000000000000000000000000000000000000"
+  verification_method_id: "#key-1"
+  default_realm_id: null
+
+database:
+  url: "sqlite://zulip-bridge.db"
+  pool_size: 8
+
+logging:
+  level: "info"
+  format: "pretty"
+
+# Zulip 适配器专属
+app:
+  # Zulip 站点基址(无尾斜杠),如 https://your-org.zulipchat.com
+  site: "https://your-org.zulipchat.com"
+  # bot 账号邮箱与 API key(Zulip 设置 → 你的 bot → API key)
+  bot_email: "cokret-bot@your-org.zulipchat.com"
+  api_key: "CHANGE_ME_ZULIP_API_KEY"

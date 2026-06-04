@@ -1,0 +1,42 @@
+# cokret-bridge-teams
+
+Rust 实现的 **cokret ⇄ Microsoft Teams** 桥接。基于共享核心
+[`cokret-bridge-core`](../core),应用侧使用 **Bot Framework** REST API
+(`ctx.http` / reqwest)发送消息。
+
+## 架构
+
+- **出站(cokret → Teams)**:cokret server 经 applet 端点
+  `POST /_cokret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`:
+  1. 用 client_credentials 向 AAD(`login.microsoftonline.com/botframework.com`)取
+     access token;
+  2. `ctx.http` POST `{serviceUrl}/v3/conversations/{conversationId}/activities`
+     发送 `message` Activity。
+- **入站(Teams → cokret)**:Bot Framework 通过 HTTPS webhook 把 Activity POST 到
+  bot 的 `/api/messages`。当前 `cokret-bridge-core` 的 web 层尚未暴露供各适配器注册
+  自定义路由的能力,因此 `BridgeApp::run` 暂以保活循环占位;待 core 暴露额外路由后,
+  在 `run` 中解析入站 Activity 并调用 `submit_app_message` 即可打通入站。
+- **映射**:conversation↔realm、消息↔event、用户↔actor 存于 diesel 数据库(默认 sqlite)。
+
+## 快速开始
+
+```bash
+cp config/config.sample.yaml config.yaml
+# 填入 cokret.access_token / signing_key_seed_hex 与 app.app_id / app.app_password
+cargo run -p cokret-bridge-teams -- --config config.yaml
+```
+
+## 配置要点
+
+- `cokret.*`:cokret 接入(server_url、service_did、applet_id、access_token、签名种子)。
+- `app.app_id` / `app.app_password`:Azure Bot 注册的应用 ID 与密钥。
+- `app.service_url`:Bot Framework serviceUrl 基地址(随入站 Activity 下发,按区域不同)。
+- `database.url`:`sqlite://...` / `postgres://...` / `mysql://...`(对应 feature)。
+
+## 不确定点 / TODO
+
+- 入站 `/api/messages` webhook 待 core 暴露额外 web 路由后接入(见 `run` 中 `// TODO`)。
+- `service_url` 实际值随会话由 Bot Framework 下发,出站前应以入站 Activity 携带的
+  serviceUrl 为准;此处先用配置缺省值。
+
+详见 [`../_bridges_todos.md`](../../_bridges_todos.md) 的总体规划与映射表。

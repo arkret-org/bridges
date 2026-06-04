@@ -1,0 +1,37 @@
+# cokret <-> Microsoft Teams 桥接示例配置(snake_case)。
+
+bridge:
+  bridge_id: "teams"
+  port: 9114
+  bind_address: "0.0.0.0"
+  admin_did: "did:web:admin.example"
+  disable_presence: false
+  disable_typing_notifications: false
+  disable_read_receipts: false
+  disable_deletion_forwarding: false
+
+cokret:
+  server_url: "http://localhost:8008"
+  service_did: "did:web:teams-bridge.example"
+  applet_id: "ck:applet:00000000-0000-7000-8000-0000000000e4"
+  access_token: "CHANGE_ME_COKRET_ACCESS_TOKEN"
+  signing_key_seed_hex: "0000000000000000000000000000000000000000000000000000000000000000"
+  verification_method_id: "#key-1"
+  default_realm_id: null
+
+database:
+  url: "sqlite://teams-bridge.db"
+  pool_size: 8
+
+logging:
+  level: "info"
+  format: "pretty"
+
+# Microsoft Teams(Bot Framework)适配器专属
+app:
+  # Azure Bot 注册的应用(client)ID。
+  app_id: "CHANGE_ME_TEAMS_APP_ID"
+  # 应用密钥(client secret)。
+  app_password: "CHANGE_ME_TEAMS_APP_PASSWORD"
+  # Bot Framework serviceUrl 基地址(随入站 Activity 下发,区域不同而异)。
+  service_url: "https://smba.trafficmanager.net/amer/"

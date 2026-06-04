@@ -1,0 +1,27 @@
+[package]
+name = "cokret-bridge-messaging"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Messaging helper layer for Cokret Applet bridges: channel/user/message mappings, ck.message.create wiring, and social bridge adapter traits."
+
+[features]
+default = ["sqlite"]
+sqlite = ["cokret-bridge-runtime/sqlite"]
+postgres = ["cokret-bridge-runtime/postgres"]
+mysql = ["cokret-bridge-runtime/mysql"]
+
+[dependencies]
+cokret-bridge-runtime = { workspace = true, default-features = false }
+cokret = { workspace = true }
+salvo = { workspace = true }
+tokio = { workspace = true }
+diesel = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+reqwest = { workspace = true }
+tracing = { workspace = true }

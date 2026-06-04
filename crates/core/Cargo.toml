@@ -1,0 +1,38 @@
+[package]
+name = "cokret-bridge-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Applet bridge runtime for Cokret integrations: protocol-side event submission, applet routes, database pool, configuration, salvo web, queue/cache, media, and logging."
+
+[features]
+default = ["sqlite"]
+sqlite = ["diesel/sqlite", "dep:libsqlite3-sys"]
+postgres = ["diesel/postgres"]
+mysql = ["diesel/mysql"]
+
+[dependencies]
+cokret = { workspace = true }
+salvo = { workspace = true }
+tokio = { workspace = true }
+diesel = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+config = { workspace = true }
+kdl = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+url = { workspace = true }
+parking_lot = { workspace = true }
+once_cell = { workspace = true }
+libsqlite3-sys = { version = "0.35", features = ["bundled"], optional = true }

@@ -1,0 +1,31 @@
+[package]
+name = "cokret-bridge-googlechat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "cokret <-> Google Chat bridge (Google Chat API, reqwest)."
+
+[[bin]]
+name = "cokret-bridge-googlechat"
+path = "src/main.rs"
+
+[features]
+default = ["sqlite"]
+sqlite = ["cokret-bridge-runtime/sqlite", "cokret-bridge-messaging/sqlite"]
+postgres = ["cokret-bridge-runtime/postgres", "cokret-bridge-messaging/postgres"]
+mysql = ["cokret-bridge-runtime/mysql", "cokret-bridge-messaging/mysql"]
+
+[dependencies]
+cokret-bridge-runtime = { workspace = true, default-features = false }
+cokret-bridge-messaging = { workspace = true, default-features = false }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+parking_lot = { workspace = true }
+reqwest = { workspace = true }

@@ -1,0 +1,38 @@
+# cokret <-> 微信(企业微信/公众号)桥接示例配置(snake_case)。
+
+bridge:
+  bridge_id: "wechat"
+  port: 9105
+  bind_address: "0.0.0.0"
+  admin_did: "did:web:admin.example"
+  disable_presence: false
+  disable_typing_notifications: false
+  disable_read_receipts: false
+  disable_deletion_forwarding: false
+
+cokret:
+  server_url: "http://localhost:8008"
+  service_did: "did:web:wechat-bridge.example"
+  applet_id: "ck:applet:00000000-0000-7000-8000-0000000000d5"
+  access_token: "CHANGE_ME_COKRET_ACCESS_TOKEN"
+  signing_key_seed_hex: "0000000000000000000000000000000000000000000000000000000000000000"
+  verification_method_id: "#key-1"
+  default_realm_id: null
+
+database:
+  url: "sqlite://wechat-bridge.db"
+  pool_size: 8
+
+logging:
+  level: "info"
+  format: "pretty"
+
+# 微信适配器专属
+# 企业微信:填 corp_id / corp_secret / agent_id
+# 公众号:改填 app_id / app_secret(agent_id 可省略)
+app:
+  corp_id: "CHANGE_ME_WECHAT_CORP_ID"
+  corp_secret: "CHANGE_ME_WECHAT_CORP_SECRET"
+  agent_id: 1000002
+  # app_id: "CHANGE_ME_WECHAT_APP_ID"
+  # app_secret: "CHANGE_ME_WECHAT_APP_SECRET"

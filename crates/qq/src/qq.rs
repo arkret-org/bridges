@@ -1,0 +1,153 @@
+//! QQ adapter (OneBot HTTP API / QQ official bot, pure reqwest).
+//!
+//! - Inbound (QQ -> cokret): OneBot HTTP reports are accepted at
+//!   `/webhooks/qq`.
+//! - Outbound (cokret → QQ): [`MessageBridge::send_to_app`] uses `ctx.http` to POST to
+//!   OneBot `send_msg` (or the official `/channels/{id}/messages`).
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
+use cokret_bridge_messaging::{
+    AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage, webhook,
+};
+use cokret_bridge_runtime::{BridgeError, Result};
+use serde_json::{Value, json};
+
+/// QQ bridge adapter.
+pub struct QqApp {
+    /// OneBot HTTP API base, e.g. `http://127.0.0.1:5700`.
+    onebot_url: String,
+    /// OneBot `access_token` (optional, used as Bearer auth).
+    access_token: Option<String>,
+}
+
+impl QqApp {
+    pub fn new(onebot_url: impl Into<String>, access_token: Option<String>) -> Self {
+        Self {
+            onebot_url: onebot_url.into(),
+            access_token,
+        }
+    }
+}
+
+#[async_trait]
+impl MessageBridge for QqApp {
+    fn name(&self) -> &str {
+        "qq"
+    }
+
+    async fn run(self: Arc<Self>, _ctx: Arc<MessageContext>) -> Result<()> {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        }
+    }
+
+    async fn send_to_app(
+        &self,
+        ctx: Arc<MessageContext>,
+        msg: OutboundAppMessage,
+    ) -> Result<AppMessageRef> {
+        // OneBot v11 send_msg: app_channel is the QQ group number.
+        let group_id: i64 = msg.app_channel.parse().map_err(|_| {
+            BridgeError::App(format!("invalid QQ group number: {}", msg.app_channel))
+        })?;
+
+        let url = format!("{}/send_msg", self.onebot_url.trim_end_matches('/'));
+        let body = format!("{}: {}", msg.sender_display, msg.body);
+        let payload = json!({
+            "message_type": "group",
+            "group_id": group_id,
+            "message": body,
+        });
+
+        let mut req = ctx.http.post(&url).json(&payload);
+        if let Some(token) = &self.access_token {
+            req = req.bearer_auth(token);
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| BridgeError::App(format!("QQ send request failed: {e}")))?;
+        let status = resp.status();
+        let value: serde_json::Value = resp.json().await.map_err(|e| {
+            BridgeError::App(format!("QQ response parse failed (status={status}): {e}"))
+        })?;
+        if !status.is_success() {
+            return Err(BridgeError::App(format!(
+                "QQ send failed status={status}: {value}"
+            )));
+        }
+
+        // OneBot send_msg returns data.message_id on success.
+        let message_id = value
+            .get("data")
+            .and_then(|d| d.get("message_id"))
+            .map(|id| id.to_string())
+            .unwrap_or_default();
+        Ok(AppMessageRef {
+            app_message_id: message_id,
+        })
+    }
+
+    fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
+        Some(
+            salvo::Router::with_path("webhooks/qq")
+                .hoop(affix_state::inject(QqWebhookState { ctx }))
+                .post(qq_delivery),
+        )
+    }
+}
+
+#[derive(Clone)]
+struct QqWebhookState {
+    ctx: Arc<MessageContext>,
+}
+
+#[handler]
+async fn qq_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    let Ok(state) = depot.obtain::<QqWebhookState>() else {
+        webhook::bad_request(res, "webhook state missing");
+        return;
+    };
+    let Some(body) = webhook::json_body(req, res).await else {
+        return;
+    };
+    if body.get("post_type").and_then(Value::as_str) != Some("message") {
+        webhook::ok_json(res, json!({ "ok": true }));
+        return;
+    }
+    let text = webhook::first_string_at(&body, &["/raw_message", "/message"]).unwrap_or_default();
+    if text.is_empty() {
+        webhook::ok_json(res, json!({ "ok": true }));
+        return;
+    }
+    let user = body
+        .get("user_id")
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+    let channel = if let Some(group_id) = body.get("group_id") {
+        group_id.to_string()
+    } else {
+        format!("private/{user}")
+    };
+    let message_id = body
+        .get("message_id")
+        .map(|v| v.to_string())
+        .or_else(|| body.get("time").map(|v| v.to_string()))
+        .unwrap_or_default();
+    webhook::submit(
+        state.ctx.clone(),
+        "qq",
+        InboundAppMessage {
+            app_channel: channel,
+            app_user: user,
+            app_message_id: message_id,
+            body: text,
+        },
+    )
+    .await;
+    webhook::ok_json(res, json!({ "ok": true }));
+}

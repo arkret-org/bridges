@@ -1,0 +1,29 @@
+# cokret-bridge-discord
+
+Rust 实现的 **cokret ⇄ Discord** 桥接。基于共享核心 [`cokret-bridge-core`](../core),
+应用侧使用 [`serenity`](https://crates.io/crates/serenity) gateway。
+
+## 架构
+
+- **入站(Discord → cokret)**:serenity gateway 收到消息 → `BridgeContext::submit_app_message`
+  → 核心构造并签名 `ck.message.create` 事件 → `events_submit` 提交到 cokret。
+- **出站(cokret → Discord)**:cokret server 经 applet 端点
+  `POST /_cokret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
+  用 serenity HTTP 发到 Discord 频道。
+- **映射**:频道↔realm、消息↔event、用户↔actor 存于 diesel 数据库(默认 sqlite)。
+
+## 快速开始
+
+```bash
+cp config/config.sample.yaml config.yaml
+# 填入 cokret.access_token / signing_key_seed_hex 与 app.bot_token
+cargo run -p cokret-bridge-discord -- --config config.yaml
+```
+
+## 配置要点
+
+- `cokret.*`:cokret 接入(server_url、service_did、applet_id、access_token、签名种子)。
+- `app.bot_token`:Discord bot token。
+- `database.url`:`sqlite://...` / `postgres://...` / `mysql://...`(对应 feature)。
+
+详见 [`../_bridges_todos.md`](../../_bridges_todos.md) 的总体规划与映射表。
