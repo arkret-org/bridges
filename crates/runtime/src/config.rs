@@ -1,7 +1,7 @@
 //! Configuration loading. Supports YAML (`config.yaml`) and KDL
-//! (`config.kdl`), with the parser chosen by file extension. The structure
-//! mirrors the `bridge`/`auth`/`logging` sections of the Matrix bridge, but
-//! the Matrix section is replaced by the cokret section.
+//! (`config.kdl`), with the parser chosen by file extension. The top-level
+//! structure is `bridge` / `cokret` / `database` / `logging` plus a per-adapter
+//! `app` section.
 
 use std::path::Path;
 
@@ -50,8 +50,8 @@ pub struct BridgeConfig {
     pub disable_deletion_forwarding: bool,
 }
 
-/// cokret protocol-side integration parameters (replaces the Matrix bridge's
-/// homeserver/appservice section).
+/// cokret protocol-side integration parameters (server URL, service DID,
+/// applet id, signing material).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CokretConfig {
     /// The cokret edge/home server base URL (used for events_submit / blob /
@@ -161,13 +161,23 @@ impl Config {
     }
 
     /// Decode the signing seed into 32 bytes.
+    ///
+    /// Rejects the all-zero seed: it appears verbatim in the sample configs, so
+    /// an operator who copies a sample without changing it would otherwise run
+    /// with a publicly predictable signing key.
     pub fn signing_seed(&self) -> Result<[u8; 32]> {
         let bytes = hex_decode(&self.cokret.signing_key_seed_hex).ok_or_else(|| {
             BridgeError::Config("signing_key_seed_hex is not valid hexadecimal".into())
         })?;
-        bytes
+        let seed: [u8; 32] = bytes
             .try_into()
-            .map_err(|_| BridgeError::Config("signing_key_seed_hex must be 32 bytes".into()))
+            .map_err(|_| BridgeError::Config("signing_key_seed_hex must be 32 bytes".into()))?;
+        if seed == [0u8; 32] {
+            return Err(BridgeError::Config(
+                "signing_key_seed_hex must not be all-zero (replace the sample placeholder)".into(),
+            ));
+        }
+        Ok(seed)
     }
 }
 

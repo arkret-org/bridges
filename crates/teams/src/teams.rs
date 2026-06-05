@@ -15,8 +15,12 @@ use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage, webhook,
 };
+use cokret_bridge_runtime::cache::TokenCache;
 use cokret_bridge_runtime::{BridgeError, Result};
 use serde_json::{Value, json};
+
+/// Fallback validity (seconds) when AAD omits `expires_in`.
+const TEAMS_TOKEN_FALLBACK_SECS: u64 = 3600;
 
 /// Microsoft Teams bridge adapter.
 pub struct TeamsApp {
@@ -26,6 +30,7 @@ pub struct TeamsApp {
     app_password: String,
     /// Bot Framework serviceUrl base address (used to assemble the outbound activities endpoint).
     service_url: String,
+    token_cache: TokenCache,
 }
 
 impl TeamsApp {
@@ -38,37 +43,51 @@ impl TeamsApp {
             app_id: app_id.into(),
             app_password: app_password.into(),
             service_url: service_url.into(),
+            token_cache: TokenCache::new(),
         }
     }
 
-    /// Use client_credentials to fetch a Bot Framework access token from AAD.
+    /// Returns a Bot Framework access token, served from the cache until it
+    /// nears the AAD-reported expiry, then re-fetched via client_credentials.
     async fn fetch_access_token(&self, ctx: &MessageContext) -> Result<String> {
-        // The Bot Framework botframework.com multi-tenant login endpoint.
-        const TOKEN_URL: &str =
-            "https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token";
-        let params = [
-            ("grant_type", "client_credentials"),
-            ("client_id", self.app_id.as_str()),
-            ("client_secret", self.app_password.as_str()),
-            ("scope", "https://api.botframework.com/.default"),
-        ];
-        let resp: Value = ctx
-            .http
-            .post(TOKEN_URL)
-            .form(&params)
-            .send()
-            .await
-            .map_err(|e| BridgeError::App(format!("Teams token request failed: {e}")))?
-            .json()
-            .await
-            .map_err(|e| BridgeError::App(format!("Teams token parse failed: {e}")))?;
+        self.token_cache
+            .get_or_try_refresh(|| async {
+                // The Bot Framework botframework.com multi-tenant login endpoint.
+                const TOKEN_URL: &str =
+                    "https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token";
+                let params = [
+                    ("grant_type", "client_credentials"),
+                    ("client_id", self.app_id.as_str()),
+                    ("client_secret", self.app_password.as_str()),
+                    ("scope", "https://api.botframework.com/.default"),
+                ];
+                let resp: Value = ctx
+                    .http
+                    .post(TOKEN_URL)
+                    .form(&params)
+                    .send()
+                    .await
+                    .map_err(|e| BridgeError::App(format!("Teams token request failed: {e}")))?
+                    .json()
+                    .await
+                    .map_err(|e| BridgeError::App(format!("Teams token parse failed: {e}")))?;
 
-        resp.get("access_token")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| {
-                BridgeError::App(format!("Teams token response has no access_token: {resp}"))
+                let token = resp
+                    .get("access_token")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        BridgeError::App(format!(
+                            "Teams token response has no access_token: {resp}"
+                        ))
+                    })?;
+                let ttl = resp
+                    .get("expires_in")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(TEAMS_TOKEN_FALLBACK_SECS);
+                Ok((token, Duration::from_secs(ttl)))
             })
+            .await
     }
 }
 

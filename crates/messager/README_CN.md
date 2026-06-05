@@ -1,15 +1,15 @@
 # cokret-bridge-messager
 
 Rust 实现的 **cokret ⇄ Messenger** 桥接(通用 / Facebook Messenger)。基于共享核心
-[`cokret-bridge-core`](../core),应用侧仅用
+[`cokret-bridge-runtime`](../core) + [`cokret-bridge-messaging`](../messaging),应用侧仅用
 [`reqwest`](https://crates.io/crates/reqwest),不引入专有 SDK。对接 **Facebook Graph API**。
 
 ## 架构
 
-- **入站(Messenger → cokret)**:Facebook 经 webhook 推送 `messages` 事件 →
-  `BridgeContext::submit_app_message` → 核心构造并签名 `ck.message.create` 事件 →
-  `events_submit` 提交到 cokret。当前 `run` 为保活循环占位,webhook 接入(含
-  `verify_token` 验证握手)待 core 暴露额外注入路由。
+- **入站(Messenger → cokret)**:Facebook 经 webhook 推送的 `messages` 事件由
+  `MessageBridge::webhook_router` 暴露的路由处理(含 GET `verify_token` 验证握手),
+  经 `webhook::submit` → `MessageContext::submit_app_message` 构造并签名
+  `ck.message.create` 事件 → `events_submit` 提交到 cokret;`run` 为保活循环。
 - **出站(cokret → Messenger)**:cokret server 经 applet 端点
   `POST /_cokret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
   用 `ctx.http` POST `https://graph.facebook.com/v20.0/me/messages`
@@ -33,7 +33,6 @@ cargo run -p cokret-bridge-messager -- --config config.yaml
 
 ## 待办
 
-- `run` 接入真实 Messenger webhook(验证握手 + `messages` 事件解析,依赖 core 暴露
-  webhook 注入路由)。
+- Messenger webhook(验证握手 + `messages` 事件解析)已接入(`webhook_router`)。
 
 详见 [`../_bridges_todos.md`](../../_bridges_todos.md) 的总体规划与映射表。

@@ -1,16 +1,18 @@
 # cokret-bridge-telegram
 
-Rust 实现的 **cokret ⇄ Telegram** 桥接。基于共享核心 [`cokret-bridge-core`](../core),
+Rust 实现的 **cokret ⇄ Telegram** 桥接。基于共享核心 [`cokret-bridge-runtime`](../core) + [`cokret-bridge-messaging`](../messaging),
 应用侧使用 [`teloxide`](https://crates.io/crates/teloxide) 长轮询。
 
 ## 架构
 
 - **入站(Telegram → cokret)**:`teloxide::repl` 长轮询收到文本消息 →
-  `BridgeContext::submit_app_message` → 核心构造并签名 `ck.message.create` 事件 →
+  `MessageContext::submit_app_message` → 核心构造并签名 `ck.message.create` 事件 →
   `events_submit` 提交到 cokret。
 - **出站(cokret → Telegram)**:cokret server 经 applet 端点
   `POST /_cokret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
-  用 `Bot::send_message` 发到对应 chat。
+  用 `Bot::send_message`(媒体则 `send_document`)发到对应 chat。
+- **媒体(双向)**:入站 photo/document 经 `get_file` 下载 → `upload_blob` → `submit_media_message`;
+  出站 `MediaContent` 经 `download_blob` → `InputFile::memory` 以 `send_document` 发回。
 - **映射**:chat↔realm、消息↔event、用户↔actor 存于 diesel 数据库(默认 sqlite)。
 
 ## 快速开始
@@ -29,7 +31,7 @@ cargo run -p cokret-bridge-telegram -- --config config.yaml
 
 ## 说明
 
-- 入站只转发文本消息;媒体/贴纸等暂未处理。
+- 入站转发文本与 photo/document 媒体;贴纸等其他类型暂未处理。
 - `app_channel` 为 Telegram chat id(整数,可为负的群组 id)。
 
 详见 [`../_bridges_todos.md`](../../_bridges_todos.md) 的总体规划与映射表。

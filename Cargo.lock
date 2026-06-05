@@ -606,6 +606,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
  "clap",
  "cokret-bridge-messaging",
  "cokret-bridge-runtime",
@@ -727,14 +728,20 @@ name = "cokret-bridge-messaging"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "chrono",
  "cokret",
  "cokret-bridge-runtime",
  "diesel",
+ "hex",
+ "hmac",
  "reqwest 0.12.28",
  "salvo",
  "serde",
  "serde_json",
+ "sha1",
+ "sha2",
+ "subtle",
  "tokio",
  "tracing",
 ]
@@ -922,6 +929,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror 2.0.18",
+ "unicode-normalization",
  "url",
 ]
 
@@ -5020,6 +5028,15 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
+dependencies = [
+ "tinyvec",
+]
 
 [[package]]
 name = "unicode-segmentation"

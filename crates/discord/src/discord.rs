@@ -8,10 +8,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::InboundAppMessage;
-use cokret_bridge_messaging::{AppMessageRef, MessageBridge, MessageContext, OutboundAppMessage};
+use cokret_bridge_messaging::{
+    AppMessageRef, Attachment, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
+};
 use cokret_bridge_runtime::{BridgeError, Result};
-use serenity::all::{ChannelId, GatewayIntents, Http, Message};
+use serenity::all::{ChannelId, CreateAttachment, CreateMessage, GatewayIntents, Http, Message};
 use serenity::client::{Context as SerenityContext, EventHandler};
 
 /// Discord bridge adapter.
@@ -52,7 +53,7 @@ impl MessageBridge for DiscordApp {
 
     async fn send_to_app(
         &self,
-        _ctx: Arc<MessageContext>,
+        ctx: Arc<MessageContext>,
         msg: OutboundAppMessage,
     ) -> Result<AppMessageRef> {
         let channel_raw: u64 = msg.app_channel.parse().map_err(|_| {
@@ -60,6 +61,22 @@ impl MessageBridge for DiscordApp {
         })?;
         let channel = ChannelId::new(channel_raw);
         let body = format!("**{}**: {}", msg.sender_display, msg.body);
+
+        // With an attachment: download the cokret blob and upload it to Discord.
+        if let Some(att) = &msg.attachment {
+            let bytes = ctx.download_blob(&att.blob_ref).await?;
+            let filename = att.filename.clone().unwrap_or_else(|| "file".to_owned());
+            let file = CreateAttachment::bytes(bytes, filename);
+            let message = CreateMessage::new().content(body).add_file(file);
+            let sent = channel
+                .send_message(self.http.as_ref(), message)
+                .await
+                .map_err(|e| BridgeError::App(format!("Discord file send failed: {e}")))?;
+            return Ok(AppMessageRef {
+                app_message_id: sent.id.to_string(),
+            });
+        }
+
         let sent = channel
             .say(self.http.as_ref(), body)
             .await
@@ -81,14 +98,72 @@ impl EventHandler for Handler {
         if m.author.bot {
             return;
         }
-        let inbound = InboundAppMessage {
-            app_channel: m.channel_id.to_string(),
-            app_user: m.author.id.to_string(),
-            app_message_id: m.id.to_string(),
-            body: m.content.clone(),
-        };
-        if let Err(e) = self.ctx.submit_app_message(inbound).await {
-            tracing::warn!(error = %e, "Discord → cokret submission failed");
+        let channel = m.channel_id.to_string();
+        let user = m.author.id.to_string();
+
+        // Forward the text body (if any) as a text message.
+        if !m.content.is_empty() {
+            let inbound = InboundAppMessage {
+                app_channel: channel.clone(),
+                app_user: user.clone(),
+                app_message_id: m.id.to_string(),
+                body: m.content.clone(),
+            };
+            if let Err(e) = self.ctx.submit_app_message(inbound).await {
+                tracing::warn!(error = %e, "Discord → cokret submission failed");
+            }
         }
+
+        // Forward each attachment: download from the Discord CDN, upload to the
+        // cokret blob store, then submit a media message.
+        for att in &m.attachments {
+            if let Err(e) = self.forward_attachment(&channel, &user, att).await {
+                tracing::warn!(error = %e, url = %att.url, "Discord attachment bridging failed");
+            }
+        }
+    }
+}
+
+impl Handler {
+    async fn forward_attachment(
+        &self,
+        channel: &str,
+        user: &str,
+        att: &serenity::all::Attachment,
+    ) -> Result<()> {
+        let resp = self
+            .ctx
+            .http
+            .get(&att.url)
+            .send()
+            .await
+            .map_err(|e| BridgeError::App(format!("Discord CDN download failed: {e}")))?;
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| BridgeError::App(format!("Discord CDN read failed: {e}")))?;
+        let mime = att
+            .content_type
+            .clone()
+            .unwrap_or_else(|| "application/octet-stream".to_owned());
+        let blob_ref = self.ctx.upload_blob(&bytes, &mime).await?;
+
+        let attachment = Attachment {
+            blob_ref,
+            media_type: Some(mime),
+            filename: Some(att.filename.clone()),
+            size: Some(att.size as u64),
+            caption: String::new(),
+        };
+        // Use the attachment id as the app message id so it maps distinctly from
+        // the text message.
+        let inbound = InboundAppMessage {
+            app_channel: channel.to_owned(),
+            app_user: user.to_owned(),
+            app_message_id: att.id.to_string(),
+            body: String::new(),
+        };
+        self.ctx.submit_media_message(inbound, attachment).await?;
+        Ok(())
     }
 }

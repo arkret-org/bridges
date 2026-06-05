@@ -1,17 +1,17 @@
 # cokret-bridge-line
 
 Rust 实现的 **cokret ⇄ LINE** 桥接。基于共享核心
-[`cokret-bridge-core`](../core),应用侧仅使用
+[`cokret-bridge-runtime`](../core) + [`cokret-bridge-messaging`](../messaging),应用侧仅使用
 [`reqwest`](https://crates.io/crates/reqwest) 直连
 [LINE Messaging API](https://developers.line.biz/en/reference/messaging-api/)。
 
 ## 架构
 
 - **入站(LINE → cokret)**:Messaging API 通过 webhook(POST,`X-Line-Signature`
-  HMAC-SHA256 签名)推送事件。当前 core 尚未向适配器暴露额外的入站 webhook 路由,
-  故 `run` 先以保活循环占位;待 core 暴露后,在用 `channel_secret` 校验签名、解析
-  `events[]` 后调 `BridgeContext::submit_app_message` 构造并签名 `ck.message.create`
-  事件提交到 cokret。
+  HMAC-SHA256 签名)推送事件,由 `MessageBridge::webhook_router` 暴露的路由接收
+  (用 `channel_secret` 校验签名、解析 `events[]`),经 `webhook::submit` →
+  `MessageContext::submit_app_message` 构造并签名 `ck.message.create` 事件提交到 cokret;
+  `run` 为保活循环。
 - **出站(cokret → LINE)**:cokret server 经 applet 端点
   `POST /_cokret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
   用 `ctx.http`(reqwest)以 Bearer `channel_access_token` POST
@@ -39,6 +39,9 @@ cargo run -p cokret-bridge-line -- --config config.yaml
 - 出站 `to` 字段当前取 `app_channel`,应为推送目标 ID(userId / groupId / roomId);
   实际映射规则待定。
 - push 接口成功响应 body 不含消息 id,目前以 `x-line-request-id` 头作追踪标识。
-- 入站 webhook 接收(POST + X-Line-Signature 校验)待 core 暴露额外路由后补全。
+- 入站 webhook 接收(POST + X-Line-Signature 校验)已接入(`webhook_router`)。
+- 入站媒体(image/video/audio/file)已接:从 `api-data.line.me/.../content` Bearer 下载 →
+  `upload_blob` → `submit_media_message`。出站二进制(LINE push 需 `originalContentUrl` 托管 URL)
+  暂未实现。
 
 详见 [`../_bridges_todos.md`](../../_bridges_todos.md) 的总体规划与映射表。

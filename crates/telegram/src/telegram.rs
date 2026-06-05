@@ -9,11 +9,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cokret_bridge_messaging::{
-    AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
+    AppMessageRef, Attachment, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
 };
 use cokret_bridge_runtime::{BridgeError, Result};
 use teloxide::prelude::*;
-use teloxide::types::ChatId;
+use teloxide::types::{ChatId, FileId, InputFile};
 
 /// Telegram bridge adapter.
 pub struct TelegramApp {
@@ -36,21 +36,24 @@ impl MessageBridge for TelegramApp {
 
     async fn run(self: Arc<Self>, ctx: Arc<MessageContext>) -> Result<()> {
         let bot = Bot::new(&self.token);
+        let token = self.token.clone();
 
-        // teloxide long-polling receive loop; submit each text message to the core.
-        teloxide::repl(bot, move |msg: Message| {
+        // teloxide long-polling receive loop; submit text and media to the core.
+        teloxide::repl(bot, move |bot: Bot, msg: Message| {
             let ctx = ctx.clone();
+            let token = token.clone();
             async move {
+                let channel = msg.chat.id.0.to_string();
+                let user = msg
+                    .from
+                    .as_ref()
+                    .map(|u| u.id.0.to_string())
+                    .unwrap_or_default();
+
                 if let Some(text) = msg.text() {
-                    // Only forward user text (ignore the bot itself and messages without text).
-                    let from_id = msg
-                        .from
-                        .as_ref()
-                        .map(|u| u.id.0.to_string())
-                        .unwrap_or_default();
                     let inbound = InboundAppMessage {
-                        app_channel: msg.chat.id.0.to_string(),
-                        app_user: from_id,
+                        app_channel: channel.clone(),
+                        app_user: user.clone(),
                         app_message_id: msg.id.0.to_string(),
                         body: text.to_owned(),
                     };
@@ -58,6 +61,17 @@ impl MessageBridge for TelegramApp {
                         tracing::warn!(error = %e, "Telegram → cokret submission failed");
                     }
                 }
+
+                if let Some((file_id, filename, mime)) = telegram_media(&msg) {
+                    if let Err(e) = forward_media(
+                        &bot, &ctx, &token, &channel, &user, &msg, file_id, filename, mime,
+                    )
+                    .await
+                    {
+                        tracing::warn!(error = %e, "Telegram media bridging failed");
+                    }
+                }
+
                 respond(())
             }
         })
@@ -68,7 +82,7 @@ impl MessageBridge for TelegramApp {
 
     async fn send_to_app(
         &self,
-        _ctx: Arc<MessageContext>,
+        ctx: Arc<MessageContext>,
         msg: OutboundAppMessage,
     ) -> Result<AppMessageRef> {
         let chat_raw: i64 = msg.app_channel.parse().map_err(|_| {
@@ -76,6 +90,22 @@ impl MessageBridge for TelegramApp {
         })?;
         let bot = Bot::new(&self.token);
         let body = format!("{}: {}", msg.sender_display, msg.body);
+
+        // With an attachment: download the cokret blob and send it as a document.
+        if let Some(att) = &msg.attachment {
+            let bytes = ctx.download_blob(&att.blob_ref).await?;
+            let filename = att.filename.clone().unwrap_or_else(|| "file".to_owned());
+            let file = InputFile::memory(bytes).file_name(filename);
+            let sent = bot
+                .send_document(ChatId(chat_raw), file)
+                .caption(body)
+                .await
+                .map_err(|e| BridgeError::App(format!("Telegram document send failed: {e}")))?;
+            return Ok(AppMessageRef {
+                app_message_id: sent.id.0.to_string(),
+            });
+        }
+
         let sent = bot
             .send_message(ChatId(chat_raw), body)
             .await
@@ -84,4 +114,71 @@ impl MessageBridge for TelegramApp {
             app_message_id: sent.id.0.to_string(),
         })
     }
+}
+
+/// Extract a downloadable media reference from a Telegram message, if any:
+/// `(file_id, filename, mime_type)`. Documents are preferred; otherwise the
+/// largest photo size is used.
+fn telegram_media(msg: &Message) -> Option<(FileId, Option<String>, Option<String>)> {
+    if let Some(doc) = msg.document() {
+        return Some((
+            doc.file.id.clone(),
+            doc.file_name.clone(),
+            doc.mime_type.as_ref().map(|m| m.to_string()),
+        ));
+    }
+    if let Some(photo) = msg.photo().and_then(<[_]>::last) {
+        return Some((photo.file.id.clone(), None, Some("image/jpeg".to_owned())));
+    }
+    None
+}
+
+/// Download Telegram media via `get_file` + the file download endpoint, upload
+/// it to the cokret blob store, and submit a media message.
+#[allow(clippy::too_many_arguments)]
+async fn forward_media(
+    bot: &Bot,
+    ctx: &Arc<MessageContext>,
+    token: &str,
+    channel: &str,
+    user: &str,
+    msg: &Message,
+    file_id: FileId,
+    filename: Option<String>,
+    mime: Option<String>,
+) -> Result<()> {
+    let file = bot
+        .get_file(file_id)
+        .await
+        .map_err(|e| BridgeError::App(format!("Telegram get_file failed: {e}")))?;
+    let url = format!("https://api.telegram.org/file/bot{token}/{}", file.path);
+    let resp = ctx
+        .http
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| BridgeError::App(format!("Telegram file download failed: {e}")))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| BridgeError::App(format!("Telegram file read failed: {e}")))?;
+    let mime = mime.unwrap_or_else(|| "application/octet-stream".to_owned());
+    let blob_ref = ctx.upload_blob(&bytes, &mime).await?;
+
+    let caption = msg.caption().unwrap_or_default().to_owned();
+    let attachment = Attachment {
+        blob_ref,
+        media_type: Some(mime),
+        filename,
+        size: Some(bytes.len() as u64),
+        caption: caption.clone(),
+    };
+    let inbound = InboundAppMessage {
+        app_channel: channel.to_owned(),
+        app_user: user.to_owned(),
+        app_message_id: msg.id.0.to_string(),
+        body: caption,
+    };
+    ctx.submit_media_message(inbound, attachment).await?;
+    Ok(())
 }

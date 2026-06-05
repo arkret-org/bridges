@@ -8,16 +8,21 @@ license.workspace = true
 description = "Applet bridge runtime for Cokret integrations: protocol-side event submission, applet routes, database pool, configuration, salvo web, queue/cache, media, and logging."
 
 [features]
-default = ["sqlite"]
-sqlite = ["diesel/sqlite", "dep:libsqlite3-sys"]
-postgres = ["diesel/postgres"]
-mysql = ["diesel/mysql"]
+default  = ["full", "sqlite"]
+full     = ["db", "web", "runtime"]
+edge     = []
+db       = ["dep:diesel"]
+sqlite   = ["db", "diesel/sqlite", "dep:libsqlite3-sys"]
+postgres = ["db", "diesel/postgres"]
+mysql    = ["db", "diesel/mysql"]
+web      = ["dep:salvo"]
+runtime  = ["db", "web"]
 
 [dependencies]
 cokret = { workspace = true }
-salvo = { workspace = true }
+salvo = { workspace = true, optional = true }
 tokio = { workspace = true }
-diesel = { workspace = true }
+diesel = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }

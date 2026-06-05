@@ -12,11 +12,15 @@ mod models;
 mod schema;
 pub mod webhook;
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cokret::Event;
-use cokret_bridge_runtime::app::{BridgeApp, BridgeContext};
+use cokret::events::{MediaContent, TextMessageContent};
+use cokret::{BlobRef, Event};
+use cokret_bridge_runtime::app::{
+    AppletResolver, BridgeApp, BridgeContext, ResolvedActor, ResolvedRealm,
+};
 use cokret_bridge_runtime::db::DatabaseManager;
 use cokret_bridge_runtime::{BridgeError, Result};
 use diesel::prelude::*;
@@ -44,6 +48,9 @@ pub struct OutboundAppMessage {
     pub sender_display: String,
     pub body: String,
     pub reply_to: Option<String>,
+    /// Present when the cokret event carried media; the adapter may download it
+    /// via [`MessageContext::download_blob`] and re-send to the app.
+    pub attachment: Option<Attachment>,
 }
 
 /// The app-side message reference returned after the adapter sends.
@@ -52,20 +59,78 @@ pub struct AppMessageRef {
     pub app_message_id: String,
 }
 
-/// Build a minimal `ck.message.create` text payload.
-pub fn default_text_payload(body: &str) -> Value {
-    json!({ "object": { "kind": "message", "body": body, "format": "text" } })
+/// A media attachment that already resides in cokret blob storage (referenced by
+/// `blob_ref`). Inbound: the adapter downloads app media, uploads it via
+/// [`MessageContext::upload_blob`], then submits with [`MessageContext::submit_media_message`].
+/// Outbound: extracted from a `ck.message.create` media payload and handed to the
+/// adapter, which downloads via [`MessageContext::download_blob`] and re-sends.
+#[derive(Clone, Debug)]
+pub struct Attachment {
+    pub blob_ref: String,
+    pub media_type: Option<String>,
+    pub filename: Option<String>,
+    pub size: Option<u64>,
+    /// Caption / display text for the media event (may be empty).
+    pub caption: String,
 }
 
-/// Extract displayable plain text from a Cokret message payload.
+/// Build a canonical `ck.message.create` text content (`{ "body": ... }`,
+/// matching the SDK's [`TextMessageContent`]).
+pub fn default_text_payload(body: &str) -> Value {
+    serde_json::to_value(TextMessageContent::plain(body))
+        .unwrap_or_else(|_| json!({ "body": body }))
+}
+
+/// Build a canonical media content (`{ "body", "blob", "mimetype", "filename",
+/// "size" }`, matching the SDK's [`MediaContent`]).
+pub fn media_message_payload(att: &Attachment) -> Result<Value> {
+    let blob = BlobRef::new(att.blob_ref.clone())
+        .map_err(|e| BridgeError::App(format!("invalid blob_ref: {e}")))?;
+    let body = if att.caption.is_empty() {
+        att.filename.clone().unwrap_or_default()
+    } else {
+        att.caption.clone()
+    };
+    let content = MediaContent {
+        body,
+        blob,
+        mimetype: att.media_type.clone(),
+        filename: att.filename.clone(),
+        size: att.size,
+        info: BTreeMap::new(),
+        relates_to: None,
+    };
+    serde_json::to_value(content).map_err(|e| BridgeError::App(e.to_string()))
+}
+
+/// Extract displayable plain text from a Cokret message payload. Deserializes
+/// the SDK's [`TextMessageContent`] (binding the canonical wire shape), falling
+/// back to a raw `body` lookup for non-conforming payloads.
 pub fn extract_plain_body(payload: &Value) -> String {
+    if let Ok(content) = serde_json::from_value::<TextMessageContent>(payload.clone()) {
+        return content.body;
+    }
     payload
-        .get("object")
-        .and_then(|o| o.get("body"))
+        .get("body")
         .and_then(Value::as_str)
-        .or_else(|| payload.get("body").and_then(Value::as_str))
         .unwrap_or_default()
         .to_owned()
+}
+
+/// Extract a media attachment from a Cokret message payload, if it carries a
+/// `blob` reference. Deserializes the SDK's [`MediaContent`] so the inbound and
+/// outbound directions stay bound to the same canonical wire type (symmetric
+/// with [`media_message_payload`]); structural drift surfaces as a failed parse
+/// rather than silently-missing fields.
+pub fn extract_attachment(payload: &Value) -> Option<Attachment> {
+    let content = serde_json::from_value::<MediaContent>(payload.clone()).ok()?;
+    Some(Attachment {
+        blob_ref: content.blob.as_str().to_owned(),
+        media_type: content.mimetype,
+        filename: content.filename,
+        size: content.size,
+        caption: content.body,
+    })
 }
 
 /// Channel/message/user mapping store persisted through the runtime database.
@@ -235,6 +300,59 @@ impl MessageStore {
             .first::<String>(&mut conn)
             .optional()?)
     }
+
+    /// Reverse lookup for ghost resolution: find the user row by cokret actor DID.
+    pub fn user_by_actor(&self, actor_did: &str) -> Result<Option<UserMapping>> {
+        use schema::user_mappings::dsl;
+
+        let mut conn = self.db.conn()?;
+        Ok(dsl::user_mappings
+            .filter(dsl::cokret_actor_did.eq(actor_did))
+            .first::<UserMapping>(&mut conn)
+            .optional()?)
+    }
+
+    /// Reverse lookup for portal resolution: find the room row by cokret realm
+    /// id or by portal alias.
+    pub fn room_by_realm_or_alias(&self, key: &str) -> Result<Option<RoomMapping>> {
+        use schema::room_mappings::dsl;
+
+        let mut conn = self.db.conn()?;
+        Ok(dsl::room_mappings
+            .filter(dsl::cokret_realm_id.eq(key).or(dsl::portal_alias.eq(key)))
+            .first::<RoomMapping>(&mut conn)
+            .optional()?)
+    }
+}
+
+/// DB-backed [`AppletResolver`] answering the cokret server's actor/realm probes
+/// from the messaging mapping tables.
+struct MessageResolver {
+    store: Arc<MessageStore>,
+}
+
+impl AppletResolver for MessageResolver {
+    fn resolve_actor(&self, actor_id: &str) -> Option<ResolvedActor> {
+        let row = self.store.user_by_actor(actor_id).ok().flatten()?;
+        Some(ResolvedActor {
+            actor_id: row.cokret_actor_did,
+            display_name: row.display_name,
+            external_ref: json!({ "app_user": row.app_user_id }),
+        })
+    }
+
+    fn resolve_realm(&self, realm_id_or_alias: &str) -> Option<ResolvedRealm> {
+        let row = self
+            .store
+            .room_by_realm_or_alias(realm_id_or_alias)
+            .ok()
+            .flatten()?;
+        Some(ResolvedRealm {
+            realm_id: row.cokret_realm_id,
+            title: row.portal_alias,
+            external_ref: json!({ "app_channel": row.app_channel_id }),
+        })
+    }
 }
 
 fn now_ts() -> i64 {
@@ -344,7 +462,40 @@ impl MessageContext {
         &self.inner
     }
 
+    /// Upload bytes to cokret blob storage, returning the blob_ref string.
+    pub async fn upload_blob(&self, bytes: &[u8], mime: &str) -> Result<String> {
+        self.inner.edge.upload_blob(bytes, mime).await
+    }
+
+    /// Download a cokret blob by its blob_ref string.
+    pub async fn download_blob(&self, blob_ref: &str) -> Result<Vec<u8>> {
+        self.inner.edge.download_blob(blob_ref).await
+    }
+
+    /// Submit an inbound text message as a `ck.message.create` event.
     pub async fn submit_app_message(&self, msg: InboundAppMessage) -> Result<String> {
+        let payload = default_text_payload(&msg.body);
+        self.submit_content(&msg, payload).await
+    }
+
+    /// Submit an inbound media message. The `attachment` must already reference a
+    /// blob uploaded via [`MessageContext::upload_blob`]; `msg.body` becomes the
+    /// caption when non-empty.
+    pub async fn submit_media_message(
+        &self,
+        msg: InboundAppMessage,
+        mut attachment: Attachment,
+    ) -> Result<String> {
+        if attachment.caption.is_empty() {
+            attachment.caption = msg.body.clone();
+        }
+        let payload = media_message_payload(&attachment)?;
+        self.submit_content(&msg, payload).await
+    }
+
+    /// Shared submit path: resolve realm, attach signed provenance, submit on the
+    /// per-channel serial queue, and record the message mapping.
+    async fn submit_content(&self, msg: &InboundAppMessage, payload: Value) -> Result<String> {
         let realm = self
             .store
             .realm_for_channel(&msg.app_channel)?
@@ -353,7 +504,6 @@ impl MessageContext {
                 BridgeError::App(format!("channel {} has no realm mapping", msg.app_channel))
             })?;
 
-        let payload = default_text_payload(&msg.body);
         let external_ref = json!({
             "source": self.inner.config.bridge.bridge_id.clone(),
             "app_channel": msg.app_channel.clone(),
@@ -404,6 +554,12 @@ pub trait MessageBridge: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Handle an ephemeral payload (typing/presence/receipts) pushed alongside
+    /// events. Raw JSON until a typed schema is defined; defaults to a no-op.
+    async fn on_ephemeral(&self, _ctx: Arc<MessageContext>, _ephemeral: Value) -> Result<()> {
+        Ok(())
+    }
+
     fn webhook_router(self: Arc<Self>, _ctx: Arc<MessageContext>) -> Option<salvo::Router> {
         None
     }
@@ -428,17 +584,31 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
         if event.kind != "ck.message.create" {
             return Ok(());
         }
+        // Skip events this bridge itself submitted (app -> cokret), which the
+        // server echoes back, to avoid an outbound loop back into the app.
+        let our_id = &self.ctx.core().config.bridge.bridge_id;
+        let originated_here = event
+            .external_ref
+            .as_ref()
+            .and_then(|r| r.get("source"))
+            .and_then(Value::as_str)
+            == Some(our_id.as_str());
+        if originated_here {
+            return Ok(());
+        }
         let realm_id = event.realm_id.to_string();
         let Some(channel) = self.ctx.store.channel_for_realm(&realm_id)? else {
             tracing::debug!(realm = %realm_id, "realm has no channel mapping, dropping");
             return Ok(());
         };
         let body = extract_plain_body(&event.content);
+        let attachment = extract_attachment(&event.content);
         let out = OutboundAppMessage {
             app_channel: channel.clone(),
             sender_display: event.actor_id.to_string(),
             body,
             reply_to: None,
+            attachment,
         };
         let app_ref = self.user.send_to_app(self.ctx.clone(), out).await?;
         self.ctx.store.record_message(
@@ -448,6 +618,10 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
             &realm_id,
         )?;
         Ok(())
+    }
+
+    async fn on_ephemeral(&self, _ctx: Arc<BridgeContext>, ephemeral: Value) -> Result<()> {
+        self.user.on_ephemeral(self.ctx.clone(), ephemeral).await
     }
 
     fn webhook_router(self: Arc<Self>, _ctx: Arc<BridgeContext>) -> Option<salvo::Router> {
@@ -462,6 +636,10 @@ where
 {
     runtime::run_bridge(config, move |core_ctx: Arc<BridgeContext>| {
         let store = Arc::new(MessageStore::new(core_ctx.db.clone())?);
+        // Install DB-backed actor/realm resolution before the web service starts.
+        core_ctx.set_resolver(Arc::new(MessageResolver {
+            store: store.clone(),
+        }));
         let ctx = Arc::new(MessageContext::new(core_ctx, store));
         let user = Arc::new(factory(ctx.clone())?);
         Ok(MessageAdapter { user, ctx })

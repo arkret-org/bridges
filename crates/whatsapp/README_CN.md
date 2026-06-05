@@ -1,16 +1,16 @@
 # cokret-bridge-whatsapp
 
 Rust 实现的 **cokret ⇄ WhatsApp** 桥接。基于共享核心
-[`cokret-bridge-core`](../core),应用侧仅使用
+[`cokret-bridge-runtime`](../core) + [`cokret-bridge-messaging`](../messaging),应用侧仅使用
 [`reqwest`](https://crates.io/crates/reqwest) 直连
 [WhatsApp Cloud API](https://developers.facebook.com/docs/whatsapp/cloud-api)。
 
 ## 架构
 
-- **入站(WhatsApp → cokret)**:Cloud API 通过 webhook(GET 校验 + POST 接收)推送消息。
-  当前 core 尚未向适配器暴露额外的入站 webhook 路由,故 `run` 先以保活循环占位;
-  待 core 暴露后,在校验 `verify_token`、解析 `entry[].changes[].value.messages[]` 后调
-  `BridgeContext::submit_app_message` 构造并签名 `ck.message.create` 事件提交到 cokret。
+- **入站(WhatsApp → cokret)**:Cloud API 通过 webhook(GET 校验 + POST 接收)推送消息,
+  由 `MessageBridge::webhook_router` 暴露的路由处理(GET 校验 `verify_token`、POST 解析
+  `entry[].changes[].value.messages[]`),经 `webhook::submit` → `MessageContext::submit_app_message`
+  构造并签名 `ck.message.create` 事件提交到 cokret;`run` 为保活循环。
 - **出站(cokret → WhatsApp)**:cokret server 经 applet 端点
   `POST /_cokret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
   用 `ctx.http`(reqwest)以 Bearer `access_token` POST
@@ -39,6 +39,9 @@ cargo run -p cokret-bridge-whatsapp -- --config config.yaml
 - 出站 `to` 字段当前取 `app_channel`,应为收件人 WhatsApp 号码(E.164,不含 `+`);
   实际映射规则待定。
 - Graph API 版本 `v20.0` 写死,后续可随官方版本升级。
-- 入站 webhook 验证(GET hub.challenge)与接收(POST 消息体)待 core 暴露额外路由后补全。
+- 入站 webhook 验证(GET hub.challenge)与接收(POST 消息体)已接入(`webhook_router`)。
+- 入站媒体(image/document/video/audio/sticker)已接:经 `graph.facebook.com/{media-id}`
+  解析 URL → Bearer 下载 → `upload_blob` → `submit_media_message`。出站二进制(需先上传 media)
+  暂未实现。
 
 详见 [`../_bridges_todos.md`](../../_bridges_todos.md) 的总体规划与映射表。

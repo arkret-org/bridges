@@ -1,15 +1,17 @@
 # cokret-bridge-discord
 
-Rust 实现的 **cokret ⇄ Discord** 桥接。基于共享核心 [`cokret-bridge-core`](../core),
+Rust 实现的 **cokret ⇄ Discord** 桥接。基于共享核心 [`cokret-bridge-runtime`](../core) + [`cokret-bridge-messaging`](../messaging),
 应用侧使用 [`serenity`](https://crates.io/crates/serenity) gateway。
 
 ## 架构
 
-- **入站(Discord → cokret)**:serenity gateway 收到消息 → `BridgeContext::submit_app_message`
+- **入站(Discord → cokret)**:serenity gateway 收到消息 → `MessageContext::submit_app_message`
   → 核心构造并签名 `ck.message.create` 事件 → `events_submit` 提交到 cokret。
 - **出站(cokret → Discord)**:cokret server 经 applet 端点
   `POST /_cokret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
   用 serenity HTTP 发到 Discord 频道。
+- **媒体(双向)**:入站附件从 Discord CDN 下载 → `upload_blob` → `submit_media_message`;
+  出站 `MediaContent` 经 `download_blob` → serenity `CreateAttachment` 发回频道。
 - **映射**:频道↔realm、消息↔event、用户↔actor 存于 diesel 数据库(默认 sqlite)。
 
 ## 快速开始

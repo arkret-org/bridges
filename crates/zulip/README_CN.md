@@ -1,13 +1,13 @@
 # cokret-bridge-zulip
 
-Rust 实现的 **cokret ⇄ Zulip** 桥接。基于共享核心 [`cokret-bridge-core`](../core),
+Rust 实现的 **cokret ⇄ Zulip** 桥接。基于共享核心 [`cokret-bridge-runtime`](../core) + [`cokret-bridge-messaging`](../messaging),
 应用侧使用 [`reqwest`](https://crates.io/crates/reqwest) 走 Zulip **event queue 长轮询**
 REST 接口(并预留 [`tokio-tungstenite`](https://crates.io/crates/tokio-tungstenite) 以备后续 ws 推送)。
 
 ## 架构
 
 - **入站(Zulip → cokret)**:`run` 先 `POST /api/v1/register` 建 event queue,再循环
-  `GET /api/v1/events`(长轮询)拉取 `message` 事件 → `BridgeContext::submit_app_message`
+  `GET /api/v1/events`(长轮询)拉取 `message` 事件 → `MessageContext::submit_app_message`
   → 核心构造并签名 `ck.message.create` 事件 → `events_submit` 提交到 cokret。
 - **出站(cokret → Zulip)**:cokret server 经 applet 端点
   `POST /_cokret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`

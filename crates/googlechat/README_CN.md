@@ -1,15 +1,15 @@
 # cokret-bridge-googlechat
 
 Rust 实现的 **cokret ⇄ Google Chat** 桥接。基于共享核心
-[`cokret-bridge-core`](../core),应用侧仅用
+[`cokret-bridge-runtime`](../core) + [`cokret-bridge-messaging`](../messaging),应用侧仅用
 [`reqwest`](https://crates.io/crates/reqwest),不引入专有 SDK。对接 **Google Chat REST API**。
 
 ## 架构
 
-- **入站(Google Chat → cokret)**:Google Chat 经 Pub/Sub 订阅或 HTTP webhook 推送
-  事件 → `BridgeContext::submit_app_message` → 核心构造并签名 `ck.message.create` 事件
-  → `events_submit` 提交到 cokret。当前 `run` 为保活循环占位,入站接入待 core 暴露
-  额外注入路由。
+- **入站(Google Chat → cokret)**:Google Chat 的 HTTP webhook 事件由
+  `MessageBridge::webhook_router` 暴露的路由接收,经 `webhook::submit` →
+  `MessageContext::submit_app_message` 构造并签名 `ck.message.create` 事件 →
+  `events_submit` 提交到 cokret;`run` 为保活循环。
 - **出站(cokret → Google Chat)**:cokret server 经 applet 端点
   `POST /_cokret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
   用 `ctx.http` POST `https://chat.googleapis.com/v1/{space}/messages` 发到 space。
@@ -41,6 +41,6 @@ cargo run -p cokret-bridge-googlechat -- --config config.yaml
 ## 待办
 
 - service-account JSON → OAuth2 access_token 的换取(`bearer_token` 中的 TODO)。
-- `run` 接入真实 Pub/Sub 或 webhook 入站(依赖 core 暴露 webhook 注入路由)。
+- HTTP webhook 入站已接入(`webhook_router`);Pub/Sub 订阅模式可作后续可选增强。
 
 详见 [`../_bridges_todos.md`](../../_bridges_todos.md) 的总体规划与映射表。

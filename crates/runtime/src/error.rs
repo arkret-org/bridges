@@ -37,12 +37,14 @@ impl From<cokret::identifiers::IdentifierError> for BridgeError {
     }
 }
 
+#[cfg(feature = "db")]
 impl From<diesel::result::Error> for BridgeError {
     fn from(e: diesel::result::Error) -> Self {
         BridgeError::Database(e.to_string())
     }
 }
 
+#[cfg(feature = "db")]
 impl From<diesel::r2d2::PoolError> for BridgeError {
     fn from(e: diesel::r2d2::PoolError) -> Self {
         BridgeError::Database(e.to_string())

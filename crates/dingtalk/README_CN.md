@@ -1,15 +1,14 @@
 # cokret-bridge-dingtalk
 
 Rust 实现的 **cokret ⇄ 钉钉(DingTalk)** 桥接。基于共享核心
-[`cokret-bridge-core`](../core),应用侧仅使用
+[`cokret-bridge-runtime`](../core) + [`cokret-bridge-messaging`](../messaging),应用侧仅使用
 [`reqwest`](https://crates.io/crates/reqwest) 直连钉钉开放平台 HTTP API。
 
 ## 架构
 
-- **入站(钉钉 → cokret)**:钉钉支持 Stream 长连(wss)与回调 webhook 推送消息。
-  当前 core 尚未向适配器暴露额外的入站路由 / stream 接入点,故 `run` 先以保活循环占位;
-  待 core 暴露后,在收到消息时调 `BridgeContext::submit_app_message` 构造并签名
-  `ck.message.create` 事件提交到 cokret。
+- **入站(钉钉 → cokret)**:钉钉回调 webhook 推送的消息由 `MessageBridge::webhook_router`
+  暴露的路由接收并验签,经 `webhook::submit` → `MessageContext::submit_app_message` 构造并
+  签名 `ck.message.create` 事件提交到 cokret;`run` 为保活循环。
 - **出站(cokret → 钉钉)**:cokret server 经 applet 端点
   `POST /_cokret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
   用 `ctx.http`(reqwest)先以 `app_key`/`app_secret` 换取 `access_token`,再
@@ -35,7 +34,7 @@ cargo run -p cokret-bridge-dingtalk -- --config config.yaml
 
 - `send_to_app` 中的发送接口 URL(群消息 `groupMessages/send` vs 单聊
   `oToMessages/batchSend`)需按实际会话类型确认。
-- `access_token` 当前每次发送现取,生产环境应缓存并按有效期(约 7200s)刷新。
-- 入站 stream/webhook 接入待 core 暴露额外路由后补全。
+- `access_token` 经 `TokenCache` 缓存,按 `expireIn` 提前 60s 刷新(不再每次现取)。
+- 入站 webhook 已接入(`webhook_router`);Stream 长连(wss)模式可作为后续可选增强。
 
 详见 [`../_bridges_todos.md`](../../_bridges_todos.md) 的总体规划与映射表。

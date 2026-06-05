@@ -40,9 +40,15 @@ async fn main() -> anyhow::Result<()> {
         .get("password")
         .and_then(|v| v.as_str())
         .map(|s| s.to_owned());
+    // Optional shared secret guarding the inbound `/webhooks/imessage` endpoint.
+    let webhook_secret = config
+        .app
+        .get("webhook_secret")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned());
 
     run_message_bridge(config, move |_ctx: Arc<_>| {
-        Ok(IMessageApp::new(gateway_url, password))
+        Ok(IMessageApp::new(gateway_url, password, webhook_secret))
     })
     .await
     .map_err(|e| anyhow::anyhow!(e.to_string()))

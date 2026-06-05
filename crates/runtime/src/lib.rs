@@ -20,26 +20,50 @@
 //! events) so it can back non-social integrations (IoT, ticketing, CI, ...).
 //! Chat/social bridge helpers live in `cokret-bridge-messaging`; this runtime
 //! intentionally does not expose message-shaped APIs.
+//!
+//! ## Cargo features
+//!
+//! - `edge` (always available): the protocol edge ([`CokretEdge`], the
+//!   [`SeqStore`] trait + [`SeqAllocator`], config, errors, cache/queue/media)
+//!   without diesel or salvo. A host injects its own [`SeqStore`].
+//! - `db`: the diesel-backed database pool ([`db`]) and [`DbSeqStore`].
+//! - `web`: the salvo HTTP service ([`web`]).
+//! - `runtime` (= `db` + `web`): [`BridgeContext`] / [`BridgeApp`] /
+//!   [`run_bridge`].
+//! - `full` (= `db` + `web` + `runtime`) and `default` (= `full` + `sqlite`)
+//!   keep all historical behavior.
 
 pub mod app;
 pub mod cache;
-pub mod cokret_edge;
-pub mod config;
-pub mod db;
-pub mod error;
+mod cokret_edge;
+mod config;
+mod error;
 pub mod logging;
-pub mod media;
 pub mod queue;
+
+#[cfg(feature = "db")]
+pub mod db;
+#[cfg(feature = "web")]
 pub mod web;
 
-pub use app::{BridgeApp, BridgeContext};
-pub use cokret_edge::CokretEdge;
+pub use app::{AppletResolver, ResolvedActor, ResolvedRealm};
+pub use cokret_edge::{CokretEdge, SeqAllocator, SeqStore};
 pub use config::Config;
 pub use error::{BridgeError, Result};
+
+#[cfg(feature = "db")]
+pub use cokret_edge::DbSeqStore;
+
+#[cfg(feature = "web")]
 pub use salvo;
 
+#[cfg(feature = "runtime")]
+pub use app::{BridgeApp, BridgeContext};
+
+#[cfg(feature = "runtime")]
 use std::sync::Arc;
 
+#[cfg(feature = "runtime")]
 use tokio::sync::mpsc;
 
 /// Wire up and run a generic bridge: load config -> build the cokret edge ->
@@ -48,6 +72,7 @@ use tokio::sync::mpsc;
 /// `app_factory` receives a ready [`BridgeContext`] and returns the
 /// [`BridgeApp`] adapter. Social bridges typically call
 /// [`messaging::run_message_bridge`] instead, which adds the chat helpers.
+#[cfg(feature = "runtime")]
 pub async fn run_bridge<A, F>(config: Config, app_factory: F) -> Result<()>
 where
     A: BridgeApp,
@@ -58,9 +83,17 @@ where
     // Events pushed by the cokret server are queued first, then forwarded to
     // the adapter by the background consumer loop.
     let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
+    // Ephemeral (typing/presence/receipts) uses a parallel queue.
+    let (ephemeral_tx, ephemeral_rx) = mpsc::unbounded_channel();
 
-    let edge = Arc::new(cokret_edge::CokretEdge::new(config.clone(), inbound_tx)?);
     let db = Arc::new(db::DatabaseManager::connect(&config.database)?);
+    // The diesel-backed restart-safe sequence store, injected into the edge.
+    let seq: Arc<dyn SeqStore> = Arc::new(DbSeqStore::new(db.clone())?);
+
+    let mut edge = CokretEdge::new(config.clone(), seq, inbound_tx)?;
+    edge.set_ephemeral_sender(ephemeral_tx);
+    let edge = Arc::new(edge);
+
     let ctx = Arc::new(BridgeContext::new(config.clone(), edge.clone(), db));
 
     let app = Arc::new(app_factory(ctx.clone())?);
@@ -70,6 +103,13 @@ where
         let ctx = ctx.clone();
         let app = app.clone();
         tokio::spawn(async move { app::consume_inbound(ctx, app, inbound_rx).await })
+    };
+
+    // 1b) Background: consume ephemeral -> adapter
+    let ephemeral_consumer = {
+        let ctx = ctx.clone();
+        let app = app.clone();
+        tokio::spawn(async move { app::consume_ephemeral(ctx, app, ephemeral_rx).await })
     };
 
     // 2) web: health/metrics + applet routes + app webhook routes
@@ -90,6 +130,7 @@ where
 
     tokio::select! {
         r = consumer => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,
+        r = ephemeral_consumer => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,
         r = web => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,
         r = runner => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,
     }

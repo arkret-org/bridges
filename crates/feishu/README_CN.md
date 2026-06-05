@@ -1,14 +1,14 @@
 # cokret-bridge-feishu
 
 Rust 实现的 **cokret ⇄ 飞书(Feishu / Lark)** 桥接。基于共享核心
-[`cokret-bridge-core`](../core),应用侧**仅使用**
+[`cokret-bridge-runtime`](../core) + [`cokret-bridge-messaging`](../messaging),应用侧**仅使用**
 [`reqwest`](https://crates.io/crates/reqwest)(不引入飞书 SDK)。
 
 ## 架构
 
 - **入站(飞书 → cokret)**:飞书通过「事件订阅」HTTP 回调推送
-  `im.message.receive_v1` 等事件。该回调需 `cokret-bridge-core` 暴露额外的
-  webhook 路由接收;在此之前 `run` 以保活循环占位(见 TODO)。
+  `im.message.receive_v1` 等事件,由 `MessageBridge::webhook_router` 暴露的路由接收
+  (含 URL 校验 challenge),再经 `webhook::submit` 入站;`run` 为保活循环。
 - **出站(cokret → 飞书)**:cokret server 经 applet 端点
   `POST /_cokret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
   用 `ctx.http` 先换 `tenant_access_token`,再
@@ -31,8 +31,8 @@ cargo run -p cokret-bridge-feishu -- --config config.yaml
 
 ## 不确定点(TODO)
 
-- 入站事件订阅 webhook 待 core 暴露额外路由后接入(含 challenge 校验与事件分发)。
-- `tenant_access_token` 当前每次发送现取,未做缓存与过期刷新。
+- 入站事件订阅 webhook 已接入(`webhook_router`,含 challenge 校验与事件分发)。
+- `tenant_access_token` 经 `TokenCache` 缓存,按 `expire` 提前 60s 刷新(不再每次现取)。
 - 出站 `receive_id_type` 默认 `chat_id`,实际可能为 `open_id`/`user_id`,需按频道键格式确定。
 
 详见 [`../_bridges_todos.md`](../../_bridges_todos.md) 的总体规划与映射表。
