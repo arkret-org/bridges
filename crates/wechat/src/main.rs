@@ -46,9 +46,16 @@ async fn main() -> anyhow::Result<()> {
         .to_owned();
     // WeChat Work requires agent_id to send app messages (Official Account customer-service messages do not).
     let agent_id = config.app.get("agent_id").and_then(|v| v.as_i64());
+    // webhook_token: Callback Token used to verify the接入 `signature` (required, fail closed).
+    let webhook_token = config
+        .app
+        .get("webhook_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("config.app.webhook_token is missing"))?
+        .to_owned();
 
     run_message_bridge(config, move |_ctx: Arc<_>| {
-        Ok(WechatApp::new(cred_id, cred_secret, agent_id))
+        Ok(WechatApp::new(cred_id, cred_secret, agent_id, webhook_token))
     })
     .await
     .map_err(|e| anyhow::anyhow!(e.to_string()))

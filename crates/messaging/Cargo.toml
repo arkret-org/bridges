@@ -9,9 +9,9 @@ description = "Messaging helper layer for Cokret Applet bridges: channel/user/me
 
 [features]
 default = ["sqlite"]
-sqlite = ["cokret-bridge-runtime/sqlite"]
-postgres = ["cokret-bridge-runtime/postgres"]
-mysql = ["cokret-bridge-runtime/mysql"]
+sqlite = ["cokret-bridge-runtime/runtime", "cokret-bridge-runtime/sqlite"]
+postgres = ["cokret-bridge-runtime/runtime", "cokret-bridge-runtime/postgres"]
+mysql = ["cokret-bridge-runtime/runtime", "cokret-bridge-runtime/mysql"]
 
 [dependencies]
 cokret-bridge-runtime = { workspace = true, default-features = false }
@@ -25,3 +25,9 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 reqwest = { workspace = true }
 tracing = { workspace = true }
+base64 = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+sha1 = { workspace = true }
+subtle = { workspace = true }
+hex = { workspace = true }

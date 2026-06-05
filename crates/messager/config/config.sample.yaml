@@ -33,3 +33,5 @@ app:
   page_access_token: "CHANGE_ME_PAGE_ACCESS_TOKEN"
   # webhook 验证令牌(GET 握手 hub.verify_token 比对值)。
   verify_token: "CHANGE_ME_WEBHOOK_VERIFY_TOKEN"
+  # Meta App Secret:用于校验每条 POST 投递的 X-Hub-Signature-256(HMAC-SHA256(app_secret, 原始 body))。
+  app_secret: "CHANGE_ME_MESSENGER_APP_SECRET"

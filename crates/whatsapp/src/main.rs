@@ -50,12 +50,20 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("config.app.verify_token missing"))?
         .to_owned();
+    // app_secret: Meta app secret used to verify X-Hub-Signature-256 on each POST.
+    let app_secret = config
+        .app
+        .get("app_secret")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("config.app.app_secret missing"))?
+        .to_owned();
 
     run_message_bridge(config, move |_ctx: Arc<_>| {
         Ok(WhatsAppApp::new(
             phone_number_id,
             access_token,
             verify_token,
+            app_secret,
         ))
     })
     .await

@@ -9,15 +9,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use base64::Engine as _;
 use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
 use cokret_bridge_messaging::{
-    AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage, webhook,
+    AppMessageRef, Attachment, InboundAppMessage, MessageBridge, MessageContext,
+    OutboundAppMessage, webhook,
 };
 use cokret_bridge_runtime::{BridgeError, Result};
-use hmac::{Hmac, Mac};
 use serde_json::{Value, json};
-use sha2::Sha256;
 
 /// LINE bridge adapter.
 pub struct LineApp {
@@ -143,14 +141,9 @@ async fn line_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response)
         .into_iter()
         .flatten()
     {
-        if webhook::str_at(event, "/type") != Some("message")
-            || webhook::str_at(event, "/message/type") != Some("text")
-        {
+        if webhook::str_at(event, "/type") != Some("message") {
             continue;
         }
-        let Some(text) = webhook::str_at(event, "/message/text") else {
-            continue;
-        };
         let channel = webhook::first_string_at(
             event,
             &["/source/groupId", "/source/roomId", "/source/userId"],
@@ -160,29 +153,96 @@ async fn line_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response)
         let message_id = webhook::first_string_at(event, &["/message/id", "/webhookEventId"])
             .or_else(|| event.get("timestamp").map(|v| v.to_string()))
             .unwrap_or_default();
+        let msg_type = webhook::str_at(event, "/message/type").unwrap_or_default();
 
-        webhook::submit(
-            state.ctx.clone(),
-            "line",
-            InboundAppMessage {
-                app_channel: channel,
-                app_user: user,
-                app_message_id: message_id,
-                body: text.to_owned(),
-            },
-        )
-        .await;
+        if msg_type == "text" {
+            let Some(text) = webhook::str_at(event, "/message/text") else {
+                continue;
+            };
+            webhook::submit(
+                state.ctx.clone(),
+                "line",
+                InboundAppMessage {
+                    app_channel: channel,
+                    app_user: user,
+                    app_message_id: message_id,
+                    body: text.to_owned(),
+                },
+            )
+            .await;
+            continue;
+        }
+
+        if matches!(msg_type, "image" | "video" | "audio" | "file") {
+            // The content id is the message id; the binary is fetched from the
+            // LINE content endpoint.
+            let content_id = webhook::string_at(event, "/message/id").unwrap_or_default();
+            let filename = webhook::string_at(event, "/message/fileName");
+            if let Err(e) =
+                forward_line_media(state, &channel, &user, &message_id, &content_id, filename).await
+            {
+                tracing::warn!(error = %e, "LINE media bridging failed");
+            }
+        }
     }
     webhook::ok_json(res, json!({ "ok": true }));
 }
 
-fn verify_line_signature(secret: &str, payload: &[u8], signature: &str) -> bool {
-    type HmacSha256 = Hmac<Sha256>;
+/// Download LINE message content (image/video/audio/file) from the content
+/// endpoint, upload it to the cokret blob store, and submit a media message.
+async fn forward_line_media(
+    state: &LineWebhookState,
+    channel: &str,
+    user: &str,
+    message_id: &str,
+    content_id: &str,
+    filename: Option<String>,
+) -> Result<()> {
+    let url = format!("https://api-data.line.me/v2/bot/message/{content_id}/content");
+    let resp = state
+        .ctx
+        .http
+        .get(&url)
+        .bearer_auth(&state.app.channel_access_token)
+        .send()
+        .await
+        .map_err(|e| BridgeError::App(format!("LINE content download failed: {e}")))?;
+    let mime = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+        .unwrap_or_else(|| "application/octet-stream".to_owned());
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| BridgeError::App(format!("LINE content read failed: {e}")))?;
+    let blob_ref = state.ctx.upload_blob(&bytes, &mime).await?;
 
-    let Ok(mut mac) = HmacSha256::new_from_slice(secret.as_bytes()) else {
-        return false;
+    let attachment = Attachment {
+        blob_ref,
+        media_type: Some(mime),
+        filename,
+        size: Some(bytes.len() as u64),
+        caption: String::new(),
     };
-    mac.update(payload);
-    let expected = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
-    expected == signature
+    let inbound = InboundAppMessage {
+        app_channel: channel.to_owned(),
+        app_user: user.to_owned(),
+        app_message_id: message_id.to_owned(),
+        body: String::new(),
+    };
+    state.ctx.submit_media_message(inbound, attachment).await?;
+    Ok(())
+}
+
+fn verify_line_signature(secret: &str, payload: &[u8], signature: &str) -> bool {
+    // LINE's `x-line-signature` is base64(HMAC-SHA256(channel_secret, body)).
+    // Use the shared constant-time comparator to avoid a timing side channel.
+    webhook::verify_hmac_sha256(
+        secret.as_bytes(),
+        payload,
+        signature,
+        webhook::SigEncoding::Base64,
+    )
 }

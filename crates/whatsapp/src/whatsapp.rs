@@ -11,7 +11,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
 use cokret_bridge_messaging::{
-    AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage, webhook,
+    AppMessageRef, Attachment, InboundAppMessage, MessageBridge, MessageContext,
+    OutboundAppMessage, webhook,
 };
 use cokret_bridge_runtime::{BridgeError, Result};
 use serde_json::{Value, json};
@@ -27,6 +28,9 @@ pub struct WhatsAppApp {
     access_token: String,
     /// Webhook verification echo token.
     verify_token: String,
+    /// Meta app secret used to verify the `X-Hub-Signature-256` of each POST
+    /// delivery (HMAC-SHA256 over the raw request body).
+    app_secret: String,
 }
 
 impl WhatsAppApp {
@@ -34,11 +38,13 @@ impl WhatsAppApp {
         phone_number_id: impl Into<String>,
         access_token: impl Into<String>,
         verify_token: impl Into<String>,
+        app_secret: impl Into<String>,
     ) -> Self {
         Self {
             phone_number_id: phone_number_id.into(),
             access_token: access_token.into(),
             verify_token: verify_token.into(),
+            app_secret: app_secret.into(),
         }
     }
 }
@@ -152,8 +158,32 @@ async fn whatsapp_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
         webhook::bad_request(res, "webhook state missing");
         return;
     };
-    let Some(body) = webhook::json_body(req, res).await else {
+    // Fail closed: every POST delivery MUST carry a valid
+    // `X-Hub-Signature-256: sha256=<hmac>` over the exact raw body.
+    if state.app.app_secret.is_empty() {
+        webhook::unauthorized(res, "WhatsApp app_secret not configured");
         return;
+    }
+    let Some(raw) = webhook::raw_body(req, res).await else {
+        return;
+    };
+    let signature = req
+        .header::<String>("x-hub-signature-256")
+        .unwrap_or_default();
+    if !webhook::verify_meta_x_hub_signature_256(
+        state.app.app_secret.as_bytes(),
+        &raw,
+        &signature,
+    ) {
+        webhook::unauthorized(res, "WhatsApp X-Hub-Signature-256 mismatch");
+        return;
+    }
+    let body: Value = match serde_json::from_slice(&raw) {
+        Ok(value) => value,
+        Err(err) => {
+            webhook::bad_request(res, format!("invalid WhatsApp JSON body: {err}"));
+            return;
+        }
     };
 
     for entry in body
@@ -175,26 +205,123 @@ async fn whatsapp_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
                 .into_iter()
                 .flatten()
             {
-                let Some(text) = webhook::str_at(message, "/text/body") else {
-                    continue;
-                };
                 let from = webhook::string_at(message, "/from").unwrap_or_default();
                 let message_id = webhook::string_at(message, "/id")
                     .or_else(|| webhook::string_at(message, "/timestamp"))
                     .unwrap_or_default();
-                webhook::submit(
-                    state.ctx.clone(),
-                    "whatsapp",
-                    InboundAppMessage {
-                        app_channel: from.clone(),
-                        app_user: from,
-                        app_message_id: message_id,
-                        body: text.to_owned(),
-                    },
-                )
-                .await;
+
+                if let Some(text) = webhook::str_at(message, "/text/body") {
+                    webhook::submit(
+                        state.ctx.clone(),
+                        "whatsapp",
+                        InboundAppMessage {
+                            app_channel: from.clone(),
+                            app_user: from,
+                            app_message_id: message_id,
+                            body: text.to_owned(),
+                        },
+                    )
+                    .await;
+                    continue;
+                }
+
+                if let Some((media_id, mime, filename)) = whatsapp_media_ref(message) {
+                    if let Err(e) =
+                        forward_whatsapp_media(state, &from, &message_id, &media_id, mime, filename)
+                            .await
+                    {
+                        tracing::warn!(error = %e, "WhatsApp media bridging failed");
+                    }
+                }
             }
         }
     }
     webhook::ok_json(res, json!({ "ok": true }));
+}
+
+/// Identify an inbound media object on a WhatsApp message: `(media_id, mime, filename)`.
+fn whatsapp_media_ref(message: &Value) -> Option<(String, Option<String>, Option<String>)> {
+    for kind in ["image", "document", "video", "audio", "sticker"] {
+        if let Some(obj) = message.get(kind) {
+            let id = obj.get("id").and_then(Value::as_str)?.to_owned();
+            let mime = obj
+                .get("mime_type")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let filename = obj
+                .get("filename")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            return Some((id, mime, filename));
+        }
+    }
+    None
+}
+
+/// Resolve a WhatsApp media id to its download URL, fetch the bytes (Bearer
+/// auth on both calls), upload to the cokret blob store, and submit a media
+/// message.
+async fn forward_whatsapp_media(
+    state: &WhatsAppWebhookState,
+    from: &str,
+    message_id: &str,
+    media_id: &str,
+    mime: Option<String>,
+    filename: Option<String>,
+) -> Result<()> {
+    let token = &state.app.access_token;
+    // 1) Resolve the (short-lived) media URL.
+    let meta_url = format!("https://graph.facebook.com/{GRAPH_API_VERSION}/{media_id}");
+    let meta: Value = state
+        .ctx
+        .http
+        .get(&meta_url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| BridgeError::App(format!("WhatsApp media lookup failed: {e}")))?
+        .json()
+        .await
+        .map_err(|e| BridgeError::App(format!("WhatsApp media lookup parse failed: {e}")))?;
+    let url = meta
+        .get("url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| BridgeError::App(format!("WhatsApp media has no url: {meta}")))?;
+    let resolved_mime = mime
+        .or_else(|| {
+            meta.get("mime_type")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "application/octet-stream".to_owned());
+
+    // 2) Download the bytes (also Bearer-authenticated).
+    let bytes = state
+        .ctx
+        .http
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| BridgeError::App(format!("WhatsApp media download failed: {e}")))?
+        .bytes()
+        .await
+        .map_err(|e| BridgeError::App(format!("WhatsApp media read failed: {e}")))?;
+    let blob_ref = state.ctx.upload_blob(&bytes, &resolved_mime).await?;
+
+    let attachment = Attachment {
+        blob_ref,
+        media_type: Some(resolved_mime),
+        filename,
+        size: Some(bytes.len() as u64),
+        caption: String::new(),
+    };
+    let inbound = InboundAppMessage {
+        app_channel: from.to_owned(),
+        app_user: from.to_owned(),
+        app_message_id: message_id.to_owned(),
+        body: String::new(),
+    };
+    state.ctx.submit_media_message(inbound, attachment).await?;
+    Ok(())
 }

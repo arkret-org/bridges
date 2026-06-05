@@ -13,8 +13,12 @@ use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage, webhook,
 };
+use cokret_bridge_runtime::cache::TokenCache;
 use cokret_bridge_runtime::{BridgeError, Result};
 use serde_json::{Value, json};
+
+/// Fallback validity (seconds) when the API omits `expireIn`.
+const DINGTALK_TOKEN_FALLBACK_SECS: u64 = 7000;
 
 /// DingTalk bridge adapter.
 pub struct DingTalkApp {
@@ -24,6 +28,7 @@ pub struct DingTalkApp {
     app_secret: String,
     /// Robot code (robotCode).
     robot_code: String,
+    token_cache: TokenCache,
 }
 
 impl DingTalkApp {
@@ -36,35 +41,47 @@ impl DingTalkApp {
             app_key: app_key.into(),
             app_secret: app_secret.into(),
             robot_code: robot_code.into(),
+            token_cache: TokenCache::new(),
         }
     }
 
-    /// Exchanges AppKey/AppSecret for an access_token.
-    ///
-    /// A DingTalk access_token is valid for about 7200s; production should cache it and refresh
-    /// as needed; here it is fetched before each send to keep the code readable and compilable.
+    /// Returns an access_token, served from the cache until it nears the
+    /// vendor-reported expiry, then re-fetched via AppKey/AppSecret.
     async fn fetch_access_token(&self, ctx: &Arc<MessageContext>) -> Result<String> {
-        // DingTalk's new API for obtaining an access_token.
-        let resp = ctx
-            .http
-            .post("https://api.dingtalk.com/v1.0/oauth2/accessToken")
-            .json(&json!({
-                "appKey": self.app_key,
-                "appSecret": self.app_secret,
-            }))
-            .send()
+        self.token_cache
+            .get_or_try_refresh(|| async {
+                // DingTalk's new API for obtaining an access_token.
+                let resp = ctx
+                    .http
+                    .post("https://api.dingtalk.com/v1.0/oauth2/accessToken")
+                    .json(&json!({
+                        "appKey": self.app_key,
+                        "appSecret": self.app_secret,
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        BridgeError::App(format!("DingTalk access_token request failed: {e}"))
+                    })?;
+
+                let value: Value = resp.json().await.map_err(|e| {
+                    BridgeError::App(format!("DingTalk access_token response parse failed: {e}"))
+                })?;
+
+                let token = value
+                    .get("accessToken")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_owned())
+                    .ok_or_else(|| {
+                        BridgeError::App(format!("DingTalk access_token is missing: {value}"))
+                    })?;
+                let ttl = value
+                    .get("expireIn")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(DINGTALK_TOKEN_FALLBACK_SECS);
+                Ok((token, Duration::from_secs(ttl)))
+            })
             .await
-            .map_err(|e| BridgeError::App(format!("DingTalk access_token request failed: {e}")))?;
-
-        let value: serde_json::Value = resp.json().await.map_err(|e| {
-            BridgeError::App(format!("DingTalk access_token response parse failed: {e}"))
-        })?;
-
-        value
-            .get("accessToken")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_owned())
-            .ok_or_else(|| BridgeError::App(format!("DingTalk access_token is missing: {value}")))
     }
 }
 
@@ -132,17 +149,44 @@ impl MessageBridge for DingTalkApp {
     }
 
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
+        let app_secret = self.app_secret.clone();
         Some(
             salvo::Router::with_path("webhooks/dingtalk")
-                .hoop(affix_state::inject(DingTalkWebhookState { ctx }))
+                .hoop(affix_state::inject(DingTalkWebhookState { ctx, app_secret }))
                 .post(dingtalk_delivery),
         )
     }
 }
 
+/// DingTalk outgoing-robot callbacks accept a `timestamp` whose skew from now
+/// must stay within this window (milliseconds).
+const DINGTALK_TIMESTAMP_WINDOW_MS: i64 = 60 * 60 * 1000;
+
 #[derive(Clone)]
 struct DingTalkWebhookState {
     ctx: Arc<MessageContext>,
+    /// Enterprise app AppSecret, used for outgoing-callback signature checks.
+    app_secret: String,
+}
+
+/// Verify a DingTalk outgoing-robot callback: `sign` header equals
+/// `base64(HMAC-SHA256(app_secret, "{timestamp}\n{app_secret}"))`, with the
+/// `timestamp` constrained to a freshness window.
+fn dingtalk_signature_ok(app_secret: &str, timestamp: &str, sign: &str) -> bool {
+    let Ok(ts) = timestamp.parse::<i64>() else {
+        return false;
+    };
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    if (now_ms - ts).abs() > DINGTALK_TIMESTAMP_WINDOW_MS {
+        return false;
+    }
+    let string_to_sign = format!("{timestamp}\n{app_secret}");
+    webhook::verify_hmac_sha256(
+        app_secret.as_bytes(),
+        string_to_sign.as_bytes(),
+        sign,
+        webhook::SigEncoding::Base64,
+    )
 }
 
 #[handler]
@@ -151,6 +195,18 @@ async fn dingtalk_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
         webhook::bad_request(res, "webhook state missing");
         return;
     };
+    // Fail closed: verify the `timestamp` + `sign` headers before any handling
+    // (including the URL-verification challenge).
+    if state.app_secret.is_empty() {
+        webhook::unauthorized(res, "DingTalk app_secret not configured");
+        return;
+    }
+    let timestamp = req.header::<String>("timestamp").unwrap_or_default();
+    let sign = req.header::<String>("sign").unwrap_or_default();
+    if !dingtalk_signature_ok(&state.app_secret, &timestamp, &sign) {
+        webhook::unauthorized(res, "DingTalk signature mismatch");
+        return;
+    }
     let Some(body) = webhook::json_body(req, res).await else {
         return;
     };

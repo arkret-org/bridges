@@ -32,3 +32,5 @@ app:
   phone_number_id: "CHANGE_ME_WHATSAPP_PHONE_NUMBER_ID"
   access_token: "CHANGE_ME_WHATSAPP_ACCESS_TOKEN"
   verify_token: "CHANGE_ME_WHATSAPP_WEBHOOK_VERIFY_TOKEN"
+  # Meta App Secret:用于校验每条 POST 投递的 X-Hub-Signature-256(HMAC-SHA256(app_secret, 原始 body))。
+  app_secret: "CHANGE_ME_WHATSAPP_APP_SECRET"

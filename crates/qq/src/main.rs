@@ -36,9 +36,16 @@ async fn main() -> anyhow::Result<()> {
         .get("access_token")
         .and_then(|v| v.as_str())
         .map(|s| s.to_owned());
+    // signing_secret: OneBot HTTP POST signing secret used to verify X-Signature.
+    let signing_secret = config
+        .app
+        .get("signing_secret")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("config.app.signing_secret missing"))?
+        .to_owned();
 
     run_message_bridge(config, move |_ctx: Arc<_>| {
-        Ok(QqApp::new(onebot_url, access_token))
+        Ok(QqApp::new(onebot_url, access_token, signing_secret))
     })
     .await
     .map_err(|e| anyhow::anyhow!(e.to_string()))

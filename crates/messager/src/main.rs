@@ -40,9 +40,16 @@ async fn main() -> anyhow::Result<()> {
         .get("verify_token")
         .and_then(|v| v.as_str())
         .map(|s| s.to_owned());
+    // app_secret: Meta app secret used to verify X-Hub-Signature-256 on each POST.
+    let app_secret = config
+        .app
+        .get("app_secret")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("config.app.app_secret missing"))?
+        .to_owned();
 
     run_message_bridge(config, move |_ctx: Arc<_>| {
-        Ok(MessagerApp::new(page_access_token, verify_token))
+        Ok(MessagerApp::new(page_access_token, verify_token, app_secret))
     })
     .await
     .map_err(|e| anyhow::anyhow!(e.to_string()))

@@ -21,13 +21,21 @@ pub struct QqApp {
     onebot_url: String,
     /// OneBot `access_token` (optional, used as Bearer auth).
     access_token: Option<String>,
+    /// OneBot HTTP POST signing secret. Inbound events carry
+    /// `X-Signature: sha1=<HMAC-SHA1(secret, raw_body)>`; required (fail closed).
+    signing_secret: String,
 }
 
 impl QqApp {
-    pub fn new(onebot_url: impl Into<String>, access_token: Option<String>) -> Self {
+    pub fn new(
+        onebot_url: impl Into<String>,
+        access_token: Option<String>,
+        signing_secret: impl Into<String>,
+    ) -> Self {
         Self {
             onebot_url: onebot_url.into(),
             access_token,
+            signing_secret: signing_secret.into(),
         }
     }
 }
@@ -93,9 +101,13 @@ impl MessageBridge for QqApp {
     }
 
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
+        let signing_secret = self.signing_secret.clone();
         Some(
             salvo::Router::with_path("webhooks/qq")
-                .hoop(affix_state::inject(QqWebhookState { ctx }))
+                .hoop(affix_state::inject(QqWebhookState {
+                    ctx,
+                    signing_secret,
+                }))
                 .post(qq_delivery),
         )
     }
@@ -104,6 +116,7 @@ impl MessageBridge for QqApp {
 #[derive(Clone)]
 struct QqWebhookState {
     ctx: Arc<MessageContext>,
+    signing_secret: String,
 }
 
 #[handler]
@@ -112,8 +125,35 @@ async fn qq_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
         webhook::bad_request(res, "webhook state missing");
         return;
     };
-    let Some(body) = webhook::json_body(req, res).await else {
+    // Fail closed: OneBot HTTP POST events MUST carry a valid
+    // `X-Signature: sha1=<HMAC-SHA1(signing_secret, raw_body)>`.
+    if state.signing_secret.is_empty() {
+        webhook::unauthorized(res, "QQ signing_secret not configured");
         return;
+    }
+    let Some(raw) = webhook::raw_body(req, res).await else {
+        return;
+    };
+    let header = req.header::<String>("x-signature").unwrap_or_default();
+    let Some(provided) = header.strip_prefix("sha1=") else {
+        webhook::unauthorized(res, "QQ X-Signature missing or malformed");
+        return;
+    };
+    if !webhook::verify_hmac_sha1(
+        state.signing_secret.as_bytes(),
+        &raw,
+        provided,
+        webhook::SigEncoding::Hex,
+    ) {
+        webhook::unauthorized(res, "QQ X-Signature mismatch");
+        return;
+    }
+    let body: Value = match serde_json::from_slice(&raw) {
+        Ok(value) => value,
+        Err(err) => {
+            webhook::bad_request(res, format!("invalid QQ JSON body: {err}"));
+            return;
+        }
     };
     if body.get("post_type").and_then(Value::as_str) != Some("message") {
         webhook::ok_json(res, json!({ "ok": true }));

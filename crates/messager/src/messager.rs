@@ -24,13 +24,21 @@ pub struct MessagerApp {
     page_access_token: String,
     /// Webhook verification token (the value compared against `hub.verify_token` in the GET verification handshake).
     verify_token: Option<String>,
+    /// Meta app secret used to verify the `X-Hub-Signature-256` of each POST
+    /// delivery (HMAC-SHA256 over the raw request body).
+    app_secret: String,
 }
 
 impl MessagerApp {
-    pub fn new(page_access_token: impl Into<String>, verify_token: Option<String>) -> Self {
+    pub fn new(
+        page_access_token: impl Into<String>,
+        verify_token: Option<String>,
+        app_secret: impl Into<String>,
+    ) -> Self {
         Self {
             page_access_token: page_access_token.into(),
             verify_token,
+            app_secret: app_secret.into(),
         }
     }
 }
@@ -133,8 +141,32 @@ async fn messenger_delivery(req: &mut Request, depot: &mut Depot, res: &mut Resp
         webhook::bad_request(res, "webhook state missing");
         return;
     };
-    let Some(body) = webhook::json_body(req, res).await else {
+    // Fail closed: every POST delivery MUST carry a valid
+    // `X-Hub-Signature-256: sha256=<hmac>` over the exact raw body.
+    if state.app.app_secret.is_empty() {
+        webhook::unauthorized(res, "Messenger app_secret not configured");
         return;
+    }
+    let Some(raw) = webhook::raw_body(req, res).await else {
+        return;
+    };
+    let signature = req
+        .header::<String>("x-hub-signature-256")
+        .unwrap_or_default();
+    if !webhook::verify_meta_x_hub_signature_256(
+        state.app.app_secret.as_bytes(),
+        &raw,
+        &signature,
+    ) {
+        webhook::unauthorized(res, "Messenger X-Hub-Signature-256 mismatch");
+        return;
+    }
+    let body: Value = match serde_json::from_slice(&raw) {
+        Ok(value) => value,
+        Err(err) => {
+            webhook::bad_request(res, format!("invalid Messenger JSON body: {err}"));
+            return;
+        }
     };
 
     for entry in body

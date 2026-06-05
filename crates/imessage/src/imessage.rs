@@ -21,13 +21,21 @@ pub struct IMessageApp {
     gateway_url: String,
     /// Gateway access password (BlueBubbles uses it as the `?guid=` query parameter).
     password: Option<String>,
+    /// Optional shared secret required on inbound webhook calls (compared against
+    /// the `x-webhook-secret` header). When `None`, the webhook is unauthenticated.
+    webhook_secret: Option<String>,
 }
 
 impl IMessageApp {
-    pub fn new(gateway_url: impl Into<String>, password: Option<String>) -> Self {
+    pub fn new(
+        gateway_url: impl Into<String>,
+        password: Option<String>,
+        webhook_secret: Option<String>,
+    ) -> Self {
         Self {
             gateway_url: gateway_url.into(),
             password,
+            webhook_secret,
         }
     }
 }
@@ -98,9 +106,10 @@ impl MessageBridge for IMessageApp {
     }
 
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
+        let secret = self.webhook_secret.clone();
         Some(
             salvo::Router::with_path("webhooks/imessage")
-                .hoop(affix_state::inject(IMessageWebhookState { ctx }))
+                .hoop(affix_state::inject(IMessageWebhookState { ctx, secret }))
                 .post(imessage_delivery),
         )
     }
@@ -109,6 +118,7 @@ impl MessageBridge for IMessageApp {
 #[derive(Clone)]
 struct IMessageWebhookState {
     ctx: Arc<MessageContext>,
+    secret: Option<String>,
 }
 
 #[handler]
@@ -117,6 +127,17 @@ async fn imessage_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
         webhook::bad_request(res, "webhook state missing");
         return;
     };
+    // Fail closed: a webhook secret MUST be configured, and inbound calls MUST
+    // present it. Compared in constant time to avoid a timing side channel.
+    let Some(expected) = &state.secret else {
+        webhook::unauthorized(res, "iMessage webhook secret not configured");
+        return;
+    };
+    let provided = req.header::<String>("x-webhook-secret").unwrap_or_default();
+    if !webhook::constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
+        webhook::unauthorized(res, "iMessage webhook secret mismatch");
+        return;
+    }
     let Some(body) = webhook::json_body(req, res).await else {
         return;
     };

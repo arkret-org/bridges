@@ -7,12 +7,14 @@
 //!   the WeChat Work app-message / Official Account customer-service-message API.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage, webhook,
 };
+use cokret_bridge_runtime::cache::TokenCache;
 use cokret_bridge_runtime::{BridgeError, Result};
 use quick_xml::Reader;
 use quick_xml::events::Event as XmlEvent;
@@ -20,6 +22,8 @@ use serde_json::{Value, json};
 
 const WECHAT_OFFICIAL_BASE: &str = "https://api.weixin.qq.com/cgi-bin";
 const WECHAT_WORK_BASE: &str = "https://qyapi.weixin.qq.com/cgi-bin";
+/// Fallback validity (seconds) when the API omits `expires_in`.
+const WECHAT_TOKEN_FALLBACK_SECS: u64 = 7000;
 
 /// WeChat bridge adapter.
 pub struct WechatApp {
@@ -29,6 +33,10 @@ pub struct WechatApp {
     cred_secret: String,
     /// WeChat Work app agent_id (required to send app messages); None for Official Account customer-service messages.
     agent_id: Option<i64>,
+    /// Callback Token used to verify the `signature` of inbound calls
+    /// (`sha1(sort(token, timestamp, nonce))`). Required (fail closed).
+    webhook_token: String,
+    token_cache: TokenCache,
 }
 
 impl WechatApp {
@@ -36,11 +44,14 @@ impl WechatApp {
         cred_id: impl Into<String>,
         cred_secret: impl Into<String>,
         agent_id: Option<i64>,
+        webhook_token: impl Into<String>,
     ) -> Self {
         Self {
             cred_id: cred_id.into(),
             cred_secret: cred_secret.into(),
             agent_id,
+            webhook_token: webhook_token.into(),
+            token_cache: TokenCache::new(),
         }
     }
 
@@ -52,39 +63,50 @@ impl WechatApp {
         }
     }
 
-    /// Exchanges corp_id/corp_secret or app_id/app_secret for an `access_token`.
+    /// Returns an `access_token`, served from the cache until it nears the
+    /// vendor-reported expiry, then re-fetched.
     async fn access_token(&self, ctx: &Arc<MessageContext>) -> Result<String> {
-        let url = match self.mode() {
-            WechatMode::Work => format!(
-                "{WECHAT_WORK_BASE}/gettoken?corpid={}&corpsecret={}",
-                self.cred_id, self.cred_secret
-            ),
-            WechatMode::OfficialAccount => format!(
-                "{WECHAT_OFFICIAL_BASE}/token?grant_type=client_credential&appid={}&secret={}",
-                self.cred_id, self.cred_secret
-            ),
-        };
-        let resp = ctx
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| BridgeError::App(format!("WeChat token request failed: {e}")))?;
+        self.token_cache
+            .get_or_try_refresh(|| async {
+                let url = match self.mode() {
+                    WechatMode::Work => format!(
+                        "{WECHAT_WORK_BASE}/gettoken?corpid={}&corpsecret={}",
+                        self.cred_id, self.cred_secret
+                    ),
+                    WechatMode::OfficialAccount => format!(
+                        "{WECHAT_OFFICIAL_BASE}/token?grant_type=client_credential&appid={}&secret={}",
+                        self.cred_id, self.cred_secret
+                    ),
+                };
+                let resp = ctx
+                    .http
+                    .get(&url)
+                    .send()
+                    .await
+                    .map_err(|e| BridgeError::App(format!("WeChat token request failed: {e}")))?;
 
-        let body: Value = resp
-            .json()
-            .await
-            .map_err(|e| BridgeError::App(format!("WeChat token parse failed: {e}")))?;
+                let body: Value = resp
+                    .json()
+                    .await
+                    .map_err(|e| BridgeError::App(format!("WeChat token parse failed: {e}")))?;
 
-        if body.get("errcode").and_then(|v| v.as_i64()).unwrap_or(0) != 0 {
-            return Err(BridgeError::App(format!(
-                "WeChat token returned an error: {body}"
-            )));
-        }
-        body.get("access_token")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_owned())
-            .ok_or_else(|| BridgeError::App(format!("WeChat token is missing: {body}")))
+                if body.get("errcode").and_then(|v| v.as_i64()).unwrap_or(0) != 0 {
+                    return Err(BridgeError::App(format!(
+                        "WeChat token returned an error: {body}"
+                    )));
+                }
+                let token = body
+                    .get("access_token")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_owned())
+                    .ok_or_else(|| BridgeError::App(format!("WeChat token is missing: {body}")))?;
+                let ttl = body
+                    .get("expires_in")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(WECHAT_TOKEN_FALLBACK_SECS);
+                Ok((token, Duration::from_secs(ttl)))
+            })
+            .await
     }
 }
 
@@ -159,9 +181,10 @@ impl MessageBridge for WechatApp {
     }
 
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
+        let webhook_token = self.webhook_token.clone();
         Some(
             salvo::Router::with_path("webhooks/wechat")
-                .hoop(affix_state::inject(WechatWebhookState { ctx }))
+                .hoop(affix_state::inject(WechatWebhookState { ctx, webhook_token }))
                 .get(wechat_verify)
                 .post(wechat_delivery),
         )
@@ -177,10 +200,34 @@ enum WechatMode {
 #[derive(Clone)]
 struct WechatWebhookState {
     ctx: Arc<MessageContext>,
+    /// Callback Token for `signature` verification.
+    webhook_token: String,
+}
+
+/// Verify the WeChat接入 `signature` query parameter, which is
+/// `sha1(sort(token, timestamp, nonce))`, in constant time.
+fn wechat_signature_ok(token: &str, req: &Request) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    let signature = req.query::<String>("signature").unwrap_or_default();
+    let timestamp = req.query::<String>("timestamp").unwrap_or_default();
+    let nonce = req.query::<String>("nonce").unwrap_or_default();
+    let expected = webhook::sha1_hex_sorted(&[token, &timestamp, &nonce]);
+    webhook::constant_time_eq(expected.as_bytes(), signature.as_bytes())
 }
 
 #[handler]
-async fn wechat_verify(req: &mut Request, _depot: &mut Depot, res: &mut Response) {
+async fn wechat_verify(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    let Ok(state) = depot.obtain::<WechatWebhookState>() else {
+        webhook::bad_request(res, "webhook state missing");
+        return;
+    };
+    // Fail closed: only echo `echostr` after the接入 signature checks out.
+    if !wechat_signature_ok(&state.webhook_token, req) {
+        webhook::unauthorized(res, "WeChat signature mismatch");
+        return;
+    }
     let echostr = req.query::<String>("echostr").unwrap_or_default();
     if echostr.is_empty() {
         webhook::bad_request(res, "missing echostr");
@@ -195,6 +242,11 @@ async fn wechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respons
         webhook::bad_request(res, "webhook state missing");
         return;
     };
+    // Fail closed: verify the plaintext-mode `signature` before processing.
+    if !wechat_signature_ok(&state.webhook_token, req) {
+        webhook::unauthorized(res, "WeChat signature mismatch");
+        return;
+    }
     let payload = match req.payload().await {
         Ok(bytes) => bytes.to_vec(),
         Err(err) => {

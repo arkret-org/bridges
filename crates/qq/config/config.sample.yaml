@@ -33,6 +33,8 @@ app:
   onebot_url: "http://127.0.0.1:5700"
   # OneBot access_token(可选,作 Bearer 鉴权)。
   access_token: "CHANGE_ME_ONEBOT_ACCESS_TOKEN"
+  # OneBot HTTP POST 上报签名密钥:校验 X-Signature: sha1=HMAC-SHA1(signing_secret, 原始 body)。
+  signing_secret: "CHANGE_ME_ONEBOT_SIGNING_SECRET"
   # —— 若改用 QQ 官方机器人,改填以下两项,并调整 send_to_app 的 endpoint:
   # app_id: "CHANGE_ME_QQ_APP_ID"
   # token: "CHANGE_ME_QQ_BOT_TOKEN"
