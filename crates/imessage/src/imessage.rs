@@ -168,8 +168,12 @@ async fn imessage_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
         ],
     )
     .unwrap_or_default();
-    let message_id =
-        webhook::first_string_at(&body, &["/data/guid", "/guid", "/id"]).unwrap_or_default();
+    let Some(message_id) =
+        webhook::first_non_empty_string_at(&body, &["/data/guid", "/guid", "/id"])
+    else {
+        webhook::bad_request(res, "iMessage message id missing");
+        return;
+    };
     webhook::submit(
         state.ctx.clone(),
         "imessage",

@@ -254,9 +254,12 @@ async fn dingtalk_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
         ],
     )
     .unwrap_or_default();
-    let message_id = webhook::first_string_at(&body, &["/msgId", "/messageId", "/eventId"])
-        .or_else(|| body.get("createAt").map(|v| v.to_string()))
-        .unwrap_or_default();
+    let Some(message_id) =
+        webhook::first_non_empty_string_at(&body, &["/msgId", "/messageId", "/eventId"])
+    else {
+        webhook::bad_request(res, "DingTalk message id missing");
+        return;
+    };
     webhook::submit(
         state.ctx.clone(),
         "dingtalk",

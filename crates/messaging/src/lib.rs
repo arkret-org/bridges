@@ -6,7 +6,7 @@
 //! - app channel/message/user mapping tables,
 //! - `ck.message.create` conversion,
 //! - `MessageBridge` and `run_message_bridge`,
-//! - signed `bridge_external_ref` provenance for upstream channel/user/message ids.
+//! - signed `external_ref` provenance for upstream channel/user/message ids.
 
 mod models;
 mod schema;
@@ -32,6 +32,9 @@ pub use models::{MessageMapping, RoomMapping, UserMapping};
 pub use runtime::salvo;
 
 use models::{NewMessageMapping, NewRoomMapping, NewUserMapping};
+
+const EXTERNAL_REF_SCHEMA: &str = "ck.external_ref.messaging.v1";
+const MESSAGE_MAPPING_KEY_SEPARATOR: char = '\u{1f}';
 
 /// An inbound message from an external app into Cokret.
 #[derive(Clone, Debug)]
@@ -216,6 +219,13 @@ impl MessageStore {
     ) -> Result<()> {
         use schema::message_mappings::dsl;
 
+        if app_channel.trim().is_empty() {
+            return Err(BridgeError::App("app_channel must not be empty".into()));
+        }
+        if app_message_id.trim().is_empty() {
+            return Err(BridgeError::App("app_message_id must not be empty".into()));
+        }
+
         let mut conn = self.db.conn()?;
         let exists = dsl::message_mappings
             .filter(dsl::app_channel_id.eq(app_channel))
@@ -248,6 +258,22 @@ impl MessageStore {
 
         let mut conn = self.db.conn()?;
         Ok(dsl::message_mappings
+            .filter(dsl::app_message_id.eq(app_message_id))
+            .select(dsl::cokret_event_id)
+            .first::<String>(&mut conn)
+            .optional()?)
+    }
+
+    pub fn event_for_channel_message(
+        &self,
+        app_channel: &str,
+        app_message_id: &str,
+    ) -> Result<Option<String>> {
+        use schema::message_mappings::dsl;
+
+        let mut conn = self.db.conn()?;
+        Ok(dsl::message_mappings
+            .filter(dsl::app_channel_id.eq(app_channel))
             .filter(dsl::app_message_id.eq(app_message_id))
             .select(dsl::cokret_event_id)
             .first::<String>(&mut conn)
@@ -365,6 +391,67 @@ impl AppletResolver for MessageResolver {
 
 fn now_ts() -> i64 {
     chrono::Utc::now().timestamp()
+}
+
+fn normalized_external_id(value: &str) -> String {
+    value.trim().to_owned()
+}
+
+fn bridge_protocol(config: &runtime::Config) -> String {
+    normalized_external_id(&config.bridge.bridge_id)
+}
+
+fn bridge_tenant(config: &runtime::Config) -> String {
+    config
+        .bridge
+        .tenant_id
+        .as_deref()
+        .map(normalized_external_id)
+        .filter(|tenant| !tenant.is_empty())
+        .unwrap_or_else(|| normalized_external_id(&config.cokret.service_did))
+}
+
+fn message_mapping_channel_key(config: &runtime::Config, app_channel: &str) -> String {
+    [
+        bridge_protocol(config),
+        bridge_tenant(config),
+        normalized_external_id(app_channel),
+    ]
+    .join(&MESSAGE_MAPPING_KEY_SEPARATOR.to_string())
+}
+
+fn external_ref_for_message(config: &runtime::Config, msg: &InboundAppMessage) -> Value {
+    let protocol = bridge_protocol(config);
+    let tenant = bridge_tenant(config);
+    let external_channel = normalized_external_id(&msg.app_channel);
+    let external_event_id = normalized_external_id(&msg.app_message_id);
+    let normalized_sender = normalized_external_id(&msg.app_user);
+
+    json!({
+        "schema": EXTERNAL_REF_SCHEMA,
+        "protocol": protocol,
+        "tenant": tenant,
+        "external_channel": external_channel,
+        "external_event_id": external_event_id,
+        "normalized_sender": normalized_sender,
+        "source": config.bridge.bridge_id.clone(),
+        "app_channel": msg.app_channel.clone(),
+        "app_user": msg.app_user.clone(),
+        "app_message_id": msg.app_message_id.clone(),
+    })
+}
+
+fn bridge_external_ref(payload: &Value) -> Option<&Value> {
+    payload.get("bridge_external_ref")
+}
+
+fn host_allowed(host: &str, allowed_hosts: &[&str]) -> bool {
+    allowed_hosts.iter().any(|allowed| {
+        host.eq_ignore_ascii_case(allowed)
+            || host
+                .to_ascii_lowercase()
+                .ends_with(&format!(".{}", allowed.to_ascii_lowercase()))
+    })
 }
 
 #[cfg(feature = "sqlite")]
@@ -571,6 +658,13 @@ impl MessageContext {
     /// Shared submit path: resolve realm, attach signed provenance, submit on the
     /// per-channel serial queue, and record the message mapping.
     async fn submit_content(&self, msg: &InboundAppMessage, payload: Value) -> Result<String> {
+        let external_event_id = normalized_external_id(&msg.app_message_id);
+        if external_event_id.is_empty() {
+            return Err(BridgeError::App(
+                "inbound app_message_id is required for external event deduplication".into(),
+            ));
+        }
+
         let realm = self
             .store
             .realm_for_channel(&msg.app_channel)?
@@ -579,51 +673,44 @@ impl MessageContext {
                 BridgeError::App(format!("channel {} has no realm mapping", msg.app_channel))
             })?;
 
-        let external_ref = json!({
-            "source": self.inner.config.bridge.bridge_id.clone(),
-            "app_channel": msg.app_channel.clone(),
-            "app_user": msg.app_user.clone(),
-            "app_message_id": msg.app_message_id.clone(),
-        });
-        let realm_for_record = realm.clone();
+        let mapping_channel_key = message_mapping_channel_key(&self.inner.config, &msg.app_channel);
         let event_id = self
             .inner
             .queue
-            .run(&msg.app_channel, || {
+            .run(&mapping_channel_key, || {
                 let edge = self.inner.edge.clone();
+                let store = self.store.clone();
+                let external_ref = external_ref_for_message(&self.inner.config, msg);
+                let mapping_channel_key = mapping_channel_key.clone();
+                let external_event_id = external_event_id.clone();
+                let realm_for_submit = realm.clone();
+                let realm_for_record = realm.clone();
                 async move {
-                    edge.submit_with_external_ref(
-                        &realm,
-                        "ck.message.create",
-                        payload,
-                        external_ref,
-                    )
-                    .await
+                    if let Some(existing_event_id) =
+                        store.event_for_channel_message(&mapping_channel_key, &external_event_id)?
+                    {
+                        return Ok::<String, BridgeError>(existing_event_id);
+                    }
+                    let event_id = edge
+                        .submit_with_external_ref(
+                            &realm_for_submit,
+                            "ck.message.create",
+                            payload,
+                            external_ref,
+                        )
+                        .await?;
+                    store.record_message(
+                        &mapping_channel_key,
+                        &external_event_id,
+                        &event_id,
+                        &realm_for_record,
+                    )?;
+                    Ok::<String, BridgeError>(event_id)
                 }
             })
             .await?;
-
-        self.store.record_message(
-            &msg.app_channel,
-            &msg.app_message_id,
-            &event_id,
-            &realm_for_record,
-        )?;
         Ok(event_id)
     }
-}
-
-fn bridge_external_ref(payload: &Value) -> Option<&Value> {
-    payload.get("bridge_external_ref")
-}
-
-fn host_allowed(host: &str, allowed_hosts: &[&str]) -> bool {
-    allowed_hosts.iter().any(|allowed| {
-        host.eq_ignore_ascii_case(allowed)
-            || host
-                .to_ascii_lowercase()
-                .ends_with(&format!(".{}", allowed.to_ascii_lowercase()))
-    })
 }
 
 #[async_trait]
@@ -697,12 +784,22 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
             attachment,
         };
         let app_ref = self.user.send_to_app(self.ctx.clone(), out).await?;
-        self.ctx.store.record_message(
-            &channel,
-            &app_ref.app_message_id,
-            &event.event_id.to_string(),
-            &realm_id,
-        )?;
+        let mapping_channel_key = message_mapping_channel_key(&self.ctx.core().config, &channel);
+        let app_message_id = normalized_external_id(&app_ref.app_message_id);
+        if app_message_id.is_empty() {
+            tracing::debug!(
+                realm = %realm_id,
+                app_channel = %channel,
+                "adapter returned no app message id; outbound mapping not recorded"
+            );
+        } else {
+            self.ctx.store.record_message(
+                &mapping_channel_key,
+                &app_message_id,
+                &event.event_id.to_string(),
+                &realm_id,
+            )?;
+        }
         Ok(())
     }
 

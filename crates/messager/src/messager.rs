@@ -186,9 +186,10 @@ async fn messenger_delivery(req: &mut Request, depot: &mut Depot, res: &mut Resp
                 continue;
             };
             let user = webhook::string_at(event, "/sender/id").unwrap_or_default();
-            let message_id = webhook::string_at(event, "/message/mid")
-                .or_else(|| event.get("timestamp").map(|v| v.to_string()))
-                .unwrap_or_default();
+            let Some(message_id) = webhook::non_empty_string_at(event, "/message/mid") else {
+                tracing::warn!("Messenger event missing message.mid; skipping");
+                continue;
+            };
             webhook::submit(
                 state.ctx.clone(),
                 "messenger",

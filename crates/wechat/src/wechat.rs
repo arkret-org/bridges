@@ -282,7 +282,10 @@ async fn wechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respons
     };
     let user = fields.from_user.unwrap_or_default();
     let channel = user.clone();
-    let message_id = fields.msg_id.or(fields.create_time).unwrap_or_default();
+    let Some(message_id) = fields.msg_id.filter(|id| !id.trim().is_empty()) else {
+        webhook::bad_request(res, "WeChat MsgId missing");
+        return;
+    };
     webhook::submit(
         state.ctx.clone(),
         "wechat",

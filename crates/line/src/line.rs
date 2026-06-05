@@ -150,9 +150,12 @@ async fn line_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response)
         )
         .unwrap_or_default();
         let user = webhook::string_at(event, "/source/userId").unwrap_or_else(|| channel.clone());
-        let message_id = webhook::first_string_at(event, &["/message/id", "/webhookEventId"])
-            .or_else(|| event.get("timestamp").map(|v| v.to_string()))
-            .unwrap_or_default();
+        let Some(message_id) =
+            webhook::first_non_empty_string_at(event, &["/message/id", "/webhookEventId"])
+        else {
+            tracing::warn!("LINE message event missing message id; skipping");
+            continue;
+        };
         let msg_type = webhook::str_at(event, "/message/type").unwrap_or_default();
 
         if msg_type == "text" {
@@ -176,7 +179,10 @@ async fn line_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response)
         if matches!(msg_type, "image" | "video" | "audio" | "file") {
             // The content id is the message id; the binary is fetched from the
             // LINE content endpoint.
-            let content_id = webhook::string_at(event, "/message/id").unwrap_or_default();
+            let Some(content_id) = webhook::non_empty_string_at(event, "/message/id") else {
+                tracing::warn!("LINE media event missing content message id; skipping");
+                continue;
+            };
             let filename = webhook::string_at(event, "/message/fileName");
             if let Err(e) =
                 forward_line_media(state, &channel, &user, &message_id, &content_id, filename).await

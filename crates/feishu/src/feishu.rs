@@ -246,7 +246,10 @@ async fn feishu_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respons
         ],
     )
     .unwrap_or_default();
-    let message_id = webhook::string_at(event, "/message/message_id").unwrap_or_default();
+    let Some(message_id) = webhook::non_empty_string_at(event, "/message/message_id") else {
+        webhook::bad_request(res, "Feishu message_id missing");
+        return;
+    };
     webhook::submit(
         state.ctx.clone(),
         "feishu",

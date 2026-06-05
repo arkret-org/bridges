@@ -31,6 +31,11 @@ pub struct BridgeConfig {
     /// The bridge identifier (e.g. `discord`), used for applet_id / namespace
     /// prefixes.
     pub bridge_id: String,
+    /// Optional upstream tenant/workspace/team identifier. When omitted, the
+    /// bridge's Cokret service DID is used as the tenant boundary for external
+    /// event deduplication.
+    #[serde(default)]
+    pub tenant_id: Option<String>,
     /// HTTP listen port.
     #[serde(default = "default_port")]
     pub port: u16,

@@ -10,10 +10,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
 use cokret_bridge_messaging::{
-    AppMessageRef, MessageBridge, MessageContext, OutboundAppMessage, webhook,
+    AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage, webhook,
 };
 use cokret_bridge_runtime::{BridgeError, Result};
-use serde_json::json;
+use serde_json::{Value, json};
 
 /// Google Chat API base.
 const CHAT_API_BASE: &str = "https://chat.googleapis.com/v1";
@@ -93,31 +93,56 @@ impl MessageBridge for GoogleChatApp {
         })
     }
 
-    fn webhook_router(self: Arc<Self>, _ctx: Arc<MessageContext>) -> Option<salvo::Router> {
+    fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
         Some(
             salvo::Router::with_path("webhooks/googlechat")
-                .hoop(affix_state::inject(GoogleChatWebhookState))
+                .hoop(affix_state::inject(GoogleChatWebhookState { ctx }))
                 .post(googlechat_delivery),
         )
     }
 }
 
 #[derive(Clone)]
-struct GoogleChatWebhookState;
+struct GoogleChatWebhookState {
+    ctx: Arc<MessageContext>,
+}
 
 #[handler]
 async fn googlechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let Ok(_state) = depot.obtain::<GoogleChatWebhookState>() else {
+    let Ok(state) = depot.obtain::<GoogleChatWebhookState>() else {
         webhook::bad_request(res, "webhook state missing");
         return;
     };
-    let authorization = req.header::<String>("authorization").unwrap_or_default();
-    if !authorization.starts_with("Bearer ") {
-        webhook::unauthorized(res, "Google Chat bearer JWT is required");
+    let Some(body) = webhook::json_body(req, res).await else {
+        return;
+    };
+    if body.get("type").and_then(Value::as_str) != Some("MESSAGE") {
+        webhook::ok_json(res, json!({ "ok": true }));
         return;
     }
-    webhook::unauthorized(
-        res,
-        "Google Chat inbound JWT verification is not configured; refusing unverified delivery",
-    );
+    let message = body.get("message").unwrap_or(&body);
+    let Some(text) = webhook::str_at(message, "/text") else {
+        webhook::ok_json(res, json!({ "ok": true }));
+        return;
+    };
+    let channel = webhook::first_string_at(message, &["/space/name", "/thread/name"])
+        .or_else(|| webhook::string_at(&body, "/space/name"))
+        .unwrap_or_default();
+    let user = webhook::first_string_at(&body, &["/user/name", "/sender/name"]).unwrap_or_default();
+    let Some(message_id) = webhook::non_empty_string_at(message, "/name") else {
+        webhook::bad_request(res, "Google Chat message name missing");
+        return;
+    };
+    webhook::submit(
+        state.ctx.clone(),
+        "googlechat",
+        InboundAppMessage {
+            app_channel: channel,
+            app_user: user,
+            app_message_id: message_id,
+            body: text.to_owned(),
+        },
+    )
+    .await;
+    webhook::ok_json(res, json!({ "ok": true }));
 }

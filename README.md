@@ -11,7 +11,7 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `cokret-bridge-
 
 共享层拆为两个 crate(均在 `crates/` 下,目录名与包名不同):
 
-- `crates/core/` ⇒ 包 **`cokret-bridge-runtime`**:与聊天无关的**通用桥运行时**——cokret 接入
+- `crates/runtime/` ⇒ 包 **`cokret-bridge-runtime`**:与聊天无关的**通用桥运行时**——cokret 接入
   (`CokretEdge`/`BridgeAppletHandler`)、DB 连接池、salvo web、队列/缓存、配置/日志,契约是
   泛型 trait `BridgeApp`(收发裸 `cokret::Event`)。非聊天集成(IoT/工单/CI)可直接实现它。
 - `crates/messaging/` ⇒ 包 **`cokret-bridge-messaging`**:在 runtime 之上的**消息层**——频道/
@@ -20,7 +20,7 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `cokret-bridge-
 
 | crate(包名) | 对端 app | 应用侧技术 | 端口 |
 |---|---|---|---|
-| `cokret-bridge-runtime`(`crates/core`) | — | 通用桥运行时(cokret 接入/DB/web/队列) | — |
+| `cokret-bridge-runtime`(`crates/runtime`) | — | 通用桥运行时(cokret 接入/DB/web/队列) | — |
 | `cokret-bridge-messaging`(`crates/messaging`) | — | 消息层(映射/`ck.message.create`/webhook 助手) | — |
 | `cokret-bridge-discord` | Discord | serenity gateway | 9101 |
 | `cokret-bridge-telegram` | Telegram | teloxide | 9102 |
@@ -46,10 +46,13 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `cokret-bridge-
   `MessageBridge::on_cokret_event` → 适配器 `send_to_app`。
 - **出站(app → cokret)**:适配器收到 app 消息(gateway/长轮询/webhook)→
   `MessageContext::submit_app_message` → runtime 构造并签名带 `external_ref` 溯源的
-  `ck.message.create` 事件 → `events_submit` 提交。纯 HTTP 桥的入站经各自
+  `ck.message.create` 事件 → `events_submit` 提交。当前写侧事件由 bridge service actor
+  署名,外部用户身份通过规范化 `external_ref` 记录;per-user Ghost Actor 委托签名尚未接入。
+  纯 HTTP 桥的入站经各自
   `MessageBridge::webhook_router`(已实现验签)挂到 web 服务。
 - **映射 / 解析**:频道↔realm、消息↔event、用户↔actor 持久化于 diesel(sqlite/postgres/mysql);
-  反查驱动 applet `resolve_actor`/`resolve_realm`(ghost/portal 解析)。
+  反查驱动 applet `resolve_actor`/`resolve_realm`(ghost/portal 读侧解析)。用户↔actor 映射
+  目前不参与 app→cokret 事件署名。
 - **序号**:服务 actor 的事件 seq 经 DB 块预留持久化,重启后严格单调。
 - **消息内容**:对齐 SDK 规范类型 `TextMessageContent`(`{body}`)/`MediaContent`
   (`{body,blob,mimetype,filename,size}`)。
@@ -68,3 +71,5 @@ cargo run -p cokret-bridge-discord -- --config config.yaml
 ```
 
 每个 crate 默认 `sqlite` feature;`--features postgres` / `--features mysql` 切换后端。
+配置文件支持 YAML 与 KDL；KDL loader 只覆盖当前桥配置使用的标量与嵌套节点形态。
+需要数组或多值节点时使用 YAML，避免 KDL 转换时丢失结构。

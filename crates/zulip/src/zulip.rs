@@ -174,6 +174,14 @@ impl MessageBridge for ZulipApp {
                         ),
                     };
 
+                    let Some(app_message_id) = message
+                        .get("id")
+                        .and_then(|v| v.as_i64())
+                        .map(|n| n.to_string())
+                    else {
+                        tracing::warn!("Zulip message missing id; skipping");
+                        continue;
+                    };
                     let inbound = InboundAppMessage {
                         app_channel,
                         app_user: message
@@ -181,11 +189,7 @@ impl MessageBridge for ZulipApp {
                             .and_then(|v| v.as_i64())
                             .map(|n| n.to_string())
                             .unwrap_or_default(),
-                        app_message_id: message
-                            .get("id")
-                            .and_then(|v| v.as_i64())
-                            .map(|n| n.to_string())
-                            .unwrap_or_default(),
+                        app_message_id,
                         body: message
                             .get("content")
                             .and_then(|v| v.as_str())

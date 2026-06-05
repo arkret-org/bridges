@@ -173,11 +173,10 @@ async fn qq_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     } else {
         format!("private/{user}")
     };
-    let message_id = body
-        .get("message_id")
-        .map(|v| v.to_string())
-        .or_else(|| body.get("time").map(|v| v.to_string()))
-        .unwrap_or_default();
+    let Some(message_id) = body.get("message_id").and_then(json_id_string) else {
+        webhook::bad_request(res, "QQ message_id missing");
+        return;
+    };
     webhook::submit(
         state.ctx.clone(),
         "qq",
@@ -190,4 +189,21 @@ async fn qq_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     )
     .await;
     webhook::ok_json(res, json!({ "ok": true }));
+}
+
+fn json_id_string(value: &Value) -> Option<String> {
+    if let Some(s) = value.as_str() {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_owned())
+        }
+    } else if let Some(n) = value.as_i64() {
+        Some(n.to_string())
+    } else if let Some(n) = value.as_u64() {
+        Some(n.to_string())
+    } else {
+        None
+    }
 }

@@ -205,9 +205,10 @@ async fn whatsapp_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
                 .flatten()
             {
                 let from = webhook::string_at(message, "/from").unwrap_or_default();
-                let message_id = webhook::string_at(message, "/id")
-                    .or_else(|| webhook::string_at(message, "/timestamp"))
-                    .unwrap_or_default();
+                let Some(message_id) = webhook::non_empty_string_at(message, "/id") else {
+                    tracing::warn!("WhatsApp message missing id; skipping");
+                    continue;
+                };
 
                 if let Some(text) = webhook::str_at(message, "/text/body") {
                     webhook::submit(

@@ -164,6 +164,16 @@ pub fn first_string_at(value: &Value, pointers: &[&str]) -> Option<String> {
         .find_map(|pointer| string_at(value, pointer))
 }
 
+pub fn non_empty_string_at(value: &Value, pointer: &str) -> Option<String> {
+    string_at(value, pointer).and_then(|s| if s.trim().is_empty() { None } else { Some(s) })
+}
+
+pub fn first_non_empty_string_at(value: &Value, pointers: &[&str]) -> Option<String> {
+    pointers
+        .iter()
+        .find_map(|pointer| non_empty_string_at(value, pointer))
+}
+
 pub fn body_text_from_json_string(raw: &str, key: &str) -> String {
     serde_json::from_str::<Value>(raw)
         .ok()
