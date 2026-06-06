@@ -184,7 +184,10 @@ impl MessageBridge for WechatApp {
         let webhook_token = self.webhook_token.clone();
         Some(
             salvo::Router::with_path("webhooks/wechat")
-                .hoop(affix_state::inject(WechatWebhookState { ctx, webhook_token }))
+                .hoop(affix_state::inject(WechatWebhookState {
+                    ctx,
+                    webhook_token,
+                }))
                 .get(wechat_verify)
                 .post(wechat_delivery),
         )

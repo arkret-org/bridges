@@ -153,11 +153,8 @@ async fn messenger_delivery(req: &mut Request, depot: &mut Depot, res: &mut Resp
     let signature = req
         .header::<String>("x-hub-signature-256")
         .unwrap_or_default();
-    if !webhook::verify_meta_x_hub_signature_256(
-        state.app.app_secret.as_bytes(),
-        &raw,
-        &signature,
-    ) {
+    if !webhook::verify_meta_x_hub_signature_256(state.app.app_secret.as_bytes(), &raw, &signature)
+    {
         webhook::unauthorized(res, "Messenger X-Hub-Signature-256 mismatch");
         return;
     }

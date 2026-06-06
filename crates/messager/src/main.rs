@@ -49,7 +49,11 @@ async fn main() -> anyhow::Result<()> {
         .to_owned();
 
     run_message_bridge(config, move |_ctx: Arc<_>| {
-        Ok(MessagerApp::new(page_access_token, verify_token, app_secret))
+        Ok(MessagerApp::new(
+            page_access_token,
+            verify_token,
+            app_secret,
+        ))
     })
     .await
     .map_err(|e| anyhow::anyhow!(e.to_string()))

@@ -220,10 +220,7 @@ async fn feishu_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respons
     }
     // Authenticate the callback by its Verification Token (plaintext mode).
     let provided = feishu_callback_token(&body);
-    if !webhook::constant_time_eq(
-        provided.as_bytes(),
-        state.verification_token.as_bytes(),
-    ) {
+    if !webhook::constant_time_eq(provided.as_bytes(), state.verification_token.as_bytes()) {
         webhook::unauthorized(res, "Feishu verification token mismatch");
         return;
     }

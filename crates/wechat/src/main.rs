@@ -55,7 +55,12 @@ async fn main() -> anyhow::Result<()> {
         .to_owned();
 
     run_message_bridge(config, move |_ctx: Arc<_>| {
-        Ok(WechatApp::new(cred_id, cred_secret, agent_id, webhook_token))
+        Ok(WechatApp::new(
+            cred_id,
+            cred_secret,
+            agent_id,
+            webhook_token,
+        ))
     })
     .await
     .map_err(|e| anyhow::anyhow!(e.to_string()))

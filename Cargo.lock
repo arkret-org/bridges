@@ -907,6 +907,8 @@ dependencies = [
  "cokret-crypto",
  "cokret-html",
  "cokret-signatures",
+ "salvo",
+ "salvo-oapi",
  "serde",
  "serde_json",
  "tracing",

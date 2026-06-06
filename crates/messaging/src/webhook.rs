@@ -201,11 +201,7 @@ mod tests {
         // Missing prefix is rejected.
         assert!(!verify_meta_x_hub_signature_256(secret, body, &sig));
         // Wrong digest is rejected.
-        assert!(!verify_meta_x_hub_signature_256(
-            secret,
-            body,
-            "sha256=00"
-        ));
+        assert!(!verify_meta_x_hub_signature_256(secret, body, "sha256=00"));
     }
 
     #[test]

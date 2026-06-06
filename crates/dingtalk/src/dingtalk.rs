@@ -152,7 +152,10 @@ impl MessageBridge for DingTalkApp {
         let app_secret = self.app_secret.clone();
         Some(
             salvo::Router::with_path("webhooks/dingtalk")
-                .hoop(affix_state::inject(DingTalkWebhookState { ctx, app_secret }))
+                .hoop(affix_state::inject(DingTalkWebhookState {
+                    ctx,
+                    app_secret,
+                }))
                 .post(dingtalk_delivery),
         )
     }

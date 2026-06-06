@@ -41,6 +41,70 @@ use crate::error::Result;
 #[cfg(feature = "runtime")]
 use crate::queue::ChannelQueue;
 
+pub const BRIDGE_PASS_THROUGH_EVENT_KINDS: &[&str] = &[
+    "ck.rsvp.set",
+    "ck.pin.add",
+    "ck.pin.remove",
+    "ck.pin.reorder",
+];
+
+pub const BRIDGE_UNSUPPORTED_POLICY_EVENT_KINDS: &[&str] =
+    &["ck.realm.disappearing_policy", "ck.realm.search_policy"];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BridgeEventHandling {
+    PassThrough,
+    UnsupportedPolicy,
+    DefaultAdapter,
+}
+
+pub fn classify_bridge_event_kind(event_kind: &str) -> BridgeEventHandling {
+    if BRIDGE_PASS_THROUGH_EVENT_KINDS.contains(&event_kind) {
+        BridgeEventHandling::PassThrough
+    } else if BRIDGE_UNSUPPORTED_POLICY_EVENT_KINDS.contains(&event_kind) {
+        BridgeEventHandling::UnsupportedPolicy
+    } else {
+        BridgeEventHandling::DefaultAdapter
+    }
+}
+
+pub fn may_map_to_bridge_redaction(event_kind: &str, has_expiry: bool) -> bool {
+    event_kind == "ck.message.redact" && !has_expiry
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn productivity_events_have_explicit_bridge_handling() {
+        for kind in [
+            "ck.rsvp.set",
+            "ck.pin.add",
+            "ck.pin.remove",
+            "ck.pin.reorder",
+        ] {
+            assert_eq!(
+                classify_bridge_event_kind(kind),
+                BridgeEventHandling::PassThrough
+            );
+        }
+        for kind in ["ck.realm.disappearing_policy", "ck.realm.search_policy"] {
+            assert_eq!(
+                classify_bridge_event_kind(kind),
+                BridgeEventHandling::UnsupportedPolicy
+            );
+        }
+    }
+
+    #[test]
+    fn disappearing_expiry_is_not_redaction() {
+        assert!(!may_map_to_bridge_redaction("ck.message.create", true));
+        assert!(!may_map_to_bridge_redaction("ck.message.redact", true));
+        assert!(may_map_to_bridge_redaction("ck.message.redact", false));
+    }
+}
+
 /// A resolved actor returned to the cokret server's `resolve_actor` probe.
 #[derive(Clone, Debug)]
 pub struct ResolvedActor {
