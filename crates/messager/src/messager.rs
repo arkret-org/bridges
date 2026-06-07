@@ -128,7 +128,11 @@ async fn messenger_verify(req: &mut Request, depot: &mut Depot, res: &mut Respon
     let mode = req.query::<String>("hub.mode").unwrap_or_default();
     let token = req.query::<String>("hub.verify_token").unwrap_or_default();
     let challenge = req.query::<String>("hub.challenge").unwrap_or_default();
-    if mode == "subscribe" && state.app.verify_token.as_deref() == Some(token.as_str()) {
+    let token_ok =
+        state.app.verify_token.as_deref().is_some_and(|expected| {
+            webhook::constant_time_eq(token.as_bytes(), expected.as_bytes())
+        });
+    if mode == "subscribe" && token_ok {
         webhook::ok_text(res, challenge);
     } else {
         webhook::unauthorized(res, "Messenger verify token mismatch");

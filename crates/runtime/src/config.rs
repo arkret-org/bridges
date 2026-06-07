@@ -3,14 +3,14 @@
 //! structure is `bridge` / `cokret` / `database` / `logging` plus a per-adapter
 //! `app` section.
 
-use std::path::Path;
+use std::{fmt, path::Path};
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::error::{BridgeError, Result};
 
 /// Top-level configuration.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct Config {
     pub bridge: BridgeConfig,
     pub cokret: CokretConfig,
@@ -26,7 +26,7 @@ pub struct Config {
 }
 
 /// The bridge's own general configuration.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct BridgeConfig {
     /// The bridge identifier (e.g. `discord`), used for applet_id / namespace
     /// prefixes.
@@ -52,7 +52,7 @@ pub struct BridgeConfig {
 
 /// cokret protocol-side integration parameters (server URL, service DID,
 /// applet id, signing material).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct CokretConfig {
     /// The cokret edge/home server base URL (used for events_submit / blob /
     /// directory).
@@ -74,9 +74,23 @@ pub struct CokretConfig {
     pub default_realm_id: Option<String>,
 }
 
+impl fmt::Debug for CokretConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CokretConfig")
+            .field("server_url", &self.server_url)
+            .field("service_did", &self.service_did)
+            .field("applet_id", &self.applet_id)
+            .field("access_token", &"<redacted>")
+            .field("signing_key_seed_hex", &"<redacted>")
+            .field("verification_method_id", &self.verification_method_id)
+            .field("default_realm_id", &self.default_realm_id)
+            .finish()
+    }
+}
+
 /// Database configuration. `url` looks like `sqlite://bridge.db` /
 /// `postgres://...` / `mysql://...`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct DatabaseConfig {
     #[serde(default = "default_db_url")]
     pub url: String,
@@ -93,7 +107,7 @@ impl Default for DatabaseConfig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct LoggingConfig {
     #[serde(default = "default_log_level")]
     pub level: String,

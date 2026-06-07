@@ -98,7 +98,7 @@ where
     edge.set_ephemeral_sender(ephemeral_tx);
     let edge = Arc::new(edge);
 
-    let ctx = Arc::new(BridgeContext::new(config.clone(), edge.clone(), db));
+    let ctx = Arc::new(BridgeContext::new(config.clone(), edge.clone(), db)?);
 
     let app = Arc::new(app_factory(ctx.clone())?);
 

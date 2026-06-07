@@ -68,9 +68,11 @@ pub trait MessageBridge: Send + Sync + 'static {
   **⚠ 验签现状(勿混淆"接入握手回显"与"投递验签"):**
   - **平台接入握手回显**(GET `challenge`/`echostr`、`hub.verify_token`)**只在订阅注册时用一次,
     不是对后续每条投递的来源认证**,不可当作验签。
-  - 飞书 `challenge`、微信 `echostr`、WhatsApp/Messenger 的 `hub.verify_token` 均属此类——
-    其后续 POST 投递目前**仍缺**真正验签(`X-Hub-Signature-256` / `signature`/`msg_signature` /
-    各平台 JWT),属待补 TODO,见 `_bridges_todos.md §3.0.b` 与 `_code_review/bridges/02-security.md`。
+  - line/飞书/微信/钉钉/WhatsApp/Messenger/QQ/iMessage 的 POST 路径已 fail-closed 校验平台签名或
+    shared secret;WhatsApp/Messenger 的 `hub.verify_token` 只用于 GET handshake,POST 使用
+    `X-Hub-Signature-256` HMAC。
+  - googlechat/teams 不得裸接 POST。在完整的平台 Bearer JWT/JWKS verifier 接入前,handler MUST
+    fail closed,不得调用 `webhook::submit`。
   关键是**编译通过、出入站链路真实可读**;来源验签未补齐者 MUST 明确标 TODO,不得宣称"已验签"。
 
 ## 端口分配(避免冲突,写进各自 sample 配置)

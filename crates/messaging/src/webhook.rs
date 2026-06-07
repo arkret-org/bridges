@@ -16,6 +16,8 @@ use crate::{InboundAppMessage, MessageContext};
 type HmacSha256 = Hmac<Sha256>;
 type HmacSha1 = Hmac<Sha1>;
 
+pub const MAX_WEBHOOK_BODY_BYTES: usize = 1024 * 1024;
+
 /// Constant-time byte-slice equality. Use for all signature/secret comparisons
 /// to avoid leaking match position through early-exit timing.
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -89,7 +91,18 @@ pub fn sha1_hex_sorted(parts: &[&str]) -> String {
 /// failure. Needed by signature schemes that sign the exact wire bytes.
 pub async fn raw_body(req: &mut Request, res: &mut Response) -> Option<Vec<u8>> {
     match req.payload().await {
-        Ok(bytes) => Some(bytes.to_vec()),
+        Ok(bytes) if bytes.len() <= MAX_WEBHOOK_BODY_BYTES => Some(bytes.to_vec()),
+        Ok(bytes) => {
+            payload_too_large(
+                res,
+                format!(
+                    "webhook body is {} bytes; limit is {} bytes",
+                    bytes.len(),
+                    MAX_WEBHOOK_BODY_BYTES
+                ),
+            );
+            None
+        }
         Err(err) => {
             bad_request(res, format!("failed to read request body: {err}"));
             None
@@ -98,7 +111,8 @@ pub async fn raw_body(req: &mut Request, res: &mut Response) -> Option<Vec<u8>> 
 }
 
 pub async fn json_body(req: &mut Request, res: &mut Response) -> Option<Value> {
-    match req.parse_json::<Value>().await {
+    let bytes = raw_body(req, res).await?;
+    match serde_json::from_slice::<Value>(&bytes) {
         Ok(value) => Some(value),
         Err(err) => {
             bad_request(res, format!("invalid JSON body: {err}"));
@@ -122,6 +136,11 @@ pub fn bad_request(res: &mut Response, message: impl Into<String>) {
 
 pub fn unauthorized(res: &mut Response, message: impl Into<String>) {
     res.status_code(StatusCode::UNAUTHORIZED);
+    res.render(Json(json!({ "ok": false, "error": message.into() })));
+}
+
+pub fn payload_too_large(res: &mut Response, message: impl Into<String>) {
+    res.status_code(StatusCode::PAYLOAD_TOO_LARGE);
     res.render(Json(json!({ "ok": false, "error": message.into() })));
 }
 

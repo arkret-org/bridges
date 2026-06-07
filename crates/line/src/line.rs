@@ -199,31 +199,24 @@ async fn forward_line_media(
     filename: Option<String>,
 ) -> Result<()> {
     let url = format!("https://api-data.line.me/v2/bot/message/{content_id}/content");
-    let resp = state
+    let media = state
         .ctx
-        .http
-        .get(&url)
-        .bearer_auth(&state.app.channel_access_token)
-        .send()
-        .await
-        .map_err(|e| BridgeError::App(format!("LINE content download failed: {e}")))?;
-    let mime = resp
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned)
+        .download_external_media(
+            &url,
+            Some(&state.app.channel_access_token),
+            &["api-data.line.me"],
+        )
+        .await?;
+    let mime = media
+        .content_type
         .unwrap_or_else(|| "application/octet-stream".to_owned());
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| BridgeError::App(format!("LINE content read failed: {e}")))?;
-    let blob_ref = state.ctx.upload_blob(&bytes, &mime).await?;
+    let blob_ref = state.ctx.upload_blob(&media.bytes, &mime).await?;
 
     let attachment = Attachment {
         blob_ref,
         media_type: Some(mime),
         filename,
-        size: Some(bytes.len() as u64),
+        size: Some(media.bytes.len() as u64),
         caption: String::new(),
     };
     let inbound = InboundAppMessage {

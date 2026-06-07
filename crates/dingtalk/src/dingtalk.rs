@@ -163,7 +163,7 @@ impl MessageBridge for DingTalkApp {
 
 /// DingTalk outgoing-robot callbacks accept a `timestamp` whose skew from now
 /// must stay within this window (milliseconds).
-const DINGTALK_TIMESTAMP_WINDOW_MS: i64 = 60 * 60 * 1000;
+const DINGTALK_TIMESTAMP_WINDOW_MS: i64 = 5 * 60 * 1000;
 
 #[derive(Clone)]
 struct DingTalkWebhookState {

@@ -14,7 +14,7 @@ use crate::error::{BridgeError, Result};
 /// Start the web service and run it blocking. `extra` is each app adapter's
 /// webhook routes (optional).
 pub async fn serve(ctx: Arc<BridgeContext>, extra: Option<Router>) -> Result<()> {
-    let handler = BridgeAppletHandler::new(&ctx.edge, ctx.resolver());
+    let handler = BridgeAppletHandler::new(&ctx.edge, ctx.resolver())?;
     let idempotency = cokret::idempotency::IdempotencyWindow::new(Duration::from_secs(300));
     let service = cokret::AppletService::new(handler, idempotency);
 

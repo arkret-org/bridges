@@ -566,7 +566,7 @@ dependencies = [
 
 [[package]]
 name = "cokret"
-version = "1.0.0"
+version = "0.3.0"
 dependencies = [
  "argon2",
  "base64",
@@ -602,7 +602,7 @@ dependencies = [
 
 [[package]]
 name = "cokret-bridge-dingtalk"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -620,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "cokret-bridge-discord"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -637,7 +637,7 @@ dependencies = [
 
 [[package]]
 name = "cokret-bridge-feishu"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -654,7 +654,7 @@ dependencies = [
 
 [[package]]
 name = "cokret-bridge-googlechat"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -671,7 +671,7 @@ dependencies = [
 
 [[package]]
 name = "cokret-bridge-imessage"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -688,7 +688,7 @@ dependencies = [
 
 [[package]]
 name = "cokret-bridge-line"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -708,7 +708,7 @@ dependencies = [
 
 [[package]]
 name = "cokret-bridge-messager"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -725,7 +725,7 @@ dependencies = [
 
 [[package]]
 name = "cokret-bridge-messaging"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -733,6 +733,7 @@ dependencies = [
  "cokret",
  "cokret-bridge-runtime",
  "diesel",
+ "futures",
  "hex",
  "hmac",
  "reqwest 0.12.28",
@@ -748,7 +749,7 @@ dependencies = [
 
 [[package]]
 name = "cokret-bridge-qq"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -765,7 +766,7 @@ dependencies = [
 
 [[package]]
 name = "cokret-bridge-runtime"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -793,7 +794,7 @@ dependencies = [
 
 [[package]]
 name = "cokret-bridge-slack"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -812,7 +813,7 @@ dependencies = [
 
 [[package]]
 name = "cokret-bridge-teams"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -830,7 +831,7 @@ dependencies = [
 
 [[package]]
 name = "cokret-bridge-telegram"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -847,7 +848,7 @@ dependencies = [
 
 [[package]]
 name = "cokret-bridge-wechat"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -865,7 +866,7 @@ dependencies = [
 
 [[package]]
 name = "cokret-bridge-whatsapp"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -882,7 +883,7 @@ dependencies = [
 
 [[package]]
 name = "cokret-bridge-zulip"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -900,7 +901,7 @@ dependencies = [
 
 [[package]]
 name = "cokret-contracts"
-version = "1.0.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "cokret-core",
@@ -916,7 +917,7 @@ dependencies = [
 
 [[package]]
 name = "cokret-core"
-version = "1.0.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "bs58",
@@ -937,7 +938,7 @@ dependencies = [
 
 [[package]]
 name = "cokret-crypto"
-version = "1.0.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "cokret-core",
@@ -950,7 +951,7 @@ dependencies = [
 
 [[package]]
 name = "cokret-ffi"
-version = "1.0.0"
+version = "0.3.0"
 dependencies = [
  "cokret-core",
  "serde",
@@ -959,7 +960,7 @@ dependencies = [
 
 [[package]]
 name = "cokret-html"
-version = "1.0.0"
+version = "0.3.0"
 dependencies = [
  "cokret-core",
  "serde",
@@ -968,7 +969,7 @@ dependencies = [
 
 [[package]]
 name = "cokret-http-client"
-version = "1.0.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "cokret-core",
@@ -983,7 +984,7 @@ dependencies = [
 
 [[package]]
 name = "cokret-identifiers"
-version = "1.0.0"
+version = "0.3.0"
 dependencies = [
  "getrandom 0.2.17",
  "getrandom 0.3.4",
@@ -997,14 +998,14 @@ dependencies = [
 
 [[package]]
 name = "cokret-keystore"
-version = "1.0.0"
+version = "0.3.0"
 dependencies = [
  "cokret-core",
 ]
 
 [[package]]
 name = "cokret-server"
-version = "1.0.0"
+version = "0.3.0"
 dependencies = [
  "cokret-contracts",
  "cokret-core",
@@ -1015,7 +1016,7 @@ dependencies = [
 
 [[package]]
 name = "cokret-signatures"
-version = "1.0.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "chrono",

@@ -1,9 +1,9 @@
-[workspace]
+﻿[workspace]
 resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.92"
 authors = ["Cokret Team <chris@acroidea.com>"]
@@ -35,7 +35,7 @@ anyhow = "1.0"
 thiserror = "2.0"
 async-trait = "0.1"
 futures = "0.3"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.10", features = ["v4", "v7", "serde"] }
 url = "2.5"

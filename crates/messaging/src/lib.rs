@@ -6,7 +6,7 @@
 //! - app channel/message/user mapping tables,
 //! - `ck.message.create` conversion,
 //! - `MessageBridge` and `run_message_bridge`,
-//! - signed `external_ref` provenance for upstream channel/user/message ids.
+//! - signed `bridge_external_ref` provenance for upstream channel/user/message ids.
 
 mod models;
 mod schema;
@@ -24,6 +24,7 @@ use cokret_bridge_runtime::app::{
 use cokret_bridge_runtime::db::DatabaseManager;
 use cokret_bridge_runtime::{BridgeError, Result};
 use diesel::prelude::*;
+use futures::StreamExt;
 use serde_json::{Value, json};
 
 pub use cokret_bridge_runtime as runtime;
@@ -73,6 +74,13 @@ pub struct Attachment {
     /// Caption / display text for the media event (may be empty).
     pub caption: String,
 }
+
+pub struct DownloadedMedia {
+    pub bytes: Vec<u8>,
+    pub content_type: Option<String>,
+}
+
+pub const MAX_EXTERNAL_MEDIA_BYTES: usize = 32 * 1024 * 1024;
 
 /// Build a canonical `ck.message.create` text content (`{ "body": ... }`,
 /// matching the SDK's [`TextMessageContent`]).
@@ -472,6 +480,73 @@ impl MessageContext {
         self.inner.edge.download_blob(blob_ref).await
     }
 
+    /// Download app-hosted media with HTTPS, host allow-list and a hard byte
+    /// cap. Use this for all inbound media fetches before uploading to Cokret blob
+    /// storage.
+    pub async fn download_external_media(
+        &self,
+        url: &str,
+        bearer_token: Option<&str>,
+        allowed_hosts: &[&str],
+    ) -> Result<DownloadedMedia> {
+        let parsed = reqwest::Url::parse(url)
+            .map_err(|err| BridgeError::App(format!("media URL parse failed: {err}")))?;
+        if parsed.scheme() != "https" {
+            return Err(BridgeError::App(
+                "media download URL must use https".to_owned(),
+            ));
+        }
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| BridgeError::App("media download URL has no host".to_owned()))?;
+        if !host_allowed(host, allowed_hosts) {
+            return Err(BridgeError::App(format!(
+                "media download host {host} is not allow-listed"
+            )));
+        }
+
+        let mut request = self.http.get(parsed);
+        if let Some(token) = bearer_token {
+            request = request.bearer_auth(token);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|err| BridgeError::App(format!("media download failed: {err}")))?;
+        let response = response
+            .error_for_status()
+            .map_err(|err| BridgeError::App(format!("media download status failed: {err}")))?;
+        if let Some(size) = response.content_length()
+            && size > MAX_EXTERNAL_MEDIA_BYTES as u64
+        {
+            return Err(BridgeError::App(format!(
+                "media download is {size} bytes; limit is {MAX_EXTERNAL_MEDIA_BYTES} bytes"
+            )));
+        }
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+
+        let mut bytes = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk
+                .map_err(|err| BridgeError::App(format!("media download read failed: {err}")))?;
+            if bytes.len() + chunk.len() > MAX_EXTERNAL_MEDIA_BYTES {
+                return Err(BridgeError::App(format!(
+                    "media download exceeded {MAX_EXTERNAL_MEDIA_BYTES} bytes"
+                )));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(DownloadedMedia {
+            bytes,
+            content_type,
+        })
+    }
+
     /// Submit an inbound text message as a `ck.message.create` event.
     pub async fn submit_app_message(&self, msg: InboundAppMessage) -> Result<String> {
         let payload = default_text_payload(&msg.body);
@@ -538,6 +613,19 @@ impl MessageContext {
     }
 }
 
+fn bridge_external_ref(payload: &Value) -> Option<&Value> {
+    payload.get("bridge_external_ref")
+}
+
+fn host_allowed(host: &str, allowed_hosts: &[&str]) -> bool {
+    allowed_hosts.iter().any(|allowed| {
+        host.eq_ignore_ascii_case(allowed)
+            || host
+                .to_ascii_lowercase()
+                .ends_with(&format!(".{}", allowed.to_ascii_lowercase()))
+    })
+}
+
 #[async_trait]
 pub trait MessageBridge: Send + Sync + 'static {
     fn name(&self) -> &str;
@@ -587,9 +675,7 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
         // Skip events this bridge itself submitted (app -> cokret), which the
         // server echoes back, to avoid an outbound loop back into the app.
         let our_id = &self.ctx.core().config.bridge.bridge_id;
-        let originated_here = event
-            .external_ref
-            .as_ref()
+        let originated_here = bridge_external_ref(&event.content)
             .and_then(|r| r.get("source"))
             .and_then(Value::as_str)
             == Some(our_id.as_str());

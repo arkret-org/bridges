@@ -152,25 +152,18 @@ async fn forward_media(
         .await
         .map_err(|e| BridgeError::App(format!("Telegram get_file failed: {e}")))?;
     let url = format!("https://api.telegram.org/file/bot{token}/{}", file.path);
-    let resp = ctx
-        .http
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| BridgeError::App(format!("Telegram file download failed: {e}")))?;
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| BridgeError::App(format!("Telegram file read failed: {e}")))?;
+    let media = ctx
+        .download_external_media(&url, None, &["api.telegram.org"])
+        .await?;
     let mime = mime.unwrap_or_else(|| "application/octet-stream".to_owned());
-    let blob_ref = ctx.upload_blob(&bytes, &mime).await?;
+    let blob_ref = ctx.upload_blob(&media.bytes, &mime).await?;
 
     let caption = msg.caption().unwrap_or_default().to_owned();
     let attachment = Attachment {
         blob_ref,
         media_type: Some(mime),
         filename,
-        size: Some(bytes.len() as u64),
+        size: Some(media.bytes.len() as u64),
         caption: caption.clone(),
     };
     let inbound = InboundAppMessage {

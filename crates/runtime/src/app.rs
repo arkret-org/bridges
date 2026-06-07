@@ -18,6 +18,8 @@ use serde_json::Value;
 
 #[cfg(feature = "runtime")]
 use std::sync::Arc;
+#[cfg(feature = "runtime")]
+use std::time::Duration;
 
 #[cfg(feature = "runtime")]
 use async_trait::async_trait;
@@ -37,7 +39,7 @@ use crate::config::Config;
 #[cfg(feature = "runtime")]
 use crate::db::DatabaseManager;
 #[cfg(feature = "runtime")]
-use crate::error::Result;
+use crate::error::{BridgeError, Result};
 #[cfg(feature = "runtime")]
 use crate::queue::ChannelQueue;
 
@@ -152,15 +154,24 @@ pub struct BridgeContext {
 
 #[cfg(feature = "runtime")]
 impl BridgeContext {
-    pub fn new(config: Arc<Config>, edge: Arc<CokretEdge>, db: Arc<DatabaseManager>) -> Self {
-        Self {
+    pub fn new(
+        config: Arc<Config>,
+        edge: Arc<CokretEdge>,
+        db: Arc<DatabaseManager>,
+    ) -> Result<Self> {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|err| BridgeError::Runtime(format!("build HTTP client: {err}")))?;
+        Ok(Self {
             config,
             edge,
             db,
             queue: ChannelQueue::new(),
-            http: reqwest::Client::new(),
+            http,
             resolver: Mutex::new(None),
-        }
+        })
     }
 
     /// Install the actor/realm resolver. Must be called during the adapter

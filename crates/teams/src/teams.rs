@@ -13,7 +13,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
 use cokret_bridge_messaging::{
-    AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage, webhook,
+    AppMessageRef, MessageBridge, MessageContext, OutboundAppMessage, webhook,
 };
 use cokret_bridge_runtime::cache::TokenCache;
 use cokret_bridge_runtime::{BridgeError, Result};
@@ -151,8 +151,8 @@ impl MessageBridge for TeamsApp {
         Ok(AppMessageRef { app_message_id: id })
     }
 
-    fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
-        let state = TeamsWebhookState { ctx };
+    fn webhook_router(self: Arc<Self>, _ctx: Arc<MessageContext>) -> Option<salvo::Router> {
+        let state = TeamsWebhookState;
         Some(
             salvo::Router::new()
                 .push(
@@ -170,43 +170,21 @@ impl MessageBridge for TeamsApp {
 }
 
 #[derive(Clone)]
-struct TeamsWebhookState {
-    ctx: Arc<MessageContext>,
-}
+struct TeamsWebhookState;
 
 #[handler]
 async fn teams_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let Ok(state) = depot.obtain::<TeamsWebhookState>() else {
+    let Ok(_state) = depot.obtain::<TeamsWebhookState>() else {
         webhook::bad_request(res, "webhook state missing");
         return;
     };
-    let Some(body) = webhook::json_body(req, res).await else {
-        return;
-    };
-    if body.get("type").and_then(Value::as_str) != Some("message") {
-        webhook::ok_json(res, json!({ "ok": true }));
+    let authorization = req.header::<String>("authorization").unwrap_or_default();
+    if !authorization.starts_with("Bearer ") {
+        webhook::unauthorized(res, "Teams bearer JWT is required");
         return;
     }
-    let text = webhook::str_at(&body, "/text").unwrap_or_default();
-    if text.is_empty() {
-        webhook::ok_json(res, json!({ "ok": true }));
-        return;
-    }
-    let channel = webhook::string_at(&body, "/conversation/id").unwrap_or_default();
-    let user = webhook::string_at(&body, "/from/id").unwrap_or_default();
-    let message_id = webhook::first_string_at(&body, &["/id", "/replyToId"])
-        .or_else(|| webhook::string_at(&body, "/timestamp"))
-        .unwrap_or_default();
-    webhook::submit(
-        state.ctx.clone(),
-        "teams",
-        InboundAppMessage {
-            app_channel: channel,
-            app_user: user,
-            app_message_id: message_id,
-            body: text.to_owned(),
-        },
-    )
-    .await;
-    webhook::ok_json(res, json!({ "ok": true }));
+    webhook::unauthorized(
+        res,
+        "Teams inbound JWT verification is not configured; refusing unverified delivery",
+    );
 }

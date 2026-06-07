@@ -131,22 +131,19 @@ impl Handler {
         user: &str,
         att: &serenity::all::Attachment,
     ) -> Result<()> {
-        let resp = self
+        let media = self
             .ctx
-            .http
-            .get(&att.url)
-            .send()
-            .await
-            .map_err(|e| BridgeError::App(format!("Discord CDN download failed: {e}")))?;
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| BridgeError::App(format!("Discord CDN read failed: {e}")))?;
+            .download_external_media(
+                &att.url,
+                None,
+                &["cdn.discordapp.com", "media.discordapp.net"],
+            )
+            .await?;
         let mime = att
             .content_type
             .clone()
             .unwrap_or_else(|| "application/octet-stream".to_owned());
-        let blob_ref = self.ctx.upload_blob(&bytes, &mime).await?;
+        let blob_ref = self.ctx.upload_blob(&media.bytes, &mime).await?;
 
         let attachment = Attachment {
             blob_ref,

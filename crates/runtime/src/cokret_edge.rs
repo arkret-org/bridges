@@ -21,8 +21,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cokret::Ed25519MoveSigner;
 use cokret::http_client::{Auth, Client};
 use cokret::model::{
-    AppletActorResBody, AppletDescription, AppletPingResBody, AppletProtocolResBody,
-    AppletRealmResBody, AppletTransactionReqBody, AppletTransactionResBody,
+    AppletActorView, AppletDescription, AppletPingOutcome, AppletProtocolMetadata, AppletRealmView,
+    AppletTransactionOutcome, AppletTransactionRequestBody,
 };
 use cokret::signatures::{SignEventOptions, sign_event};
 use cokret::{Did, Event, Hlc, RealmId};
@@ -280,8 +280,8 @@ impl CokretEdge {
     }
 
     /// Build and sign an event attributed to `actor` (instead of this bridge's
-    /// service actor). Still stamps `applet_id` and signs with this edge's signer
-    /// + the configured verification method.
+    /// service actor). Signs with this edge's signer and configured verification
+    /// method.
     pub fn mint_event_as(
         &self,
         actor: &cokret::Did,
@@ -302,7 +302,6 @@ impl CokretEdge {
         let seq = self.seq.alloc()?;
         let hlc = self.next_hlc()?;
         let mut event = Event::new(kind, realm_id.clone(), actor, seq, hlc, content)?;
-        event.applet_id = Some(self.config.cokret.applet_id.clone());
         sign_event(
             &mut event,
             &self.signer,
@@ -340,7 +339,8 @@ impl CokretEdge {
     ) -> Result<String> {
         let realm = RealmId::new(realm_id.to_owned())?;
         let mut event = self.mint_event(kind, &realm, content)?;
-        event.external_ref = Some(external_ref);
+        let content = std::mem::take(&mut event.content);
+        event.content = content_with_bridge_external_ref(content, external_ref);
         event.proofs.clear();
         sign_event(
             &mut event,
@@ -424,26 +424,64 @@ impl SeqStore for DbSeqStore {
     /// new value (the highest sequence number now reserved).
     fn reserve_block(&self, key: &str, block: i64) -> Result<i64> {
         use diesel::prelude::*;
-        use state_schema::bridge_state::dsl;
+
+        #[derive(diesel::QueryableByName)]
+        struct ReservedRow {
+            #[diesel(sql_type = diesel::sql_types::BigInt)]
+            state_value: i64,
+        }
 
         let mut conn = self.db.conn()?;
-        let current: i64 = dsl::bridge_state
-            .filter(dsl::state_key.eq(key))
-            .select(dsl::state_value)
-            .first::<i64>(&mut conn)
-            .optional()?
-            .unwrap_or(0);
-        let reserved = current + block;
-
-        let updated = diesel::update(dsl::bridge_state.filter(dsl::state_key.eq(key)))
-            .set(dsl::state_value.eq(reserved))
-            .execute(&mut conn)?;
-        if updated == 0 {
-            diesel::insert_into(dsl::bridge_state)
-                .values((dsl::state_key.eq(key), dsl::state_value.eq(reserved)))
-                .execute(&mut conn)?;
+        #[cfg(feature = "sqlite")]
+        {
+            let row = diesel::sql_query(
+                "INSERT INTO bridge_state (state_key, state_value) VALUES (?, ?) \
+                 ON CONFLICT(state_key) DO UPDATE \
+                 SET state_value = bridge_state.state_value + excluded.state_value \
+                 RETURNING state_value",
+            )
+            .bind::<diesel::sql_types::Text, _>(key)
+            .bind::<diesel::sql_types::BigInt, _>(block)
+            .get_result::<ReservedRow>(&mut conn)?;
+            return Ok(row.state_value);
         }
-        Ok(reserved)
+
+        #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
+        {
+            let row = diesel::sql_query(
+                "INSERT INTO bridge_state (state_key, state_value) VALUES ($1, $2) \
+                 ON CONFLICT(state_key) DO UPDATE \
+                 SET state_value = bridge_state.state_value + excluded.state_value \
+                 RETURNING state_value",
+            )
+            .bind::<diesel::sql_types::Text, _>(key)
+            .bind::<diesel::sql_types::BigInt, _>(block)
+            .get_result::<ReservedRow>(&mut conn)?;
+            return Ok(row.state_value);
+        }
+
+        #[cfg(all(feature = "mysql", not(feature = "sqlite"), not(feature = "postgres")))]
+        {
+            conn.transaction::<i64, diesel::result::Error, _>(|conn| {
+                diesel::sql_query(
+                    "INSERT INTO bridge_state (state_key, state_value) VALUES (?, 0) \
+                     ON DUPLICATE KEY UPDATE state_key = state_key",
+                )
+                .bind::<diesel::sql_types::Text, _>(key)
+                .execute(conn)?;
+                diesel::sql_query(
+                    "UPDATE bridge_state SET state_value = state_value + ? WHERE state_key = ?",
+                )
+                .bind::<diesel::sql_types::BigInt, _>(block)
+                .bind::<diesel::sql_types::Text, _>(key)
+                .execute(conn)?;
+                diesel::sql_query("SELECT state_value FROM bridge_state WHERE state_key = ?")
+                    .bind::<diesel::sql_types::Text, _>(key)
+                    .get_result::<ReservedRow>(conn)
+                    .map(|row| row.state_value)
+            })
+            .map_err(Into::into)
+        }
     }
 }
 
@@ -456,6 +494,19 @@ fn stable_node_id(bridge_id: &str) -> String {
         hash = hash.wrapping_mul(0x0100_0193);
     }
     format!("{hash:08x}")
+}
+
+fn content_with_bridge_external_ref(content: Value, external_ref: Value) -> Value {
+    match content {
+        Value::Object(mut object) => {
+            object.insert("bridge_external_ref".to_owned(), external_ref);
+            Value::Object(object)
+        }
+        other => serde_json::json!({
+            "payload": other,
+            "bridge_external_ref": external_ref,
+        }),
+    }
 }
 
 /// Bounded in-memory window of recently seen `event_id`s used to enforce the
@@ -551,24 +602,26 @@ pub struct BridgeAppletHandler {
 const EVENT_DEDUP_CAPACITY: usize = 8192;
 
 impl BridgeAppletHandler {
-    /// Build the handler from an inbound-capable edge. The edge must have been
-    /// constructed with an inbound sender (the run_bridge/web path always is).
-    pub fn new(edge: &CokretEdge, resolver: Option<Arc<dyn AppletResolver>>) -> Self {
-        Self {
+    /// Build the handler from an inbound-capable edge.
+    pub fn new(edge: &CokretEdge, resolver: Option<Arc<dyn AppletResolver>>) -> Result<Self> {
+        let inbound_tx = edge
+            .inbound_sender()
+            .ok_or_else(|| BridgeError::Runtime("applet handler requires inbound sender".into()))?;
+        Ok(Self {
             applet_id: edge.config.cokret.applet_id.clone(),
             service_did: edge.service_did.clone(),
             protocols: vec![edge.config.bridge.bridge_id.clone()],
-            inbound_tx: edge.inbound_sender().expect("inbound enabled"),
+            inbound_tx,
             ephemeral_tx: edge.ephemeral_sender(),
             resolver,
             dedup: EventDedupWindow::new(EVENT_DEDUP_CAPACITY),
-        }
+        })
     }
 }
 
 impl cokret::AppletHandler for BridgeAppletHandler {
-    fn ping(&self) -> cokret::Result<AppletPingResBody> {
-        Ok(AppletPingResBody {
+    fn ping(&self) -> cokret::Result<AppletPingOutcome> {
+        Ok(AppletPingOutcome {
             ok: true,
             applet_id: self.applet_id.clone(),
             service_did: self.service_did.clone(),
@@ -590,8 +643,8 @@ impl cokret::AppletHandler for BridgeAppletHandler {
     fn handle_transaction(
         &self,
         _idempotency_key: Option<&str>,
-        req: AppletTransactionReqBody,
-    ) -> cokret::Result<AppletTransactionResBody> {
+        req: AppletTransactionRequestBody,
+    ) -> cokret::Result<AppletTransactionOutcome> {
         // NOTE (security gap — tracked, not silenced): this handler does NOT yet
         // verify the inbound HTTP message signature, the `source_service_did`,
         // or the per-event signature required by `applet-integration.md`
@@ -602,6 +655,24 @@ impl cokret::AppletHandler for BridgeAppletHandler {
         // verifier the raw request, plus a `keyid (did:web#frag) -> Ed25519
         // public key` resolver and a server-DID allow-list in `CokretConfig`.
         // Tracked in `_bridges_todos.md §3` and `_code_review/bridges/02-security.md`.
+        if !req.events.is_empty() {
+            let rejected = req
+                .events
+                .into_iter()
+                .map(|event| {
+                    serde_json::json!({
+                        "event_id": event.event_id.to_string(),
+                        "reason": "inbound_signature_verification_required",
+                    })
+                })
+                .collect();
+            return Ok(AppletTransactionOutcome {
+                ok: false,
+                rejected,
+                retry_after_ms: None,
+            });
+        }
+
         let mut rejected: Vec<Value> = Vec::new();
         let mut enqueue_failed = false;
 
@@ -661,21 +732,21 @@ impl cokret::AppletHandler for BridgeAppletHandler {
         // `ok` reflects whether every durable event was accepted (either freshly
         // enqueued or de-duplicated). When enqueueing failed, signal a retry so
         // the server re-pushes rather than dropping the batch.
-        Ok(AppletTransactionResBody {
+        Ok(AppletTransactionOutcome {
             ok: rejected.is_empty(),
             rejected,
             retry_after_ms: enqueue_failed.then_some(1000),
         })
     }
 
-    fn resolve_actor(&self, actor_id: &str) -> cokret::Result<AppletActorResBody> {
+    fn resolve_actor(&self, actor_id: &str) -> cokret::Result<AppletActorView> {
         if let Some(resolved) = self
             .resolver
             .as_ref()
             .and_then(|r| r.resolve_actor(actor_id))
         {
             if let Ok(did) = Did::new(resolved.actor_id) {
-                return Ok(AppletActorResBody {
+                return Ok(AppletActorView {
                     exists: true,
                     actor_id: Some(did),
                     display_name: resolved.display_name,
@@ -683,7 +754,7 @@ impl cokret::AppletHandler for BridgeAppletHandler {
                 });
             }
         }
-        Ok(AppletActorResBody {
+        Ok(AppletActorView {
             exists: false,
             actor_id: None,
             display_name: None,
@@ -691,14 +762,14 @@ impl cokret::AppletHandler for BridgeAppletHandler {
         })
     }
 
-    fn resolve_realm(&self, realm_id_or_alias: &str) -> cokret::Result<AppletRealmResBody> {
+    fn resolve_realm(&self, realm_id_or_alias: &str) -> cokret::Result<AppletRealmView> {
         if let Some(resolved) = self
             .resolver
             .as_ref()
             .and_then(|r| r.resolve_realm(realm_id_or_alias))
         {
             if let Ok(realm) = RealmId::new(resolved.realm_id) {
-                return Ok(AppletRealmResBody {
+                return Ok(AppletRealmView {
                     exists: true,
                     realm_id: Some(realm),
                     title: resolved.title,
@@ -706,7 +777,7 @@ impl cokret::AppletHandler for BridgeAppletHandler {
                 });
             }
         }
-        Ok(AppletRealmResBody {
+        Ok(AppletRealmView {
             exists: false,
             realm_id: None,
             title: None,
@@ -714,8 +785,8 @@ impl cokret::AppletHandler for BridgeAppletHandler {
         })
     }
 
-    fn resolve_protocol(&self, protocol: &str) -> cokret::Result<AppletProtocolResBody> {
-        Ok(AppletProtocolResBody {
+    fn resolve_protocol(&self, protocol: &str) -> cokret::Result<AppletProtocolMetadata> {
+        Ok(AppletProtocolMetadata {
             protocol: protocol.to_owned(),
             display_name: protocol.to_owned(),
             icon_blob_ref: None,

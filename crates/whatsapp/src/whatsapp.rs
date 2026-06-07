@@ -145,7 +145,9 @@ async fn whatsapp_verify(req: &mut Request, depot: &mut Depot, res: &mut Respons
     let mode = req.query::<String>("hub.mode").unwrap_or_default();
     let token = req.query::<String>("hub.verify_token").unwrap_or_default();
     let challenge = req.query::<String>("hub.challenge").unwrap_or_default();
-    if mode == "subscribe" && token == state.app.verify_token {
+    if mode == "subscribe"
+        && webhook::constant_time_eq(token.as_bytes(), state.app.verify_token.as_bytes())
+    {
         webhook::ok_text(res, challenge);
     } else {
         webhook::unauthorized(res, "WhatsApp verify token mismatch");
@@ -293,24 +295,26 @@ async fn forward_whatsapp_media(
         .unwrap_or_else(|| "application/octet-stream".to_owned());
 
     // 2) Download the bytes (also Bearer-authenticated).
-    let bytes = state
+    let media = state
         .ctx
-        .http
-        .get(url)
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|e| BridgeError::App(format!("WhatsApp media download failed: {e}")))?
-        .bytes()
-        .await
-        .map_err(|e| BridgeError::App(format!("WhatsApp media read failed: {e}")))?;
-    let blob_ref = state.ctx.upload_blob(&bytes, &resolved_mime).await?;
+        .download_external_media(
+            url,
+            Some(token),
+            &[
+                "lookaside.fbsbx.com",
+                "lookaside.facebook.com",
+                "graph.facebook.com",
+                "mmg.whatsapp.net",
+            ],
+        )
+        .await?;
+    let blob_ref = state.ctx.upload_blob(&media.bytes, &resolved_mime).await?;
 
     let attachment = Attachment {
         blob_ref,
         media_type: Some(resolved_mime),
         filename,
-        size: Some(bytes.len() as u64),
+        size: Some(media.bytes.len() as u64),
         caption: String::new(),
     };
     let inbound = InboundAppMessage {
