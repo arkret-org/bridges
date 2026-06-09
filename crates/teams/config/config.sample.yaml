@@ -17,7 +17,12 @@ cokret:
   access_token: "CHANGE_ME_COKRET_ACCESS_TOKEN"
   signing_key_seed_hex: "0000000000000000000000000000000000000000000000000000000000000000"
   verification_method_id: "#key-1"
-  default_realm_id: null
+  trusted_server_did: "did:web:cokret-server.example"
+  trusted_verification_methods:
+    - verification_method: "did:web:cokret-server.example#key-1"
+      public_key:
+        encoding: "ed25519_multibase"
+        value: "zCHANGE_ME_SERVER_ED25519_PUBLIC_KEY"
 
 database:
   url: "sqlite://teams-bridge.db"
@@ -35,3 +40,7 @@ app:
   app_password: "CHANGE_ME_TEAMS_APP_PASSWORD"
   # Bot Framework serviceUrl 基地址(随入站 Activity 下发,区域不同而异)。
   service_url: "https://smba.trafficmanager.net/amer/"
+  inbound_jwt:
+    issuer: "https://api.botframework.com"
+    audience: "CHANGE_ME_TEAMS_APP_ID"
+    jwks_url: "https://login.botframework.com/v1/.well-known/keys"

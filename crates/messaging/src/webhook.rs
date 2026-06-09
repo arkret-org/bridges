@@ -1,15 +1,20 @@
 //! Small helpers for adapter-owned Salvo webhook handlers.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
+use jsonwebtoken::jwk::JwkSet;
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use salvo::http::StatusCode;
 use salvo::prelude::*;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sha1::Sha1;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
+use tokio::sync::RwLock;
 
 use crate::{InboundAppMessage, MessageContext};
 
@@ -17,6 +22,7 @@ type HmacSha256 = Hmac<Sha256>;
 type HmacSha1 = Hmac<Sha1>;
 
 pub const MAX_WEBHOOK_BODY_BYTES: usize = 1024 * 1024;
+const JWT_JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
 
 /// Constant-time byte-slice equality. Use for all signature/secret comparisons
 /// to avoid leaking match position through early-exit timing.
@@ -144,6 +150,147 @@ pub fn payload_too_large(res: &mut Response, message: impl Into<String>) {
     res.render(Json(json!({ "ok": false, "error": message.into() })));
 }
 
+/// Configuration for webhook sources that authenticate with a Bearer JWT whose
+/// signing keys are published as JWKS.
+#[derive(Clone, Debug, Deserialize)]
+pub struct JwtAuthConfig {
+    pub issuer: String,
+    pub audience: String,
+    pub jwks_url: String,
+}
+
+#[derive(Clone)]
+struct CachedJwks {
+    set: Arc<JwkSet>,
+    expires_at: Instant,
+}
+
+/// JWKS-backed Bearer JWT verifier shared by Google Chat and Teams webhook
+/// handlers.
+pub struct JwtVerifier {
+    config: JwtAuthConfig,
+    http: reqwest::Client,
+    jwks: RwLock<Option<CachedJwks>>,
+}
+
+enum JwtDecodeFailure {
+    MissingKey,
+    Invalid(String),
+}
+
+impl JwtVerifier {
+    pub fn new(config: JwtAuthConfig, http: reqwest::Client) -> Self {
+        Self {
+            config,
+            http,
+            jwks: RwLock::new(None),
+        }
+    }
+
+    pub async fn verify_authorization(
+        &self,
+        authorization: Option<&str>,
+    ) -> std::result::Result<Value, String> {
+        let token = bearer_token(authorization)?;
+        let header = decode_header(token).map_err(|err| format!("JWT header is invalid: {err}"))?;
+        if !matches!(header.alg, Algorithm::RS256) {
+            return Err("JWT alg must be RS256".to_owned());
+        }
+        let kid = header
+            .kid
+            .as_deref()
+            .filter(|kid| !kid.trim().is_empty())
+            .ok_or_else(|| "JWT kid header is required".to_owned())?;
+
+        let jwks = self.cached_jwks().await?;
+        match self.decode_with_jwks(token, kid, &jwks) {
+            Ok(claims) => Ok(claims),
+            Err(JwtDecodeFailure::MissingKey) => {
+                let refreshed = self.refresh_jwks().await?;
+                self.decode_with_jwks(token, kid, &refreshed)
+                    .map_err(jwt_decode_failure_message)
+            }
+            Err(err) => Err(jwt_decode_failure_message(err)),
+        }
+    }
+
+    async fn cached_jwks(&self) -> std::result::Result<Arc<JwkSet>, String> {
+        let now = Instant::now();
+        if let Some(cached) = self.jwks.read().await.as_ref()
+            && cached.expires_at > now
+        {
+            return Ok(cached.set.clone());
+        }
+        self.refresh_jwks().await
+    }
+
+    async fn refresh_jwks(&self) -> std::result::Result<Arc<JwkSet>, String> {
+        let set = self
+            .http
+            .get(&self.config.jwks_url)
+            .send()
+            .await
+            .map_err(|err| format!("JWKS fetch failed: {err}"))?
+            .error_for_status()
+            .map_err(|err| format!("JWKS fetch failed: {err}"))?
+            .json::<JwkSet>()
+            .await
+            .map_err(|err| format!("JWKS parse failed: {err}"))?;
+        let set = Arc::new(set);
+        *self.jwks.write().await = Some(CachedJwks {
+            set: set.clone(),
+            expires_at: Instant::now() + JWT_JWKS_CACHE_TTL,
+        });
+        Ok(set)
+    }
+
+    fn decode_with_jwks(
+        &self,
+        token: &str,
+        kid: &str,
+        jwks: &JwkSet,
+    ) -> std::result::Result<Value, JwtDecodeFailure> {
+        let jwk = jwks
+            .keys
+            .iter()
+            .find(|jwk| jwk.common.key_id.as_deref() == Some(kid))
+            .ok_or(JwtDecodeFailure::MissingKey)?;
+        let key = DecodingKey::from_jwk(jwk)
+            .map_err(|err| JwtDecodeFailure::Invalid(format!("JWT JWK is invalid: {err}")))?;
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_issuer(&[self.config.issuer.as_str()]);
+        validation.set_audience(&[self.config.audience.as_str()]);
+        let data = decode::<Value>(token, &key, &validation)
+            .map_err(|err| JwtDecodeFailure::Invalid(format!("JWT verification failed: {err}")))?;
+        Ok(data.claims)
+    }
+}
+
+fn jwt_decode_failure_message(err: JwtDecodeFailure) -> String {
+    match err {
+        JwtDecodeFailure::MissingKey => "JWT kid is not present in JWKS".to_owned(),
+        JwtDecodeFailure::Invalid(message) => message,
+    }
+}
+
+fn bearer_token(authorization: Option<&str>) -> std::result::Result<&str, String> {
+    let value = authorization
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Authorization Bearer JWT is required".to_owned())?;
+    let mut parts = value.splitn(2, char::is_whitespace);
+    let scheme = parts.next().unwrap_or_default();
+    let token = parts
+        .next()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| "Authorization Bearer JWT is malformed".to_owned())?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return Err("Authorization scheme must be Bearer".to_owned());
+    }
+    Ok(token)
+}
+
 pub async fn submit(ctx: Arc<MessageContext>, label: &str, inbound: InboundAppMessage) {
     if let Err(error) = ctx.submit_app_message(inbound).await {
         tracing::warn!(%error, bridge = label, "webhook submission failed");
@@ -243,5 +390,14 @@ mod tests {
         let b = sha1_hex_sorted(&[nonce, token, timestamp]);
         assert_eq!(a, b, "order of inputs must not change the digest");
         assert_eq!(a.len(), 40, "sha1 hex is 40 chars");
+    }
+
+    #[test]
+    fn bearer_token_requires_bearer_scheme() {
+        assert_eq!(bearer_token(Some("Bearer abc.def")).unwrap(), "abc.def");
+        assert_eq!(bearer_token(Some("bearer   abc")).unwrap(), "abc");
+        assert!(bearer_token(None).is_err());
+        assert!(bearer_token(Some("Basic abc")).is_err());
+        assert!(bearer_token(Some("Bearer")).is_err());
     }
 }

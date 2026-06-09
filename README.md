@@ -18,6 +18,13 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `cokret-bridge-
   用户/消息映射表、`ck.message.create` 转换、actor/realm 反查解析、webhook 助手,契约是
   `MessageBridge`/`MessageContext`(14 个聊天桥都实现它,经 `run_message_bridge` 装配)。
 
+共享层术语对照:
+
+| 目录 | 包名 | 当前职责 | 历史/旧称 |
+|---|---|---|---|
+| `crates/runtime` | `cokret-bridge-runtime` | 通用桥运行时 | core/runtime |
+| `crates/messaging` | `cokret-bridge-messaging` | 聊天消息契约层 | messaging |
+
 | crate(包名) | 对端 app | 应用侧技术 | 端口 |
 |---|---|---|---|
 | `cokret-bridge-runtime`(`crates/runtime`) | — | 通用桥运行时(cokret 接入/DB/web/队列) | — |
@@ -28,7 +35,7 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `cokret-bridge-
 | `cokret-bridge-feishu` | 飞书 | reqwest | 9104 |
 | `cokret-bridge-wechat` | 微信 | reqwest | 9105 |
 | `cokret-bridge-dingtalk` | 钉钉 | reqwest | 9106 |
-| `cokret-bridge-zulip` | Zulip | reqwest + tungstenite | 9107 |
+| `cokret-bridge-zulip` | Zulip | reqwest event queue long-polling | 9107 |
 | `cokret-bridge-whatsapp` | WhatsApp | reqwest (Cloud API) | 9108 |
 | `cokret-bridge-line` | LINE | reqwest | 9109 |
 | `cokret-bridge-qq` | QQ | reqwest (OneBot/官方) | 9110 |
@@ -46,19 +53,20 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `cokret-bridge-
   `MessageBridge::on_cokret_event` → 适配器 `send_to_app`。
 - **出站(app → cokret)**:适配器收到 app 消息(gateway/长轮询/webhook)→
   `MessageContext::submit_app_message` → runtime 构造并签名带 `external_ref` 溯源的
-  `ck.message.create` 事件 → `events_submit` 提交。当前写侧事件由 bridge service actor
-  署名,外部用户身份通过规范化 `external_ref` 记录;per-user Ghost Actor 委托签名尚未接入。
-  纯 HTTP 桥的入站经各自
-  `MessageBridge::webhook_router`(已实现验签)挂到 web 服务。
+  per-user Ghost Actor `ck.message.create` 事件 → `events_submit` 提交。Ghost DID 按
+  `protocol/tenant/external_user_id` 生成并写入 `user_mappings`;proof 使用该 Ghost DID 的
+  configured key fragment,避免写侧退回 bridge service actor。纯 HTTP 桥的入站经各自
+  `MessageBridge::webhook_router` 挂到 web 服务,平台来源验签在 handler 解析 JSON 前完成。
 - **映射 / 解析**:频道↔realm、消息↔event、用户↔actor 持久化于 diesel(sqlite/postgres/mysql);
   反查驱动 applet `resolve_actor`/`resolve_realm`(ghost/portal 读侧解析)。用户↔actor 映射
-  目前不参与 app→cokret 事件署名。
+  同时参与 app→cokret 写侧署名。
 - **序号**:服务 actor 的事件 seq 经 DB 块预留持久化,重启后严格单调。
 - **消息内容**:对齐 SDK 规范类型 `TextMessageContent`(`{body}`)/`MediaContent`
   (`{body,blob,mimetype,filename,size}`)。
 - **媒体**:`MessageContext::{upload_blob,download_blob,submit_media_message}` + `Attachment`;
   discord/telegram 收发双向、whatsapp/line 入站已接,余者文本(通用能力就绪)。
-- **防回声**:`on_cokret_event` 跳过本桥 `external_ref.source` 自发事件,避免出站回环。
+- **防回声**:`on_cokret_event` 跳过本桥 `external_ref.source` 自发事件、由本桥
+  service actor 署名的事件,以及已在消息映射表记录的 event,避免出站回环。
 
 详见 [`_bridges_todos.md`](_bridges_todos.md)(规划/并行/进度)与
 [`_BRIDGE_CONTRACT.md`](_BRIDGE_CONTRACT.md)(适配器编写契约)。
@@ -73,3 +81,12 @@ cargo run -p cokret-bridge-discord -- --config config.yaml
 每个 crate 默认 `sqlite` feature;`--features postgres` / `--features mysql` 切换后端。
 配置文件支持 YAML 与 KDL；KDL loader 只覆盖当前桥配置使用的标量与嵌套节点形态。
 需要数组或多值节点时使用 YAML，避免 KDL 转换时丢失结构。
+所有桥都必须显式建立 app channel 到 Realm 的映射；没有 room mapping 的入站消息会直接失败,
+不再回退到默认 Realm。
+
+生产部署应把桥服务放在反向代理之后并按 path 做访问控制:`/webhooks/*` 暴露给对应
+平台回调,`/_cokret/edge/applet/*` 配置 `trusted_server_did` 与
+`trusted_verification_methods` 后会校验 HTTP Message Signature、source/destination DID 与
+event proof,仍建议网络层仅允许可信 Cokret server 访问;`/metrics` 仅内网或受认证访问。
+默认 `bind_address=0.0.0.0` 只是便于容器/开发环境绑定端口,不代表这些不同信任面的路径都应
+直接公网开放。

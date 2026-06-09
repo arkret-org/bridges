@@ -11,7 +11,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
 use cokret_bridge_messaging::{
-    AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage, webhook,
+    AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
+    SenderRenderStyle, webhook,
 };
 use cokret_bridge_runtime::cache::TokenCache;
 use cokret_bridge_runtime::{BridgeError, Result};
@@ -104,8 +105,7 @@ impl MessageBridge for DingTalkApp {
     ) -> Result<AppMessageRef> {
         let access_token = self.fetch_access_token(&ctx).await?;
 
-        // Prepend the sender prefix to the text, consistent with the discord template style.
-        let text = format!("{}: {}", msg.sender_display, msg.body);
+        let text = msg.rendered_body(SenderRenderStyle::Plain);
 
         // DingTalk enterprise robot group message API; app_channel is treated as openConversationId.
         // msgParam must be a JSON string.

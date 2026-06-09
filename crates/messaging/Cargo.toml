@@ -32,3 +32,4 @@ sha2 = { workspace = true }
 sha1 = { workspace = true }
 subtle = { workspace = true }
 hex = { workspace = true }
+jsonwebtoken = { workspace = true }

@@ -6,15 +6,15 @@
 //! - Outbound (cokret -> Zulip): [`MessageBridge::send_to_app`] uses `ctx.http` to POST
 //!   `{site}/api/v1/messages` (HTTP basic auth: bot_email + api_key).
 //!
-//! Note: tokio-tungstenite is already listed as a dependency (Zulip may later switch
-//! to ws push); the current receive path goes through the official event queue
-//! long-polling REST interface, which better fits Zulip's actual capabilities.
+//! The receive path uses Zulip's official event queue long-polling REST
+//! interface.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
+    SenderRenderStyle,
 };
 use cokret_bridge_runtime::{BridgeError, Result};
 use serde_json::Value;
@@ -210,7 +210,7 @@ impl MessageBridge for ZulipApp {
         msg: OutboundAppMessage,
     ) -> Result<AppMessageRef> {
         let url = format!("{}/api/v1/messages", self.site);
-        let body = format!("**{}**: {}", msg.sender_display, msg.body);
+        let body = msg.rendered_body(SenderRenderStyle::MarkdownBold);
 
         // An app_channel shaped like "pm/<id>" is treated as a direct message.
         // Stream channels use "<stream_id>/<topic>".

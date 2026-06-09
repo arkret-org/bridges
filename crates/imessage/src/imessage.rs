@@ -10,7 +10,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
 use cokret_bridge_messaging::{
-    AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage, webhook,
+    AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
+    SenderRenderStyle, webhook,
 };
 use cokret_bridge_runtime::{BridgeError, Result};
 use serde_json::json;
@@ -66,7 +67,7 @@ impl MessageBridge for IMessageApp {
             url.push_str(&format!("?guid={pw}"));
         }
 
-        let body = format!("{}: {}", msg.sender_display, msg.body);
+        let body = msg.rendered_body(SenderRenderStyle::Plain);
         let payload = json!({
             "chatGuid": msg.app_channel,
             "message": body,

@@ -10,7 +10,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
 use cokret_bridge_messaging::{
-    AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage, webhook,
+    AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
+    SenderRenderStyle, webhook,
 };
 use cokret_bridge_runtime::{BridgeError, Result};
 use serde_json::{Value, json};
@@ -63,7 +64,7 @@ impl MessageBridge for QqApp {
         })?;
 
         let url = format!("{}/send_msg", self.onebot_url.trim_end_matches('/'));
-        let body = format!("{}: {}", msg.sender_display, msg.body);
+        let body = msg.rendered_body(SenderRenderStyle::Plain);
         let payload = json!({
             "message_type": "group",
             "group_id": group_id,

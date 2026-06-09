@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
 use cokret_bridge_messaging::{
     AppMessageRef, Attachment, InboundAppMessage, MessageBridge, MessageContext,
-    OutboundAppMessage, webhook,
+    OutboundAppMessage, SenderRenderStyle, webhook,
 };
 use cokret_bridge_runtime::{BridgeError, Result};
 use serde_json::{Value, json};
@@ -51,8 +51,7 @@ impl MessageBridge for LineApp {
         ctx: Arc<MessageContext>,
         msg: OutboundAppMessage,
     ) -> Result<AppMessageRef> {
-        // Prefix the text with the sender, matching the discord template style.
-        let text = format!("{}: {}", msg.sender_display, msg.body);
+        let text = msg.rendered_body(SenderRenderStyle::Plain);
 
         // app_channel is treated as the push target ID (userId / groupId / roomId).
         let body = json!({

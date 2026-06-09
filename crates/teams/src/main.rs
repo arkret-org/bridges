@@ -5,7 +5,7 @@ mod teams;
 use std::sync::Arc;
 
 use clap::Parser;
-use cokret_bridge_messaging::run_message_bridge;
+use cokret_bridge_messaging::{run_message_bridge, webhook::JwtAuthConfig};
 use cokret_bridge_runtime::{Config, logging};
 
 use crate::teams::TeamsApp;
@@ -47,11 +47,26 @@ async fn main() -> anyhow::Result<()> {
         .app
         .get("service_url")
         .and_then(|v| v.as_str())
-        .unwrap_or("https://smba.trafficmanager.net/amer/")
+        .ok_or_else(|| anyhow::anyhow!("config.app.service_url is missing"))?
         .to_owned();
+    let inbound_jwt: JwtAuthConfig = serde_json::from_value(
+        config
+            .app
+            .get("inbound_jwt")
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("config.app.inbound_jwt is missing"))?,
+    )?;
 
-    run_message_bridge(config, move |_ctx: Arc<_>| {
-        Ok(TeamsApp::new(app_id, app_password, service_url))
+    run_message_bridge(config, move |ctx: Arc<_>| {
+        Ok(TeamsApp::new(
+            app_id,
+            app_password,
+            service_url,
+            Arc::new(cokret_bridge_messaging::webhook::JwtVerifier::new(
+                inbound_jwt,
+                ctx.http.clone(),
+            )),
+        ))
     })
     .await
     .map_err(|e| anyhow::anyhow!(e.to_string()))

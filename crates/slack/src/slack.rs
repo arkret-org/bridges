@@ -15,6 +15,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
+    SenderRenderStyle,
 };
 use cokret_bridge_runtime::{BridgeError, Result};
 use futures::{SinkExt, StreamExt};
@@ -174,7 +175,7 @@ impl MessageBridge for SlackApp {
         ctx: Arc<MessageContext>,
         msg: OutboundAppMessage,
     ) -> Result<AppMessageRef> {
-        let body = format!("*{}*: {}", msg.sender_display, msg.body);
+        let body = msg.rendered_body(SenderRenderStyle::MarkdownItalic);
         let payload = json!({
             "channel": msg.app_channel,
             "text": body,

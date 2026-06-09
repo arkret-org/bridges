@@ -5,7 +5,7 @@ mod googlechat;
 use std::sync::Arc;
 
 use clap::Parser;
-use cokret_bridge_messaging::run_message_bridge;
+use cokret_bridge_messaging::{run_message_bridge, webhook::JwtAuthConfig};
 use cokret_bridge_runtime::{Config, logging};
 
 use crate::googlechat::GoogleChatApp;
@@ -34,9 +34,22 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("config.app.token is missing"))?
         .to_owned();
+    let inbound_jwt: JwtAuthConfig = serde_json::from_value(
+        config
+            .app
+            .get("inbound_jwt")
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("config.app.inbound_jwt is missing"))?,
+    )?;
 
-    run_message_bridge(config, move |_ctx: Arc<_>| {
-        Ok(GoogleChatApp::new(access_token))
+    run_message_bridge(config, move |ctx: Arc<_>| {
+        Ok(GoogleChatApp::new(
+            access_token,
+            Arc::new(cokret_bridge_messaging::webhook::JwtVerifier::new(
+                inbound_jwt,
+                ctx.http.clone(),
+            )),
+        ))
     })
     .await
     .map_err(|e| anyhow::anyhow!(e.to_string()))

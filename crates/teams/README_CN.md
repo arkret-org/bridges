@@ -13,8 +13,9 @@ Rust 实现的 **cokret ⇄ Microsoft Teams** 桥接。基于共享核心
   2. `ctx.http` POST `{serviceUrl}/v3/conversations/{conversationId}/activities`
      发送 `message` Activity。
 - **入站(Teams → cokret)**:Bot Framework 通过 HTTPS webhook 把 Activity POST 到
-  bot 的 `/api/messages`,由 `MessageBridge::webhook_router` 暴露的路由接收并解析
-  入站 Activity,再经 `webhook::submit` 入站;`run` 为保活循环。
+  bot 的 `/api/messages`,由 `MessageBridge::webhook_router` 暴露的路由接收,先校验
+  `Authorization: Bearer <JWT>`(Bot Framework JWKS + issuer/audience),再解析入站 Activity
+  并经 `webhook::submit` 入站;`run` 为保活循环。
 - **映射**:conversation↔realm、消息↔event、用户↔actor 存于 diesel 数据库(默认 sqlite)。
 
 ## 快速开始
@@ -29,13 +30,13 @@ cargo run -p cokret-bridge-teams -- --config config.yaml
 
 - `cokret.*`:cokret 接入(server_url、service_did、applet_id、access_token、签名种子)。
 - `app.app_id` / `app.app_password`:Azure Bot 注册的应用 ID 与密钥。
-- `app.service_url`:Bot Framework serviceUrl 基地址(随入站 Activity 下发,按区域不同)。
+- `app.service_url`:Bot Framework serviceUrl 基地址(必填,按区域不同)。
+- `app.inbound_jwt`:Teams webhook Bearer JWT 验签配置(`issuer`/`audience`/`jwks_url`)。
 - `database.url`:`sqlite://...` / `postgres://...` / `mysql://...`(对应 feature)。
 
 ## 不确定点 / TODO
 
-- 入站 `/api/messages` webhook 已接入(`webhook_router`)。
 - `service_url` 实际值随会话由 Bot Framework 下发,出站前应以入站 Activity 携带的
-  serviceUrl 为准;此处先用配置缺省值。
+  serviceUrl 为准;当前实现要求显式配置。
 
 详见 [`../_bridges_todos.md`](../../_bridges_todos.md) 的总体规划与映射表。

@@ -49,6 +49,7 @@ sha1 = "0.10"
 subtle = "2.6"
 hex = "0.4"
 quick-xml = "0.38"
+jsonwebtoken = "9.3"
 
 [profile.release]
 lto = "thin"

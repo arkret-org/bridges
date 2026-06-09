@@ -13,7 +13,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
 use cokret_bridge_messaging::{
-    AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage, webhook,
+    AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
+    SenderRenderStyle, webhook,
 };
 use cokret_bridge_runtime::cache::TokenCache;
 use cokret_bridge_runtime::{BridgeError, Result};
@@ -30,6 +31,7 @@ pub struct TeamsApp {
     app_password: String,
     /// Bot Framework serviceUrl base address (used to assemble the outbound activities endpoint).
     service_url: String,
+    inbound_jwt: Arc<webhook::JwtVerifier>,
     token_cache: TokenCache,
 }
 
@@ -38,11 +40,13 @@ impl TeamsApp {
         app_id: impl Into<String>,
         app_password: impl Into<String>,
         service_url: impl Into<String>,
+        inbound_jwt: Arc<webhook::JwtVerifier>,
     ) -> Self {
         Self {
             app_id: app_id.into(),
             app_password: app_password.into(),
             service_url: service_url.into(),
+            inbound_jwt,
             token_cache: TokenCache::new(),
         }
     }
@@ -115,7 +119,7 @@ impl MessageBridge for TeamsApp {
         let base = self.service_url.trim_end_matches('/');
         let url = format!("{base}/v3/conversations/{}/activities", msg.app_channel);
 
-        let body = format!("**{}**: {}", msg.sender_display, msg.body);
+        let body = msg.rendered_body(SenderRenderStyle::MarkdownBold);
         let activity = json!({
             "type": "message",
             "text": body,
@@ -152,7 +156,10 @@ impl MessageBridge for TeamsApp {
     }
 
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
-        let state = TeamsWebhookState { ctx };
+        let state = TeamsWebhookState {
+            ctx,
+            inbound_jwt: self.inbound_jwt.clone(),
+        };
         Some(
             salvo::Router::new()
                 .push(
@@ -172,6 +179,7 @@ impl MessageBridge for TeamsApp {
 #[derive(Clone)]
 struct TeamsWebhookState {
     ctx: Arc<MessageContext>,
+    inbound_jwt: Arc<webhook::JwtVerifier>,
 }
 
 #[handler]
@@ -180,6 +188,15 @@ async fn teams_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response
         webhook::bad_request(res, "webhook state missing");
         return;
     };
+    let authorization = req.header::<String>("authorization");
+    if let Err(error) = state
+        .inbound_jwt
+        .verify_authorization(authorization.as_deref())
+        .await
+    {
+        webhook::unauthorized(res, format!("Teams JWT rejected: {error}"));
+        return;
+    }
     let Some(body) = webhook::json_body(req, res).await else {
         return;
     };

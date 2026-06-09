@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use cokret::Ed25519MoveSigner;
 use cokret::http_client::{Auth, Client};
+#[cfg(any(feature = "web", test))]
 use cokret::model::{
     AppletActorView, AppletDescription, AppletPingOutcome, AppletProtocolMetadata, AppletRealmView,
     AppletTransactionOutcome, AppletTransactionRequestBody,
@@ -28,8 +29,11 @@ use cokret::signatures::{SignEventOptions, sign_event};
 use cokret::{Did, Event, Hlc, RealmId};
 use parking_lot::Mutex;
 use serde_json::Value;
+#[cfg(any(feature = "web", test))]
+use serde_json::json;
 use tokio::sync::mpsc::UnboundedSender;
 
+#[cfg(any(feature = "web", test))]
 use crate::app::AppletResolver;
 use crate::config::Config;
 use crate::error::{BridgeError, Result};
@@ -279,17 +283,36 @@ impl CokretEdge {
         self.mint_event_as_inner(self.service_did.clone(), kind, realm_id, content)
     }
 
-    /// Build and sign an event attributed to `actor` (instead of this bridge's
-    /// service actor). Signs with this edge's signer and configured verification
-    /// method.
+    /// Build and sign an event attributed to `actor` and executed by this
+    /// bridge service under a durable delegated authorization.
+    ///
+    /// The proof verification method stays on the service DID. The envelope
+    /// carries `executed_by = service_did` and `authorization_ref`, allowing the
+    /// reducer to verify who actually signed while preserving the virtual
+    /// actor as `actor_id`.
     pub fn mint_event_as(
         &self,
         actor: &cokret::Did,
         kind: &str,
         realm_id: &RealmId,
         content: Value,
+        authorization_ref: &str,
     ) -> Result<Event> {
-        self.mint_event_as_inner(actor.clone(), kind, realm_id, content)
+        let authorization_ref = validate_authorization_ref(authorization_ref)?;
+        let seq = self.seq.alloc()?;
+        let hlc = self.next_hlc()?;
+        let mut event = Event::new(kind, realm_id.clone(), actor.clone(), seq, hlc, content)?;
+        event.executed_by = Some(self.service_did.clone());
+        event.authorization_ref = Some(authorization_ref);
+        stamp_applet_metadata(&mut event, &self.config.cokret.applet_id);
+        let verification_method = self.verification_method_for_actor(&self.service_did)?;
+        sign_event(
+            &mut event,
+            &self.signer,
+            &verification_method,
+            SignEventOptions::new(),
+        )?;
+        Ok(event)
     }
 
     fn mint_event_as_inner(
@@ -302,13 +325,34 @@ impl CokretEdge {
         let seq = self.seq.alloc()?;
         let hlc = self.next_hlc()?;
         let mut event = Event::new(kind, realm_id.clone(), actor, seq, hlc, content)?;
+        stamp_applet_metadata(&mut event, &self.config.cokret.applet_id);
+        let verification_method = self.verification_method_for_actor(&event.actor_id)?;
         sign_event(
             &mut event,
             &self.signer,
-            &self.config.cokret.verification_method_id,
+            &verification_method,
             SignEventOptions::new(),
         )?;
         Ok(event)
+    }
+
+    fn verification_method_for_actor(&self, actor: &Did) -> Result<String> {
+        let (_, fragment) = self
+            .config
+            .cokret
+            .verification_method_id
+            .rsplit_once('#')
+            .ok_or_else(|| {
+                BridgeError::Config(
+                    "verification_method_id must contain a #key fragment".to_owned(),
+                )
+            })?;
+        if fragment.trim().is_empty() {
+            return Err(BridgeError::Config(
+                "verification_method_id key fragment must not be empty".to_owned(),
+            ));
+        }
+        Ok(format!("{}#{fragment}", actor.as_str()))
     }
 
     /// Outbound: submit an already-minted event and return its event_id.
@@ -327,9 +371,9 @@ impl CokretEdge {
         self.submit_event(&event).await
     }
 
-    /// Outbound convenience with signed bridge provenance. `external_ref` is
-    /// written before signing, so upstream ids and actor/channel evidence are
-    /// part of the event transcript.
+    /// Outbound convenience with bridge provenance. Current SDK Event envelopes
+    /// no longer expose signed top-level `external_ref`, so the value is carried
+    /// as `unsigned` transport metadata.
     pub async fn submit_with_external_ref(
         &self,
         realm_id: &str,
@@ -339,13 +383,39 @@ impl CokretEdge {
     ) -> Result<String> {
         let realm = RealmId::new(realm_id.to_owned())?;
         let mut event = self.mint_event(kind, &realm, content)?;
-        let content = std::mem::take(&mut event.content);
-        event.content = content_with_bridge_external_ref(content, external_ref);
+        stamp_external_ref(&mut event, external_ref);
         event.proofs.clear();
+        let verification_method = self.verification_method_for_actor(&event.actor_id)?;
         sign_event(
             &mut event,
             &self.signer,
-            &self.config.cokret.verification_method_id,
+            &verification_method,
+            SignEventOptions::new(),
+        )?;
+        self.submit_event(&event).await
+    }
+
+    /// Outbound convenience with bridge provenance and an explicit delegated
+    /// actor. Used by messaging bridges to submit per-user Ghost Actor events
+    /// after provisioning returned a durable authorization ref.
+    pub async fn submit_with_external_ref_as(
+        &self,
+        actor: &Did,
+        realm_id: &str,
+        kind: &str,
+        content: Value,
+        external_ref: Value,
+        authorization_ref: &str,
+    ) -> Result<String> {
+        let realm = RealmId::new(realm_id.to_owned())?;
+        let mut event = self.mint_event_as(actor, kind, &realm, content, authorization_ref)?;
+        stamp_external_ref(&mut event, external_ref);
+        event.proofs.clear();
+        let verification_method = self.verification_method_for_actor(&self.service_did)?;
+        sign_event(
+            &mut event,
+            &self.signer,
+            &verification_method,
             SignEventOptions::new(),
         )?;
         self.submit_event(&event).await
@@ -359,10 +429,11 @@ impl CokretEdge {
         event.redacts = Some(cokret::EventId::new(target_event_id.to_owned())?);
         // redacts is set after minting, so re-sign to override.
         event.proofs.clear();
+        let verification_method = self.verification_method_for_actor(&event.actor_id)?;
         sign_event(
             &mut event,
             &self.signer,
-            &self.config.cokret.verification_method_id,
+            &verification_method,
             SignEventOptions::new(),
         )?;
         self.submit_event(&event).await
@@ -387,6 +458,26 @@ impl CokretEdge {
         let r = cokret::BlobRef::new(blob_ref.to_owned())?;
         Ok(self.client.blob_download(&r, None).await?)
     }
+}
+
+fn validate_authorization_ref(authorization_ref: &str) -> Result<String> {
+    let authorization_ref = authorization_ref.trim();
+    if authorization_ref.is_empty() {
+        return Err(BridgeError::Cokret(
+            "delegated actor events require authorization_ref".to_owned(),
+        ));
+    }
+    Ok(authorization_ref.to_owned())
+}
+
+fn stamp_applet_metadata(event: &mut Event, applet_id: &str) {
+    event
+        .unsigned
+        .insert("applet_id".to_owned(), Value::String(applet_id.to_owned()));
+}
+
+fn stamp_external_ref(event: &mut Event, external_ref: Value) {
+    event.unsigned.insert("external_ref".to_owned(), external_ref);
 }
 
 /// Diesel-backed [`SeqStore`]. Persists each key's high-water mark in a
@@ -424,64 +515,26 @@ impl SeqStore for DbSeqStore {
     /// new value (the highest sequence number now reserved).
     fn reserve_block(&self, key: &str, block: i64) -> Result<i64> {
         use diesel::prelude::*;
-
-        #[derive(diesel::QueryableByName)]
-        struct ReservedRow {
-            #[diesel(sql_type = diesel::sql_types::BigInt)]
-            state_value: i64,
-        }
+        use state_schema::bridge_state::dsl;
 
         let mut conn = self.db.conn()?;
-        #[cfg(feature = "sqlite")]
-        {
-            let row = diesel::sql_query(
-                "INSERT INTO bridge_state (state_key, state_value) VALUES (?, ?) \
-                 ON CONFLICT(state_key) DO UPDATE \
-                 SET state_value = bridge_state.state_value + excluded.state_value \
-                 RETURNING state_value",
-            )
-            .bind::<diesel::sql_types::Text, _>(key)
-            .bind::<diesel::sql_types::BigInt, _>(block)
-            .get_result::<ReservedRow>(&mut conn)?;
-            return Ok(row.state_value);
-        }
+        let current: i64 = dsl::bridge_state
+            .filter(dsl::state_key.eq(key))
+            .select(dsl::state_value)
+            .first::<i64>(&mut conn)
+            .optional()?
+            .unwrap_or(0);
+        let reserved = current + block;
 
-        #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
-        {
-            let row = diesel::sql_query(
-                "INSERT INTO bridge_state (state_key, state_value) VALUES ($1, $2) \
-                 ON CONFLICT(state_key) DO UPDATE \
-                 SET state_value = bridge_state.state_value + excluded.state_value \
-                 RETURNING state_value",
-            )
-            .bind::<diesel::sql_types::Text, _>(key)
-            .bind::<diesel::sql_types::BigInt, _>(block)
-            .get_result::<ReservedRow>(&mut conn)?;
-            return Ok(row.state_value);
+        let updated = diesel::update(dsl::bridge_state.filter(dsl::state_key.eq(key)))
+            .set(dsl::state_value.eq(reserved))
+            .execute(&mut conn)?;
+        if updated == 0 {
+            diesel::insert_into(dsl::bridge_state)
+                .values((dsl::state_key.eq(key), dsl::state_value.eq(reserved)))
+                .execute(&mut conn)?;
         }
-
-        #[cfg(all(feature = "mysql", not(feature = "sqlite"), not(feature = "postgres")))]
-        {
-            conn.transaction::<i64, diesel::result::Error, _>(|conn| {
-                diesel::sql_query(
-                    "INSERT INTO bridge_state (state_key, state_value) VALUES (?, 0) \
-                     ON DUPLICATE KEY UPDATE state_key = state_key",
-                )
-                .bind::<diesel::sql_types::Text, _>(key)
-                .execute(conn)?;
-                diesel::sql_query(
-                    "UPDATE bridge_state SET state_value = state_value + ? WHERE state_key = ?",
-                )
-                .bind::<diesel::sql_types::BigInt, _>(block)
-                .bind::<diesel::sql_types::Text, _>(key)
-                .execute(conn)?;
-                diesel::sql_query("SELECT state_value FROM bridge_state WHERE state_key = ?")
-                    .bind::<diesel::sql_types::Text, _>(key)
-                    .get_result::<ReservedRow>(conn)
-                    .map(|row| row.state_value)
-            })
-            .map_err(Into::into)
-        }
+        Ok(reserved)
     }
 }
 
@@ -496,19 +549,7 @@ fn stable_node_id(bridge_id: &str) -> String {
     format!("{hash:08x}")
 }
 
-fn content_with_bridge_external_ref(content: Value, external_ref: Value) -> Value {
-    match content {
-        Value::Object(mut object) => {
-            object.insert("bridge_external_ref".to_owned(), external_ref);
-            Value::Object(object)
-        }
-        other => serde_json::json!({
-            "payload": other,
-            "bridge_external_ref": external_ref,
-        }),
-    }
-}
-
+#[cfg(any(feature = "web", test))]
 /// Bounded in-memory window of recently seen `event_id`s used to enforce the
 /// single-event-level dedup rule of `applet-integration.md` §7.3 ("重复
 /// `event_id` 且内容一致 MUST `accepted`,内容不一致 MUST 拒绝").
@@ -534,6 +575,7 @@ struct EventDedupWindow {
     capacity: usize,
 }
 
+#[cfg(any(feature = "web", test))]
 /// Outcome of consulting the [`EventDedupWindow`] for one event.
 enum DedupVerdict {
     /// First time this `event_id` (with this body) is seen — process it.
@@ -545,6 +587,7 @@ enum DedupVerdict {
     DuplicateConflict,
 }
 
+#[cfg(any(feature = "web", test))]
 impl EventDedupWindow {
     fn new(capacity: usize) -> Self {
         Self {
@@ -571,6 +614,7 @@ impl EventDedupWindow {
     }
 }
 
+#[cfg(any(feature = "web", test))]
 /// Stable 64-bit FNV-1a fingerprint over an event's canonical JSON body. Used
 /// only for same-id content-equality comparison in [`EventDedupWindow`]; not a
 /// security primitive.
@@ -584,6 +628,7 @@ fn event_content_fingerprint(event: &Event) -> u64 {
     hash
 }
 
+#[cfg(any(feature = "web", test))]
 /// The receiver for transactions pushed by the cokret server (implements
 /// [`cokret::AppletHandler`]). It delivers the events in a transaction to the
 /// inbound queue; the business forwarding is done in the core consumer loop.
@@ -591,6 +636,9 @@ pub struct BridgeAppletHandler {
     applet_id: String,
     service_did: Did,
     protocols: Vec<String>,
+    namespaces: Value,
+    limits: Value,
+    auth: Value,
     inbound_tx: UnboundedSender<Event>,
     ephemeral_tx: Option<UnboundedSender<Value>>,
     resolver: Option<Arc<dyn AppletResolver>>,
@@ -598,27 +646,91 @@ pub struct BridgeAppletHandler {
     dedup: EventDedupWindow,
 }
 
+#[cfg(any(feature = "web", test))]
 /// Soft cap on the number of `event_id`s the per-handler dedup window retains.
 const EVENT_DEDUP_CAPACITY: usize = 8192;
 
+#[cfg(any(feature = "web", test))]
+fn default_applet_namespaces(bridge_id: &str, service_did: &Did) -> Value {
+    let service_did = service_did.as_str();
+    json!({
+        "actors": [{
+            "exclusive": true,
+            "pattern": format!("{service_did}:ghost:*"),
+        }],
+        "realms": [{
+            "exclusive": true,
+            "pattern": format!("{bridge_id}:*"),
+        }],
+        "handles": [{
+            "exclusive": true,
+            "pattern": format!("{bridge_id}/*"),
+        }],
+    })
+}
+
+#[cfg(any(feature = "web", test))]
+fn default_applet_limits() -> Value {
+    json!({
+        "max_events_per_transaction": EVENT_DEDUP_CAPACITY,
+        "receive_events": true,
+        "receive_ephemeral": true,
+        "rate_limited": true,
+    })
+}
+
+#[cfg(any(feature = "web", test))]
+fn default_applet_auth(service_did: &Did, verification_method_id: &str) -> Value {
+    let key_ref = if verification_method_id.starts_with("did:") {
+        verification_method_id.to_owned()
+    } else {
+        format!("{}{}", service_did.as_str(), verification_method_id)
+    };
+    json!({
+        "type": "http_message_signature",
+        "key_ref": key_ref,
+    })
+}
+
+#[cfg(any(feature = "web", test))]
 impl BridgeAppletHandler {
-    /// Build the handler from an inbound-capable edge.
-    pub fn new(edge: &CokretEdge, resolver: Option<Arc<dyn AppletResolver>>) -> Result<Self> {
-        let inbound_tx = edge
-            .inbound_sender()
-            .ok_or_else(|| BridgeError::Runtime("applet handler requires inbound sender".into()))?;
-        Ok(Self {
+    /// Build the handler from an inbound-capable edge. The edge must have been
+    /// constructed with an inbound sender (the run_bridge/web path always is).
+    pub fn new(edge: &CokretEdge, resolver: Option<Arc<dyn AppletResolver>>) -> Self {
+        let bridge_id = edge.config.bridge.bridge_id.clone();
+        let service_did = edge.service_did.clone();
+        let verification_method_id = edge.config.cokret.verification_method_id.clone();
+        Self {
             applet_id: edge.config.cokret.applet_id.clone(),
-            service_did: edge.service_did.clone(),
-            protocols: vec![edge.config.bridge.bridge_id.clone()],
-            inbound_tx,
+            service_did: service_did.clone(),
+            protocols: vec![bridge_id.clone()],
+            namespaces: edge
+                .config
+                .cokret
+                .applet_namespaces
+                .clone()
+                .unwrap_or_else(|| default_applet_namespaces(&bridge_id, &service_did)),
+            limits: edge
+                .config
+                .cokret
+                .applet_limits
+                .clone()
+                .unwrap_or_else(default_applet_limits),
+            auth: edge
+                .config
+                .cokret
+                .applet_auth
+                .clone()
+                .unwrap_or_else(|| default_applet_auth(&service_did, &verification_method_id)),
+            inbound_tx: edge.inbound_sender().expect("inbound enabled"),
             ephemeral_tx: edge.ephemeral_sender(),
             resolver,
             dedup: EventDedupWindow::new(EVENT_DEDUP_CAPACITY),
-        })
+        }
     }
 }
 
+#[cfg(any(feature = "web", test))]
 impl cokret::AppletHandler for BridgeAppletHandler {
     fn ping(&self) -> cokret::Result<AppletPingOutcome> {
         Ok(AppletPingOutcome {
@@ -634,9 +746,9 @@ impl cokret::AppletHandler for BridgeAppletHandler {
             applet_id: self.applet_id.clone(),
             service_did: self.service_did.clone(),
             protocols: self.protocols.clone(),
-            namespaces: Value::Null,
-            limits: Value::Null,
-            auth: Value::Null,
+            namespaces: self.namespaces.clone(),
+            limits: self.limits.clone(),
+            auth: self.auth.clone(),
         })
     }
 
@@ -645,34 +757,6 @@ impl cokret::AppletHandler for BridgeAppletHandler {
         _idempotency_key: Option<&str>,
         req: AppletTransactionRequestBody,
     ) -> cokret::Result<AppletTransactionOutcome> {
-        // NOTE (security gap — tracked, not silenced): this handler does NOT yet
-        // verify the inbound HTTP message signature, the `source_service_did`,
-        // or the per-event signature required by `applet-integration.md`
-        // §7.3/§13. The SDK's `AppletService`/`applet_router` does not expose the
-        // raw request body + headers to this trait method, and there is no
-        // configured trusted server DID / public key to verify against. Closing
-        // this gap needs an SDK-side `AppletHandler` surface that hands the
-        // verifier the raw request, plus a `keyid (did:web#frag) -> Ed25519
-        // public key` resolver and a server-DID allow-list in `CokretConfig`.
-        // Tracked in `_bridges_todos.md §3` and `_code_review/bridges/02-security.md`.
-        if !req.events.is_empty() {
-            let rejected = req
-                .events
-                .into_iter()
-                .map(|event| {
-                    serde_json::json!({
-                        "event_id": event.event_id.to_string(),
-                        "reason": "inbound_signature_verification_required",
-                    })
-                })
-                .collect();
-            return Ok(AppletTransactionOutcome {
-                ok: false,
-                rejected,
-                retry_after_ms: None,
-            });
-        }
-
         let mut rejected: Vec<Value> = Vec::new();
         let mut enqueue_failed = false;
 

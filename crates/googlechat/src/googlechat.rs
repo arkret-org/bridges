@@ -10,7 +10,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
 use cokret_bridge_messaging::{
-    AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage, webhook,
+    AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
+    SenderRenderStyle, webhook,
 };
 use cokret_bridge_runtime::{BridgeError, Result};
 use serde_json::{Value, json};
@@ -22,12 +23,14 @@ const CHAT_API_BASE: &str = "https://chat.googleapis.com/v1";
 pub struct GoogleChatApp {
     /// Ready OAuth2 access token (scope: chat.bot, etc.).
     access_token: String,
+    inbound_jwt: Arc<webhook::JwtVerifier>,
 }
 
 impl GoogleChatApp {
-    pub fn new(access_token: impl Into<String>) -> Self {
+    pub fn new(access_token: impl Into<String>, inbound_jwt: Arc<webhook::JwtVerifier>) -> Self {
         Self {
             access_token: access_token.into(),
+            inbound_jwt,
         }
     }
 
@@ -57,7 +60,7 @@ impl MessageBridge for GoogleChatApp {
         // app_channel is the space resource name, like `spaces/AAAAAAAAAAA`.
         let space = msg.app_channel.trim_matches('/');
         let url = format!("{CHAT_API_BASE}/{space}/messages");
-        let body = format!("{}: {}", msg.sender_display, msg.body);
+        let body = msg.rendered_body(SenderRenderStyle::Plain);
         let payload = json!({ "text": body });
 
         let token = self.bearer_token();
@@ -96,7 +99,10 @@ impl MessageBridge for GoogleChatApp {
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
         Some(
             salvo::Router::with_path("webhooks/googlechat")
-                .hoop(affix_state::inject(GoogleChatWebhookState { ctx }))
+                .hoop(affix_state::inject(GoogleChatWebhookState {
+                    ctx,
+                    inbound_jwt: self.inbound_jwt.clone(),
+                }))
                 .post(googlechat_delivery),
         )
     }
@@ -105,6 +111,7 @@ impl MessageBridge for GoogleChatApp {
 #[derive(Clone)]
 struct GoogleChatWebhookState {
     ctx: Arc<MessageContext>,
+    inbound_jwt: Arc<webhook::JwtVerifier>,
 }
 
 #[handler]
@@ -113,6 +120,15 @@ async fn googlechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Res
         webhook::bad_request(res, "webhook state missing");
         return;
     };
+    let authorization = req.header::<String>("authorization");
+    if let Err(error) = state
+        .inbound_jwt
+        .verify_authorization(authorization.as_deref())
+        .await
+    {
+        webhook::unauthorized(res, format!("Google Chat JWT rejected: {error}"));
+        return;
+    }
     let Some(body) = webhook::json_body(req, res).await else {
         return;
     };

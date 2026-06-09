@@ -12,7 +12,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
 use cokret_bridge_messaging::{
-    AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage, webhook,
+    AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
+    SenderRenderStyle, webhook,
 };
 use cokret_bridge_runtime::cache::TokenCache;
 use cokret_bridge_runtime::{BridgeError, Result};
@@ -129,7 +130,7 @@ impl MessageBridge for WechatApp {
     ) -> Result<AppMessageRef> {
         let token = self.access_token(&ctx).await?;
 
-        let text = format!("{}: {}", msg.sender_display, msg.body);
+        let text = msg.rendered_body(SenderRenderStyle::Plain);
 
         let (url, payload) = match self.mode() {
             WechatMode::Work => (

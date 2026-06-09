@@ -18,7 +18,8 @@ where M: MessageBridge, F: FnOnce(Arc<MessageContext>) -> Result<M>;
 // cokret-bridge-runtime 重导出:Config(Config::load(path))、BridgeError/Result、logging::init
 pub struct MessageContext { pub http: reqwest::Client, /* + core()/store() */ }
 impl MessageContext {
-    // 出站:把 app 入站消息提交到 cokret realm(签名 external_ref),返回 event_id
+    // 出站:把 app 入站消息作为 per-user Ghost Actor 事件提交到 cokret realm
+    // (签名 external_ref),返回 event_id
     pub async fn submit_app_message(&self, msg: InboundAppMessage) -> Result<String>;
 }
 pub struct InboundAppMessage  { pub app_channel: String, pub app_user: String,
@@ -58,21 +59,16 @@ pub trait MessageBridge: Send + Sync + 'static {
 
 - **有 SDK 的**(telegram=teloxide):`run` 跑 SDK 的接收循环,回调里调
   `ctx.submit_app_message(InboundAppMessage{..})`;`send_to_app` 用 SDK 发消息。
-- **websocket 的**(slack/zulip/teams=tokio-tungstenite):`run` 建立 ws 长连,
+- **websocket 的**(slack=tokio-tungstenite):`run` 建立 ws 长连,
   读循环解析消息→`submit_app_message`;`send_to_app` 用 `ctx.http`(reqwest)POST app API。
-- **纯 HTTP/webhook 的**(feishu/wechat/dingtalk/whatsapp/line/qq/googlechat/imessage/messager):
+- **长轮询的**(zulip):`run` 建立官方 event queue 并长轮询,
+  读循环解析消息→`submit_app_message`;`send_to_app` 用 `ctx.http` POST app API。
+- **纯 HTTP/webhook 的**(feishu/wechat/dingtalk/whatsapp/line/qq/googlechat/imessage/messager/teams):
   `send_to_app` 用 `ctx.http` POST 到 app 的发送 API;`run` 为保活循环
   (`loop { tokio::time::sleep(30s).await }`),入站走 `webhook_router`——返回一个 salvo `Router`,
   handler 内**对每条投递做来源验签**,再构造 `InboundAppMessage` 调 `webhook::submit(ctx, ..)`。
-  参考 `crates/line`(`x-line-signature` HMAC-SHA256 是当前唯一完整正例)。
-  **⚠ 验签现状(勿混淆"接入握手回显"与"投递验签"):**
-  - **平台接入握手回显**(GET `challenge`/`echostr`、`hub.verify_token`)**只在订阅注册时用一次,
-    不是对后续每条投递的来源认证**,不可当作验签。
-  - line/飞书/微信/钉钉/WhatsApp/Messenger/QQ/iMessage 的 POST 路径已 fail-closed 校验平台签名或
-    shared secret;WhatsApp/Messenger 的 `hub.verify_token` 只用于 GET handshake,POST 使用
-    `X-Hub-Signature-256` HMAC。
-  - googlechat/teams 不得裸接 POST。在完整的平台 Bearer JWT/JWKS verifier 接入前,handler MUST
-    fail closed,不得调用 `webhook::submit`。
+  参考 `messaging::webhook` 的 HMAC/JWKS helper。接入握手回显(GET `challenge`/`echostr`、
+  `hub.verify_token`)只用于订阅注册,不得替代后续 POST 投递验签。
   关键是**编译通过、出入站链路真实可读**;来源验签未补齐者 MUST 明确标 TODO,不得宣称"已验签"。
 
 ## 端口分配(避免冲突,写进各自 sample 配置)
@@ -83,8 +79,8 @@ messager=9113, teams=9114。
 
 ## 不要做
 
-- 不要修改两个共享 crate `cokret-bridge-runtime` / `cokret-bridge-messaging`
-  (发现确需改动,写到 `_bridges_todos.md` §3,勿擅改)。
+- 只有跨桥共享能力才放入 `cokret-bridge-runtime` / `cokret-bridge-messaging`;
+  单桥协议细节留在各自 adapter。
 - 各 crate 位于 `crates/<短名>`(去掉 `cokret-bridge-` 前缀;包名仍 `cokret-bridge-*`);
   workspace `members = ["crates/*"]` 自动纳入,无需手改根 `Cargo.toml`。
 - 不要引入未缓存的专有 SDK(feishu-sdk/dingtalk-sdk 等);一律用 `reqwest`。

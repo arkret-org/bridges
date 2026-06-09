@@ -10,7 +10,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
 use cokret_bridge_messaging::{
-    AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage, webhook,
+    AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
+    SenderRenderStyle, webhook,
 };
 use cokret_bridge_runtime::{BridgeError, Result};
 use serde_json::{Value, json};
@@ -61,7 +62,7 @@ impl MessageBridge for MessagerApp {
         msg: OutboundAppMessage,
     ) -> Result<AppMessageRef> {
         // app_channel is the PSID (Page-Scoped User ID), used as recipient.id.
-        let body = format!("{}: {}", msg.sender_display, msg.body);
+        let body = msg.rendered_body(SenderRenderStyle::Plain);
         let payload = json!({
             "recipient": { "id": msg.app_channel },
             "messaging_type": "RESPONSE",

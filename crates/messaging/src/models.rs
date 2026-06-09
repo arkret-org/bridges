@@ -49,8 +49,13 @@ pub struct NewMessageMapping<'a> {
 #[diesel(table_name = user_mappings)]
 pub struct UserMapping {
     pub id: i64,
-    pub app_user_id: String,
+    pub protocol: String,
+    pub tenant: String,
+    pub external_user_id: String,
     pub cokret_actor_did: String,
+    pub profile_event_ref: String,
+    pub accountability_grant_ref: String,
+    pub authorization_ref: String,
     pub display_name: Option<String>,
     pub created_at: i64,
 }
@@ -58,8 +63,13 @@ pub struct UserMapping {
 #[derive(Debug, Clone, Insertable)]
 #[diesel(table_name = user_mappings)]
 pub struct NewUserMapping<'a> {
-    pub app_user_id: &'a str,
+    pub protocol: &'a str,
+    pub tenant: &'a str,
+    pub external_user_id: &'a str,
     pub cokret_actor_did: &'a str,
+    pub profile_event_ref: &'a str,
+    pub accountability_grant_ref: &'a str,
+    pub authorization_ref: &'a str,
     pub display_name: Option<&'a str>,
     pub created_at: i64,
 }

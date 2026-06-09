@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cokret_bridge_messaging::{
-    AppMessageRef, Attachment, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
+    AppMessageRef, Attachment, InboundAppMessage, MessageBridge, MessageContext,
+    OutboundAppMessage, SenderRenderStyle,
 };
 use cokret_bridge_runtime::{BridgeError, Result};
 use teloxide::prelude::*;
@@ -89,7 +90,7 @@ impl MessageBridge for TelegramApp {
             BridgeError::App(format!("invalid Telegram chat id: {}", msg.app_channel))
         })?;
         let bot = Bot::new(&self.token);
-        let body = format!("{}: {}", msg.sender_display, msg.body);
+        let body = msg.rendered_body(SenderRenderStyle::Plain);
 
         // With an attachment: download the cokret blob and send it as a document.
         if let Some(att) = &msg.attachment {

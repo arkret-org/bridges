@@ -5,6 +5,7 @@
 
 use std::{fmt, path::Path};
 
+use cokret::signatures::PublicKeyMaterial;
 use serde::Deserialize;
 
 use crate::error::{BridgeError, Result};
@@ -73,10 +74,31 @@ pub struct CokretConfig {
     /// The signing verification method id (the kid on the DID).
     #[serde(default = "default_kid")]
     pub verification_method_id: String,
-    /// The realm this bridge belongs to by default (fallback when there is no
-    /// mapping).
+    /// The only cokret server DID accepted for server -> bridge transaction
+    /// pushes.
+    pub trusted_server_did: String,
+    /// Static DID verification-method public keys accepted for HTTP message
+    /// signatures and event envelope proofs on transaction pushes.
     #[serde(default)]
-    pub default_realm_id: Option<String>,
+    pub trusted_verification_methods: Vec<TrustedVerificationMethodConfig>,
+    /// Optional `ck.edge.applet.describe.namespaces` override. When omitted,
+    /// the runtime publishes a narrow namespace derived from the bridge id and
+    /// service DID.
+    #[serde(default)]
+    pub applet_namespaces: Option<serde_json::Value>,
+    /// Optional `ck.edge.applet.describe.limits` override.
+    #[serde(default)]
+    pub applet_limits: Option<serde_json::Value>,
+    /// Optional `ck.edge.applet.describe.auth` override.
+    #[serde(default)]
+    pub applet_auth: Option<serde_json::Value>,
+}
+
+/// A configured verification method and its Ed25519 public key material.
+#[derive(Clone, Debug, Deserialize)]
+pub struct TrustedVerificationMethodConfig {
+    pub verification_method: String,
+    pub public_key: PublicKeyMaterial,
 }
 
 impl fmt::Debug for CokretConfig {
@@ -88,7 +110,14 @@ impl fmt::Debug for CokretConfig {
             .field("access_token", &"<redacted>")
             .field("signing_key_seed_hex", &"<redacted>")
             .field("verification_method_id", &self.verification_method_id)
-            .field("default_realm_id", &self.default_realm_id)
+            .field("trusted_server_did", &self.trusted_server_did)
+            .field(
+                "trusted_verification_methods",
+                &self.trusted_verification_methods,
+            )
+            .field("applet_namespaces", &self.applet_namespaces)
+            .field("applet_limits", &self.applet_limits)
+            .field("applet_auth", &self.applet_auth)
             .finish()
     }
 }

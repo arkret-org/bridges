@@ -24,11 +24,16 @@ diesel::table! {
 }
 
 diesel::table! {
-    /// App user <-> Cokret actor DID mapping.
+    /// External protocol/user <-> Cokret actor DID mapping.
     user_mappings (id) {
         id -> BigInt,
-        app_user_id -> Text,
+        protocol -> Text,
+        tenant -> Text,
+        external_user_id -> Text,
         cokret_actor_did -> Text,
+        profile_event_ref -> Text,
+        accountability_grant_ref -> Text,
+        authorization_ref -> Text,
         display_name -> Nullable<Text>,
         created_at -> BigInt,
     }

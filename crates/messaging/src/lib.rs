@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cokret::events::{MediaContent, TextMessageContent};
-use cokret::{BlobRef, Event};
+use cokret::{BlobRef, Did, Event};
 use cokret_bridge_runtime::app::{
     AppletResolver, BridgeApp, BridgeContext, ResolvedActor, ResolvedRealm,
 };
@@ -25,6 +25,7 @@ use cokret_bridge_runtime::db::DatabaseManager;
 use cokret_bridge_runtime::{BridgeError, Result};
 use diesel::prelude::*;
 use futures::StreamExt;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub use cokret_bridge_runtime as runtime;
@@ -34,6 +35,7 @@ pub use runtime::salvo;
 use models::{NewMessageMapping, NewRoomMapping, NewUserMapping};
 
 const EXTERNAL_REF_SCHEMA: &str = "ck.external_ref.messaging.v1";
+const GHOST_ACTOR_PROVISION_REQUEST_SCHEMA: &str = "ck.applet.ghost_actor.provision_request.v1";
 const MESSAGE_MAPPING_KEY_SEPARATOR: char = '\u{1f}';
 
 /// An inbound message from an external app into Cokret.
@@ -43,6 +45,31 @@ pub struct InboundAppMessage {
     pub app_user: String,
     pub app_message_id: String,
     pub body: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct GhostActorProvisionRequest {
+    schema: &'static str,
+    applet_id: String,
+    service_did: Did,
+    ghost_actor_did: Did,
+    protocol: String,
+    tenant: String,
+    external_user_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display_name: Option<String>,
+    realm_id: String,
+    external_ref: Value,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct GhostActorProvisionResponse {
+    ghost_actor_did: Did,
+    profile_event_ref: String,
+    accountability_grant_ref: String,
+    authorization_ref: String,
+    #[serde(default)]
+    display_name: Option<String>,
 }
 
 /// An outbound message from Cokret to an external app.
@@ -55,6 +82,27 @@ pub struct OutboundAppMessage {
     /// Present when the cokret event carried media; the adapter may download it
     /// via [`MessageContext::download_blob`] and re-send to the app.
     pub attachment: Option<Attachment>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SenderRenderStyle {
+    Plain,
+    MarkdownItalic,
+    MarkdownBold,
+}
+
+impl OutboundAppMessage {
+    pub fn rendered_body(&self, style: SenderRenderStyle) -> String {
+        match style {
+            SenderRenderStyle::Plain => format!("{}: {}", self.sender_display, self.body),
+            SenderRenderStyle::MarkdownItalic => {
+                format!("*{}*: {}", self.sender_display, self.body)
+            }
+            SenderRenderStyle::MarkdownBold => {
+                format!("**{}**: {}", self.sender_display, self.body)
+            }
+        }
+    }
 }
 
 /// The app-side message reference returned after the adapter sends.
@@ -293,29 +341,44 @@ impl MessageStore {
 
     pub fn upsert_user(
         &self,
-        app_user: &str,
+        protocol: &str,
+        tenant: &str,
+        external_user_id: &str,
         actor_did: &str,
+        profile_event_ref: &str,
+        accountability_grant_ref: &str,
+        authorization_ref: &str,
         display: Option<&str>,
     ) -> Result<()> {
         use schema::user_mappings::dsl;
 
         let mut conn = self.db.conn()?;
         let exists = dsl::user_mappings
-            .filter(dsl::app_user_id.eq(app_user))
+            .filter(dsl::protocol.eq(protocol))
+            .filter(dsl::tenant.eq(tenant))
+            .filter(dsl::external_user_id.eq(external_user_id))
             .first::<UserMapping>(&mut conn)
             .optional()?;
         if let Some(existing) = exists {
             diesel::update(dsl::user_mappings.filter(dsl::id.eq(existing.id)))
                 .set((
                     dsl::cokret_actor_did.eq(actor_did),
+                    dsl::profile_event_ref.eq(profile_event_ref),
+                    dsl::accountability_grant_ref.eq(accountability_grant_ref),
+                    dsl::authorization_ref.eq(authorization_ref),
                     dsl::display_name.eq(display),
                 ))
                 .execute(&mut conn)?;
         } else {
             diesel::insert_into(dsl::user_mappings)
                 .values(NewUserMapping {
-                    app_user_id: app_user,
+                    protocol,
+                    tenant,
+                    external_user_id,
                     cokret_actor_did: actor_did,
+                    profile_event_ref,
+                    accountability_grant_ref,
+                    authorization_ref,
                     display_name: display,
                     created_at: now_ts(),
                 })
@@ -324,14 +387,20 @@ impl MessageStore {
         Ok(())
     }
 
-    pub fn actor_for_app_user(&self, app_user: &str) -> Result<Option<String>> {
+    pub fn ghost_actor_for_app_user(
+        &self,
+        protocol: &str,
+        tenant: &str,
+        external_user_id: &str,
+    ) -> Result<Option<UserMapping>> {
         use schema::user_mappings::dsl;
 
         let mut conn = self.db.conn()?;
         Ok(dsl::user_mappings
-            .filter(dsl::app_user_id.eq(app_user))
-            .select(dsl::cokret_actor_did)
-            .first::<String>(&mut conn)
+            .filter(dsl::protocol.eq(protocol))
+            .filter(dsl::tenant.eq(tenant))
+            .filter(dsl::external_user_id.eq(external_user_id))
+            .first::<UserMapping>(&mut conn)
             .optional()?)
     }
 
@@ -371,7 +440,11 @@ impl AppletResolver for MessageResolver {
         Some(ResolvedActor {
             actor_id: row.cokret_actor_did,
             display_name: row.display_name,
-            external_ref: json!({ "app_user": row.app_user_id }),
+            external_ref: json!({
+                "protocol": row.protocol,
+                "tenant": row.tenant,
+                "external_user_id": row.external_user_id,
+            }),
         })
     }
 
@@ -411,6 +484,119 @@ fn bridge_tenant(config: &runtime::Config) -> String {
         .unwrap_or_else(|| normalized_external_id(&config.cokret.service_did))
 }
 
+fn requested_ghost_actor_did_for_user(
+    config: &runtime::Config,
+    protocol: &str,
+    tenant: &str,
+    external_user_id: &str,
+) -> Result<String> {
+    if protocol.trim().is_empty() {
+        return Err(BridgeError::App("bridge protocol must not be empty".into()));
+    }
+    if tenant.trim().is_empty() {
+        return Err(BridgeError::App("bridge tenant must not be empty".into()));
+    }
+    if external_user_id.trim().is_empty() {
+        return Err(BridgeError::App(
+            "inbound app_user is required for ghost actor mapping".into(),
+        ));
+    }
+    let material =
+        [protocol, tenant, external_user_id].join(&MESSAGE_MAPPING_KEY_SEPARATOR.to_string());
+    let encoded = cokret::base64url_encode(material.as_bytes());
+    let did = format!(
+        "{}:ghost:u{encoded}",
+        config.cokret.service_did.trim_end_matches(':')
+    );
+    Did::new(did.clone())?;
+    Ok(did)
+}
+
+fn ghost_actor_provision_path(applet_id: &str) -> Result<String> {
+    if applet_id.trim().is_empty() || applet_id.contains('/') {
+        return Err(BridgeError::Config(
+            "cokret.applet_id must be a non-empty path-safe ck:applet id".into(),
+        ));
+    }
+    Ok(format!(
+        "/_cokret/self/applets/{applet_id}/ghosts/provision"
+    ))
+}
+
+fn external_ref_for_user(
+    config: &runtime::Config,
+    protocol: &str,
+    tenant: &str,
+    external_user_id: &str,
+) -> Value {
+    json!({
+        "protocol": protocol,
+        "tenant": tenant,
+        "external_user_id": external_user_id,
+        "source": config.bridge.bridge_id.clone(),
+    })
+}
+
+async fn provision_ghost_actor(
+    edge: &runtime::CokretEdge,
+    config: &runtime::Config,
+    protocol: &str,
+    tenant: &str,
+    external_user_id: &str,
+    display_name: Option<&str>,
+    realm_id: &str,
+) -> Result<GhostActorProvisionResponse> {
+    let ghost_actor_did = Did::new(requested_ghost_actor_did_for_user(
+        config,
+        protocol,
+        tenant,
+        external_user_id,
+    )?)?;
+    let request = GhostActorProvisionRequest {
+        schema: GHOST_ACTOR_PROVISION_REQUEST_SCHEMA,
+        applet_id: config.cokret.applet_id.clone(),
+        service_did: edge.service_did().clone(),
+        ghost_actor_did: ghost_actor_did.clone(),
+        protocol: protocol.to_owned(),
+        tenant: tenant.to_owned(),
+        external_user_id: external_user_id.to_owned(),
+        display_name: display_name.map(str::to_owned),
+        realm_id: realm_id.to_owned(),
+        external_ref: external_ref_for_user(config, protocol, tenant, external_user_id),
+    };
+    let path = ghost_actor_provision_path(&config.cokret.applet_id)?;
+    let response: GhostActorProvisionResponse = edge.client().post(&path, &request).await?;
+    validate_ghost_provision_response(&ghost_actor_did, response)
+}
+
+fn validate_ghost_provision_response(
+    requested_actor: &Did,
+    response: GhostActorProvisionResponse,
+) -> Result<GhostActorProvisionResponse> {
+    if &response.ghost_actor_did != requested_actor {
+        return Err(BridgeError::Cokret(format!(
+            "ghost provisioning returned actor {} but requested {}",
+            response.ghost_actor_did, requested_actor
+        )));
+    }
+    require_nonempty_ref("profile_event_ref", &response.profile_event_ref)?;
+    require_nonempty_ref(
+        "accountability_grant_ref",
+        &response.accountability_grant_ref,
+    )?;
+    require_nonempty_ref("authorization_ref", &response.authorization_ref)?;
+    Ok(response)
+}
+
+fn require_nonempty_ref(label: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        return Err(BridgeError::Cokret(format!(
+            "ghost provisioning response requires {label}"
+        )));
+    }
+    Ok(())
+}
+
 fn message_mapping_channel_key(config: &runtime::Config, app_channel: &str) -> String {
     [
         bridge_protocol(config),
@@ -441,10 +627,6 @@ fn external_ref_for_message(config: &runtime::Config, msg: &InboundAppMessage) -
     })
 }
 
-fn bridge_external_ref(payload: &Value) -> Option<&Value> {
-    payload.get("bridge_external_ref")
-}
-
 fn host_allowed(host: &str, allowed_hosts: &[&str]) -> bool {
     allowed_hosts.iter().any(|allowed| {
         host.eq_ignore_ascii_case(allowed)
@@ -473,10 +655,16 @@ fn schema_sql() -> &'static [&'static str] {
             UNIQUE(app_channel_id, app_message_id))",
         "CREATE TABLE IF NOT EXISTS user_mappings (\
             id INTEGER PRIMARY KEY AUTOINCREMENT,\
-            app_user_id TEXT NOT NULL UNIQUE,\
-            cokret_actor_did TEXT NOT NULL,\
+            protocol TEXT NOT NULL,\
+            tenant TEXT NOT NULL,\
+            external_user_id TEXT NOT NULL,\
+            cokret_actor_did TEXT NOT NULL UNIQUE,\
+            profile_event_ref TEXT NOT NULL,\
+            accountability_grant_ref TEXT NOT NULL,\
+            authorization_ref TEXT NOT NULL,\
             display_name TEXT,\
-            created_at BIGINT NOT NULL)",
+            created_at BIGINT NOT NULL,\
+            UNIQUE(protocol, tenant, external_user_id))",
     ]
 }
 
@@ -499,10 +687,16 @@ fn schema_sql() -> &'static [&'static str] {
             UNIQUE(app_channel_id, app_message_id))",
         "CREATE TABLE IF NOT EXISTS user_mappings (\
             id BIGSERIAL PRIMARY KEY,\
-            app_user_id TEXT NOT NULL UNIQUE,\
-            cokret_actor_did TEXT NOT NULL,\
+            protocol TEXT NOT NULL,\
+            tenant TEXT NOT NULL,\
+            external_user_id TEXT NOT NULL,\
+            cokret_actor_did TEXT NOT NULL UNIQUE,\
+            profile_event_ref TEXT NOT NULL,\
+            accountability_grant_ref TEXT NOT NULL,\
+            authorization_ref TEXT NOT NULL,\
             display_name TEXT,\
-            created_at BIGINT NOT NULL)",
+            created_at BIGINT NOT NULL,\
+            UNIQUE(protocol, tenant, external_user_id))",
     ]
 }
 
@@ -528,11 +722,18 @@ fn schema_sql() -> &'static [&'static str] {
             UNIQUE KEY message_cokret_event_id_unique (cokret_event_id(191)))",
         "CREATE TABLE IF NOT EXISTS user_mappings (\
             id BIGINT AUTO_INCREMENT PRIMARY KEY,\
-            app_user_id TEXT NOT NULL,\
+            protocol TEXT NOT NULL,\
+            tenant TEXT NOT NULL,\
+            external_user_id TEXT NOT NULL,\
             cokret_actor_did TEXT NOT NULL,\
+            profile_event_ref TEXT NOT NULL,\
+            accountability_grant_ref TEXT NOT NULL,\
+            authorization_ref TEXT NOT NULL,\
             display_name TEXT,\
             created_at BIGINT NOT NULL,\
-            UNIQUE KEY user_app_user_id_unique (app_user_id(191)))",
+            UNIQUE KEY user_protocol_tenant_external_id_unique \
+                (protocol(64), tenant(191), external_user_id(191)),\
+            UNIQUE KEY user_cokret_actor_did_unique (cokret_actor_did(191)))",
     ]
 }
 
@@ -668,10 +869,21 @@ impl MessageContext {
         let realm = self
             .store
             .realm_for_channel(&msg.app_channel)?
-            .or_else(|| self.inner.config.cokret.default_realm_id.clone())
             .ok_or_else(|| {
-                BridgeError::App(format!("channel {} has no realm mapping", msg.app_channel))
+                BridgeError::App(format!(
+                    "channel {} has no realm mapping; create an explicit room mapping",
+                    msg.app_channel
+                ))
             })?;
+
+        let protocol = bridge_protocol(&self.inner.config);
+        let tenant = bridge_tenant(&self.inner.config);
+        let external_user_id = normalized_external_id(&msg.app_user);
+        if external_user_id.is_empty() {
+            return Err(BridgeError::App(
+                "inbound app_user is required for ghost actor mapping".into(),
+            ));
+        }
 
         let mapping_channel_key = message_mapping_channel_key(&self.inner.config, &msg.app_channel);
         let event_id = self
@@ -680,9 +892,13 @@ impl MessageContext {
             .run(&mapping_channel_key, || {
                 let edge = self.inner.edge.clone();
                 let store = self.store.clone();
-                let external_ref = external_ref_for_message(&self.inner.config, msg);
+                let config = self.inner.config.clone();
+                let external_ref = external_ref_for_message(&config, msg);
                 let mapping_channel_key = mapping_channel_key.clone();
                 let external_event_id = external_event_id.clone();
+                let protocol = protocol.clone();
+                let tenant = tenant.clone();
+                let external_user_id = external_user_id.clone();
                 let realm_for_submit = realm.clone();
                 let realm_for_record = realm.clone();
                 async move {
@@ -691,12 +907,62 @@ impl MessageContext {
                     {
                         return Ok::<String, BridgeError>(existing_event_id);
                     }
+                    let mapping = match store.ghost_actor_for_app_user(
+                        &protocol,
+                        &tenant,
+                        &external_user_id,
+                    )? {
+                        Some(mapping) => mapping,
+                        None => {
+                            let provisioned = provision_ghost_actor(
+                                &edge,
+                                &config,
+                                &protocol,
+                                &tenant,
+                                &external_user_id,
+                                Some(&external_user_id),
+                                &realm_for_submit,
+                            )
+                            .await?;
+                            let actor_did = provisioned.ghost_actor_did.to_string();
+                            let display_name = provisioned
+                                .display_name
+                                .as_deref()
+                                .or(Some(external_user_id.as_str()));
+                            store.upsert_user(
+                                &protocol,
+                                &tenant,
+                                &external_user_id,
+                                &actor_did,
+                                &provisioned.profile_event_ref,
+                                &provisioned.accountability_grant_ref,
+                                &provisioned.authorization_ref,
+                                display_name,
+                            )?;
+                            store
+                                .ghost_actor_for_app_user(&protocol, &tenant, &external_user_id)?
+                                .ok_or_else(|| {
+                                    BridgeError::Database(
+                                        "ghost actor provisioning row was not persisted".into(),
+                                    )
+                                })?
+                        }
+                    };
+                    require_nonempty_ref("profile_event_ref", &mapping.profile_event_ref)?;
+                    require_nonempty_ref(
+                        "accountability_grant_ref",
+                        &mapping.accountability_grant_ref,
+                    )?;
+                    require_nonempty_ref("authorization_ref", &mapping.authorization_ref)?;
+                    let actor = Did::new(mapping.cokret_actor_did)?;
                     let event_id = edge
-                        .submit_with_external_ref(
+                        .submit_with_external_ref_as(
+                            &actor,
                             &realm_for_submit,
                             "ck.message.create",
                             payload,
                             external_ref,
+                            &mapping.authorization_ref,
                         )
                         .await?;
                     store.record_message(
@@ -745,6 +1011,23 @@ struct MessageAdapter<M: MessageBridge> {
     ctx: Arc<MessageContext>,
 }
 
+fn sender_display_for_event(store: &MessageStore, event: &Event) -> Result<String> {
+    let actor_did = event.actor_id.to_string();
+    let mut display = match store.user_by_actor(&actor_did)? {
+        Some(row) => row
+            .display_name
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or(row.external_user_id),
+        None => actor_did,
+    };
+    if let Some(executed_by) = event.executed_by.as_ref() {
+        if executed_by != &event.actor_id {
+            display = format!("{display} via {executed_by}");
+        }
+    }
+    Ok(display)
+}
+
 #[async_trait]
 impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
     fn name(&self) -> &str {
@@ -762,11 +1045,20 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
         // Skip events this bridge itself submitted (app -> cokret), which the
         // server echoes back, to avoid an outbound loop back into the app.
         let our_id = &self.ctx.core().config.bridge.bridge_id;
-        let originated_here = bridge_external_ref(&event.content)
+        let originated_here = event
+            .unsigned
+            .get("external_ref")
             .and_then(|r| r.get("source"))
             .and_then(Value::as_str)
             == Some(our_id.as_str());
         if originated_here {
+            return Ok(());
+        }
+        if &event.actor_id == self.ctx.core().edge.service_did() {
+            return Ok(());
+        }
+        let event_id = event.event_id.to_string();
+        if self.ctx.store.app_message_for_event(&event_id)?.is_some() {
             return Ok(());
         }
         let realm_id = event.realm_id.to_string();
@@ -776,9 +1068,10 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
         };
         let body = extract_plain_body(&event.content);
         let attachment = extract_attachment(&event.content);
+        let sender_display = sender_display_for_event(&self.ctx.store, &event)?;
         let out = OutboundAppMessage {
             app_channel: channel.clone(),
-            sender_display: event.actor_id.to_string(),
+            sender_display,
             body,
             reply_to: None,
             attachment,
