@@ -17,7 +17,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cokret::events::{MediaContent, TextMessageContent};
-use cokret::{BlobRef, Did, Event};
+use cokret::{
+    AppletId, BlobRef, Did, Event, GhostActorProvisionOutcome, GhostActorProvisionRequestBody,
+    RealmId,
+};
 use cokret_bridge_runtime::app::{
     AppletResolver, BridgeApp, BridgeContext, ResolvedActor, ResolvedRealm,
 };
@@ -25,7 +28,6 @@ use cokret_bridge_runtime::db::DatabaseManager;
 use cokret_bridge_runtime::{BridgeError, Result};
 use diesel::prelude::*;
 use futures::StreamExt;
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub use cokret_bridge_runtime as runtime;
@@ -35,7 +37,6 @@ pub use runtime::salvo;
 use models::{NewMessageMapping, NewRoomMapping, NewUserMapping};
 
 const EXTERNAL_REF_SCHEMA: &str = "ck.external_ref.messaging.v1";
-const GHOST_ACTOR_PROVISION_REQUEST_SCHEMA: &str = "ck.applet.ghost_actor.provision_request.v1";
 const MESSAGE_MAPPING_KEY_SEPARATOR: char = '\u{1f}';
 
 /// An inbound message from an external app into Cokret.
@@ -45,31 +46,6 @@ pub struct InboundAppMessage {
     pub app_user: String,
     pub app_message_id: String,
     pub body: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct GhostActorProvisionRequest {
-    schema: &'static str,
-    applet_id: String,
-    service_did: Did,
-    ghost_actor_id: Did,
-    protocol: String,
-    tenant: String,
-    external_user_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    display_name: Option<String>,
-    realm_id: String,
-    external_ref: Value,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct GhostActorProvisionResponse {
-    ghost_actor_id: Did,
-    profile_event_ref: String,
-    accountability_grant_ref: String,
-    authorization_ref: String,
-    #[serde(default)]
-    display_name: Option<String>,
 }
 
 /// An outbound message from Cokret to an external app.
@@ -545,34 +521,35 @@ async fn provision_ghost_actor(
     external_user_id: &str,
     display_name: Option<&str>,
     realm_id: &str,
-) -> Result<GhostActorProvisionResponse> {
+) -> Result<GhostActorProvisionOutcome> {
     let ghost_actor_id = Did::new(requested_ghost_actor_id_for_user(
         config,
         protocol,
         tenant,
         external_user_id,
     )?)?;
-    let request = GhostActorProvisionRequest {
-        schema: GHOST_ACTOR_PROVISION_REQUEST_SCHEMA,
-        applet_id: config.cokret.applet_id.clone(),
-        service_did: edge.service_did().clone(),
-        ghost_actor_id: ghost_actor_id.clone(),
-        protocol: protocol.to_owned(),
-        tenant: tenant.to_owned(),
-        external_user_id: external_user_id.to_owned(),
-        display_name: display_name.map(str::to_owned),
-        realm_id: realm_id.to_owned(),
-        external_ref: external_ref_for_user(config, protocol, tenant, external_user_id),
-    };
+    let mut request = GhostActorProvisionRequestBody::new(
+        AppletId::new(config.cokret.applet_id.clone())?,
+        edge.service_did().clone(),
+        ghost_actor_id.clone(),
+        protocol,
+        tenant,
+        external_user_id,
+        RealmId::new(realm_id.to_owned())?,
+        external_ref_for_user(config, protocol, tenant, external_user_id),
+    );
+    if let Some(display_name) = display_name {
+        request = request.with_display_name(display_name);
+    }
     let path = ghost_actor_provision_path(&config.cokret.applet_id)?;
-    let response: GhostActorProvisionResponse = edge.client().post(&path, &request).await?;
+    let response: GhostActorProvisionOutcome = edge.client().post(&path, &request).await?;
     validate_ghost_provision_response(&ghost_actor_id, response)
 }
 
 fn validate_ghost_provision_response(
     requested_actor: &Did,
-    response: GhostActorProvisionResponse,
-) -> Result<GhostActorProvisionResponse> {
+    response: GhostActorProvisionOutcome,
+) -> Result<GhostActorProvisionOutcome> {
     if &response.ghost_actor_id != requested_actor {
         return Err(BridgeError::Cokret(format!(
             "ghost provisioning returned actor {} but requested {}",
