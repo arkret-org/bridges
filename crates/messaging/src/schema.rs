@@ -30,7 +30,7 @@ diesel::table! {
         protocol -> Text,
         tenant -> Text,
         external_user_id -> Text,
-        cokret_actor_did -> Text,
+        cokret_actor_id -> Text,
         profile_event_ref -> Text,
         accountability_grant_ref -> Text,
         authorization_ref -> Text,

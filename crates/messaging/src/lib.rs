@@ -52,7 +52,7 @@ struct GhostActorProvisionRequest {
     schema: &'static str,
     applet_id: String,
     service_did: Did,
-    ghost_actor_did: Did,
+    ghost_actor_id: Did,
     protocol: String,
     tenant: String,
     external_user_id: String,
@@ -64,7 +64,7 @@ struct GhostActorProvisionRequest {
 
 #[derive(Clone, Debug, Deserialize)]
 struct GhostActorProvisionResponse {
-    ghost_actor_did: Did,
+    ghost_actor_id: Did,
     profile_event_ref: String,
     accountability_grant_ref: String,
     authorization_ref: String,
@@ -344,7 +344,7 @@ impl MessageStore {
         protocol: &str,
         tenant: &str,
         external_user_id: &str,
-        actor_did: &str,
+        actor_id: &str,
         profile_event_ref: &str,
         accountability_grant_ref: &str,
         authorization_ref: &str,
@@ -362,7 +362,7 @@ impl MessageStore {
         if let Some(existing) = exists {
             diesel::update(dsl::user_mappings.filter(dsl::id.eq(existing.id)))
                 .set((
-                    dsl::cokret_actor_did.eq(actor_did),
+                    dsl::cokret_actor_id.eq(actor_id),
                     dsl::profile_event_ref.eq(profile_event_ref),
                     dsl::accountability_grant_ref.eq(accountability_grant_ref),
                     dsl::authorization_ref.eq(authorization_ref),
@@ -375,7 +375,7 @@ impl MessageStore {
                     protocol,
                     tenant,
                     external_user_id,
-                    cokret_actor_did: actor_did,
+                    cokret_actor_id: actor_id,
                     profile_event_ref,
                     accountability_grant_ref,
                     authorization_ref,
@@ -405,12 +405,12 @@ impl MessageStore {
     }
 
     /// Reverse lookup for ghost resolution: find the user row by cokret actor DID.
-    pub fn user_by_actor(&self, actor_did: &str) -> Result<Option<UserMapping>> {
+    pub fn user_by_actor(&self, actor_id: &str) -> Result<Option<UserMapping>> {
         use schema::user_mappings::dsl;
 
         let mut conn = self.db.conn()?;
         Ok(dsl::user_mappings
-            .filter(dsl::cokret_actor_did.eq(actor_did))
+            .filter(dsl::cokret_actor_id.eq(actor_id))
             .first::<UserMapping>(&mut conn)
             .optional()?)
     }
@@ -438,7 +438,7 @@ impl AppletResolver for MessageResolver {
     fn resolve_actor(&self, actor_id: &str) -> Option<ResolvedActor> {
         let row = self.store.user_by_actor(actor_id).ok().flatten()?;
         Some(ResolvedActor {
-            actor_id: row.cokret_actor_did,
+            actor_id: row.cokret_actor_id,
             display_name: row.display_name,
             external_ref: json!({
                 "protocol": row.protocol,
@@ -484,7 +484,7 @@ fn bridge_tenant(config: &runtime::Config) -> String {
         .unwrap_or_else(|| normalized_external_id(&config.cokret.service_did))
 }
 
-fn requested_ghost_actor_did_for_user(
+fn requested_ghost_actor_id_for_user(
     config: &runtime::Config,
     protocol: &str,
     tenant: &str,
@@ -546,7 +546,7 @@ async fn provision_ghost_actor(
     display_name: Option<&str>,
     realm_id: &str,
 ) -> Result<GhostActorProvisionResponse> {
-    let ghost_actor_did = Did::new(requested_ghost_actor_did_for_user(
+    let ghost_actor_id = Did::new(requested_ghost_actor_id_for_user(
         config,
         protocol,
         tenant,
@@ -556,7 +556,7 @@ async fn provision_ghost_actor(
         schema: GHOST_ACTOR_PROVISION_REQUEST_SCHEMA,
         applet_id: config.cokret.applet_id.clone(),
         service_did: edge.service_did().clone(),
-        ghost_actor_did: ghost_actor_did.clone(),
+        ghost_actor_id: ghost_actor_id.clone(),
         protocol: protocol.to_owned(),
         tenant: tenant.to_owned(),
         external_user_id: external_user_id.to_owned(),
@@ -566,17 +566,17 @@ async fn provision_ghost_actor(
     };
     let path = ghost_actor_provision_path(&config.cokret.applet_id)?;
     let response: GhostActorProvisionResponse = edge.client().post(&path, &request).await?;
-    validate_ghost_provision_response(&ghost_actor_did, response)
+    validate_ghost_provision_response(&ghost_actor_id, response)
 }
 
 fn validate_ghost_provision_response(
     requested_actor: &Did,
     response: GhostActorProvisionResponse,
 ) -> Result<GhostActorProvisionResponse> {
-    if &response.ghost_actor_did != requested_actor {
+    if &response.ghost_actor_id != requested_actor {
         return Err(BridgeError::Cokret(format!(
             "ghost provisioning returned actor {} but requested {}",
-            response.ghost_actor_did, requested_actor
+            response.ghost_actor_id, requested_actor
         )));
     }
     require_nonempty_ref("profile_event_ref", &response.profile_event_ref)?;
@@ -658,7 +658,7 @@ fn schema_sql() -> &'static [&'static str] {
             protocol TEXT NOT NULL,\
             tenant TEXT NOT NULL,\
             external_user_id TEXT NOT NULL,\
-            cokret_actor_did TEXT NOT NULL UNIQUE,\
+            cokret_actor_id TEXT NOT NULL UNIQUE,\
             profile_event_ref TEXT NOT NULL,\
             accountability_grant_ref TEXT NOT NULL,\
             authorization_ref TEXT NOT NULL,\
@@ -690,7 +690,7 @@ fn schema_sql() -> &'static [&'static str] {
             protocol TEXT NOT NULL,\
             tenant TEXT NOT NULL,\
             external_user_id TEXT NOT NULL,\
-            cokret_actor_did TEXT NOT NULL UNIQUE,\
+            cokret_actor_id TEXT NOT NULL UNIQUE,\
             profile_event_ref TEXT NOT NULL,\
             accountability_grant_ref TEXT NOT NULL,\
             authorization_ref TEXT NOT NULL,\
@@ -725,7 +725,7 @@ fn schema_sql() -> &'static [&'static str] {
             protocol TEXT NOT NULL,\
             tenant TEXT NOT NULL,\
             external_user_id TEXT NOT NULL,\
-            cokret_actor_did TEXT NOT NULL,\
+            cokret_actor_id TEXT NOT NULL,\
             profile_event_ref TEXT NOT NULL,\
             accountability_grant_ref TEXT NOT NULL,\
             authorization_ref TEXT NOT NULL,\
@@ -733,7 +733,7 @@ fn schema_sql() -> &'static [&'static str] {
             created_at BIGINT NOT NULL,\
             UNIQUE KEY user_protocol_tenant_external_id_unique \
                 (protocol(64), tenant(191), external_user_id(191)),\
-            UNIQUE KEY user_cokret_actor_did_unique (cokret_actor_did(191)))",
+            UNIQUE KEY user_cokret_actor_id_unique (cokret_actor_id(191)))",
     ]
 }
 
@@ -924,7 +924,7 @@ impl MessageContext {
                                 &realm_for_submit,
                             )
                             .await?;
-                            let actor_did = provisioned.ghost_actor_did.to_string();
+                            let actor_id = provisioned.ghost_actor_id.to_string();
                             let display_name = provisioned
                                 .display_name
                                 .as_deref()
@@ -933,7 +933,7 @@ impl MessageContext {
                                 &protocol,
                                 &tenant,
                                 &external_user_id,
-                                &actor_did,
+                                &actor_id,
                                 &provisioned.profile_event_ref,
                                 &provisioned.accountability_grant_ref,
                                 &provisioned.authorization_ref,
@@ -954,7 +954,7 @@ impl MessageContext {
                         &mapping.accountability_grant_ref,
                     )?;
                     require_nonempty_ref("authorization_ref", &mapping.authorization_ref)?;
-                    let actor = Did::new(mapping.cokret_actor_did)?;
+                    let actor = Did::new(mapping.cokret_actor_id)?;
                     let event_id = edge
                         .submit_with_external_ref_as(
                             &actor,
@@ -1012,13 +1012,13 @@ struct MessageAdapter<M: MessageBridge> {
 }
 
 fn sender_display_for_event(store: &MessageStore, event: &Event) -> Result<String> {
-    let actor_did = event.actor_id.to_string();
-    let mut display = match store.user_by_actor(&actor_did)? {
+    let actor_id = event.actor_id.to_string();
+    let mut display = match store.user_by_actor(&actor_id)? {
         Some(row) => row
             .display_name
             .filter(|name| !name.trim().is_empty())
             .unwrap_or(row.external_user_id),
-        None => actor_did,
+        None => actor_id,
     };
     if let Some(executed_by) = event.executed_by.as_ref() {
         if executed_by != &event.actor_id {
