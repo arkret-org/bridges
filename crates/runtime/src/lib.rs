@@ -24,7 +24,7 @@
 //! ## Cargo features
 //!
 //! - `edge` (always available): the protocol edge ([`CokretEdge`], the
-//!   [`SeqStore`] trait + [`SeqAllocator`], config, errors, cache/queue/media)
+//!   [`SeqStore`] trait + [`SeqAllocator`], config, errors, cache/queue, and blob helpers)
 //!   without diesel or salvo. A host injects its own [`SeqStore`].
 //! - `db`: the diesel-backed database pool ([`db`]) and [`DbSeqStore`].
 //! - `web`: the salvo HTTP service ([`web`]).
