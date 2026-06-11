@@ -36,7 +36,23 @@ impl ChannelQueue {
         Fut: Future<Output = T>,
     {
         let lock = self.lock_for(key);
-        let _guard = lock.lock().await;
-        task().await
+        let result = {
+            let _guard = lock.lock().await;
+            task().await
+        };
+        // Lazily reclaim the per-key entry once no other task is using it. High
+        // cardinality keys (e.g. per-user channels on WhatsApp/Messenger) would
+        // otherwise grow the map unboundedly. We hold one `Arc` (`lock`); the map
+        // holds another. After dropping the guard, a strong_count of 2 means only
+        // we and the map reference it, so it is safe to remove.
+        {
+            let mut guard = self.locks.lock();
+            if let Some(entry) = guard.get(key)
+                && Arc::strong_count(entry) <= 2
+            {
+                guard.remove(key);
+            }
+        }
+        result
     }
 }

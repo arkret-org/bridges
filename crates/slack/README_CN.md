@@ -1,6 +1,6 @@
 # cokret-bridge-slack
 
-Rust 实现的 **cokret ⇄ Slack** 桥接。基于共享核心 [`cokret-bridge-runtime`](../core) + [`cokret-bridge-messaging`](../messaging),
+Rust 实现的 **cokret ⇄ Slack** 桥接。基于共享核心 [`cokret-bridge-runtime`](../runtime) + [`cokret-bridge-messaging`](../messaging),
 应用侧使用 Slack **Socket Mode**(WebSocket,[`tokio-tungstenite`](https://crates.io/crates/tokio-tungstenite))
 接收事件,使用 **Web API**(`ctx.http` / reqwest)发送消息。
 

@@ -53,7 +53,7 @@ impl TeamsApp {
 
     /// Returns a Bot Framework access token, served from the cache until it
     /// nears the AAD-reported expiry, then re-fetched via client_credentials.
-    async fn fetch_access_token(&self, ctx: &MessageContext) -> Result<String> {
+    async fn access_token(&self, ctx: &MessageContext) -> Result<String> {
         self.token_cache
             .get_or_try_refresh(|| async {
                 // The Bot Framework botframework.com multi-tenant login endpoint.
@@ -101,18 +101,12 @@ impl MessageBridge for TeamsApp {
         "teams"
     }
 
-    async fn run(self: Arc<Self>, _ctx: Arc<MessageContext>) -> Result<()> {
-        loop {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-        }
-    }
-
     async fn send_to_app(
         &self,
         ctx: Arc<MessageContext>,
         msg: OutboundAppMessage,
     ) -> Result<AppMessageRef> {
-        let token = self.fetch_access_token(&ctx).await?;
+        let token = self.access_token(&ctx).await?;
 
         // app_channel is treated as the Bot Framework conversationId.
         // activities endpoint: {serviceUrl}/v3/conversations/{conversationId}/activities
@@ -189,17 +183,30 @@ async fn teams_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response
         return;
     };
     let authorization = req.header::<String>("authorization");
-    if let Err(error) = state
+    let claims = match state
         .inbound_jwt
         .verify_authorization(authorization.as_deref())
         .await
     {
-        webhook::unauthorized(res, format!("Teams JWT rejected: {error}"));
-        return;
-    }
+        Ok(claims) => claims,
+        Err(error) => {
+            webhook::unauthorized(res, format!("Teams JWT rejected: {error}"));
+            return;
+        }
+    };
     let Some(body) = webhook::json_body(req, res).await else {
         return;
     };
+    // Bot Framework auth: the token's `serviceUrl` claim, when present, MUST match
+    // the activity's serviceUrl. This blocks a stolen-but-valid token from being
+    // replayed against a forged activity routed to a different service URL.
+    if let Some(token_service_url) = claims.get("serviceUrl").and_then(Value::as_str) {
+        let activity_service_url = body.get("serviceUrl").and_then(Value::as_str);
+        if activity_service_url != Some(token_service_url) {
+            webhook::unauthorized(res, "Teams activity serviceUrl does not match the JWT claim");
+            return;
+        }
+    }
     if body.get("type").and_then(Value::as_str) != Some("message") {
         webhook::ok_json(res, json!({ "ok": true }));
         return;

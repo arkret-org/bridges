@@ -47,12 +47,6 @@ impl MessageBridge for IMessageApp {
         "imessage"
     }
 
-    async fn run(self: Arc<Self>, _ctx: Arc<MessageContext>) -> Result<()> {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-        }
-    }
-
     async fn send_to_app(
         &self,
         ctx: Arc<MessageContext>,

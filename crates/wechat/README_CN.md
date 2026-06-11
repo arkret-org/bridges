@@ -1,7 +1,7 @@
 # cokret-bridge-wechat
 
 Rust 实现的 **cokret ⇄ 微信(企业微信 / 公众号)** 桥接。基于共享核心
-[`cokret-bridge-runtime`](../core) + [`cokret-bridge-messaging`](../messaging),应用侧**仅使用**
+[`cokret-bridge-runtime`](../runtime) + [`cokret-bridge-messaging`](../messaging),应用侧**仅使用**
 [`reqwest`](https://crates.io/crates/reqwest)(不引入微信 SDK,也不另起端口)。
 
 ## 架构

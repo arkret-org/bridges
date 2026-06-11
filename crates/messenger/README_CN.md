@@ -1,7 +1,7 @@
-# cokret-bridge-messager
+# cokret-bridge-messenger
 
 Rust 实现的 **cokret ⇄ Messenger** 桥接(通用 / Facebook Messenger)。基于共享核心
-[`cokret-bridge-runtime`](../core) + [`cokret-bridge-messaging`](../messaging),应用侧仅用
+[`cokret-bridge-runtime`](../runtime) + [`cokret-bridge-messaging`](../messaging),应用侧仅用
 [`reqwest`](https://crates.io/crates/reqwest),不引入专有 SDK。对接 **Facebook Graph API**。
 
 ## 架构
@@ -21,7 +21,7 @@ Rust 实现的 **cokret ⇄ Messenger** 桥接(通用 / Facebook Messenger)。�
 ```bash
 cp config/config.sample.yaml config.yaml
 # 填入 cokret.access_token / signing_key_seed_hex 与 app.page_access_token / verify_token
-cargo run -p cokret-bridge-messager -- --config config.yaml
+cargo run -p cokret-bridge-messenger -- --config config.yaml
 ```
 
 ## 配置要点

@@ -6,6 +6,7 @@
 //!   `https://chat.googleapis.com/v1/{space}/messages`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
@@ -13,43 +14,143 @@ use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, webhook,
 };
+use cokret_bridge_runtime::cache::TokenCache;
 use cokret_bridge_runtime::{BridgeError, Result};
+use jsonwebtoken::{Algorithm, EncodingKey, Header};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// Google Chat API base.
 const CHAT_API_BASE: &str = "https://chat.googleapis.com/v1";
+/// Google OAuth2 token endpoint for the JWT-bearer grant.
+const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+/// OAuth2 scope required to post Chat messages as a bot.
+const CHAT_BOT_SCOPE: &str = "https://www.googleapis.com/auth/chat.bot";
+/// Lifetime (seconds) of the self-signed JWT assertion (Google caps this at 1h).
+const ASSERTION_TTL_SECS: u64 = 3600;
+
+/// A Google service-account JSON key (the relevant subset) used to mint
+/// JWT-bearer assertions for the OAuth2 token endpoint.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ServiceAccountKey {
+    pub client_email: String,
+    pub private_key: String,
+    #[serde(default = "default_token_uri")]
+    pub token_uri: String,
+}
+
+fn default_token_uri() -> String {
+    GOOGLE_TOKEN_URL.to_owned()
+}
+
+/// How the bridge authenticates outbound Chat API calls.
+pub enum GoogleChatAuth {
+    /// A ready OAuth2 access token. Expires (~1h) and is not auto-refreshed; kept
+    /// for back-compat / short-lived testing only.
+    StaticToken(String),
+    /// A service account that mints a fresh access token on demand and caches it
+    /// until shortly before expiry — the recommended, operable configuration.
+    ServiceAccount(Box<ServiceAccountKey>),
+}
 
 /// Google Chat bridge adapter.
 pub struct GoogleChatApp {
-    /// Ready OAuth2 access token (scope: chat.bot, etc.).
-    access_token: String,
+    auth: GoogleChatAuth,
+    token_cache: TokenCache,
     inbound_jwt: Arc<webhook::JwtVerifier>,
 }
 
+#[derive(Serialize)]
+struct JwtBearerClaims<'a> {
+    iss: &'a str,
+    scope: &'a str,
+    aud: &'a str,
+    iat: u64,
+    exp: u64,
+}
+
 impl GoogleChatApp {
-    pub fn new(access_token: impl Into<String>, inbound_jwt: Arc<webhook::JwtVerifier>) -> Self {
+    pub fn new(auth: GoogleChatAuth, inbound_jwt: Arc<webhook::JwtVerifier>) -> Self {
         Self {
-            access_token: access_token.into(),
+            auth,
+            token_cache: TokenCache::new(),
             inbound_jwt,
         }
     }
 
-    /// Obtain the OAuth2 access_token used to call the Chat API.
-    fn bearer_token(&self) -> String {
-        self.access_token.clone()
+    /// Obtain an OAuth2 access token for the Chat API. Static tokens are returned
+    /// verbatim; a service account mints + caches a JWT-bearer grant so a
+    /// long-running bridge keeps working past the ~1h token lifetime.
+    async fn bearer_token(&self, ctx: &Arc<MessageContext>) -> Result<String> {
+        match &self.auth {
+            GoogleChatAuth::StaticToken(token) => Ok(token.clone()),
+            GoogleChatAuth::ServiceAccount(key) => {
+                self.token_cache
+                    .get_or_try_refresh(|| async {
+                        let (token, ttl) = fetch_service_account_token(ctx, key).await?;
+                        Ok::<_, BridgeError>((token, ttl))
+                    })
+                    .await
+            }
+        }
     }
+}
+
+/// Mint a JWT-bearer assertion from the service account key and exchange it at
+/// the Google token endpoint for an access token + its TTL.
+async fn fetch_service_account_token(
+    ctx: &Arc<MessageContext>,
+    key: &ServiceAccountKey,
+) -> Result<(String, Duration)> {
+    let now = chrono::Utc::now().timestamp().max(0) as u64;
+    let claims = JwtBearerClaims {
+        iss: &key.client_email,
+        scope: CHAT_BOT_SCOPE,
+        aud: &key.token_uri,
+        iat: now,
+        exp: now + ASSERTION_TTL_SECS,
+    };
+    let encoding_key = EncodingKey::from_rsa_pem(key.private_key.as_bytes())
+        .map_err(|e| BridgeError::App(format!("Google service account private_key invalid: {e}")))?;
+    let assertion = jsonwebtoken::encode(&Header::new(Algorithm::RS256), &claims, &encoding_key)
+        .map_err(|e| BridgeError::App(format!("Google JWT assertion signing failed: {e}")))?;
+
+    let resp = ctx
+        .http
+        .post(&key.token_uri)
+        .form(&[
+            ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
+            ("assertion", &assertion),
+        ])
+        .send()
+        .await
+        .map_err(|e| BridgeError::App(format!("Google token request failed: {e}")))?;
+    let status = resp.status();
+    let body: Value = resp
+        .json()
+        .await
+        .map_err(|e| BridgeError::App(format!("Google token parse failed (status={status}): {e}")))?;
+    if !status.is_success() {
+        return Err(BridgeError::App(format!(
+            "Google token exchange failed status={status}: {body}"
+        )));
+    }
+    let token = body
+        .get("access_token")
+        .and_then(Value::as_str)
+        .ok_or_else(|| BridgeError::App(format!("Google token response missing access_token: {body}")))?
+        .to_owned();
+    let ttl = body
+        .get("expires_in")
+        .and_then(Value::as_u64)
+        .unwrap_or(ASSERTION_TTL_SECS);
+    Ok((token, Duration::from_secs(ttl)))
 }
 
 #[async_trait]
 impl MessageBridge for GoogleChatApp {
     fn name(&self) -> &str {
         "googlechat"
-    }
-
-    async fn run(self: Arc<Self>, _ctx: Arc<MessageContext>) -> Result<()> {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-        }
     }
 
     async fn send_to_app(
@@ -63,7 +164,7 @@ impl MessageBridge for GoogleChatApp {
         let body = msg.rendered_body(SenderRenderStyle::Plain);
         let payload = json!({ "text": body });
 
-        let token = self.bearer_token();
+        let token = self.bearer_token(&ctx).await?;
         let resp = ctx
             .http
             .post(&url)

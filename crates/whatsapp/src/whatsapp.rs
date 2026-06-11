@@ -6,7 +6,6 @@
 //!   (reqwest) to POST `https://graph.facebook.com/v20.0/{phone_number_id}/messages`.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
@@ -55,12 +54,6 @@ impl MessageBridge for WhatsAppApp {
         "whatsapp"
     }
 
-    async fn run(self: Arc<Self>, _ctx: Arc<MessageContext>) -> Result<()> {
-        loop {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-        }
-    }
-
     async fn send_to_app(
         &self,
         ctx: Arc<MessageContext>,
@@ -107,14 +100,17 @@ impl MessageBridge for WhatsAppApp {
             .await
             .map_err(|e| BridgeError::App(format!("WhatsApp send response parse failed: {e}")))?;
 
-        // Return messages[0].id as the app-side message identifier; fall back to the recipient number if missing.
+        // Return messages[0].id as the app-side message identifier. Return the
+        // empty string when absent rather than falling back to the recipient
+        // number: a non-message-id value would pollute the message mapping
+        // (messaging skips recording an empty id).
         let app_message_id = value
             .get("messages")
             .and_then(|m| m.get(0))
             .and_then(|m| m.get("id"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_owned())
-            .unwrap_or_else(|| msg.app_channel.clone());
+            .unwrap_or_default();
 
         Ok(AppMessageRef { app_message_id })
     }

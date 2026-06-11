@@ -36,7 +36,11 @@ pub use runtime::salvo;
 
 use models::{NewMessageMapping, NewRoomMapping, NewUserMapping};
 
-const EXTERNAL_REF_SCHEMA: &str = "ck.external_ref.messaging.v1";
+// Not a `ck.`-prefixed id: the `ck.` namespace is reserved for spec-registered
+// protocol objects/operations/schemas. This is a bridge-private (applet-side)
+// provenance schema id, so it uses a reverse-domain product prefix to avoid
+// colliding with any future spec-defined messaging external_ref schema.
+const EXTERNAL_REF_SCHEMA: &str = "org.cokret.bridge.external_ref.messaging.v1";
 const MESSAGE_MAPPING_KEY_SEPARATOR: char = '\u{1f}';
 
 /// An inbound message from an external app into Cokret.
@@ -275,17 +279,6 @@ impl MessageStore {
                 .execute(&mut conn)?;
         }
         Ok(())
-    }
-
-    pub fn event_for_app_message(&self, app_message_id: &str) -> Result<Option<String>> {
-        use schema::message_mappings::dsl;
-
-        let mut conn = self.db.conn()?;
-        Ok(dsl::message_mappings
-            .filter(dsl::app_message_id.eq(app_message_id))
-            .select(dsl::cokret_event_id)
-            .first::<String>(&mut conn)
-            .optional()?)
     }
 
     pub fn event_for_channel_message(
@@ -960,7 +953,15 @@ impl MessageContext {
 pub trait MessageBridge: Send + Sync + 'static {
     fn name(&self) -> &str;
 
-    async fn run(self: Arc<Self>, ctx: Arc<MessageContext>) -> Result<()>;
+    /// The app-side receive loop. Pure webhook bridges (whose inbound path is the
+    /// salvo `webhook_router`) can rely on the default keep-alive loop and only
+    /// need to override `webhook_router`. Gateway / long-poll bridges (Discord,
+    /// Telegram, Slack, Zulip) override this with their own connection loop.
+    async fn run(self: Arc<Self>, _ctx: Arc<MessageContext>) -> Result<()> {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        }
+    }
 
     async fn send_to_app(
         &self,
@@ -1016,6 +1017,33 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
     }
 
     async fn on_cokret_event(&self, _ctx: Arc<BridgeContext>, event: Event) -> Result<()> {
+        // Deletion forwarding (cokret -> app): a `ck.message.redact` that targets
+        // an event we previously bridged is mapped to an app-side deletion via the
+        // adapter's `redact_in_app`. Honors the `disable_deletion_forwarding`
+        // switch.
+        if event.kind == "ck.message.redact" {
+            if self
+                .ctx
+                .core()
+                .config
+                .bridge
+                .disable_deletion_forwarding
+            {
+                return Ok(());
+            }
+            let Some(target) = event.redacts.as_ref() else {
+                return Ok(());
+            };
+            let Some(app_message_id) =
+                self.ctx.store.app_message_for_event(&target.to_string())?
+            else {
+                return Ok(());
+            };
+            self.user
+                .redact_in_app(self.ctx.clone(), &app_message_id)
+                .await?;
+            return Ok(());
+        }
         if event.kind != "ck.message.create" {
             return Ok(());
         }
@@ -1089,6 +1117,15 @@ where
 {
     runtime::run_bridge(config, move |core_ctx: Arc<BridgeContext>| {
         let store = Arc::new(MessageStore::new(core_ctx.db.clone())?);
+        // Apply any static channel↔realm mappings from configuration so a bridge
+        // is operable out of the box without hand-written SQL (see `upsert_room`).
+        for mapping in &core_ctx.config.mappings {
+            store.upsert_room(
+                &mapping.app_channel,
+                &mapping.realm_id,
+                mapping.alias.as_deref(),
+            )?;
+        }
         // Install DB-backed actor/realm resolution before the web service starts.
         core_ctx.set_resolver(Arc::new(MessageResolver {
             store: store.clone(),
@@ -1100,8 +1137,3 @@ where
     .await
 }
 
-pub async fn submit_inbound(ctx: Arc<MessageContext>, label: &str, inbound: InboundAppMessage) {
-    if let Err(e) = ctx.submit_app_message(inbound).await {
-        tracing::warn!(error = %e, bridge = label, "app -> cokret submission failed");
-    }
-}

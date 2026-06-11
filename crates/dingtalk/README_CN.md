@@ -1,7 +1,7 @@
 # cokret-bridge-dingtalk
 
 Rust 实现的 **cokret ⇄ 钉钉(DingTalk)** 桥接。基于共享核心
-[`cokret-bridge-runtime`](../core) + [`cokret-bridge-messaging`](../messaging),应用侧仅使用
+[`cokret-bridge-runtime`](../runtime) + [`cokret-bridge-messaging`](../messaging),应用侧仅使用
 [`reqwest`](https://crates.io/crates/reqwest) 直连钉钉开放平台 HTTP API。
 
 ## 架构

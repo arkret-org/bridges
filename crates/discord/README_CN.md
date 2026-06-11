@@ -1,6 +1,6 @@
 # cokret-bridge-discord
 
-Rust 实现的 **cokret ⇄ Discord** 桥接。基于共享核心 [`cokret-bridge-runtime`](../core) + [`cokret-bridge-messaging`](../messaging),
+Rust 实现的 **cokret ⇄ Discord** 桥接。基于共享核心 [`cokret-bridge-runtime`](../runtime) + [`cokret-bridge-messaging`](../messaging),
 应用侧使用 [`serenity`](https://crates.io/crates/serenity) gateway。
 
 ## 架构

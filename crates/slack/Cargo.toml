@@ -27,7 +27,6 @@ tracing = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-parking_lot = { workspace = true }
 reqwest = { workspace = true }
 futures = { workspace = true }
 tokio-tungstenite = { version = "0.28", default-features = false, features = [

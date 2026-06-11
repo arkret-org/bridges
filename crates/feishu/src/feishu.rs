@@ -55,7 +55,7 @@ impl FeishuApp {
 
     /// Returns a `tenant_access_token`, served from the cache until it nears the
     /// vendor-reported expiry, then re-fetched via app_id/app_secret.
-    async fn tenant_access_token(&self, ctx: &Arc<MessageContext>) -> Result<String> {
+    async fn access_token(&self, ctx: &Arc<MessageContext>) -> Result<String> {
         self.token_cache
             .get_or_try_refresh(|| async {
                 let url = format!("{FEISHU_BASE}/auth/v3/tenant_access_token/internal");
@@ -101,18 +101,12 @@ impl MessageBridge for FeishuApp {
         "feishu"
     }
 
-    async fn run(self: Arc<Self>, _ctx: Arc<MessageContext>) -> Result<()> {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-        }
-    }
-
     async fn send_to_app(
         &self,
         ctx: Arc<MessageContext>,
         msg: OutboundAppMessage,
     ) -> Result<AppMessageRef> {
-        let token = self.tenant_access_token(&ctx).await?;
+        let token = self.access_token(&ctx).await?;
 
         // app_channel can be plain chat_id or prefixed as `open_id/<id>`,
         // `user_id/<id>`, `union_id/<id>`, or `chat_id/<id>`.

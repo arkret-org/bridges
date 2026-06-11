@@ -1,6 +1,6 @@
-//! cokret-bridge-messager executable entry point.
+//! cokret-bridge-messenger executable entry point.
 
-mod messager;
+mod messenger;
 
 use std::sync::Arc;
 
@@ -8,11 +8,11 @@ use clap::Parser;
 use cokret_bridge_messaging::run_message_bridge;
 use cokret_bridge_runtime::{Config, logging};
 
-use crate::messager::MessagerApp;
+use crate::messenger::MessengerApp;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "cokret-bridge-messager",
+    name = "cokret-bridge-messenger",
     version,
     about = "cokret <-> Messenger bridge"
 )]
@@ -35,11 +35,14 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("config.app.page_access_token missing"))?
         .to_owned();
+    // verify_token is required (parity with WhatsApp): fail fast at startup
+    // rather than at the first Meta GET handshake.
     let verify_token = config
         .app
         .get("verify_token")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_owned());
+        .ok_or_else(|| anyhow::anyhow!("config.app.verify_token missing"))?
+        .to_owned();
     // app_secret: Meta app secret used to verify X-Hub-Signature-256 on each POST.
     let app_secret = config
         .app
@@ -49,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
         .to_owned();
 
     run_message_bridge(config, move |_ctx: Arc<_>| {
-        Ok(MessagerApp::new(
+        Ok(MessengerApp::new(
             page_access_token,
             verify_token,
             app_secret,

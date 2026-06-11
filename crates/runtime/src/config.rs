@@ -1,7 +1,6 @@
-//! Configuration loading. Supports YAML (`config.yaml`) and KDL
-//! (`config.kdl`), with the parser chosen by file extension. The top-level
-//! structure is `bridge` / `cokret` / `database` / `logging` plus a per-adapter
-//! `app` section.
+//! Configuration loading (YAML). The top-level structure is
+//! `bridge` / `cokret` / `database` / `logging` plus a per-adapter `app`
+//! section.
 
 use std::{fmt, path::Path};
 
@@ -24,6 +23,24 @@ pub struct Config {
     /// bridge.
     #[serde(default)]
     pub app: serde_json::Value,
+    /// Static channel↔realm mappings applied (upserted) at startup. The messaging
+    /// layer requires an explicit app-channel→Realm mapping for inbound delivery;
+    /// this gives operators a supported, file-driven way to provision them
+    /// instead of writing SQL by hand.
+    #[serde(default)]
+    pub mappings: Vec<RoomMappingConfig>,
+}
+
+/// A static channel↔realm mapping entry from configuration.
+#[derive(Clone, Debug, Deserialize)]
+pub struct RoomMappingConfig {
+    /// The app-side channel identifier (e.g. a Slack channel id or LINE group id).
+    pub app_channel: String,
+    /// The cokret realm id this channel maps to.
+    pub realm_id: String,
+    /// Optional portal alias.
+    #[serde(default)]
+    pub alias: Option<String>,
 }
 
 /// The bridge's own general configuration.
@@ -43,15 +60,8 @@ pub struct BridgeConfig {
     /// HTTP bind address.
     #[serde(default = "default_bind")]
     pub bind_address: String,
-    /// The administrator's cokret DID.
-    #[serde(default)]
-    pub admin_did: Option<String>,
-    #[serde(default)]
-    pub disable_presence: bool,
-    #[serde(default)]
-    pub disable_typing_notifications: bool,
-    #[serde(default)]
-    pub disable_read_receipts: bool,
+    /// When set, `ck.message.redact` events from cokret are not forwarded as
+    /// app-side deletions (see `MessageAdapter::on_cokret_event`).
     #[serde(default)]
     pub disable_deletion_forwarding: bool,
 }
@@ -182,30 +192,16 @@ fn default_log_format() -> String {
 
 impl Config {
     /// Load from a file, choosing the parser by extension (`.kdl` / otherwise
-    /// YAML).
+    /// All bridge sample configs are YAML.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path)
             .map_err(|e| BridgeError::Config(format!("reading {}: {e}", path.display())))?;
-        if path.extension().and_then(|s| s.to_str()) == Some("kdl") {
-            Self::from_kdl(&text)
-        } else {
-            Self::from_yaml(&text)
-        }
+        Self::from_yaml(&text)
     }
 
     pub fn from_yaml(text: &str) -> Result<Self> {
         serde_yaml::from_str(text).map_err(|e| BridgeError::Config(e.to_string()))
-    }
-
-    /// KDL → JSON → Config. Only supports the simple scalar/nested-node shapes
-    /// used by this configuration.
-    pub fn from_kdl(text: &str) -> Result<Self> {
-        let doc: kdl::KdlDocument = text
-            .parse()
-            .map_err(|e: kdl::KdlError| BridgeError::Config(e.to_string()))?;
-        let value = kdl_doc_to_json(&doc);
-        serde_json::from_value(value).map_err(|e| BridgeError::Config(e.to_string()))
     }
 
     /// Decode the signing seed into 32 bytes.
@@ -229,47 +225,19 @@ impl Config {
     }
 }
 
-/// Convert a KDL document into a JSON object: each node name becomes a key; a
-/// leaf node takes its first argument as a scalar; a node with children is
-/// recursed into an object. This is sufficient to cover the hierarchy of this
-/// configuration.
-fn kdl_doc_to_json(doc: &kdl::KdlDocument) -> serde_json::Value {
-    let mut map = serde_json::Map::new();
-    for node in doc.nodes() {
-        let name = node.name().value().to_owned();
-        let value = if let Some(children) = node.children() {
-            kdl_doc_to_json(children)
-        } else if let Some(entry) = node.entries().first() {
-            kdl_value_to_json(entry.value())
-        } else {
-            serde_json::Value::Null
-        };
-        map.insert(name, value);
-    }
-    serde_json::Value::Object(map)
-}
-
-fn kdl_value_to_json(v: &kdl::KdlValue) -> serde_json::Value {
-    if let Some(s) = v.as_string() {
-        serde_json::Value::String(s.to_owned())
-    } else if let Some(i) = v.as_i64() {
-        serde_json::Value::from(i)
-    } else if let Some(f) = v.as_f64() {
-        serde_json::Value::from(f)
-    } else if let Some(b) = v.as_bool() {
-        serde_json::Value::Bool(b)
-    } else {
-        serde_json::Value::Null
-    }
-}
-
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
     let s = s.trim();
-    if s.len() % 2 != 0 {
+    // Operate on bytes (not the str) so multi-byte UTF-8 input cannot panic on a
+    // non-char-boundary slice; non-ASCII hex digits simply fail `from_str_radix`.
+    let bytes = s.as_bytes();
+    if bytes.len() % 2 != 0 {
         return None;
     }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+    bytes
+        .chunks_exact(2)
+        .map(|pair| {
+            let s = std::str::from_utf8(pair).ok()?;
+            u8::from_str_radix(s, 16).ok()
+        })
         .collect()
 }

@@ -26,14 +26,14 @@ pub struct InboundAppMessage  { pub app_channel: String, pub app_user: String,
                                 pub app_message_id: String, pub body: String }
 pub struct OutboundAppMessage { pub app_channel: String, pub sender_display: String,
                                 pub body: String, pub reply_to: Option<String> }
-pub struct AppMessageRef { pub app_message_id: String }
+pub struct Appmessengeref { pub app_message_id: String }
 
 #[async_trait]
 pub trait MessageBridge: Send + Sync + 'static {
     fn name(&self) -> &str;
     async fn run(self: Arc<Self>, ctx: Arc<MessageContext>) -> Result<()>;    // app 接收循环
     async fn send_to_app(&self, ctx: Arc<MessageContext>, msg: OutboundAppMessage)
-        -> Result<AppMessageRef>;                                            // cokret→app 发送
+        -> Result<Appmessengeref>;                                            // cokret→app 发送
     async fn redact_in_app(&self, _ctx: Arc<MessageContext>, _id: &str) -> Result<()> { Ok(()) }
     // 纯 HTTP 桥重写此项,返回入站 webhook 路由(由 runtime web 服务挂载);默认 None
     fn webhook_router(self: Arc<Self>, _ctx: Arc<MessageContext>) -> Option<salvo::Router> { None }
@@ -63,7 +63,7 @@ pub trait MessageBridge: Send + Sync + 'static {
   读循环解析消息→`submit_app_message`;`send_to_app` 用 `ctx.http`(reqwest)POST app API。
 - **长轮询的**(zulip):`run` 建立官方 event queue 并长轮询,
   读循环解析消息→`submit_app_message`;`send_to_app` 用 `ctx.http` POST app API。
-- **纯 HTTP/webhook 的**(feishu/wechat/dingtalk/whatsapp/line/qq/googlechat/imessage/messager/teams):
+- **纯 HTTP/webhook 的**(feishu/wechat/dingtalk/whatsapp/line/qq/googlechat/imessage/messenger/teams):
   `send_to_app` 用 `ctx.http` POST 到 app 的发送 API;`run` 为保活循环
   (`loop { tokio::time::sleep(30s).await }`),入站走 `webhook_router`——返回一个 salvo `Router`,
   handler 内**对每条投递做来源验签**,再构造 `InboundAppMessage` 调 `webhook::submit(ctx, ..)`。
@@ -75,7 +75,7 @@ pub trait MessageBridge: Send + Sync + 'static {
 
 discord=9101, telegram=9102, slack=9103, feishu=9104, wechat=9105, dingtalk=9106,
 zulip=9107, whatsapp=9108, line=9109, qq=9110, googlechat=9111, imessage=9112,
-messager=9113, teams=9114。
+messenger=9113, teams=9114。
 
 ## 不要做
 

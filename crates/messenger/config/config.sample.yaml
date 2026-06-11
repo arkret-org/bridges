@@ -1,18 +1,14 @@
 # cokret <-> Messenger 桥接示例配置(snake_case)。
 
 bridge:
-  bridge_id: "messager"
+  bridge_id: "messenger"
   port: 9113
   bind_address: "0.0.0.0"
-  admin_did: "did:web:admin.example"
-  disable_presence: false
-  disable_typing_notifications: false
-  disable_read_receipts: false
   disable_deletion_forwarding: false
 
 cokret:
   server_url: "http://localhost:8008"
-  service_did: "did:web:messager-bridge.example"
+  service_did: "did:web:messenger-bridge.example"
   applet_id: "ck:applet:00000000-0000-7000-8000-00000000msgr"
   access_token: "CHANGE_ME_COKRET_ACCESS_TOKEN"
   signing_key_seed_hex: "0000000000000000000000000000000000000000000000000000000000000000"
@@ -25,7 +21,7 @@ cokret:
         value: "zCHANGE_ME_SERVER_ED25519_PUBLIC_KEY"
 
 database:
-  url: "sqlite://messager-bridge.db"
+  url: "sqlite://messenger-bridge.db"
   pool_size: 8
 
 logging:

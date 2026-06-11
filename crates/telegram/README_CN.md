@@ -1,6 +1,6 @@
 # cokret-bridge-telegram
 
-Rust 实现的 **cokret ⇄ Telegram** 桥接。基于共享核心 [`cokret-bridge-runtime`](../core) + [`cokret-bridge-messaging`](../messaging),
+Rust 实现的 **cokret ⇄ Telegram** 桥接。基于共享核心 [`cokret-bridge-runtime`](../runtime) + [`cokret-bridge-messaging`](../messaging),
 应用侧使用 [`teloxide`](https://crates.io/crates/teloxide) 长轮询。
 
 ## 架构

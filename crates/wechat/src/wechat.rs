@@ -27,7 +27,7 @@ const WECHAT_WORK_BASE: &str = "https://qyapi.weixin.qq.com/cgi-bin";
 const WECHAT_TOKEN_FALLBACK_SECS: u64 = 7000;
 
 /// WeChat bridge adapter.
-pub struct WechatApp {
+pub struct WeChatApp {
     /// WeChat Work corp_id or Official Account app_id.
     cred_id: String,
     /// WeChat Work corp_secret or Official Account app_secret.
@@ -40,7 +40,7 @@ pub struct WechatApp {
     token_cache: TokenCache,
 }
 
-impl WechatApp {
+impl WeChatApp {
     pub fn new(
         cred_id: impl Into<String>,
         cred_secret: impl Into<String>,
@@ -112,15 +112,9 @@ impl WechatApp {
 }
 
 #[async_trait]
-impl MessageBridge for WechatApp {
+impl MessageBridge for WeChatApp {
     fn name(&self) -> &str {
         "wechat"
-    }
-
-    async fn run(self: Arc<Self>, _ctx: Arc<MessageContext>) -> Result<()> {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-        }
     }
 
     async fn send_to_app(
@@ -251,12 +245,10 @@ async fn wechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respons
         webhook::unauthorized(res, "WeChat signature mismatch");
         return;
     }
-    let payload = match req.payload().await {
-        Ok(bytes) => bytes.to_vec(),
-        Err(err) => {
-            webhook::bad_request(res, format!("failed to read WeChat payload: {err}"));
-            return;
-        }
+    // Use the shared `raw_body` helper so the webhook body is bounded by
+    // `MAX_WEBHOOK_BODY_BYTES` instead of reading an unbounded payload.
+    let Some(payload) = webhook::raw_body(req, res).await else {
+        return;
     };
     let xml = match std::str::from_utf8(&payload) {
         Ok(text) => text,
@@ -307,7 +299,6 @@ struct WechatXmlFields {
     msg_type: Option<String>,
     content: Option<String>,
     msg_id: Option<String>,
-    create_time: Option<String>,
     encrypt: Option<String>,
 }
 
@@ -329,7 +320,6 @@ fn parse_wechat_xml(xml: &str) -> WechatXmlFields {
                     "MsgType" => fields.msg_type = Some(value),
                     "Content" => fields.content = Some(value),
                     "MsgId" => fields.msg_id = Some(value),
-                    "CreateTime" => fields.create_time = Some(value),
                     "Encrypt" => fields.encrypt = Some(value),
                     _ => {}
                 }
@@ -341,7 +331,6 @@ fn parse_wechat_xml(xml: &str) -> WechatXmlFields {
                     "MsgType" => fields.msg_type = Some(value),
                     "Content" => fields.content = Some(value),
                     "MsgId" => fields.msg_id = Some(value),
-                    "CreateTime" => fields.create_time = Some(value),
                     "Encrypt" => fields.encrypt = Some(value),
                     _ => {}
                 }

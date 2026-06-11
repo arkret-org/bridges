@@ -46,13 +46,9 @@ pub mod db;
 #[cfg(feature = "web")]
 pub mod web;
 
-pub use app::{
-    AppletResolver, BRIDGE_PASS_THROUGH_EVENT_KINDS, BRIDGE_UNSUPPORTED_POLICY_EVENT_KINDS,
-    BridgeEventHandling, ResolvedActor, ResolvedRealm, classify_bridge_event_kind,
-    may_map_to_bridge_redaction,
-};
+pub use app::{AppletResolver, ResolvedActor, ResolvedRealm};
 pub use cokret_edge::{CokretEdge, SeqAllocator, SeqStore};
-pub use config::Config;
+pub use config::{Config, RoomMappingConfig};
 pub use error::{BridgeError, Result};
 
 #[cfg(feature = "db")]

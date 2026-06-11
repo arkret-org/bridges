@@ -165,12 +165,20 @@ struct CachedJwks {
     expires_at: Instant,
 }
 
+/// Minimum interval between JWKS refreshes triggered by an unknown `kid`. Bounds
+/// the outbound-amplification / upstream-rate-limit DoS where an attacker sends
+/// JWTs with random kids to force one JWKS fetch each.
+const JWKS_MISSING_KEY_REFRESH_MIN_INTERVAL: Duration = Duration::from_secs(30);
+
 /// JWKS-backed Bearer JWT verifier shared by Google Chat and Teams webhook
 /// handlers.
 pub struct JwtVerifier {
     config: JwtAuthConfig,
     http: reqwest::Client,
     jwks: RwLock<Option<CachedJwks>>,
+    /// Last time a MissingKey-triggered refresh was actually performed; used to
+    /// throttle refreshes for unknown kids.
+    last_missing_key_refresh: RwLock<Option<Instant>>,
 }
 
 enum JwtDecodeFailure {
@@ -184,6 +192,7 @@ impl JwtVerifier {
             config,
             http,
             jwks: RwLock::new(None),
+            last_missing_key_refresh: RwLock::new(None),
         }
     }
 
@@ -206,6 +215,19 @@ impl JwtVerifier {
         match self.decode_with_jwks(token, kid, &jwks) {
             Ok(claims) => Ok(claims),
             Err(JwtDecodeFailure::MissingKey) => {
+                // Throttle refreshes for unknown kids so a flood of random-kid
+                // JWTs cannot amplify into an equal flood of JWKS fetches (and the
+                // resulting upstream rate-limiting). Within the cool-down window
+                // we reject without re-fetching.
+                {
+                    let last = *self.last_missing_key_refresh.read().await;
+                    if let Some(last) = last
+                        && last.elapsed() < JWKS_MISSING_KEY_REFRESH_MIN_INTERVAL
+                    {
+                        return Err("JWT kid is not present in JWKS".to_owned());
+                    }
+                }
+                *self.last_missing_key_refresh.write().await = Some(Instant::now());
                 let refreshed = self.refresh_jwks().await?;
                 self.decode_with_jwks(token, kid, &refreshed)
                     .map_err(jwt_decode_failure_message)

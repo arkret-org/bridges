@@ -6,7 +6,6 @@
 //!   (reqwest) to POST `https://api.line.me/v2/bot/message/push`.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
@@ -38,12 +37,6 @@ impl LineApp {
 impl MessageBridge for LineApp {
     fn name(&self) -> &str {
         "line"
-    }
-
-    async fn run(self: Arc<Self>, _ctx: Arc<MessageContext>) -> Result<()> {
-        loop {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-        }
     }
 
     async fn send_to_app(
@@ -81,14 +74,16 @@ impl MessageBridge for LineApp {
             )));
         }
 
-        // The LINE push endpoint's successful response body contains no message id; read the
-        // x-line-request-id header as a tracing identifier, falling back to the target id if missing.
+        // The LINE push endpoint's successful response body contains no message
+        // id. Return the empty string when `x-line-request-id` is absent rather
+        // than falling back to the target id: a non-message-id value would
+        // pollute the message mapping (messaging skips recording an empty id).
         let app_message_id = resp
             .headers()
             .get("x-line-request-id")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_owned())
-            .unwrap_or_else(|| msg.app_channel.clone());
+            .unwrap_or_default();
 
         Ok(AppMessageRef { app_message_id })
     }
@@ -115,12 +110,17 @@ async fn line_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response)
         return;
     };
     let signature = req.header::<String>("x-line-signature").unwrap_or_default();
-    let payload = match req.payload().await {
-        Ok(bytes) => bytes.to_vec(),
-        Err(err) => {
-            webhook::bad_request(res, format!("failed to read LINE payload: {err}"));
-            return;
-        }
+    // Fail closed on an empty channel_secret: HMAC over an empty key is publicly
+    // computable, so a mis-configured empty secret would let anyone forge a valid
+    // `x-line-signature` (parity with the other signed bridges).
+    if state.app.channel_secret.is_empty() {
+        webhook::unauthorized(res, "LINE channel_secret is not configured");
+        return;
+    }
+    // Use the shared `raw_body` helper so the webhook body is bounded by
+    // `MAX_WEBHOOK_BODY_BYTES` instead of reading an unbounded payload.
+    let Some(payload) = webhook::raw_body(req, res).await else {
+        return;
     };
     if !verify_line_signature(&state.app.channel_secret, &payload, &signature) {
         webhook::unauthorized(res, "LINE signature mismatch");

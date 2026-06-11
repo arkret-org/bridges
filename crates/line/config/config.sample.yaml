@@ -4,10 +4,6 @@ bridge:
   bridge_id: "line"
   port: 9109
   bind_address: "0.0.0.0"
-  admin_did: "did:web:admin.example"
-  disable_presence: false
-  disable_typing_notifications: false
-  disable_read_receipts: false
   disable_deletion_forwarding: false
 
 cokret:

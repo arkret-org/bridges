@@ -41,7 +41,7 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `cokret-bridge-
 | `cokret-bridge-qq` | QQ | reqwest (OneBot/官方) | 9110 |
 | `cokret-bridge-googlechat` | Google Chat | reqwest | 9111 |
 | `cokret-bridge-imessage` | iMessage | reqwest (网关) | 9112 |
-| `cokret-bridge-messager` | Messenger | reqwest (Graph API) | 9113 |
+| `cokret-bridge-messenger` | Messenger | reqwest (Graph API) | 9113 |
 | `cokret-bridge-teams` | MS Teams | reqwest (Bot Framework) | 9114 |
 
 ## 架构

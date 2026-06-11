@@ -728,6 +728,41 @@ impl BridgeAppletHandler {
             dedup: EventDedupWindow::new(EVENT_DEDUP_CAPACITY),
         }
     }
+
+    /// Whether `realm_id` falls inside one of the realm namespace patterns this
+    /// applet declared in `describe` (applet-integration §7/§13 namespace
+    /// matching). Patterns use the spec's `*` suffix-glob form (e.g.
+    /// `{bridge_id}:*`). When no realm patterns are declared the check is
+    /// permissive (cannot constrain what was never declared).
+    fn realm_in_namespace(&self, realm_id: &str) -> bool {
+        let patterns = self
+            .namespaces
+            .get("realms")
+            .and_then(Value::as_array)
+            .map(|realms| {
+                realms
+                    .iter()
+                    .filter_map(|entry| entry.get("pattern").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if patterns.is_empty() {
+            return true;
+        }
+        patterns
+            .iter()
+            .any(|pattern| glob_suffix_match(pattern, realm_id))
+    }
+}
+
+/// Match a spec namespace pattern against a candidate id. Supports a trailing
+/// `*` wildcard (prefix match) and exact equality otherwise; an interior `*` is
+/// treated literally (the spec only uses trailing globs for namespaces).
+fn glob_suffix_match(pattern: &str, candidate: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => candidate.starts_with(prefix),
+        None => pattern == candidate,
+    }
 }
 
 #[cfg(any(feature = "web", test))]
@@ -762,6 +797,23 @@ impl cokret::AppletHandler for BridgeAppletHandler {
 
         for event in req.events {
             let event_id = event.event_id.to_string();
+
+            // Namespace enforcement (applet-integration §7 / §13): the pushed
+            // event's realm MUST fall inside the realm namespace this applet
+            // declared in `describe`. A trusted-channel event for a realm outside
+            // our namespace is rejected before it can be forwarded to the app.
+            if !self.realm_in_namespace(&event.realm_id.to_string()) {
+                tracing::warn!(
+                    %event_id,
+                    realm = %event.realm_id,
+                    "rejecting event: realm is outside this applet's declared namespace"
+                );
+                rejected.push(serde_json::json!({
+                    "event_id": event_id,
+                    "reason": "namespace_mismatch",
+                }));
+                continue;
+            }
 
             // Single-event-level dedup (§7.3): identical re-push is accepted
             // without re-forwarding; a conflicting body under the same id is

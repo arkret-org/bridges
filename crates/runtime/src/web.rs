@@ -87,6 +87,12 @@ fn applet_router(state: AppletWebState) -> Router {
         .push(Router::with_path("actors/{actor_id}").get(applet_actor))
         .push(Router::with_path("realms/{realm_id_or_alias}").get(applet_realm))
         .push(Router::with_path("protocols/{protocol}").get(applet_protocol))
+        // The applet edge surface declares eight operations; the third_party
+        // user/location lookups are not backed by a server-side discovery index
+        // here. Per applet-integration §15 an unimplemented surface MUST return a
+        // structured `unsupported_feature` rather than fall through to a bare 404.
+        .push(Router::with_path("third_party/users").get(applet_third_party_unsupported))
+        .push(Router::with_path("third_party/locations").get(applet_third_party_unsupported))
 }
 
 #[derive(Clone)]
@@ -231,10 +237,13 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
             return;
         }
         CachedTransactionLookup::Conflict => {
+            // Same (source_service_did, Idempotency-Key) with a different body:
+            // applet-integration §7.3/§14 require the closed error code
+            // `duplicate_conflict` (the registry has no `idempotency_conflict`).
             res.status_code(StatusCode::CONFLICT);
             res.render(Json(json!({
                 "ok": false,
-                "rejected": [{ "reason": "idempotency_conflict" }]
+                "rejected": [{ "reason": "duplicate_conflict" }]
             })));
             return;
         }
@@ -294,6 +303,14 @@ async fn applet_protocol(req: &mut Request, depot: &mut Depot, res: &mut Respons
         Ok(body) => res.render(Json(body)),
         Err(err) => internal_error(res, err.to_string()),
     }
+}
+
+#[handler]
+async fn applet_third_party_unsupported(res: &mut Response) {
+    unsupported_feature(
+        res,
+        "third_party user/location lookup is not implemented by this bridge",
+    );
 }
 
 fn applet_state<'a>(depot: &'a Depot, res: &mut Response) -> Option<&'a AppletWebState> {
@@ -651,17 +668,32 @@ mod tests {
     }
 }
 
+/// Render the spec standard error response shape
+/// (`{"ok":false,"error":{"code":..,"message":..}}`, see
+/// `service-http-binding.md` §9) with a registry error code. The protocol
+/// surface (`/_cokret/edge/applet/*`) is part of the universal failure surface
+/// in `operations-error-mapping.json`, so the `code` must come from the closed
+/// `error-code-registry.json` set rather than being a free-form string.
+fn applet_error(res: &mut Response, status: StatusCode, code: &str, message: impl Into<String>) {
+    res.status_code(status);
+    res.render(Json(json!({
+        "ok": false,
+        "error": { "code": code, "message": message.into() },
+    })));
+}
+
 fn bad_request(res: &mut Response, message: impl Into<String>) {
-    res.status_code(StatusCode::BAD_REQUEST);
-    res.render(Json(json!({ "ok": false, "error": message.into() })));
+    applet_error(res, StatusCode::BAD_REQUEST, "bad_json", message);
 }
 
 fn unauthorized(res: &mut Response, message: impl Into<String>) {
-    res.status_code(StatusCode::UNAUTHORIZED);
-    res.render(Json(json!({ "ok": false, "error": message.into() })));
+    applet_error(res, StatusCode::UNAUTHORIZED, "invalid_signature", message);
 }
 
 fn internal_error(res: &mut Response, message: impl Into<String>) {
-    res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-    res.render(Json(json!({ "ok": false, "error": message.into() })));
+    applet_error(res, StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message);
+}
+
+fn unsupported_feature(res: &mut Response, message: impl Into<String>) {
+    applet_error(res, StatusCode::NOT_IMPLEMENTED, "unsupported_feature", message);
 }

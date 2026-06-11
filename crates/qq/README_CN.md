@@ -1,6 +1,6 @@
 # cokret-bridge-qq
 
-Rust 实现的 **cokret ⇄ QQ** 桥接。基于共享核心 [`cokret-bridge-runtime`](../core) + [`cokret-bridge-messaging`](../messaging),
+Rust 实现的 **cokret ⇄ QQ** 桥接。基于共享核心 [`cokret-bridge-runtime`](../runtime) + [`cokret-bridge-messaging`](../messaging),
 应用侧仅用 [`reqwest`](https://crates.io/crates/reqwest),不引入专有 SDK。对接 **OneBot**
 HTTP API(go-cqhttp / NapCat / Lagrange 等)或 **QQ 官方机器人**。
 

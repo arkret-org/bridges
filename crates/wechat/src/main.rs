@@ -8,7 +8,7 @@ use clap::Parser;
 use cokret_bridge_messaging::run_message_bridge;
 use cokret_bridge_runtime::{Config, logging};
 
-use crate::wechat::WechatApp;
+use crate::wechat::WeChatApp;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
         .to_owned();
 
     run_message_bridge(config, move |_ctx: Arc<_>| {
-        Ok(WechatApp::new(
+        Ok(WeChatApp::new(
             cred_id,
             cred_secret,
             agent_id,

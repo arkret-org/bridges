@@ -20,40 +20,37 @@ use serde_json::{Value, json};
 const SEND_API: &str = "https://graph.facebook.com/v20.0/me/messages";
 
 /// Messenger bridge adapter.
-pub struct MessagerApp {
+pub struct MessengerApp {
     /// Page access token (Bearer auth, used for sending).
     page_access_token: String,
-    /// Webhook verification token (the value compared against `hub.verify_token` in the GET verification handshake).
-    verify_token: Option<String>,
+    /// Webhook verification token (the value compared against `hub.verify_token`
+    /// in the GET verification handshake). Required (parity with WhatsApp): a
+    /// missing value would otherwise make the handshake fail at callback time
+    /// rather than at startup.
+    verify_token: String,
     /// Meta app secret used to verify the `X-Hub-Signature-256` of each POST
     /// delivery (HMAC-SHA256 over the raw request body).
     app_secret: String,
 }
 
-impl MessagerApp {
+impl MessengerApp {
     pub fn new(
         page_access_token: impl Into<String>,
-        verify_token: Option<String>,
+        verify_token: impl Into<String>,
         app_secret: impl Into<String>,
     ) -> Self {
         Self {
             page_access_token: page_access_token.into(),
-            verify_token,
+            verify_token: verify_token.into(),
             app_secret: app_secret.into(),
         }
     }
 }
 
 #[async_trait]
-impl MessageBridge for MessagerApp {
+impl MessageBridge for MessengerApp {
     fn name(&self) -> &str {
-        "messager"
-    }
-
-    async fn run(self: Arc<Self>, _ctx: Arc<MessageContext>) -> Result<()> {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-        }
+        "messenger"
     }
 
     async fn send_to_app(
@@ -116,7 +113,7 @@ impl MessageBridge for MessagerApp {
 
 #[derive(Clone)]
 struct MessengerWebhookState {
-    app: Arc<MessagerApp>,
+    app: Arc<MessengerApp>,
     ctx: Arc<MessageContext>,
 }
 
@@ -129,10 +126,8 @@ async fn messenger_verify(req: &mut Request, depot: &mut Depot, res: &mut Respon
     let mode = req.query::<String>("hub.mode").unwrap_or_default();
     let token = req.query::<String>("hub.verify_token").unwrap_or_default();
     let challenge = req.query::<String>("hub.challenge").unwrap_or_default();
-    let token_ok =
-        state.app.verify_token.as_deref().is_some_and(|expected| {
-            webhook::constant_time_eq(token.as_bytes(), expected.as_bytes())
-        });
+    let token_ok = !state.app.verify_token.is_empty()
+        && webhook::constant_time_eq(token.as_bytes(), state.app.verify_token.as_bytes());
     if mode == "subscribe" && token_ok {
         webhook::ok_text(res, challenge);
     } else {

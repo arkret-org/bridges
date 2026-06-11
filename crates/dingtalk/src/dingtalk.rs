@@ -48,7 +48,7 @@ impl DingTalkApp {
 
     /// Returns an access_token, served from the cache until it nears the
     /// vendor-reported expiry, then re-fetched via AppKey/AppSecret.
-    async fn fetch_access_token(&self, ctx: &Arc<MessageContext>) -> Result<String> {
+    async fn access_token(&self, ctx: &Arc<MessageContext>) -> Result<String> {
         self.token_cache
             .get_or_try_refresh(|| async {
                 // DingTalk's new API for obtaining an access_token.
@@ -92,18 +92,12 @@ impl MessageBridge for DingTalkApp {
         "dingtalk"
     }
 
-    async fn run(self: Arc<Self>, _ctx: Arc<MessageContext>) -> Result<()> {
-        loop {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-        }
-    }
-
     async fn send_to_app(
         &self,
         ctx: Arc<MessageContext>,
         msg: OutboundAppMessage,
     ) -> Result<AppMessageRef> {
-        let access_token = self.fetch_access_token(&ctx).await?;
+        let access_token = self.access_token(&ctx).await?;
 
         let text = msg.rendered_body(SenderRenderStyle::Plain);
 
@@ -138,12 +132,15 @@ impl MessageBridge for DingTalkApp {
             .await
             .map_err(|e| BridgeError::App(format!("DingTalk send response parse failed: {e}")))?;
 
-        // DingTalk returns processQueryKey as the message tracking identifier; falls back to the conversation id when missing.
+        // DingTalk returns processQueryKey as the message tracking identifier.
+        // Return the empty string when absent rather than falling back to the
+        // conversation id: a non-message-id value would pollute the message
+        // mapping (messaging skips recording an empty id).
         let app_message_id = value
             .get("processQueryKey")
             .and_then(|v| v.as_str())
             .map(|s| s.to_owned())
-            .unwrap_or_else(|| msg.app_channel.clone());
+            .unwrap_or_default();
 
         Ok(AppMessageRef { app_message_id })
     }
