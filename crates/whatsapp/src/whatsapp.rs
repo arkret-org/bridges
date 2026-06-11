@@ -195,9 +195,9 @@ async fn whatsapp_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
                     && let Err(e) =
                         forward_whatsapp_media(state, &from, &message_id, &media_id, mime, filename)
                             .await
-                    {
-                        tracing::warn!(error = %e, "WhatsApp media bridging failed");
-                    }
+                {
+                    tracing::warn!(error = %e, "WhatsApp media bridging failed");
+                }
             }
         }
     }

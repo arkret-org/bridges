@@ -24,13 +24,16 @@ struct AppConfig {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    bridge_main("cokret <-> Microsoft Teams bridge", |app: AppConfig, ctx| {
-        Ok(TeamsApp::new(
-            app.app_id,
-            app.app_password,
-            app.service_url,
-            Arc::new(JwtVerifier::new(app.inbound_jwt, ctx.http.clone())),
-        ))
-    })
+    bridge_main(
+        "cokret <-> Microsoft Teams bridge",
+        |app: AppConfig, ctx| {
+            Ok(TeamsApp::new(
+                app.app_id,
+                app.app_password,
+                app.service_url,
+                Arc::new(JwtVerifier::new(app.inbound_jwt, ctx.http.clone())),
+            ))
+        },
+    )
     .await
 }

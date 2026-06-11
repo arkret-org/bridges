@@ -1011,9 +1011,10 @@ fn sender_display_for_event(store: &MessageStore, event: &Event) -> Result<Strin
         None => actor_id,
     };
     if let Some(executed_by) = event.executed_by.as_ref()
-        && executed_by != &event.actor_id {
-            display = format!("{display} via {executed_by}");
-        }
+        && executed_by != &event.actor_id
+    {
+        display = format!("{display} via {executed_by}");
+    }
     Ok(display)
 }
 

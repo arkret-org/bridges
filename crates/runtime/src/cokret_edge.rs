@@ -866,9 +866,10 @@ impl cokret::AppletHandler for BridgeAppletHandler {
         // non-fatal (best-effort) and does not affect the durable ack.
         if !req.ephemeral.is_null()
             && let Some(tx) = self.ephemeral_tx.as_ref()
-                && let Err(err) = tx.send(req.ephemeral) {
-                    tracing::warn!(error = %err, "failed to enqueue ephemeral payload");
-                }
+            && let Err(err) = tx.send(req.ephemeral)
+        {
+            tracing::warn!(error = %err, "failed to enqueue ephemeral payload");
+        }
 
         // `ok` reflects whether every durable event was accepted (either freshly
         // enqueued or de-duplicated). When enqueueing failed, signal a retry so
@@ -885,14 +886,15 @@ impl cokret::AppletHandler for BridgeAppletHandler {
             .resolver
             .as_ref()
             .and_then(|r| r.resolve_actor(actor_id))
-            && let Ok(did) = Did::new(resolved.actor_id) {
-                return Ok(AppletActorView {
-                    exists: true,
-                    actor_id: Some(did),
-                    display_name: resolved.display_name,
-                    external_ref: resolved.external_ref,
-                });
-            }
+            && let Ok(did) = Did::new(resolved.actor_id)
+        {
+            return Ok(AppletActorView {
+                exists: true,
+                actor_id: Some(did),
+                display_name: resolved.display_name,
+                external_ref: resolved.external_ref,
+            });
+        }
         Ok(AppletActorView {
             exists: false,
             actor_id: None,
@@ -906,14 +908,15 @@ impl cokret::AppletHandler for BridgeAppletHandler {
             .resolver
             .as_ref()
             .and_then(|r| r.resolve_realm(realm_id_or_alias))
-            && let Ok(realm) = RealmId::new(resolved.realm_id) {
-                return Ok(AppletRealmView {
-                    exists: true,
-                    realm_id: Some(realm),
-                    title: resolved.title,
-                    external_ref: resolved.external_ref,
-                });
-            }
+            && let Ok(realm) = RealmId::new(resolved.realm_id)
+        {
+            return Ok(AppletRealmView {
+                exists: true,
+                realm_id: Some(realm),
+                title: resolved.title,
+                external_ref: resolved.external_ref,
+            });
+        }
         Ok(AppletRealmView {
             exists: false,
             realm_id: None,

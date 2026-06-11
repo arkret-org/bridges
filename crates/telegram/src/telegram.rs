@@ -68,9 +68,9 @@ impl MessageBridge for TelegramApp {
                         &bot, &ctx, &token, &channel, &user, &msg, file_id, filename, mime,
                     )
                     .await
-                    {
-                        tracing::warn!(error = %e, "Telegram media bridging failed");
-                    }
+                {
+                    tracing::warn!(error = %e, "Telegram media bridging failed");
+                }
 
                 respond(())
             }
