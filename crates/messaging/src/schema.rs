@@ -1,22 +1,27 @@
 //! Diesel table definitions for the messaging helper layer.
 
 diesel::table! {
-    /// App channel/conversation <-> Cokret realm mapping.
+    /// App channel/conversation <-> Cokret portal mapping. The mapping unit is
+    /// `(realm_id, flow_id)` per applet-integration §10.1: `portal_flow_id` is
+    /// resolved lazily through the §10.1 acquisition path and cached here.
     room_mappings (id) {
         id -> BigInt,
         app_channel_id -> Text,
         cokret_realm_id -> Text,
         portal_alias -> Nullable<Text>,
+        portal_flow_id -> Nullable<Text>,
         created_at -> BigInt,
     }
 }
 
 diesel::table! {
-    /// App message id <-> Cokret event id mapping.
+    /// App message id <-> Cokret event id mapping. `normalized_sender` is part
+    /// of the dedup key (applet-integration §16 minimum key set).
     message_mappings (id) {
         id -> BigInt,
         app_channel_id -> Text,
         app_message_id -> Text,
+        normalized_sender -> Text,
         cokret_event_id -> Text,
         cokret_realm_id -> Text,
         created_at -> BigInt,

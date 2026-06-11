@@ -3,23 +3,26 @@
 //! This crate sits on top of `cokret-bridge-runtime`. It owns the
 //! message-shaped contract shared by the social bridge adapters:
 //!
-//! - app channel/message/user mapping tables,
-//! - `ck.message.create` conversion,
+//! - app channel/message/user mapping tables (location ↔ `(realm_id, flow_id)`
+//!   per applet-integration §10.1),
+//! - spec-shaped `ck.message.create` payload assembly
+//!   (`{flow_id, track_name, content, blob_refs}`) and parsing,
+//! - portal flow acquisition/creation (`ck.flow.create`),
 //! - `MessageBridge` and `run_message_bridge`,
-//! - signed `external_ref` provenance for upstream channel/user/message ids.
+//! - `external_ref` provenance for upstream channel/user/message ids.
 
 mod models;
 mod schema;
 pub mod webhook;
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cokret::events::{MediaContent, TextMessageContent};
+use cokret::http_client::ClientRequestOptions;
 use cokret::{
-    AppletId, BlobRef, Did, Event, GhostActorProvisionOutcome, GhostActorProvisionRequestBody,
-    RealmId,
+    AppletId, BlobRef, ContentBlock, Did, Event, FlowCreateObject, FlowId, FlowTrackConfig,
+    GhostActorProvisionOutcome, GhostActorProvisionRequestBody, MessageCreatePayload,
+    ObjectCreatePayload, RealmId,
 };
 use cokret_bridge_runtime::app::{
     AppletResolver, BridgeApp, BridgeContext, ResolvedActor, ResolvedRealm,
@@ -42,6 +45,17 @@ use models::{NewMessageMapping, NewRoomMapping, NewUserMapping};
 // colliding with any future spec-defined messaging external_ref schema.
 const EXTERNAL_REF_SCHEMA: &str = "org.cokret.bridge.external_ref.messaging.v1";
 const MESSAGE_MAPPING_KEY_SEPARATOR: char = '\u{1f}';
+
+/// The flow track bridged messages write into. applet-integration §10.1: 桥接
+/// 消息默认写入 `discussion`;v1 的 `message_create_payload.track_name` 在
+/// schema 中即 const `"discussion"`。
+const PORTAL_FLOW_TRACK: &str = "discussion";
+
+/// Page size for the §10.1 step-2 projection scan over realm history.
+const PORTAL_FLOW_SCAN_PAGE_LIMIT: u32 = 200;
+/// Page cap for the §10.1 step-2 projection scan (bounds startup cost on large
+/// realms; a fresh portal realm resolves in one page).
+const PORTAL_FLOW_SCAN_MAX_PAGES: usize = 25;
 
 /// An inbound message from an external app into Cokret.
 #[derive(Clone, Debug)]
@@ -113,62 +127,155 @@ pub struct DownloadedMedia {
 
 pub const MAX_EXTERNAL_MEDIA_BYTES: usize = 32 * 1024 * 1024;
 
-/// Build a canonical `ck.message.create` text content (`{ "body": ... }`,
-/// matching the SDK's [`TextMessageContent`]).
-pub fn default_text_payload(body: &str) -> Value {
-    serde_json::to_value(TextMessageContent::plain(body))
-        .unwrap_or_else(|_| json!({ "body": body }))
+/// Build the spec `content_block` for plain text
+/// (`zh/models/content-types.md` §4.1: `{ "kind": "ck.content.text", "body" }`).
+pub fn text_content_block(body: &str) -> Result<Value> {
+    ContentBlock::text(body)
+        .to_value()
+        .map_err(|e| BridgeError::App(e.to_string()))
 }
 
-/// Build a canonical media content (`{ "body", "blob", "mimetype", "filename",
-/// "size" }`, matching the SDK's [`MediaContent`]).
-pub fn media_message_payload(att: &Attachment) -> Result<Value> {
+/// Map a MIME type to the spec media content kind
+/// (`zh/models/content-types.md` §4.2–§4.5).
+fn media_content_kind(media_type: Option<&str>) -> &'static str {
+    match media_type.and_then(|mime| mime.split('/').next()) {
+        Some("image") => "ck.content.image",
+        Some("video") => "ck.content.video",
+        Some("audio") => "ck.content.audio",
+        _ => "ck.content.file",
+    }
+}
+
+const MEDIA_CONTENT_KINDS: [&str; 4] = [
+    "ck.content.image",
+    "ck.content.video",
+    "ck.content.audio",
+    "ck.content.file",
+];
+
+/// Build the spec media `content_block` (`zh/models/content-types.md` §4.2–§4.5:
+/// `blob_ref` / `mime_type` / `size_bytes` / `filename` as block fields; the
+/// payload-level `blob_refs[]` listing is added by the submit path). Note the
+/// schema explicitly forbids the field name `size` — byte counts are
+/// `size_bytes`.
+pub fn media_content_block(att: &Attachment) -> Result<Value> {
     let blob = BlobRef::new(att.blob_ref.clone())
         .map_err(|e| BridgeError::App(format!("invalid blob_ref: {e}")))?;
+    let kind = media_content_kind(att.media_type.as_deref());
+    let filename = att
+        .filename
+        .clone()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "attachment".to_owned());
     let body = if att.caption.is_empty() {
-        att.filename.clone().unwrap_or_default()
+        filename.clone()
     } else {
         att.caption.clone()
     };
-    let content = MediaContent {
-        body,
-        blob,
-        mimetype: att.media_type.clone(),
-        filename: att.filename.clone(),
-        size: att.size,
-        info: BTreeMap::new(),
-        relates_to: None,
-    };
-    serde_json::to_value(content).map_err(|e| BridgeError::App(e.to_string()))
+    let mut block = ContentBlock::new(kind, body)
+        .with_field("blob_ref", Value::String(blob.as_str().to_owned()));
+    if let Some(mime) = &att.media_type {
+        block = block.with_field("mime_type", Value::String(mime.clone()));
+    }
+    // `filename` is MUST for ck.content.file and harmless elsewhere.
+    block = block.with_field("filename", Value::String(filename));
+    if let Some(size) = att.size {
+        block = block.with_field("size_bytes", json!(size));
+    }
+    block
+        .to_value()
+        .map_err(|e| BridgeError::App(e.to_string()))
 }
 
-/// Extract displayable plain text from a Cokret message payload. Deserializes
-/// the SDK's [`TextMessageContent`] (binding the canonical wire shape), falling
-/// back to a raw `body` lookup for non-conforming payloads.
-pub fn extract_plain_body(payload: &Value) -> String {
-    if let Ok(content) = serde_json::from_value::<TextMessageContent>(payload.clone()) {
-        return content.body;
-    }
+/// Assemble the authoritative `ck.message.create` payload
+/// (`event-payload.schema.json#/$defs/message_create_payload`, closed schema:
+/// required `flow_id` + `track_name`, body in `content`, media listed in
+/// `blob_refs[]`).
+fn build_message_create_payload(
+    flow_id: &str,
+    content: Value,
+    blob_refs: Vec<String>,
+) -> Result<Value> {
+    let flow_id = FlowId::new(flow_id.to_owned())?;
+    let mut payload = MessageCreatePayload::with_content(flow_id, PORTAL_FLOW_TRACK, content);
+    payload.blob_refs = blob_refs;
     payload
-        .get("body")
+        .to_value()
+        .map_err(|e| BridgeError::App(e.to_string()))
+}
+
+/// Extract displayable plain text from a spec-shaped `ck.message.create`
+/// payload: the `content_block` lives in `payload.content` and its `body` is
+/// the required plain-text fallback (E2EE `encrypted_content` yields an empty
+/// string — this bridge does not join MLS groups).
+pub fn extract_plain_body(payload: &Value) -> String {
+    payload
+        .pointer("/content/body")
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned()
 }
 
-/// Extract a media attachment from a Cokret message payload, if it carries a
-/// `blob` reference. Deserializes the SDK's [`MediaContent`] so the inbound and
-/// outbound directions stay bound to the same canonical wire type (symmetric
-/// with [`media_message_payload`]); structural drift surfaces as a failed parse
-/// rather than silently-missing fields.
+/// The `flow_id` carried by a `ck.message.create` payload, if present.
+pub fn extract_flow_id(payload: &Value) -> Option<&str> {
+    payload.get("flow_id").and_then(Value::as_str)
+}
+
+/// Locate the media block inside a `content_block`: the block itself when it is
+/// a media kind, or the first media part of a `ck.content.composite`.
+fn media_block(content: &Value) -> Option<&Value> {
+    let kind = content.get("kind").and_then(Value::as_str)?;
+    if MEDIA_CONTENT_KINDS.contains(&kind) {
+        return Some(content);
+    }
+    if kind == "ck.content.composite" {
+        return content
+            .get("parts")
+            .and_then(Value::as_array)?
+            .iter()
+            .find(|part| {
+                part.get("kind")
+                    .and_then(Value::as_str)
+                    .is_some_and(|k| MEDIA_CONTENT_KINDS.contains(&k))
+            });
+    }
+    None
+}
+
+/// Extract a media attachment from a spec-shaped `ck.message.create` payload:
+/// reads the media `content_block` fields (`blob_ref` / `mime_type` /
+/// `filename` / `size_bytes`), falling back to the payload-level `blob_refs[]`
+/// for the blob reference.
 pub fn extract_attachment(payload: &Value) -> Option<Attachment> {
-    let content = serde_json::from_value::<MediaContent>(payload.clone()).ok()?;
+    let content = payload.get("content")?;
+    let block = media_block(content)?;
+    let blob_ref = block
+        .get("blob_ref")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            payload
+                .get("blob_refs")
+                .and_then(Value::as_array)
+                .and_then(|refs| refs.first())
+                .and_then(Value::as_str)
+        })?
+        .to_owned();
     Some(Attachment {
-        blob_ref: content.blob.as_str().to_owned(),
-        media_type: content.mimetype,
-        filename: content.filename,
-        size: content.size,
-        caption: content.body,
+        blob_ref,
+        media_type: block
+            .get("mime_type")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        filename: block
+            .get("filename")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        size: block.get("size_bytes").and_then(Value::as_u64),
+        caption: content
+            .get("body")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
     })
 }
 
@@ -197,10 +304,18 @@ impl MessageStore {
             .first::<RoomMapping>(&mut conn)
             .optional()?;
         if let Some(existing) = exists {
+            // A realm change invalidates the cached portal flow (the flow
+            // belongs to the previous realm); it is re-resolved lazily.
+            let portal_flow_id = if existing.cokret_realm_id == realm_id {
+                existing.portal_flow_id.clone()
+            } else {
+                None
+            };
             diesel::update(dsl::room_mappings.filter(dsl::id.eq(existing.id)))
                 .set((
                     dsl::cokret_realm_id.eq(realm_id),
                     dsl::portal_alias.eq(alias),
+                    dsl::portal_flow_id.eq(portal_flow_id),
                 ))
                 .execute(&mut conn)?;
         } else {
@@ -209,6 +324,7 @@ impl MessageStore {
                     app_channel_id: app_channel,
                     cokret_realm_id: realm_id,
                     portal_alias: alias,
+                    portal_flow_id: None,
                     created_at: now_ts(),
                 })
                 .execute(&mut conn)?;
@@ -216,25 +332,37 @@ impl MessageStore {
         Ok(())
     }
 
-    pub fn realm_for_channel(&self, app_channel: &str) -> Result<Option<String>> {
+    /// The full portal mapping row for an app channel (realm + cached portal
+    /// flow, applet-integration §10.1).
+    pub fn portal_for_channel(&self, app_channel: &str) -> Result<Option<RoomMapping>> {
         use schema::room_mappings::dsl;
 
         let mut conn = self.db.conn()?;
         Ok(dsl::room_mappings
             .filter(dsl::app_channel_id.eq(app_channel))
-            .select(dsl::cokret_realm_id)
-            .first::<String>(&mut conn)
+            .first::<RoomMapping>(&mut conn)
             .optional()?)
     }
 
-    pub fn channel_for_realm(&self, realm_id: &str) -> Result<Option<String>> {
+    /// Persist the resolved portal flow for an app channel (§10.1 step 1 cache).
+    pub fn set_channel_portal_flow(&self, app_channel: &str, flow_id: &str) -> Result<()> {
+        use schema::room_mappings::dsl;
+
+        let mut conn = self.db.conn()?;
+        diesel::update(dsl::room_mappings.filter(dsl::app_channel_id.eq(app_channel)))
+            .set(dsl::portal_flow_id.eq(Some(flow_id)))
+            .execute(&mut conn)?;
+        Ok(())
+    }
+
+    /// The portal mapping row for a realm (cokret → app direction).
+    pub fn room_for_realm(&self, realm_id: &str) -> Result<Option<RoomMapping>> {
         use schema::room_mappings::dsl;
 
         let mut conn = self.db.conn()?;
         Ok(dsl::room_mappings
             .filter(dsl::cokret_realm_id.eq(realm_id))
-            .select(dsl::app_channel_id)
-            .first::<String>(&mut conn)
+            .first::<RoomMapping>(&mut conn)
             .optional()?)
     }
 
@@ -242,6 +370,7 @@ impl MessageStore {
         &self,
         app_channel: &str,
         app_message_id: &str,
+        normalized_sender: &str,
         cokret_event_id: &str,
         realm_id: &str,
     ) -> Result<()> {
@@ -253,11 +382,17 @@ impl MessageStore {
         if app_message_id.trim().is_empty() {
             return Err(BridgeError::App("app_message_id must not be empty".into()));
         }
+        if normalized_sender.trim().is_empty() {
+            return Err(BridgeError::App(
+                "normalized_sender must not be empty".into(),
+            ));
+        }
 
         let mut conn = self.db.conn()?;
         let exists = dsl::message_mappings
             .filter(dsl::app_channel_id.eq(app_channel))
             .filter(dsl::app_message_id.eq(app_message_id))
+            .filter(dsl::normalized_sender.eq(normalized_sender))
             .first::<MessageMapping>(&mut conn)
             .optional()?;
         if let Some(existing) = exists {
@@ -272,6 +407,7 @@ impl MessageStore {
                 .values(NewMessageMapping {
                     app_channel_id: app_channel,
                     app_message_id,
+                    normalized_sender,
                     cokret_event_id,
                     cokret_realm_id: realm_id,
                     created_at: now_ts(),
@@ -281,10 +417,13 @@ impl MessageStore {
         Ok(())
     }
 
+    /// Dedup lookup keyed by the §16 minimum key set: protocol/tenant/channel
+    /// (folded into `app_channel`), external event id, and normalized sender.
     pub fn event_for_channel_message(
         &self,
         app_channel: &str,
         app_message_id: &str,
+        normalized_sender: &str,
     ) -> Result<Option<String>> {
         use schema::message_mappings::dsl;
 
@@ -292,6 +431,7 @@ impl MessageStore {
         Ok(dsl::message_mappings
             .filter(dsl::app_channel_id.eq(app_channel))
             .filter(dsl::app_message_id.eq(app_message_id))
+            .filter(dsl::normalized_sender.eq(normalized_sender))
             .select(dsl::cokret_event_id)
             .first::<String>(&mut conn)
             .optional()?)
@@ -484,6 +624,9 @@ fn requested_ghost_actor_id_for_user(
     Ok(did)
 }
 
+/// The spec-registered ghost provision binding: `ck.self.applet.ghost.provision`
+/// = `POST /_cokret/self/applets/{applet_id}/ghosts/provision`
+/// (applet-integration §9.1, `operation-registry.json`, openapi).
 fn ghost_actor_provision_path(applet_id: &str) -> Result<String> {
     if applet_id.trim().is_empty() || applet_id.contains('/') {
         return Err(BridgeError::Config(
@@ -493,6 +636,26 @@ fn ghost_actor_provision_path(applet_id: &str) -> Result<String> {
     Ok(format!(
         "/_cokret/self/applets/{applet_id}/ghosts/provision"
     ))
+}
+
+/// Deterministic `Idempotency-Key` for ghost provisioning (required header per
+/// the openapi binding; §9.1 keys server-side idempotency on
+/// `(applet_id, protocol, tenant, external_user_id)`, so retries of the same
+/// external user reuse the same key). Hashed to satisfy the 128-char bound.
+fn ghost_provision_idempotency_key(
+    applet_id: &str,
+    protocol: &str,
+    tenant: &str,
+    external_user_id: &str,
+) -> String {
+    use sha2::{Digest, Sha256};
+
+    let material = [applet_id, protocol, tenant, external_user_id]
+        .join(&MESSAGE_MAPPING_KEY_SEPARATOR.to_string());
+    format!(
+        "ghost-provision-{}",
+        hex::encode(Sha256::digest(material.as_bytes()))
+    )
 }
 
 fn external_ref_for_user(
@@ -538,7 +701,16 @@ async fn provision_ghost_actor(
         request = request.with_display_name(display_name);
     }
     let path = ghost_actor_provision_path(&config.cokret.applet_id)?;
-    let response: GhostActorProvisionOutcome = edge.client().post(&path, &request).await?;
+    let options = ClientRequestOptions::new().idempotency_key(ghost_provision_idempotency_key(
+        &config.cokret.applet_id,
+        protocol,
+        tenant,
+        external_user_id,
+    ));
+    let response: GhostActorProvisionOutcome = edge
+        .client()
+        .post_with_options(&path, &request, &options)
+        .await?;
     validate_ghost_provision_response(&ghost_actor_id, response)
 }
 
@@ -600,6 +772,126 @@ fn external_ref_for_message(config: &runtime::Config, msg: &InboundAppMessage) -
     })
 }
 
+/// The external location reference identifying one app channel, in the §10.1
+/// match vocabulary (`protocol` / `network_id` / `location_id`).
+fn portal_location_ref(config: &runtime::Config, app_channel: &str) -> Value {
+    json!({
+        "schema": EXTERNAL_REF_SCHEMA,
+        "protocol": bridge_protocol(config),
+        "network_id": bridge_tenant(config),
+        "location_id": normalized_external_id(app_channel),
+    })
+}
+
+/// §10.1 location equivalence: protocol / network_id / location_id equality.
+fn location_matches(candidate: Option<&Value>, location: &Value) -> bool {
+    let Some(candidate) = candidate else {
+        return false;
+    };
+    ["protocol", "network_id", "location_id"]
+        .iter()
+        .all(|key| candidate.get(*key) == location.get(*key))
+}
+
+/// §10.1 step 2: scan the portal realm's history (a projection over regular
+/// event reads) for an existing portal flow whose recorded external location
+/// matches. Concurrent/retried creates resolve to the earliest flow in
+/// effective (HLC) order, per the §10.1 create-idempotency rule.
+///
+/// The location is matched against the flow object's signed
+/// `metadata.fields.external_ref` (covered by the event digest). The spec's
+/// envelope-top-level signed `external_ref` is not yet representable in the SDK
+/// `Event` model, so flow creation mirrors the location into the signed flow
+/// metadata (see [`create_portal_flow`]).
+async fn find_existing_portal_flow(
+    edge: &runtime::CokretEdge,
+    realm_id: &str,
+    location: &Value,
+) -> Result<Option<String>> {
+    let mut cursor: Option<String> = None;
+    // (hlc, event_id, flow_id) — keep the earliest in effective order.
+    let mut earliest: Option<(String, String, String)> = None;
+    for _ in 0..PORTAL_FLOW_SCAN_MAX_PAGES {
+        let page = edge
+            .client()
+            .events_query(
+                realm_id,
+                cursor.as_deref(),
+                None,
+                None,
+                Some(PORTAL_FLOW_SCAN_PAGE_LIMIT),
+            )
+            .await?;
+        for event in &page.events {
+            if event.kind.as_str() != "ck.flow.create" {
+                continue;
+            }
+            let Some(object) = event.content.get("object") else {
+                continue;
+            };
+            if !location_matches(object.pointer("/metadata/fields/external_ref"), location) {
+                continue;
+            }
+            let Some(flow_id) = object.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            let key = (event.hlc.to_string(), event.event_id.to_string());
+            if earliest.as_ref().is_none_or(|(hlc, event_id, _)| {
+                (key.0.as_str(), key.1.as_str()) < (hlc.as_str(), event_id.as_str())
+            }) {
+                earliest = Some((key.0, key.1, flow_id.to_owned()));
+            }
+        }
+        if page.events.is_empty() {
+            break;
+        }
+        match page.prev_cursor {
+            Some(prev) => cursor = Some(prev),
+            None => break,
+        }
+    }
+    Ok(earliest.map(|(_, _, flow_id)| flow_id))
+}
+
+/// §10.1 step 3: create the portal flow by submitting `ck.flow.create` under
+/// the bridge's own signable identity (the service actor), recording the
+/// external location in the signed flow metadata, and return the new flow id.
+async fn create_portal_flow(
+    edge: &runtime::CokretEdge,
+    app_channel: &str,
+    alias: Option<&str>,
+    realm_id: &str,
+    location: &Value,
+) -> Result<String> {
+    let realm = RealmId::new(realm_id.to_owned())?;
+    let flow_id = FlowId::new(cokret::new_prefixed_uuid7("ck:flow:"))?;
+    let title = alias
+        .filter(|alias| !alias.trim().is_empty())
+        .unwrap_or(app_channel);
+    let flow = FlowCreateObject::new(flow_id.clone(), realm.clone(), edge.service_did().clone())
+        .with_metadata_title(title)
+        .with_metadata_field("external_ref", location.clone())
+        .with_track(PORTAL_FLOW_TRACK, FlowTrackConfig::discussion_primary());
+    let flow_created_at = flow.created_at;
+    let payload = ObjectCreatePayload::new(flow)
+        .to_value()
+        .map_err(|e| BridgeError::App(e.to_string()))?;
+    let mut event = edge.mint_event("ck.flow.create", &realm, payload)?;
+    // flow_create_payload semantic validation requires object.created_by ==
+    // actor_id (both are the service DID here) and object.created_at == the
+    // envelope created_at.
+    event.created_at = flow_created_at;
+    // §10.1 asks for a signed envelope top-level external_ref recording the
+    // location; the SDK Event model cannot carry that field yet, so the signed
+    // copy lives in the flow metadata above and unsigned only carries a hint.
+    event
+        .unsigned
+        .insert("external_ref".to_owned(), location.clone());
+    edge.resign_event(&mut event)?;
+    edge.submit_event(&event).await?;
+    Ok(flow_id.to_string())
+}
+
 fn host_allowed(host: &str, allowed_hosts: &[&str]) -> bool {
     allowed_hosts.iter().any(|allowed| {
         host.eq_ignore_ascii_case(allowed)
@@ -617,15 +909,17 @@ fn schema_sql() -> &'static [&'static str] {
             app_channel_id TEXT NOT NULL UNIQUE,\
             cokret_realm_id TEXT NOT NULL UNIQUE,\
             portal_alias TEXT,\
+            portal_flow_id TEXT,\
             created_at BIGINT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS message_mappings (\
             id INTEGER PRIMARY KEY AUTOINCREMENT,\
             app_channel_id TEXT NOT NULL,\
             app_message_id TEXT NOT NULL,\
+            normalized_sender TEXT NOT NULL,\
             cokret_event_id TEXT NOT NULL UNIQUE,\
             cokret_realm_id TEXT NOT NULL,\
             created_at BIGINT NOT NULL,\
-            UNIQUE(app_channel_id, app_message_id))",
+            UNIQUE(app_channel_id, app_message_id, normalized_sender))",
         "CREATE TABLE IF NOT EXISTS user_mappings (\
             id INTEGER PRIMARY KEY AUTOINCREMENT,\
             protocol TEXT NOT NULL,\
@@ -649,15 +943,17 @@ fn schema_sql() -> &'static [&'static str] {
             app_channel_id TEXT NOT NULL UNIQUE,\
             cokret_realm_id TEXT NOT NULL UNIQUE,\
             portal_alias TEXT,\
+            portal_flow_id TEXT,\
             created_at BIGINT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS message_mappings (\
             id BIGSERIAL PRIMARY KEY,\
             app_channel_id TEXT NOT NULL,\
             app_message_id TEXT NOT NULL,\
+            normalized_sender TEXT NOT NULL,\
             cokret_event_id TEXT NOT NULL UNIQUE,\
             cokret_realm_id TEXT NOT NULL,\
             created_at BIGINT NOT NULL,\
-            UNIQUE(app_channel_id, app_message_id))",
+            UNIQUE(app_channel_id, app_message_id, normalized_sender))",
         "CREATE TABLE IF NOT EXISTS user_mappings (\
             id BIGSERIAL PRIMARY KEY,\
             protocol TEXT NOT NULL,\
@@ -681,6 +977,7 @@ fn schema_sql() -> &'static [&'static str] {
             app_channel_id TEXT NOT NULL,\
             cokret_realm_id TEXT NOT NULL,\
             portal_alias TEXT,\
+            portal_flow_id TEXT,\
             created_at BIGINT NOT NULL,\
             UNIQUE KEY room_app_channel_id_unique (app_channel_id(191)),\
             UNIQUE KEY room_cokret_realm_id_unique (cokret_realm_id(191)))",
@@ -688,10 +985,12 @@ fn schema_sql() -> &'static [&'static str] {
             id BIGINT AUTO_INCREMENT PRIMARY KEY,\
             app_channel_id TEXT NOT NULL,\
             app_message_id TEXT NOT NULL,\
+            normalized_sender TEXT NOT NULL,\
             cokret_event_id TEXT NOT NULL,\
             cokret_realm_id TEXT NOT NULL,\
             created_at BIGINT NOT NULL,\
-            UNIQUE KEY message_app_id_unique (app_channel_id(191), app_message_id(191)),\
+            UNIQUE KEY message_app_id_unique \
+                (app_channel_id(191), app_message_id(120), normalized_sender(120)),\
             UNIQUE KEY message_cokret_event_id_unique (cokret_event_id(191)))",
         "CREATE TABLE IF NOT EXISTS user_mappings (\
             id BIGINT AUTO_INCREMENT PRIMARY KEY,\
@@ -817,10 +1116,63 @@ impl MessageContext {
         })
     }
 
+    /// Resolve the portal flow for an app channel following the §10.1
+    /// acquisition order: persisted mapping → projection scan over the portal
+    /// realm (match by external location) → `ck.flow.create`. The result is
+    /// cached in the room mapping. Serialized per channel so concurrent first
+    /// messages cannot double-create.
+    pub async fn ensure_portal_flow(&self, app_channel: &str, realm_id: &str) -> Result<String> {
+        let channel_key = message_mapping_channel_key(&self.inner.config, app_channel);
+        let queue_key = format!("portal_flow{MESSAGE_MAPPING_KEY_SEPARATOR}{channel_key}");
+        self.inner
+            .queue
+            .run(&queue_key, || {
+                let edge = self.inner.edge.clone();
+                let store = self.store.clone();
+                let config = self.inner.config.clone();
+                let app_channel = app_channel.to_owned();
+                let realm_id = realm_id.to_owned();
+                async move {
+                    // §10.1 step 1: the persisted location ↔ (realm_id, flow_id)
+                    // mapping.
+                    let row = store.portal_for_channel(&app_channel)?;
+                    let alias = row.as_ref().and_then(|row| row.portal_alias.clone());
+                    if let Some(row) = row
+                        && row.cokret_realm_id == realm_id
+                        && let Some(flow_id) = row
+                            .portal_flow_id
+                            .filter(|flow_id| !flow_id.trim().is_empty())
+                    {
+                        return Ok::<String, BridgeError>(flow_id);
+                    }
+                    let location = portal_location_ref(&config, &app_channel);
+                    // §10.1 step 2: look for an existing portal flow.
+                    let flow_id =
+                        match find_existing_portal_flow(&edge, &realm_id, &location).await? {
+                            Some(flow_id) => flow_id,
+                            // §10.1 step 3: create it.
+                            None => {
+                                create_portal_flow(
+                                    &edge,
+                                    &app_channel,
+                                    alias.as_deref(),
+                                    &realm_id,
+                                    &location,
+                                )
+                                .await?
+                            }
+                        };
+                    store.set_channel_portal_flow(&app_channel, &flow_id)?;
+                    Ok(flow_id)
+                }
+            })
+            .await
+    }
+
     /// Submit an inbound text message as a `ck.message.create` event.
     pub async fn submit_app_message(&self, msg: InboundAppMessage) -> Result<String> {
-        let payload = default_text_payload(&msg.body);
-        self.submit_content(&msg, payload).await
+        let content = text_content_block(&msg.body)?;
+        self.submit_content(&msg, content, Vec::new()).await
     }
 
     /// Submit an inbound media message. The `attachment` must already reference a
@@ -834,13 +1186,20 @@ impl MessageContext {
         if attachment.caption.is_empty() {
             attachment.caption = msg.body.clone();
         }
-        let payload = media_message_payload(&attachment)?;
-        self.submit_content(&msg, payload).await
+        let content = media_content_block(&attachment)?;
+        self.submit_content(&msg, content, vec![attachment.blob_ref.clone()])
+            .await
     }
 
-    /// Shared submit path: resolve realm, attach signed provenance, submit on the
+    /// Shared submit path: resolve the portal `(realm_id, flow_id)`, assemble
+    /// the spec `message_create_payload`, attach provenance, submit on the
     /// per-channel serial queue, and record the message mapping.
-    async fn submit_content(&self, msg: &InboundAppMessage, payload: Value) -> Result<String> {
+    async fn submit_content(
+        &self,
+        msg: &InboundAppMessage,
+        content: Value,
+        blob_refs: Vec<String>,
+    ) -> Result<String> {
         let external_event_id = normalized_external_id(&msg.app_message_id);
         if external_event_id.is_empty() {
             return Err(BridgeError::App(
@@ -850,13 +1209,18 @@ impl MessageContext {
 
         let realm = self
             .store
-            .realm_for_channel(&msg.app_channel)?
+            .portal_for_channel(&msg.app_channel)?
+            .map(|row| row.cokret_realm_id)
             .ok_or_else(|| {
                 BridgeError::App(format!(
                     "channel {} has no realm mapping; create an explicit room mapping",
                     msg.app_channel
                 ))
             })?;
+        // §10.1: the mapping unit for an external location is (realm_id,
+        // flow_id) — resolve the portal flow before submitting.
+        let flow_id = self.ensure_portal_flow(&msg.app_channel, &realm).await?;
+        let payload = build_message_create_payload(&flow_id, content, blob_refs)?;
 
         let protocol = bridge_protocol(&self.inner.config);
         let tenant = bridge_tenant(&self.inner.config);
@@ -884,9 +1248,11 @@ impl MessageContext {
                 let realm_for_submit = realm.clone();
                 let realm_for_record = realm.clone();
                 async move {
-                    if let Some(existing_event_id) =
-                        store.event_for_channel_message(&mapping_channel_key, &external_event_id)?
-                    {
+                    if let Some(existing_event_id) = store.event_for_channel_message(
+                        &mapping_channel_key,
+                        &external_event_id,
+                        &external_user_id,
+                    )? {
                         return Ok::<String, BridgeError>(existing_event_id);
                     }
                     let mapping = match store.ghost_actor_for_app_user(
@@ -950,6 +1316,7 @@ impl MessageContext {
                     store.record_message(
                         &mapping_channel_key,
                         &external_event_id,
+                        &external_user_id,
                         &event_id,
                         &realm_for_record,
                     )?;
@@ -1052,18 +1419,14 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
         if event.kind != "ck.message.create" {
             return Ok(());
         }
-        // Skip events this bridge itself submitted (app -> cokret), which the
-        // server echoes back, to avoid an outbound loop back into the app.
-        let our_id = &self.ctx.core().config.bridge.bridge_id;
-        let originated_here = event
-            .unsigned
-            .get("external_ref")
-            .and_then(|r| r.get("source"))
-            .and_then(Value::as_str)
-            == Some(our_id.as_str());
-        if originated_here {
-            return Ok(());
-        }
+        // Loop prevention: skip events this bridge itself submitted (app ->
+        // cokret), which the server echoes back. Only signature-covered fields
+        // are consulted (applet-integration §8: `unsigned.external_ref` is a
+        // discardable hint and MUST NOT be a security-decision input): every
+        // event this bridge submits either carries `executed_by = service_did`
+        // (delegated ghost events) or is authored by the service actor itself.
+        // Both checks are independent of local DB state, so a server push
+        // racing ahead of our own mapping write cannot bypass them.
         if event.executed_by.as_ref() == Some(self.ctx.core().edge.service_did()) {
             return Ok(());
         }
@@ -1075,10 +1438,25 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
             return Ok(());
         }
         let realm_id = event.realm_id.to_string();
-        let Some(channel) = self.ctx.store.channel_for_realm(&realm_id)? else {
+        let Some(room) = self.ctx.store.room_for_realm(&realm_id)? else {
             tracing::debug!(realm = %realm_id, "realm has no channel mapping, dropping");
             return Ok(());
         };
+        let channel = room.app_channel_id.clone();
+        // §10.1: the external location maps to (realm_id, flow_id), not the
+        // bare realm — only messages on the portal flow cross the bridge.
+        let portal_flow = match room.portal_flow_id.filter(|f| !f.trim().is_empty()) {
+            Some(flow_id) => flow_id,
+            None => self.ctx.ensure_portal_flow(&channel, &realm_id).await?,
+        };
+        if extract_flow_id(&event.content) != Some(portal_flow.as_str()) {
+            tracing::debug!(
+                realm = %realm_id,
+                portal_flow = %portal_flow,
+                "message is not on the portal flow, dropping"
+            );
+            return Ok(());
+        }
         let body = extract_plain_body(&event.content);
         let attachment = extract_attachment(&event.content);
         let sender_display = sender_display_for_event(&self.ctx.store, &event)?;
@@ -1102,6 +1480,7 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
             self.ctx.store.record_message(
                 &mapping_channel_key,
                 &app_message_id,
+                event.actor_id.as_ref(),
                 event.event_id.as_ref(),
                 &realm_id,
             )?;
@@ -1210,4 +1589,140 @@ where
 
     run_message_bridge(config, move |ctx| factory(app_config, ctx)).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FLOW_ID: &str = "ck:flow:01904100-0000-7000-8000-000000000001";
+
+    fn media_attachment() -> Attachment {
+        Attachment {
+            blob_ref: format!("ck:blob:sha256:{}", "a".repeat(64)),
+            media_type: Some("image/png".to_owned()),
+            filename: Some("shot.png".to_owned()),
+            size: Some(2048),
+            caption: "look at this".to_owned(),
+        }
+    }
+
+    #[test]
+    fn text_payload_matches_message_create_schema_shape() {
+        let content = text_content_block("hello").unwrap();
+        let payload = build_message_create_payload(FLOW_ID, content, Vec::new()).unwrap();
+        assert_eq!(payload["flow_id"], FLOW_ID);
+        assert_eq!(payload["track_name"], PORTAL_FLOW_TRACK);
+        assert_eq!(payload["content"]["kind"], "ck.content.text");
+        assert_eq!(payload["content"]["body"], "hello");
+        // Closed-schema hygiene: no stray top-level body / media fields.
+        assert!(payload.get("body").is_none());
+        assert!(payload.get("blob").is_none());
+        assert!(payload.get("blob_refs").is_none());
+    }
+
+    #[test]
+    fn media_payload_uses_blob_refs_and_forbidden_field_names_are_absent() {
+        let att = media_attachment();
+        let content = media_content_block(&att).unwrap();
+        let payload =
+            build_message_create_payload(FLOW_ID, content, vec![att.blob_ref.clone()]).unwrap();
+        assert_eq!(payload["content"]["kind"], "ck.content.image");
+        assert_eq!(payload["content"]["body"], "look at this");
+        assert_eq!(payload["content"]["blob_ref"], att.blob_ref);
+        assert_eq!(payload["content"]["mime_type"], "image/png");
+        assert_eq!(payload["content"]["size_bytes"], 2048);
+        // content_block schema forbids `size` (byte counts are `size_bytes`)
+        // and the legacy flat fields must not leak into the payload.
+        assert!(payload["content"].get("size").is_none());
+        assert!(payload["content"].get("mimetype").is_none());
+        assert_eq!(payload["blob_refs"][0], att.blob_ref);
+        assert!(payload.get("blob").is_none());
+    }
+
+    #[test]
+    fn media_kind_follows_mime_category_and_file_requires_filename() {
+        assert_eq!(media_content_kind(Some("video/mp4")), "ck.content.video");
+        assert_eq!(media_content_kind(Some("audio/ogg")), "ck.content.audio");
+        assert_eq!(
+            media_content_kind(Some("application/pdf")),
+            "ck.content.file"
+        );
+        assert_eq!(media_content_kind(None), "ck.content.file");
+
+        let mut att = media_attachment();
+        att.media_type = Some("application/pdf".to_owned());
+        att.filename = None;
+        let block = media_content_block(&att).unwrap();
+        // `filename` is MUST for ck.content.file even when upstream gave none.
+        assert!(
+            block["filename"]
+                .as_str()
+                .is_some_and(|name| !name.is_empty())
+        );
+    }
+
+    #[test]
+    fn extraction_reads_spec_shaped_payloads() {
+        let att = media_attachment();
+        let content = media_content_block(&att).unwrap();
+        let payload =
+            build_message_create_payload(FLOW_ID, content, vec![att.blob_ref.clone()]).unwrap();
+
+        assert_eq!(extract_plain_body(&payload), "look at this");
+        assert_eq!(extract_flow_id(&payload), Some(FLOW_ID));
+        let extracted = extract_attachment(&payload).expect("attachment");
+        assert_eq!(extracted.blob_ref, att.blob_ref);
+        assert_eq!(extracted.media_type.as_deref(), Some("image/png"));
+        assert_eq!(extracted.filename.as_deref(), Some("shot.png"));
+        assert_eq!(extracted.size, Some(2048));
+        assert_eq!(extracted.caption, "look at this");
+    }
+
+    #[test]
+    fn extraction_handles_composite_and_legacy_shapes() {
+        let composite = json!({
+            "flow_id": FLOW_ID,
+            "track_name": "discussion",
+            "content": {
+                "kind": "ck.content.composite",
+                "body": "caption text",
+                "parts": [
+                    { "kind": "ck.content.text", "body": "caption text" },
+                    {
+                        "kind": "ck.content.file",
+                        "body": "spec.pdf",
+                        "blob_ref": format!("ck:blob:sha256:{}", "b".repeat(64)),
+                        "mime_type": "application/pdf",
+                        "filename": "spec.pdf",
+                        "size_bytes": 7
+                    }
+                ]
+            }
+        });
+        let extracted = extract_attachment(&composite).expect("attachment");
+        assert_eq!(extracted.filename.as_deref(), Some("spec.pdf"));
+        assert_eq!(extracted.size, Some(7));
+
+        // The pre-spec flat shape (`{body}` as the whole payload) no longer
+        // parses — the misaligned legacy read paths are gone.
+        let legacy = json!({ "body": "hello" });
+        assert_eq!(extract_plain_body(&legacy), "");
+        assert!(extract_attachment(&legacy).is_none());
+    }
+
+    #[test]
+    fn location_match_requires_protocol_network_and_location() {
+        let location = json!({
+            "schema": EXTERNAL_REF_SCHEMA,
+            "protocol": "discord",
+            "network_id": "tenant-1",
+            "location_id": "chan-1",
+        });
+        assert!(location_matches(Some(&location), &location));
+        let mut other = location.clone();
+        other["location_id"] = json!("chan-2");
+        assert!(!location_matches(Some(&other), &location));
+        assert!(!location_matches(None, &location));
+    }
 }
