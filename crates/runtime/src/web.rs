@@ -2,12 +2,10 @@
 //! the cokret applet routes (`/_cokret/edge/applet/*`) to receive event pushes
 //! from the cokret server.
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use cokret::identity::{ResolverFailMode, ResolverPolicy};
-use cokret::model::{AppletTransactionOutcome, AppletTransactionRequestBody};
+use cokret::model::AppletTransactionRequestBody;
 use cokret::signatures::http_signature::{
     Component, SignatureVerificationPolicy, parse_signature_input, public_key_from_bytes,
     verify_signed_http_message,
@@ -16,24 +14,31 @@ use cokret::signatures::{Ed25519DetachedJwsVerifier, EventProofBuilder, PublicKe
 use cokret::{
     AppletHandler, CompositeDidResolver, Did, DidKeyResolver, DidResolver, HttpDidResolver,
 };
-use parking_lot::Mutex;
 use salvo::{affix_state, http::StatusCode, prelude::*};
 use serde_json::{Value, json};
 
 use crate::app::BridgeContext;
 use crate::cokret_edge::BridgeAppletHandler;
 use crate::config::{Config, TrustedVerificationMethodConfig};
+use crate::db::{DbEventDedupStore, DbTransactionIdempotencyStore};
 use crate::error::{BridgeError, Result};
+use crate::idempotency::{EventDedupStore, TransactionClaim, TransactionIdempotencyStore};
 
 /// Start the web service and run it blocking. `extra` is each app adapter's
 /// webhook routes (optional).
 pub async fn serve(ctx: Arc<BridgeContext>, extra: Option<Router>) -> Result<()> {
-    let handler = Arc::new(BridgeAppletHandler::new(&ctx.edge, ctx.resolver()));
+    // Durable idempotency / dedup records (applet-integration §7.3 / §13):
+    // both stores persist in the bridge database so restarts do not turn
+    // server retries into duplicate deliveries.
+    let dedup: Arc<dyn EventDedupStore> = Arc::new(DbEventDedupStore::new(ctx.db.clone())?);
+    let idempotency: Arc<dyn TransactionIdempotencyStore> =
+        Arc::new(DbTransactionIdempotencyStore::new(ctx.db.clone())?);
+    let handler = Arc::new(BridgeAppletHandler::new(&ctx.edge, ctx.resolver(), dedup));
     let event_proof_resolver = Arc::new(build_event_proof_resolver()?);
     let applet = applet_router(AppletWebState {
         handler,
         config: ctx.config.clone(),
-        idempotency: Arc::new(TransactionIdempotencyCache::new(Duration::from_secs(300))),
+        idempotency,
         event_proof_resolver,
     });
 
@@ -74,7 +79,7 @@ async fn metrics(res: &mut Response) {
 struct AppletWebState {
     handler: Arc<BridgeAppletHandler>,
     config: Arc<Config>,
-    idempotency: Arc<TransactionIdempotencyCache>,
+    idempotency: Arc<dyn TransactionIdempotencyStore>,
     event_proof_resolver: Arc<CompositeDidResolver>,
 }
 
@@ -93,102 +98,6 @@ fn applet_router(state: AppletWebState) -> Router {
         // structured `unsupported_feature` rather than fall through to a bare 404.
         .push(Router::with_path("third_party/users").get(applet_third_party_unsupported))
         .push(Router::with_path("third_party/locations").get(applet_third_party_unsupported))
-}
-
-enum CachedTransaction {
-    Pending {
-        hash: String,
-        expires_at: Instant,
-    },
-    Completed {
-        hash: String,
-        response: AppletTransactionOutcome,
-        expires_at: Instant,
-    },
-}
-
-impl CachedTransaction {
-    fn expires_at(&self) -> Instant {
-        match self {
-            Self::Pending { expires_at, .. } | Self::Completed { expires_at, .. } => *expires_at,
-        }
-    }
-}
-
-struct TransactionIdempotencyCache {
-    ttl: Duration,
-    inner: Mutex<HashMap<String, CachedTransaction>>,
-}
-
-enum CachedTransactionLookup {
-    Claimed,
-    Pending,
-    Duplicate(AppletTransactionOutcome),
-    Conflict,
-}
-
-impl TransactionIdempotencyCache {
-    fn new(ttl: Duration) -> Self {
-        Self {
-            ttl,
-            inner: Mutex::new(HashMap::new()),
-        }
-    }
-
-    fn claim(&self, source: &str, key: &str, hash: &str) -> CachedTransactionLookup {
-        let cache_key = transaction_cache_key(source, key);
-        let now = Instant::now();
-        let mut inner = self.inner.lock();
-        inner.retain(|_, cached| cached.expires_at() > now);
-        match inner.get(&cache_key) {
-            Some(CachedTransaction::Completed {
-                hash: cached_hash,
-                response,
-                ..
-            }) if cached_hash == hash => CachedTransactionLookup::Duplicate(response.clone()),
-            Some(CachedTransaction::Pending {
-                hash: cached_hash, ..
-            }) if cached_hash == hash => CachedTransactionLookup::Pending,
-            Some(_) => CachedTransactionLookup::Conflict,
-            None => {
-                inner.insert(
-                    cache_key,
-                    CachedTransaction::Pending {
-                        hash: hash.to_owned(),
-                        expires_at: now + self.ttl,
-                    },
-                );
-                CachedTransactionLookup::Claimed
-            }
-        }
-    }
-
-    fn record(&self, source: &str, key: &str, hash: String, response: AppletTransactionOutcome) {
-        self.inner.lock().insert(
-            transaction_cache_key(source, key),
-            CachedTransaction::Completed {
-                hash,
-                response,
-                expires_at: Instant::now() + self.ttl,
-            },
-        );
-    }
-
-    fn release(&self, source: &str, key: &str, hash: &str) {
-        let cache_key = transaction_cache_key(source, key);
-        let mut inner = self.inner.lock();
-        let should_remove = matches!(
-            inner.get(&cache_key),
-            Some(CachedTransaction::Pending { hash: cached_hash, .. }) if cached_hash == hash
-        );
-        if should_remove {
-            inner.remove(&cache_key);
-        }
-    }
-}
-
-fn transaction_cache_key(source: &str, key: &str) -> String {
-    format!("{source}\u{1f}{key}")
 }
 
 #[handler]
@@ -276,23 +185,25 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         return;
     }
 
+    // §7.3: persist the idempotency claim before any side effect (the claim is
+    // a durable `pending` record; the completed outcome replaces it below).
     match state
         .idempotency
         .claim(&source, &idempotency_key, &request_hash)
     {
-        CachedTransactionLookup::Duplicate(response) => {
+        Ok(TransactionClaim::Duplicate(response)) => {
             res.render(Json(response));
             return;
         }
-        CachedTransactionLookup::Pending => {
-            res.render(Json(AppletTransactionOutcome {
+        Ok(TransactionClaim::Pending) => {
+            res.render(Json(cokret::model::AppletTransactionOutcome {
                 ok: false,
                 rejected: Vec::new(),
                 retry_after_ms: Some(1000),
             }));
             return;
         }
-        CachedTransactionLookup::Conflict => {
+        Ok(TransactionClaim::Conflict) => {
             // Same (source_service_did, Idempotency-Key) with a different body:
             // applet-integration §7.3/§14 require the closed error code
             // `duplicate_conflict` (the registry has no `idempotency_conflict`).
@@ -303,13 +214,21 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
             })));
             return;
         }
-        CachedTransactionLookup::Claimed => {}
+        Ok(TransactionClaim::Claimed) => {}
+        Err(err) => {
+            internal_error(res, err.to_string());
+            return;
+        }
     }
 
     if let Err(err) = verify_transaction_events(state.event_proof_resolver.as_ref(), &body) {
-        state
-            .idempotency
-            .release(&source, &idempotency_key, &request_hash);
+        if let Err(release_err) =
+            state
+                .idempotency
+                .release(&source, &idempotency_key, &request_hash)
+        {
+            tracing::warn!(error = %release_err, "failed to release idempotency claim");
+        }
         unauthorized(res, err);
         return;
     }
@@ -319,15 +238,23 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         .handle_transaction(Some(&idempotency_key), body)
     {
         Ok(response) => {
-            state
-                .idempotency
-                .record(&source, &idempotency_key, request_hash, response.clone());
+            if let Err(err) =
+                state
+                    .idempotency
+                    .record(&source, &idempotency_key, &request_hash, &response)
+            {
+                tracing::warn!(error = %err, "failed to record idempotency outcome");
+            }
             res.render(Json(response));
         }
         Err(err) => {
-            state
-                .idempotency
-                .release(&source, &idempotency_key, &request_hash);
+            if let Err(release_err) =
+                state
+                    .idempotency
+                    .release(&source, &idempotency_key, &request_hash)
+            {
+                tracing::warn!(error = %release_err, "failed to release idempotency claim");
+            }
             internal_error(res, err.to_string());
         }
     }
@@ -810,55 +737,5 @@ mod tests {
         });
         let public_key = public_key_material_from_did_document_value(&jwk.to_string()).unwrap();
         assert_eq!(public_key.ed25519_bytes().unwrap(), [9u8; 32]);
-    }
-
-    #[test]
-    fn idempotency_claim_blocks_duplicate_until_recorded() {
-        let cache = TransactionIdempotencyCache::new(Duration::from_secs(300));
-        assert!(matches!(
-            cache.claim("did:web:server.example", "idem-1", "hash-a"),
-            CachedTransactionLookup::Claimed
-        ));
-        assert!(matches!(
-            cache.claim("did:web:server.example", "idem-1", "hash-a"),
-            CachedTransactionLookup::Pending
-        ));
-
-        let response = AppletTransactionOutcome {
-            ok: true,
-            rejected: Vec::new(),
-            retry_after_ms: None,
-        };
-        cache.record(
-            "did:web:server.example",
-            "idem-1",
-            "hash-a".to_owned(),
-            response.clone(),
-        );
-
-        match cache.claim("did:web:server.example", "idem-1", "hash-a") {
-            CachedTransactionLookup::Duplicate(cached) => assert_eq!(cached.ok, response.ok),
-            _ => panic!("expected duplicate response"),
-        }
-    }
-
-    #[test]
-    fn idempotency_release_allows_retry_after_failure() {
-        let cache = TransactionIdempotencyCache::new(Duration::from_secs(300));
-        assert!(matches!(
-            cache.claim("did:web:server.example", "idem-2", "hash-a"),
-            CachedTransactionLookup::Claimed
-        ));
-        assert!(matches!(
-            cache.claim("did:web:server.example", "idem-2", "hash-b"),
-            CachedTransactionLookup::Conflict
-        ));
-
-        cache.release("did:web:server.example", "idem-2", "hash-a");
-
-        assert!(matches!(
-            cache.claim("did:web:server.example", "idem-2", "hash-a"),
-            CachedTransactionLookup::Claimed
-        ));
     }
 }

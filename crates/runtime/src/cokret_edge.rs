@@ -39,6 +39,8 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::app::AppletResolver;
 use crate::config::Config;
 use crate::error::{BridgeError, Result};
+#[cfg(any(feature = "web", test))]
+use crate::idempotency::{DedupVerdict, EventDedupStore};
 
 /// How many actor sequence numbers to reserve in the store per refill. A larger
 /// block means fewer store writes at the cost of skipping more numbers on each
@@ -373,9 +375,28 @@ impl CokretEdge {
         self.submit_event(&event).await
     }
 
-    /// Outbound convenience with bridge provenance. Current SDK Event envelopes
-    /// no longer expose signed top-level `external_ref`, so the value is carried
-    /// as `unsigned` transport metadata.
+    /// Re-sign an already-minted event after envelope mutation (e.g. setting
+    /// `redacts`, overriding `created_at`, or adding `unsigned` hints). Clears
+    /// the existing proofs and signs with the service key over the current
+    /// canonical envelope.
+    pub fn resign_event(&self, event: &mut Event) -> Result<()> {
+        event.proofs.clear();
+        let verification_method = self.verification_method_for_actor(&self.service_did)?;
+        sign_event(
+            event,
+            &self.signer,
+            &verification_method,
+            SignEventOptions::new(),
+        )?;
+        Ok(())
+    }
+
+    /// Outbound convenience with bridge provenance. applet-integration §8
+    /// requires the signed Event Envelope top-level `external_ref` for
+    /// bridge-originated events; the current SDK `Event` model does not yet
+    /// expose that field (its wire form rejects unknown envelope fields), so the
+    /// value is carried as an `unsigned` transport hint only. Per §8 it MUST NOT
+    /// be used for loop prevention or any other security decision.
     pub async fn submit_with_external_ref(
         &self,
         realm_id: &str,
@@ -386,14 +407,7 @@ impl CokretEdge {
         let realm = RealmId::new(realm_id.to_owned())?;
         let mut event = self.mint_event(kind, &realm, content)?;
         stamp_external_ref(&mut event, external_ref);
-        event.proofs.clear();
-        let verification_method = self.verification_method_for_actor(&event.actor_id)?;
-        sign_event(
-            &mut event,
-            &self.signer,
-            &verification_method,
-            SignEventOptions::new(),
-        )?;
+        self.resign_event(&mut event)?;
         self.submit_event(&event).await
     }
 
@@ -412,14 +426,7 @@ impl CokretEdge {
         let realm = RealmId::new(realm_id.to_owned())?;
         let mut event = self.mint_event_as(actor, kind, &realm, content, authorization_ref)?;
         stamp_external_ref(&mut event, external_ref);
-        event.proofs.clear();
-        let verification_method = self.verification_method_for_actor(&self.service_did)?;
-        sign_event(
-            &mut event,
-            &self.signer,
-            &verification_method,
-            SignEventOptions::new(),
-        )?;
+        self.resign_event(&mut event)?;
         self.submit_event(&event).await
     }
 
@@ -430,14 +437,7 @@ impl CokretEdge {
         let mut event = self.mint_event("ck.message.redact", &realm, content)?;
         event.redacts = Some(cokret::EventId::new(target_event_id.to_owned())?);
         // redacts is set after minting, so re-sign to override.
-        event.proofs.clear();
-        let verification_method = self.verification_method_for_actor(&event.actor_id)?;
-        sign_event(
-            &mut event,
-            &self.signer,
-            &verification_method,
-            SignEventOptions::new(),
-        )?;
+        self.resign_event(&mut event)?;
         self.submit_event(&event).await
     }
 
@@ -472,12 +472,22 @@ fn validate_authorization_ref(authorization_ref: &str) -> Result<String> {
     Ok(authorization_ref.to_owned())
 }
 
+/// Carry `applet_id` as an `unsigned` transport hint. applet-integration §8 /
+/// §11 and `event-envelope.schema.json` define `applet_id` as a **signed**
+/// envelope top-level field; the current SDK `Event` model does not expose it
+/// (unknown envelope fields are rejected on its wire form), so until the SDK
+/// catches up this hint is display/debug metadata only and MUST NOT feed
+/// authorization or loop-prevention decisions.
 fn stamp_applet_metadata(event: &mut Event, applet_id: &str) {
     event
         .unsigned
         .insert("applet_id".to_owned(), Value::String(applet_id.to_owned()));
 }
 
+/// Carry `external_ref` as an `unsigned` transport hint. See
+/// [`CokretEdge::submit_with_external_ref`]: §8 requires signed top-level
+/// `external_ref` for security-relevant provenance; `unsigned.external_ref` is
+/// a discardable local hint by spec and MUST NOT be a security input.
 fn stamp_external_ref(event: &mut Event, external_ref: Value) {
     event
         .unsigned
@@ -554,76 +564,11 @@ fn stable_node_id(bridge_id: &str) -> String {
 }
 
 #[cfg(any(feature = "web", test))]
-/// Bounded in-memory window of recently seen `event_id`s used to enforce the
-/// single-event-level dedup rule of `applet-integration.md` §7.3: a repeated
-/// `event_id` with identical signed content is accepted, while conflicting
-/// content is rejected.
-///
-/// The SDK [`cokret::idempotency::IdempotencyWindow`] only covers the
-/// transaction-level `Idempotency-Key`; it does not look at individual events.
-/// This window therefore tracks `event_id -> canonical content fingerprint` so a
-/// re-pushed event with identical content is dropped (treated as accepted) while
-/// a re-pushed event with a *different* body under the same id is rejected.
-///
-/// It is intentionally process-local and best-effort: it hardens against
-/// duplicate fan-out within a running process. Cross-restart / cross-process
-/// dedup against durable history is tracked as a separate SDK gap in
-/// `_bridges_todos.md §3` (transaction push inbound verification).
-struct EventDedupWindow {
-    /// `event_id -> fingerprint` of the first body seen for that id. A
-    /// fingerprint collision is astronomically unlikely for the FNV-1a 64-bit
-    /// hash used here, and a mismatch only ever leads to a (safe) rejection.
-    seen: Mutex<std::collections::HashMap<String, u64>>,
-    /// Soft cap on retained ids; on overflow the window is cleared. Duplicates
-    /// older than the window simply re-enter as fresh events (at-least-once),
-    /// which is the correct conservative behaviour.
-    capacity: usize,
-}
-
-#[cfg(any(feature = "web", test))]
-/// Outcome of consulting the [`EventDedupWindow`] for one event.
-enum DedupVerdict {
-    /// First time this `event_id` (with this body) is seen — process it.
-    Fresh,
-    /// Same `event_id` and identical body already seen — MUST be accepted
-    /// without re-processing (no duplicate fan-out).
-    DuplicateSameContent,
-    /// Same `event_id` but a *different* body — MUST be rejected.
-    DuplicateConflict,
-}
-
-#[cfg(any(feature = "web", test))]
-impl EventDedupWindow {
-    fn new(capacity: usize) -> Self {
-        Self {
-            seen: Mutex::new(std::collections::HashMap::new()),
-            capacity,
-        }
-    }
-
-    /// Record `event_id` with the fingerprint of its canonical body and return
-    /// the dedup verdict.
-    fn check(&self, event_id: &str, fingerprint: u64) -> DedupVerdict {
-        let mut seen = self.seen.lock();
-        match seen.get(event_id) {
-            Some(&prev) if prev == fingerprint => DedupVerdict::DuplicateSameContent,
-            Some(_) => DedupVerdict::DuplicateConflict,
-            None => {
-                if seen.len() >= self.capacity {
-                    seen.clear();
-                }
-                seen.insert(event_id.to_owned(), fingerprint);
-                DedupVerdict::Fresh
-            }
-        }
-    }
-}
-
-#[cfg(any(feature = "web", test))]
-/// Stable 64-bit FNV-1a fingerprint over an event's signed canonical envelope.
-/// Used only for same-id content-equality comparison in [`EventDedupWindow`];
-/// not a security primitive.
-fn event_content_fingerprint(event: &Event) -> u64 {
+/// Stable 64-bit FNV-1a fingerprint over an event's signed canonical envelope,
+/// bit-cast to `i64` for storage. Used only for same-id content-equality
+/// comparison in an [`EventDedupStore`]; not a security primitive (a mismatch
+/// only ever leads to a safe rejection).
+fn event_content_fingerprint(event: &Event) -> i64 {
     let canonical = EventProofBuilder::new()
         .envelope_bytes(event)
         .unwrap_or_default();
@@ -632,7 +577,7 @@ fn event_content_fingerprint(event: &Event) -> u64 {
         hash ^= b as u64;
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    hash
+    hash as i64
 }
 
 #[cfg(any(feature = "web", test))]
@@ -649,12 +594,13 @@ pub struct BridgeAppletHandler {
     inbound_tx: UnboundedSender<Event>,
     ephemeral_tx: Option<UnboundedSender<Value>>,
     resolver: Option<Arc<dyn AppletResolver>>,
-    /// Single-event-level dedup window (see [`EventDedupWindow`]).
-    dedup: EventDedupWindow,
+    /// Durable single-event-level dedup store (applet-integration §7.3; the
+    /// runtime path injects [`crate::db::DbEventDedupStore`]).
+    dedup: Arc<dyn EventDedupStore>,
 }
 
 #[cfg(any(feature = "web", test))]
-/// Soft cap on the number of `event_id`s the per-handler dedup window retains.
+/// Advisory per-transaction event ceiling published in `describe.limits`.
 const EVENT_DEDUP_CAPACITY: usize = 8192;
 
 #[cfg(any(feature = "web", test))]
@@ -703,7 +649,12 @@ fn default_applet_auth(service_did: &Did, verification_method_id: &str) -> Value
 impl BridgeAppletHandler {
     /// Build the handler from an inbound-capable edge. The edge must have been
     /// constructed with an inbound sender (the run_bridge/web path always is).
-    pub fn new(edge: &CokretEdge, resolver: Option<Arc<dyn AppletResolver>>) -> Self {
+    /// `dedup` is the durable event-dedup store enforcing §7.3.
+    pub fn new(
+        edge: &CokretEdge,
+        resolver: Option<Arc<dyn AppletResolver>>,
+        dedup: Arc<dyn EventDedupStore>,
+    ) -> Self {
         let bridge_id = edge.config.bridge.bridge_id.clone();
         let service_did = edge.service_did.clone();
         let verification_method_id = edge.config.cokret.verification_method_id.clone();
@@ -732,7 +683,7 @@ impl BridgeAppletHandler {
             inbound_tx: edge.inbound_sender().expect("inbound enabled"),
             ephemeral_tx: edge.ephemeral_sender(),
             resolver,
-            dedup: EventDedupWindow::new(EVENT_DEDUP_CAPACITY),
+            dedup,
         }
     }
 
@@ -824,18 +775,20 @@ impl cokret::AppletHandler for BridgeAppletHandler {
 
             // Single-event-level dedup (§7.3): identical re-push is accepted
             // without re-forwarding; a conflicting body under the same id is
-            // rejected.
+            // rejected. The store is durable, so the rule holds across
+            // restarts. A store failure must not silently double-deliver:
+            // signal a retry instead.
             match self
                 .dedup
-                .check(&event_id, event_content_fingerprint(&event))
+                .check_and_record(&event_id, event_content_fingerprint(&event))
             {
-                DedupVerdict::Fresh => {}
-                DedupVerdict::DuplicateSameContent => {
+                Ok(DedupVerdict::Fresh) => {}
+                Ok(DedupVerdict::DuplicateSameContent) => {
                     // Already processed with identical content — accept silently,
                     // do not fan out again.
                     continue;
                 }
-                DedupVerdict::DuplicateConflict => {
+                Ok(DedupVerdict::DuplicateConflict) => {
                     tracing::warn!(
                         %event_id,
                         "rejecting event: same event_id pushed with conflicting content"
@@ -843,6 +796,15 @@ impl cokret::AppletHandler for BridgeAppletHandler {
                     rejected.push(serde_json::json!({
                         "event_id": event_id,
                         "reason": "duplicate_conflict",
+                    }));
+                    continue;
+                }
+                Err(err) => {
+                    enqueue_failed = true;
+                    tracing::error!(%event_id, error = %err, "event dedup store failed");
+                    rejected.push(serde_json::json!({
+                        "event_id": event_id,
+                        "reason": "internal_error",
                     }));
                     continue;
                 }
@@ -988,36 +950,6 @@ mod tests {
         for (i, n) in first_block.iter().enumerate() {
             assert_eq!(*n, (i as u64) + 1);
         }
-    }
-
-    #[test]
-    fn dedup_window_distinguishes_same_and_conflicting_content() {
-        let win = EventDedupWindow::new(16);
-        // First sight of an id+fingerprint is Fresh.
-        assert!(matches!(win.check("ev1", 100), DedupVerdict::Fresh));
-        // Same id + same fingerprint is an accepted duplicate (no re-fanout).
-        assert!(matches!(
-            win.check("ev1", 100),
-            DedupVerdict::DuplicateSameContent
-        ));
-        // Same id + different fingerprint is a conflict (must reject).
-        assert!(matches!(
-            win.check("ev1", 200),
-            DedupVerdict::DuplicateConflict
-        ));
-        // A different id is independent.
-        assert!(matches!(win.check("ev2", 100), DedupVerdict::Fresh));
-    }
-
-    #[test]
-    fn dedup_window_clears_on_capacity_overflow() {
-        let win = EventDedupWindow::new(2);
-        assert!(matches!(win.check("a", 1), DedupVerdict::Fresh));
-        assert!(matches!(win.check("b", 1), DedupVerdict::Fresh));
-        // Inserting a third id overflows the soft cap, clearing the window; the
-        // new id is recorded fresh and prior ids re-enter as fresh (at-least-once).
-        assert!(matches!(win.check("c", 1), DedupVerdict::Fresh));
-        assert!(matches!(win.check("a", 1), DedupVerdict::Fresh));
     }
 
     #[test]

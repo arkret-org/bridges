@@ -38,6 +38,7 @@ pub mod cache;
 mod cokret_edge;
 mod config;
 mod error;
+pub mod idempotency;
 pub mod logging;
 pub mod queue;
 
@@ -50,9 +51,15 @@ pub use app::{AppletResolver, ResolvedActor, ResolvedRealm};
 pub use cokret_edge::{CokretEdge, SeqAllocator, SeqStore};
 pub use config::{Config, RoomMappingConfig};
 pub use error::{BridgeError, Result, redact_sensitive_url_values};
+pub use idempotency::{
+    DedupVerdict, EventDedupStore, MemoryEventDedupStore, MemoryTransactionIdempotencyStore,
+    TransactionClaim, TransactionIdempotencyStore,
+};
 
 #[cfg(feature = "db")]
 pub use cokret_edge::DbSeqStore;
+#[cfg(feature = "db")]
+pub use db::{DbEventDedupStore, DbTransactionIdempotencyStore};
 
 #[cfg(feature = "web")]
 pub use salvo;
