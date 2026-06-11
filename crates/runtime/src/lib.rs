@@ -49,7 +49,7 @@ pub mod web;
 pub use app::{AppletResolver, ResolvedActor, ResolvedRealm};
 pub use cokret_edge::{CokretEdge, SeqAllocator, SeqStore};
 pub use config::{Config, RoomMappingConfig};
-pub use error::{BridgeError, Result};
+pub use error::{BridgeError, Result, redact_sensitive_url_values};
 
 #[cfg(feature = "db")]
 pub use cokret_edge::DbSeqStore;

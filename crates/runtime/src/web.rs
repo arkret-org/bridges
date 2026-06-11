@@ -152,10 +152,14 @@ fn transaction_cache_key(source: &str, key: &str) -> String {
 }
 
 #[handler]
-async fn applet_ping(depot: &mut Depot, res: &mut Response) {
+async fn applet_ping(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let Some(state) = applet_state(depot, res) else {
         return;
     };
+    if let Err(err) = verify_http_applet_get_request(req, &state.config) {
+        unauthorized(res, err);
+        return;
+    }
     match state.handler.ping() {
         Ok(body) => res.render(Json(body)),
         Err(err) => internal_error(res, err.to_string()),
@@ -163,10 +167,14 @@ async fn applet_ping(depot: &mut Depot, res: &mut Response) {
 }
 
 #[handler]
-async fn applet_describe(depot: &mut Depot, res: &mut Response) {
+async fn applet_describe(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let Some(state) = applet_state(depot, res) else {
         return;
     };
+    if let Err(err) = verify_http_applet_get_request(req, &state.config) {
+        unauthorized(res, err);
+        return;
+    }
     match state.handler.describe() {
         Ok(body) => res.render(Json(body)),
         Err(err) => internal_error(res, err.to_string()),
@@ -274,6 +282,10 @@ async fn applet_actor(req: &mut Request, depot: &mut Depot, res: &mut Response) 
     let Some(state) = applet_state(depot, res) else {
         return;
     };
+    if let Err(err) = verify_http_applet_get_request(req, &state.config) {
+        unauthorized(res, err);
+        return;
+    }
     let actor_id = req.param::<String>("actor_id").unwrap_or_default();
     match state.handler.resolve_actor(&actor_id) {
         Ok(body) => res.render(Json(body)),
@@ -286,6 +298,10 @@ async fn applet_realm(req: &mut Request, depot: &mut Depot, res: &mut Response) 
     let Some(state) = applet_state(depot, res) else {
         return;
     };
+    if let Err(err) = verify_http_applet_get_request(req, &state.config) {
+        unauthorized(res, err);
+        return;
+    }
     let realm = req.param::<String>("realm_id_or_alias").unwrap_or_default();
     match state.handler.resolve_realm(&realm) {
         Ok(body) => res.render(Json(body)),
@@ -298,6 +314,10 @@ async fn applet_protocol(req: &mut Request, depot: &mut Depot, res: &mut Respons
     let Some(state) = applet_state(depot, res) else {
         return;
     };
+    if let Err(err) = verify_http_applet_get_request(req, &state.config) {
+        unauthorized(res, err);
+        return;
+    }
     let protocol = req.param::<String>("protocol").unwrap_or_default();
     match state.handler.resolve_protocol(&protocol) {
         Ok(body) => res.render(Json(body)),
@@ -306,7 +326,18 @@ async fn applet_protocol(req: &mut Request, depot: &mut Depot, res: &mut Respons
 }
 
 #[handler]
-async fn applet_third_party_unsupported(res: &mut Response) {
+async fn applet_third_party_unsupported(
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+) {
+    let Some(state) = applet_state(depot, res) else {
+        return;
+    };
+    if let Err(err) = verify_http_applet_get_request(req, &state.config) {
+        unauthorized(res, err);
+        return;
+    }
     unsupported_feature(
         res,
         "third_party user/location lookup is not implemented by this bridge",
@@ -328,6 +359,21 @@ fn verify_http_transaction_request(
     headers: &[(String, String)],
     body: &[u8],
     config: &Config,
+) -> std::result::Result<(), String> {
+    verify_http_applet_request(req, headers, body, config, true)
+}
+
+fn verify_http_applet_get_request(req: &Request, config: &Config) -> std::result::Result<(), String> {
+    let headers = collect_headers(req);
+    verify_http_applet_request(req, &headers, &[], config, false)
+}
+
+fn verify_http_applet_request(
+    req: &Request,
+    headers: &[(String, String)],
+    body: &[u8],
+    config: &Config,
+    require_content_digest: bool,
 ) -> std::result::Result<(), String> {
     let signature_input_header = header_value_from(headers, "signature-input")
         .ok_or_else(|| "Signature-Input header is required".to_owned())?;
@@ -363,14 +409,18 @@ fn verify_http_transaction_request(
         .map(|value| value.as_str().to_owned())
         .unwrap_or_else(|| "/".to_owned());
     let target_uri = request_target_uri(req, headers, &authority, &path);
-    let policy = SignatureVerificationPolicy::new(vec![
+    let mut required_components = vec![
         Component::Method,
         Component::TargetUri,
         Component::Authority,
-        Component::Header("content-digest".to_owned()),
         Component::Header("x-cokret-origin-service-did".to_owned()),
         Component::Header("x-cokret-destination-service-did".to_owned()),
-    ]);
+    ];
+    if require_content_digest {
+        required_components.push(Component::Header("content-digest".to_owned()));
+    }
+    let policy =
+        SignatureVerificationPolicy::new(required_components).require_content_digest(require_content_digest);
     verify_signed_http_message(
         req.method().as_str(),
         &target_uri,

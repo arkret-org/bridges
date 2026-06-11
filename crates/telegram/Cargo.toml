@@ -18,16 +18,16 @@ postgres = ["cokret-bridge-runtime/postgres", "cokret-bridge-messaging/postgres"
 mysql = ["cokret-bridge-runtime/mysql", "cokret-bridge-messaging/mysql"]
 
 [dependencies]
-cokret-bridge-runtime = { workspace = true, default-features = false }
-cokret-bridge-messaging = { workspace = true, default-features = false }
-tokio = { workspace = true }
-async-trait = { workspace = true }
-anyhow = { workspace = true }
-tracing = { workspace = true }
-clap = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-teloxide = { version = "0.17", default-features = false, features = [
+anyhow = {workspace = true}
+async-trait = {workspace = true}
+clap = {workspace = true}
+cokret-bridge-messaging = {workspace = true,default-features = false}
+cokret-bridge-runtime = {workspace = true,default-features = false}
+serde = {workspace = true}
+serde_json = {workspace = true}
+teloxide = {workspace = true,default-features = false,features = [
     "rustls",
     "ctrlc_handler",
-] }
+]}
+tokio = {workspace = true}
+tracing = {workspace = true}

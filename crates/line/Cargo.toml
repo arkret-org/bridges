@@ -18,16 +18,16 @@ postgres = ["cokret-bridge-runtime/postgres", "cokret-bridge-messaging/postgres"
 mysql = ["cokret-bridge-runtime/mysql", "cokret-bridge-messaging/mysql"]
 
 [dependencies]
-cokret-bridge-runtime = { workspace = true, default-features = false }
-cokret-bridge-messaging = { workspace = true, default-features = false }
-tokio = { workspace = true }
-async-trait = { workspace = true }
-anyhow = { workspace = true }
-tracing = { workspace = true }
-clap = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-reqwest = { workspace = true }
-base64 = { workspace = true }
-hmac = { workspace = true }
-sha2 = { workspace = true }
+anyhow = {workspace = true}
+async-trait = {workspace = true}
+base64 = {workspace = true}
+clap = {workspace = true}
+cokret-bridge-messaging = {workspace = true,default-features = false}
+cokret-bridge-runtime = {workspace = true,default-features = false}
+hmac = {workspace = true}
+reqwest = {workspace = true}
+serde = {workspace = true}
+serde_json = {workspace = true}
+sha2 = {workspace = true}
+tokio = {workspace = true}
+tracing = {workspace = true}
