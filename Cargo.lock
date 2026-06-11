@@ -590,6 +590,7 @@ dependencies = [
  "cokret-signatures",
  "ed25519-dalek",
  "getrandom 0.4.2",
+ "hex",
  "hkdf",
  "parking_lot",
  "regex",
@@ -616,7 +617,7 @@ dependencies = [
  "clap",
  "cokret-bridge-messaging",
  "cokret-bridge-runtime",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",
@@ -648,7 +649,7 @@ dependencies = [
  "clap",
  "cokret-bridge-messaging",
  "cokret-bridge-runtime",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",
@@ -666,7 +667,7 @@ dependencies = [
  "cokret-bridge-messaging",
  "cokret-bridge-runtime",
  "jsonwebtoken",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",
@@ -682,7 +683,7 @@ dependencies = [
  "clap",
  "cokret-bridge-messaging",
  "cokret-bridge-runtime",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",
@@ -699,11 +700,11 @@ dependencies = [
  "clap",
  "cokret-bridge-messaging",
  "cokret-bridge-runtime",
- "hmac 0.12.1",
- "reqwest 0.12.28",
+ "hmac 0.13.0",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "tokio",
  "tracing",
 ]
@@ -720,14 +721,14 @@ dependencies = [
  "diesel",
  "futures",
  "hex",
- "hmac 0.12.1",
+ "hmac 0.13.0",
  "jsonwebtoken",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "salvo",
  "serde",
  "serde_json",
- "sha1",
- "sha2 0.10.9",
+ "sha1 0.11.0",
+ "sha2 0.11.0",
  "subtle",
  "tokio",
  "tracing",
@@ -742,7 +743,7 @@ dependencies = [
  "clap",
  "cokret-bridge-messaging",
  "cokret-bridge-runtime",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",
@@ -758,7 +759,7 @@ dependencies = [
  "clap",
  "cokret-bridge-messaging",
  "cokret-bridge-runtime",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",
@@ -776,7 +777,7 @@ dependencies = [
  "diesel",
  "libsqlite3-sys",
  "parking_lot",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "salvo",
  "serde",
  "serde_json",
@@ -798,11 +799,11 @@ dependencies = [
  "cokret-bridge-messaging",
  "cokret-bridge-runtime",
  "futures",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",
- "tokio-tungstenite 0.28.0",
+ "tokio-tungstenite 0.29.0",
  "tracing",
 ]
 
@@ -815,7 +816,7 @@ dependencies = [
  "clap",
  "cokret-bridge-messaging",
  "cokret-bridge-runtime",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",
@@ -848,7 +849,7 @@ dependencies = [
  "cokret-bridge-messaging",
  "cokret-bridge-runtime",
  "quick-xml",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",
@@ -864,7 +865,7 @@ dependencies = [
  "clap",
  "cokret-bridge-messaging",
  "cokret-bridge-runtime",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",
@@ -880,7 +881,7 @@ dependencies = [
  "clap",
  "cokret-bridge-messaging",
  "cokret-bridge-runtime",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",
@@ -912,6 +913,7 @@ dependencies = [
  "chrono",
  "cokret-identifiers",
  "getrandom 0.4.2",
+ "hex",
  "regex",
  "salvo",
  "salvo-oapi",
@@ -975,6 +977,7 @@ version = "0.3.0"
 dependencies = [
  "getrandom 0.2.17",
  "getrandom 0.4.2",
+ "hex",
  "salvo",
  "salvo-oapi",
  "serde",
@@ -1078,6 +1081,12 @@ name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
+
+[[package]]
+name = "const-oid"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "content_inspector"
@@ -1343,7 +1352,7 @@ version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
 dependencies = [
- "const-oid",
+ "const-oid 0.9.6",
  "zeroize",
 ]
 
@@ -1471,6 +1480,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
 dependencies = [
  "block-buffer 0.12.0",
+ "const-oid 0.10.2",
  "crypto-common 0.2.2",
  "ctutils",
 ]
@@ -1924,7 +1934,7 @@ dependencies = [
  "http",
  "httpdate",
  "mime",
- "sha1",
+ "sha1 0.10.6",
 ]
 
 [[package]]
@@ -2391,17 +2401,19 @@ dependencies = [
 
 [[package]]
 name = "jsonwebtoken"
-version = "9.3.1"
+version = "10.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a87cc7a48537badeae96744432de36f4be2b4a34a05a5ef32e9dd8a1c169dde"
+checksum = "eba32bfb4ffdeaca3e34431072faf01745c9b26d25504aa7a6cf5684334fc4fc"
 dependencies = [
  "base64",
+ "getrandom 0.2.17",
  "js-sys",
  "pem",
- "ring",
  "serde",
  "serde_json",
+ "signature",
  "simple_asn1",
+ "zeroize",
 ]
 
 [[package]]
@@ -2943,9 +2955,9 @@ dependencies = [
 
 [[package]]
 name = "quick-xml"
-version = "0.38.4"
+version = "0.40.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b66c2058c55a409d601666cffe35f04333cf1013010882cec174a7467cd4e21c"
+checksum = "2474bd2e5029e7ccb6abb2ba48cf2383a333851dedf495901544281590c7da7f"
 dependencies = [
  "memchr",
 ]
@@ -3267,6 +3279,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls 0.26.4",
@@ -3994,6 +4007,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.0",
+ "digest 0.11.3",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4495,9 +4519,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-tungstenite"
-version = "0.28.0"
+version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d25a406cddcc431a75d3d9afc6a7c0f7428d4891dd973e4d54c56b46127bf857"
+checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
 dependencies = [
  "futures-util",
  "log",
@@ -4505,20 +4529,8 @@ dependencies = [
  "rustls-pki-types",
  "tokio",
  "tokio-rustls 0.26.4",
- "tungstenite 0.28.0",
- "webpki-roots 0.26.11",
-]
-
-[[package]]
-name = "tokio-tungstenite"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
-dependencies = [
- "futures-util",
- "log",
- "tokio",
  "tungstenite 0.29.0",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -4712,28 +4724,9 @@ dependencies = [
  "rand 0.8.6",
  "rustls 0.22.4",
  "rustls-pki-types",
- "sha1",
+ "sha1 0.10.6",
  "thiserror 1.0.69",
  "url",
- "utf-8",
-]
-
-[[package]]
-name = "tungstenite"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8628dcc84e5a09eb3d8423d6cb682965dea9133204e8fb3efee74c2a0c259442"
-dependencies = [
- "bytes",
- "data-encoding",
- "http",
- "httparse",
- "log",
- "rand 0.9.4",
- "rustls 0.23.40",
- "rustls-pki-types",
- "sha1",
- "thiserror 2.0.18",
  "utf-8",
 ]
 
@@ -4744,8 +4737,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c01152af293afb9c7c2a57e4b559c5620b421f6d133261c60dd2d0cdb38e6b8"
 dependencies = [
  "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
  "log",
  "rand 0.9.4",
+ "rustls 0.23.40",
+ "rustls-pki-types",
+ "sha1 0.10.6",
  "thiserror 2.0.18",
 ]
 
@@ -5541,6 +5540,20 @@ name = "zeroize"
 version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
+dependencies = [
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85a5b4158499876c763cb03bc4e49185d3cccbabb15b33c627f7884f43db852e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
 
 [[package]]
 name = "zerotrie"

@@ -95,11 +95,24 @@ fn applet_router(state: AppletWebState) -> Router {
         .push(Router::with_path("third_party/locations").get(applet_third_party_unsupported))
 }
 
-#[derive(Clone)]
-struct CachedTransaction {
-    hash: String,
-    response: AppletTransactionOutcome,
-    expires_at: Instant,
+enum CachedTransaction {
+    Pending {
+        hash: String,
+        expires_at: Instant,
+    },
+    Completed {
+        hash: String,
+        response: AppletTransactionOutcome,
+        expires_at: Instant,
+    },
+}
+
+impl CachedTransaction {
+    fn expires_at(&self) -> Instant {
+        match self {
+            Self::Pending { expires_at, .. } | Self::Completed { expires_at, .. } => *expires_at,
+        }
+    }
 }
 
 struct TransactionIdempotencyCache {
@@ -108,7 +121,8 @@ struct TransactionIdempotencyCache {
 }
 
 enum CachedTransactionLookup {
-    Fresh,
+    Claimed,
+    Pending,
     Duplicate(AppletTransactionOutcome),
     Conflict,
 }
@@ -121,29 +135,55 @@ impl TransactionIdempotencyCache {
         }
     }
 
-    fn lookup(&self, source: &str, key: &str, hash: &str) -> CachedTransactionLookup {
+    fn claim(&self, source: &str, key: &str, hash: &str) -> CachedTransactionLookup {
         let cache_key = transaction_cache_key(source, key);
         let now = Instant::now();
         let mut inner = self.inner.lock();
-        inner.retain(|_, cached| cached.expires_at > now);
+        inner.retain(|_, cached| cached.expires_at() > now);
         match inner.get(&cache_key) {
-            Some(cached) if cached.hash == hash => {
-                CachedTransactionLookup::Duplicate(cached.response.clone())
-            }
+            Some(CachedTransaction::Completed {
+                hash: cached_hash,
+                response,
+                ..
+            }) if cached_hash == hash => CachedTransactionLookup::Duplicate(response.clone()),
+            Some(CachedTransaction::Pending {
+                hash: cached_hash, ..
+            }) if cached_hash == hash => CachedTransactionLookup::Pending,
             Some(_) => CachedTransactionLookup::Conflict,
-            None => CachedTransactionLookup::Fresh,
+            None => {
+                inner.insert(
+                    cache_key,
+                    CachedTransaction::Pending {
+                        hash: hash.to_owned(),
+                        expires_at: now + self.ttl,
+                    },
+                );
+                CachedTransactionLookup::Claimed
+            }
         }
     }
 
     fn record(&self, source: &str, key: &str, hash: String, response: AppletTransactionOutcome) {
         self.inner.lock().insert(
             transaction_cache_key(source, key),
-            CachedTransaction {
+            CachedTransaction::Completed {
                 hash,
                 response,
                 expires_at: Instant::now() + self.ttl,
             },
         );
+    }
+
+    fn release(&self, source: &str, key: &str, hash: &str) {
+        let cache_key = transaction_cache_key(source, key);
+        let mut inner = self.inner.lock();
+        let should_remove = matches!(
+            inner.get(&cache_key),
+            Some(CachedTransaction::Pending { hash: cached_hash, .. }) if cached_hash == hash
+        );
+        if should_remove {
+            inner.remove(&cache_key);
+        }
     }
 }
 
@@ -238,10 +278,18 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
 
     match state
         .idempotency
-        .lookup(&source, &idempotency_key, &request_hash)
+        .claim(&source, &idempotency_key, &request_hash)
     {
         CachedTransactionLookup::Duplicate(response) => {
             res.render(Json(response));
+            return;
+        }
+        CachedTransactionLookup::Pending => {
+            res.render(Json(AppletTransactionOutcome {
+                ok: false,
+                rejected: Vec::new(),
+                retry_after_ms: Some(1000),
+            }));
             return;
         }
         CachedTransactionLookup::Conflict => {
@@ -255,10 +303,13 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
             })));
             return;
         }
-        CachedTransactionLookup::Fresh => {}
+        CachedTransactionLookup::Claimed => {}
     }
 
     if let Err(err) = verify_transaction_events(state.event_proof_resolver.as_ref(), &body) {
+        state
+            .idempotency
+            .release(&source, &idempotency_key, &request_hash);
         unauthorized(res, err);
         return;
     }
@@ -273,7 +324,12 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
                 .record(&source, &idempotency_key, request_hash, response.clone());
             res.render(Json(response));
         }
-        Err(err) => internal_error(res, err.to_string()),
+        Err(err) => {
+            state
+                .idempotency
+                .release(&source, &idempotency_key, &request_hash);
+            internal_error(res, err.to_string());
+        }
     }
 }
 
@@ -326,11 +382,7 @@ async fn applet_protocol(req: &mut Request, depot: &mut Depot, res: &mut Respons
 }
 
 #[handler]
-async fn applet_third_party_unsupported(
-    req: &mut Request,
-    depot: &mut Depot,
-    res: &mut Response,
-) {
+async fn applet_third_party_unsupported(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let Some(state) = applet_state(depot, res) else {
         return;
     };
@@ -363,7 +415,10 @@ fn verify_http_transaction_request(
     verify_http_applet_request(req, headers, body, config, true)
 }
 
-fn verify_http_applet_get_request(req: &Request, config: &Config) -> std::result::Result<(), String> {
+fn verify_http_applet_get_request(
+    req: &Request,
+    config: &Config,
+) -> std::result::Result<(), String> {
     let headers = collect_headers(req);
     verify_http_applet_request(req, &headers, &[], config, false)
 }
@@ -419,8 +474,8 @@ fn verify_http_applet_request(
     if require_content_digest {
         required_components.push(Component::Header("content-digest".to_owned()));
     }
-    let policy =
-        SignatureVerificationPolicy::new(required_components).require_content_digest(require_content_digest);
+    let policy = SignatureVerificationPolicy::new(required_components)
+        .require_content_digest(require_content_digest);
     verify_signed_http_message(
         req.method().as_str(),
         &target_uri,
@@ -716,6 +771,56 @@ mod tests {
         let public_key = public_key_material_from_did_document_value(&jwk.to_string()).unwrap();
         assert_eq!(public_key.ed25519_bytes().unwrap(), [9u8; 32]);
     }
+
+    #[test]
+    fn idempotency_claim_blocks_duplicate_until_recorded() {
+        let cache = TransactionIdempotencyCache::new(Duration::from_secs(300));
+        assert!(matches!(
+            cache.claim("did:web:server.example", "idem-1", "hash-a"),
+            CachedTransactionLookup::Claimed
+        ));
+        assert!(matches!(
+            cache.claim("did:web:server.example", "idem-1", "hash-a"),
+            CachedTransactionLookup::Pending
+        ));
+
+        let response = AppletTransactionOutcome {
+            ok: true,
+            rejected: Vec::new(),
+            retry_after_ms: None,
+        };
+        cache.record(
+            "did:web:server.example",
+            "idem-1",
+            "hash-a".to_owned(),
+            response.clone(),
+        );
+
+        match cache.claim("did:web:server.example", "idem-1", "hash-a") {
+            CachedTransactionLookup::Duplicate(cached) => assert_eq!(cached.ok, response.ok),
+            _ => panic!("expected duplicate response"),
+        }
+    }
+
+    #[test]
+    fn idempotency_release_allows_retry_after_failure() {
+        let cache = TransactionIdempotencyCache::new(Duration::from_secs(300));
+        assert!(matches!(
+            cache.claim("did:web:server.example", "idem-2", "hash-a"),
+            CachedTransactionLookup::Claimed
+        ));
+        assert!(matches!(
+            cache.claim("did:web:server.example", "idem-2", "hash-b"),
+            CachedTransactionLookup::Conflict
+        ));
+
+        cache.release("did:web:server.example", "idem-2", "hash-a");
+
+        assert!(matches!(
+            cache.claim("did:web:server.example", "idem-2", "hash-a"),
+            CachedTransactionLookup::Claimed
+        ));
+    }
 }
 
 /// Render the spec standard error response shape
@@ -741,9 +846,19 @@ fn unauthorized(res: &mut Response, message: impl Into<String>) {
 }
 
 fn internal_error(res: &mut Response, message: impl Into<String>) {
-    applet_error(res, StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message);
+    applet_error(
+        res,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal_error",
+        message,
+    );
 }
 
 fn unsupported_feature(res: &mut Response, message: impl Into<String>) {
-    applet_error(res, StatusCode::NOT_IMPLEMENTED, "unsupported_feature", message);
+    applet_error(
+        res,
+        StatusCode::NOT_IMPLEMENTED,
+        "unsupported_feature",
+        message,
+    );
 }

@@ -203,7 +203,10 @@ async fn teams_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response
     if let Some(token_service_url) = claims.get("serviceUrl").and_then(Value::as_str) {
         let activity_service_url = body.get("serviceUrl").and_then(Value::as_str);
         if activity_service_url != Some(token_service_url) {
-            webhook::unauthorized(res, "Teams activity serviceUrl does not match the JWT claim");
+            webhook::unauthorized(
+                res,
+                "Teams activity serviceUrl does not match the JWT claim",
+            );
             return;
         }
     }

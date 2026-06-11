@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use salvo::http::StatusCode;
@@ -83,7 +83,7 @@ pub fn verify_meta_x_hub_signature_256(app_secret: &[u8], body: &[u8], header: &
 }
 
 /// Compute lowercase-hex `SHA1(parts sorted lexicographically, concatenated)`.
-/// Used by WeChat's接入校验 (`signature = sha1(sort(token, timestamp, nonce))`).
+/// Used by WeChat server verification (`signature = sha1(sort(token, timestamp, nonce))`).
 pub fn sha1_hex_sorted(parts: &[&str]) -> String {
     use sha1::Digest;
     let mut sorted: Vec<&str> = parts.to_vec();

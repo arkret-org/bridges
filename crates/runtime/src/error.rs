@@ -128,7 +128,8 @@ mod tests {
 
     #[test]
     fn redacts_sensitive_query_values() {
-        let input = "request failed for https://api.example.test/path?corpsecret=abc&access_token=def&ok=1";
+        let input =
+            "request failed for https://api.example.test/path?corpsecret=abc&access_token=def&ok=1";
         let redacted = redact_sensitive_url_values(input);
         assert_eq!(
             redacted,
@@ -138,7 +139,8 @@ mod tests {
 
     #[test]
     fn redacts_telegram_bot_token_path_segment() {
-        let input = "error for url (https://api.telegram.org/file/bot123456:ABCDEF/photos/file.jpg)";
+        let input =
+            "error for url (https://api.telegram.org/file/bot123456:ABCDEF/photos/file.jpg)";
         let redacted = redact_sensitive_url_values(input);
         assert_eq!(
             redacted,

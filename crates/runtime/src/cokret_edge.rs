@@ -25,6 +25,8 @@ use cokret::model::{
     AppletActorView, AppletDescription, AppletPingOutcome, AppletProtocolMetadata, AppletRealmView,
     AppletTransactionOutcome, AppletTransactionRequestBody,
 };
+#[cfg(any(feature = "web", test))]
+use cokret::signatures::EventProofBuilder;
 use cokret::signatures::{SignEventOptions, sign_event};
 use cokret::{Did, Event, Hlc, RealmId};
 use parking_lot::Mutex;
@@ -477,7 +479,9 @@ fn stamp_applet_metadata(event: &mut Event, applet_id: &str) {
 }
 
 fn stamp_external_ref(event: &mut Event, external_ref: Value) {
-    event.unsigned.insert("external_ref".to_owned(), external_ref);
+    event
+        .unsigned
+        .insert("external_ref".to_owned(), external_ref);
 }
 
 /// Diesel-backed [`SeqStore`]. Persists each key's high-water mark in a
@@ -551,8 +555,9 @@ fn stable_node_id(bridge_id: &str) -> String {
 
 #[cfg(any(feature = "web", test))]
 /// Bounded in-memory window of recently seen `event_id`s used to enforce the
-/// single-event-level dedup rule of `applet-integration.md` §7.3 ("重复
-/// `event_id` 且内容一致 MUST `accepted`,内容不一致 MUST 拒绝").
+/// single-event-level dedup rule of `applet-integration.md` §7.3: a repeated
+/// `event_id` with identical signed content is accepted, while conflicting
+/// content is rejected.
 ///
 /// The SDK [`cokret::idempotency::IdempotencyWindow`] only covers the
 /// transaction-level `Idempotency-Key`; it does not look at individual events.
@@ -615,11 +620,13 @@ impl EventDedupWindow {
 }
 
 #[cfg(any(feature = "web", test))]
-/// Stable 64-bit FNV-1a fingerprint over an event's canonical JSON body. Used
-/// only for same-id content-equality comparison in [`EventDedupWindow`]; not a
-/// security primitive.
+/// Stable 64-bit FNV-1a fingerprint over an event's signed canonical envelope.
+/// Used only for same-id content-equality comparison in [`EventDedupWindow`];
+/// not a security primitive.
 fn event_content_fingerprint(event: &Event) -> u64 {
-    let canonical = serde_json::to_vec(event).unwrap_or_default();
+    let canonical = EventProofBuilder::new()
+        .envelope_bytes(event)
+        .unwrap_or_default();
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for b in canonical {
         hash ^= b as u64;
@@ -1014,6 +1021,59 @@ mod tests {
         // new id is recorded fresh and prior ids re-enter as fresh (at-least-once).
         assert!(matches!(win.check("c", 1), DedupVerdict::Fresh));
         assert!(matches!(win.check("a", 1), DedupVerdict::Fresh));
+    }
+
+    #[test]
+    fn event_fingerprint_ignores_unsigned_and_proofs() {
+        let realm = RealmId::new("ck:realm:01904100-0000-7000-8000-668e2181b41d").unwrap();
+        let actor = Did::new("did:web:alice.example").unwrap();
+        let hlc = Hlc::new("01970e589d21-0001-a13f9c2e").unwrap();
+        let mut first = Event::new(
+            "ck.message.create",
+            realm,
+            actor,
+            1,
+            hlc,
+            json!({ "body": "hello" }),
+        )
+        .unwrap();
+        let mut second = first.clone();
+
+        first
+            .unsigned
+            .insert("delivery".to_owned(), json!({ "attempt": 1 }));
+        second
+            .unsigned
+            .insert("delivery".to_owned(), json!({ "attempt": 2 }));
+        first.proofs.push(test_proof("header.payload.signature-a"));
+        second.proofs.push(test_proof("header.payload.signature-b"));
+
+        assert_eq!(
+            event_content_fingerprint(&first),
+            event_content_fingerprint(&second)
+        );
+
+        second.content = json!({ "body": "changed" });
+        assert_ne!(
+            event_content_fingerprint(&first),
+            event_content_fingerprint(&second)
+        );
+    }
+
+    fn test_proof(jws: &str) -> cokret::Proof {
+        cokret::Proof {
+            kind: "detached_jws".to_owned(),
+            alg: "EdDSA".to_owned(),
+            verification_method: "did:web:alice.example#key-1".to_owned(),
+            event_digest: cokret::Hash::new(
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            )
+            .unwrap(),
+            created_at: "2026-04-26T00:00:00Z".parse().unwrap(),
+            domain: None,
+            audience: None,
+            jws: jws.to_owned(),
+        }
     }
 
     #[test]

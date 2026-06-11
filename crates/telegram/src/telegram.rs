@@ -12,7 +12,7 @@ use cokret_bridge_messaging::{
     AppMessageRef, Attachment, InboundAppMessage, MessageBridge, MessageContext,
     OutboundAppMessage, SenderRenderStyle,
 };
-use cokret_bridge_runtime::{BridgeError, Result};
+use cokret_bridge_runtime::{BridgeError, Result, redact_sensitive_url_values};
 use teloxide::prelude::*;
 use teloxide::types::{ChatId, FileId, InputFile};
 
@@ -101,7 +101,12 @@ impl MessageBridge for TelegramApp {
                 .send_document(ChatId(chat_raw), file)
                 .caption(body)
                 .await
-                .map_err(|e| BridgeError::App(format!("Telegram document send failed: {e}")))?;
+                .map_err(|e| {
+                    BridgeError::App(format!(
+                        "Telegram document send failed: {}",
+                        redact_sensitive_url_values(e.to_string())
+                    ))
+                })?;
             return Ok(AppMessageRef {
                 app_message_id: sent.id.0.to_string(),
             });
@@ -110,7 +115,12 @@ impl MessageBridge for TelegramApp {
         let sent = bot
             .send_message(ChatId(chat_raw), body)
             .await
-            .map_err(|e| BridgeError::App(format!("Telegram send failed: {e}")))?;
+            .map_err(|e| {
+                BridgeError::App(format!(
+                    "Telegram send failed: {}",
+                    redact_sensitive_url_values(e.to_string())
+                ))
+            })?;
         Ok(AppMessageRef {
             app_message_id: sent.id.0.to_string(),
         })
@@ -148,10 +158,12 @@ async fn forward_media(
     filename: Option<String>,
     mime: Option<String>,
 ) -> Result<()> {
-    let file = bot
-        .get_file(file_id)
-        .await
-        .map_err(|e| BridgeError::App(format!("Telegram get_file failed: {e}")))?;
+    let file = bot.get_file(file_id).await.map_err(|e| {
+        BridgeError::App(format!(
+            "Telegram get_file failed: {}",
+            redact_sensitive_url_values(e.to_string())
+        ))
+    })?;
     let url = format!("https://api.telegram.org/file/bot{token}/{}", file.path);
     let media = ctx
         .download_external_media(&url, None, &["api.telegram.org"])

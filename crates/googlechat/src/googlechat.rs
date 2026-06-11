@@ -110,8 +110,9 @@ async fn fetch_service_account_token(
         iat: now,
         exp: now + ASSERTION_TTL_SECS,
     };
-    let encoding_key = EncodingKey::from_rsa_pem(key.private_key.as_bytes())
-        .map_err(|e| BridgeError::App(format!("Google service account private_key invalid: {e}")))?;
+    let encoding_key = EncodingKey::from_rsa_pem(key.private_key.as_bytes()).map_err(|e| {
+        BridgeError::App(format!("Google service account private_key invalid: {e}"))
+    })?;
     let assertion = jsonwebtoken::encode(&Header::new(Algorithm::RS256), &claims, &encoding_key)
         .map_err(|e| BridgeError::App(format!("Google JWT assertion signing failed: {e}")))?;
 
@@ -126,10 +127,9 @@ async fn fetch_service_account_token(
         .await
         .map_err(|e| BridgeError::App(format!("Google token request failed: {e}")))?;
     let status = resp.status();
-    let body: Value = resp
-        .json()
-        .await
-        .map_err(|e| BridgeError::App(format!("Google token parse failed (status={status}): {e}")))?;
+    let body: Value = resp.json().await.map_err(|e| {
+        BridgeError::App(format!("Google token parse failed (status={status}): {e}"))
+    })?;
     if !status.is_success() {
         return Err(BridgeError::App(format!(
             "Google token exchange failed status={status}: {body}"
@@ -138,7 +138,11 @@ async fn fetch_service_account_token(
     let token = body
         .get("access_token")
         .and_then(Value::as_str)
-        .ok_or_else(|| BridgeError::App(format!("Google token response missing access_token: {body}")))?
+        .ok_or_else(|| {
+            BridgeError::App(format!(
+                "Google token response missing access_token: {body}"
+            ))
+        })?
         .to_owned();
     let ttl = body
         .get("expires_in")
