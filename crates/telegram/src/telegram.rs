@@ -63,15 +63,14 @@ impl MessageBridge for TelegramApp {
                     }
                 }
 
-                if let Some((file_id, filename, mime)) = telegram_media(&msg) {
-                    if let Err(e) = forward_media(
+                if let Some((file_id, filename, mime)) = telegram_media(&msg)
+                    && let Err(e) = forward_media(
                         &bot, &ctx, &token, &channel, &user, &msg, file_id, filename, mime,
                     )
                     .await
                     {
                         tracing::warn!(error = %e, "Telegram media bridging failed");
                     }
-                }
 
                 respond(())
             }

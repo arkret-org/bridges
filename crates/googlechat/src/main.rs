@@ -4,58 +4,40 @@ mod googlechat;
 
 use std::sync::Arc;
 
-use clap::Parser;
-use cokret_bridge_messaging::{run_message_bridge, webhook::JwtAuthConfig};
-use cokret_bridge_runtime::{Config, logging};
+use cokret_bridge_messaging::bridge_main;
+use cokret_bridge_messaging::runtime::BridgeError;
+use cokret_bridge_messaging::webhook::{JwtAuthConfig, JwtVerifier};
+use serde::Deserialize;
 
 use crate::googlechat::{GoogleChatApp, GoogleChatAuth, ServiceAccountKey};
 
-#[derive(Parser, Debug)]
-#[command(
-    name = "cokret-bridge-googlechat",
-    version,
-    about = "cokret <-> Google Chat bridge"
-)]
-struct Cli {
-    /// Config file path (.yaml or .kdl).
-    #[arg(short, long, default_value = "config.yaml")]
-    config: String,
+#[derive(Debug, Deserialize)]
+struct AppConfig {
+    /// Service account key (auto-refreshing); preferred over `token`.
+    service_account_json: Option<ServiceAccountKey>,
+    /// Back-compat static access token, short-lived only (expires in ~1h).
+    token: Option<String>,
+    /// Inbound webhook Bearer JWT verification (issuer/audience/JWKS).
+    inbound_jwt: JwtAuthConfig,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-    let config = Config::load(&cli.config)?;
-    logging::init(&config.logging);
-
-    // Prefer a service account (auto-refreshing) over a static access token. The
-    // static `token` is back-compat / short-lived only and expires in ~1h.
-    let auth = if let Some(sa) = config.app.get("service_account_json").cloned() {
-        let key: ServiceAccountKey = serde_json::from_value(sa)
-            .map_err(|e| anyhow::anyhow!("config.app.service_account_json is invalid: {e}"))?;
-        GoogleChatAuth::ServiceAccount(Box::new(key))
-    } else if let Some(token) = config.app.get("token").and_then(|v| v.as_str()) {
-        GoogleChatAuth::StaticToken(token.to_owned())
-    } else {
-        anyhow::bail!("config.app requires either service_account_json or token");
-    };
-    let inbound_jwt: JwtAuthConfig = serde_json::from_value(
-        config
-            .app
-            .get("inbound_jwt")
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("config.app.inbound_jwt is missing"))?,
-    )?;
-
-    run_message_bridge(config, move |ctx: Arc<_>| {
+    bridge_main("cokret <-> Google Chat bridge", |app: AppConfig, ctx| {
+        // Prefer a service account (auto-refreshing) over a static access token.
+        let auth = match (app.service_account_json, app.token) {
+            (Some(key), _) => GoogleChatAuth::ServiceAccount(Box::new(key)),
+            (None, Some(token)) => GoogleChatAuth::StaticToken(token),
+            (None, None) => {
+                return Err(BridgeError::Config(
+                    "config.app requires either service_account_json or token".into(),
+                ));
+            }
+        };
         Ok(GoogleChatApp::new(
             auth,
-            Arc::new(cokret_bridge_messaging::webhook::JwtVerifier::new(
-                inbound_jwt,
-                ctx.http.clone(),
-            )),
+            Arc::new(JwtVerifier::new(app.inbound_jwt, ctx.http.clone())),
         ))
     })
     .await
-    .map_err(|e| anyhow::anyhow!(e.to_string()))
 }

@@ -522,7 +522,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ddb117e43bbf7dacf0a4190fef4d345b9bad68dfc649cb349e7d17d28428e51"
 dependencies = [
  "clap_builder",
- "clap_derive",
 ]
 
 [[package]]
@@ -535,18 +534,6 @@ dependencies = [
  "anstyle",
  "clap_lex",
  "strsim",
-]
-
-[[package]]
-name = "clap_derive"
-version = "4.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2ce8604710f6733aa641a2b3731eaa1e8b3d9973d5e3565da11800813f997a9"
-dependencies = [
- "heck",
- "proc-macro2",
- "quote",
- "syn 2.0.117",
 ]
 
 [[package]]
@@ -614,14 +601,11 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "clap",
  "cokret-bridge-messaging",
  "cokret-bridge-runtime",
- "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -630,11 +614,9 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "clap",
  "cokret-bridge-messaging",
  "cokret-bridge-runtime",
  "serde",
- "serde_json",
  "serenity",
  "tokio",
  "tracing",
@@ -646,14 +628,11 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "clap",
  "cokret-bridge-messaging",
  "cokret-bridge-runtime",
- "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -663,15 +642,12 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "clap",
  "cokret-bridge-messaging",
  "cokret-bridge-runtime",
  "jsonwebtoken",
- "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -680,14 +656,11 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "clap",
  "cokret-bridge-messaging",
  "cokret-bridge-runtime",
- "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -696,15 +669,10 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "base64",
- "clap",
  "cokret-bridge-messaging",
  "cokret-bridge-runtime",
- "hmac 0.13.0",
- "reqwest 0.13.4",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "tokio",
  "tracing",
 ]
@@ -713,9 +681,11 @@ dependencies = [
 name = "cokret-bridge-messaging"
 version = "0.3.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "base64",
  "chrono",
+ "clap",
  "cokret",
  "cokret-bridge-runtime",
  "diesel",
@@ -740,10 +710,8 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "clap",
  "cokret-bridge-messaging",
  "cokret-bridge-runtime",
- "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",
@@ -756,14 +724,11 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "clap",
  "cokret-bridge-messaging",
  "cokret-bridge-runtime",
- "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -795,11 +760,9 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "clap",
  "cokret-bridge-messaging",
  "cokret-bridge-runtime",
  "futures",
- "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",
@@ -813,14 +776,11 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "clap",
  "cokret-bridge-messaging",
  "cokret-bridge-runtime",
- "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -829,11 +789,9 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "clap",
  "cokret-bridge-messaging",
  "cokret-bridge-runtime",
  "serde",
- "serde_json",
  "teloxide",
  "tokio",
  "tracing",
@@ -845,15 +803,12 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "clap",
  "cokret-bridge-messaging",
  "cokret-bridge-runtime",
  "quick-xml",
- "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -862,10 +817,8 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "clap",
  "cokret-bridge-messaging",
  "cokret-bridge-runtime",
- "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",
@@ -878,10 +831,8 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "clap",
  "cokret-bridge-messaging",
  "cokret-bridge-runtime",
- "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",

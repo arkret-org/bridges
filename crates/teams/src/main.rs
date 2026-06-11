@@ -4,70 +4,33 @@ mod teams;
 
 use std::sync::Arc;
 
-use clap::Parser;
-use cokret_bridge_messaging::{run_message_bridge, webhook::JwtAuthConfig};
-use cokret_bridge_runtime::{Config, logging};
+use cokret_bridge_messaging::bridge_main;
+use cokret_bridge_messaging::webhook::{JwtAuthConfig, JwtVerifier};
+use serde::Deserialize;
 
 use crate::teams::TeamsApp;
 
-#[derive(Parser, Debug)]
-#[command(
-    name = "cokret-bridge-teams",
-    version,
-    about = "cokret <-> Microsoft Teams bridge"
-)]
-struct Cli {
-    /// Path to the config file (.yaml or .kdl).
-    #[arg(short, long, default_value = "config.yaml")]
-    config: String,
+/// Bot Framework application credentials.
+#[derive(Debug, Deserialize)]
+struct AppConfig {
+    app_id: String,
+    app_password: String,
+    /// The Bot Framework serviceUrl assembled when sending outbound messages
+    /// (e.g. https://smba.trafficmanager.net/...).
+    service_url: String,
+    /// Inbound webhook Bearer JWT verification (issuer/audience/JWKS).
+    inbound_jwt: JwtAuthConfig,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-    let config = Config::load(&cli.config)?;
-    logging::init(&config.logging);
-
-    // Bot Framework application credentials.
-    let app_id = config
-        .app
-        .get("app_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("config.app.app_id is missing"))?
-        .to_owned();
-    let app_password = config
-        .app
-        .get("app_password")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("config.app.app_password is missing"))?
-        .to_owned();
-    // The Bot Framework serviceUrl assembled when sending outbound messages (e.g.
-    // https://smba.trafficmanager.net/...).
-    let service_url = config
-        .app
-        .get("service_url")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("config.app.service_url is missing"))?
-        .to_owned();
-    let inbound_jwt: JwtAuthConfig = serde_json::from_value(
-        config
-            .app
-            .get("inbound_jwt")
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("config.app.inbound_jwt is missing"))?,
-    )?;
-
-    run_message_bridge(config, move |ctx: Arc<_>| {
+    bridge_main("cokret <-> Microsoft Teams bridge", |app: AppConfig, ctx| {
         Ok(TeamsApp::new(
-            app_id,
-            app_password,
-            service_url,
-            Arc::new(cokret_bridge_messaging::webhook::JwtVerifier::new(
-                inbound_jwt,
-                ctx.http.clone(),
-            )),
+            app.app_id,
+            app.app_password,
+            app.service_url,
+            Arc::new(JwtVerifier::new(app.inbound_jwt, ctx.http.clone())),
         ))
     })
     .await
-    .map_err(|e| anyhow::anyhow!(e.to_string()))
 }

@@ -2,47 +2,24 @@
 
 mod line;
 
-use std::sync::Arc;
-
-use clap::Parser;
-use cokret_bridge_messaging::run_message_bridge;
-use cokret_bridge_runtime::{Config, logging};
+use cokret_bridge_messaging::bridge_main;
+use serde::Deserialize;
 
 use crate::line::LineApp;
 
-#[derive(Parser, Debug)]
-#[command(name = "cokret-bridge-line", version, about = "cokret <-> LINE bridge")]
-struct Cli {
-    /// Config file path (.yaml or .kdl).
-    #[arg(short, long, default_value = "config.yaml")]
-    config: String,
+/// LINE Messaging API credentials.
+#[derive(Debug, Deserialize)]
+struct AppConfig {
+    /// Used to push messages (Bearer).
+    channel_access_token: String,
+    /// Used for webhook signature verification (inbound onboarding).
+    channel_secret: String,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-    let config = Config::load(&cli.config)?;
-    logging::init(&config.logging);
-
-    // LINE Messaging API credentials:
-    // - channel_access_token: used to push messages (Bearer).
-    // - channel_secret: used for webhook signature verification (used for inbound onboarding).
-    let channel_access_token = config
-        .app
-        .get("channel_access_token")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("config.app.channel_access_token missing"))?
-        .to_owned();
-    let channel_secret = config
-        .app
-        .get("channel_secret")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("config.app.channel_secret missing"))?
-        .to_owned();
-
-    run_message_bridge(config, move |_ctx: Arc<_>| {
-        Ok(LineApp::new(channel_access_token, channel_secret))
+    bridge_main("cokret <-> LINE bridge", |app: AppConfig, _ctx| {
+        Ok(LineApp::new(app.channel_access_token, app.channel_secret))
     })
     .await
-    .map_err(|e| anyhow::anyhow!(e.to_string()))
 }

@@ -2,66 +2,36 @@
 
 mod wechat;
 
-use std::sync::Arc;
-
-use clap::Parser;
-use cokret_bridge_messaging::run_message_bridge;
-use cokret_bridge_runtime::{Config, logging};
+use cokret_bridge_messaging::bridge_main;
+use serde::Deserialize;
 
 use crate::wechat::WeChatApp;
 
-#[derive(Parser, Debug)]
-#[command(
-    name = "cokret-bridge-wechat",
-    version,
-    about = "cokret <-> WeChat bridge"
-)]
-struct Cli {
-    /// Configuration file path (.yaml or .kdl).
-    #[arg(short, long, default_value = "config.yaml")]
-    config: String,
+/// WeChat Work uses `corp_id`/`corp_secret`; Official Accounts use
+/// `app_id`/`app_secret`. Both spellings are accepted (serde aliases) and
+/// passed to the adapter as a unified "credential id"/secret.
+#[derive(Debug, Deserialize)]
+struct AppConfig {
+    #[serde(alias = "app_id")]
+    corp_id: String,
+    #[serde(alias = "app_secret")]
+    corp_secret: String,
+    /// WeChat Work requires agent_id to send app messages (Official Account
+    /// customer-service messages do not).
+    agent_id: Option<i64>,
+    /// Callback Token used to verify the inbound `signature` (required, fail closed).
+    webhook_token: String,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-    let config = Config::load(&cli.config)?;
-    logging::init(&config.logging);
-
-    // WeChat Work uses corp_id/corp_secret; Official Accounts use app_id/app_secret. Both are accepted,
-    // preferring corp_id and falling back to app_id, passed to the adapter as a unified "credential id".
-    let cred_id = config
-        .app
-        .get("corp_id")
-        .or_else(|| config.app.get("app_id"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("config.app.corp_id or app_id is missing"))?
-        .to_owned();
-    let cred_secret = config
-        .app
-        .get("corp_secret")
-        .or_else(|| config.app.get("app_secret"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("config.app.corp_secret or app_secret is missing"))?
-        .to_owned();
-    // WeChat Work requires agent_id to send app messages (Official Account customer-service messages do not).
-    let agent_id = config.app.get("agent_id").and_then(|v| v.as_i64());
-    // webhook_token: Callback Token used to verify the接入 `signature` (required, fail closed).
-    let webhook_token = config
-        .app
-        .get("webhook_token")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("config.app.webhook_token is missing"))?
-        .to_owned();
-
-    run_message_bridge(config, move |_ctx: Arc<_>| {
+    bridge_main("cokret <-> WeChat bridge", |app: AppConfig, _ctx| {
         Ok(WeChatApp::new(
-            cred_id,
-            cred_secret,
-            agent_id,
-            webhook_token,
+            app.corp_id,
+            app.corp_secret,
+            app.agent_id,
+            app.webhook_token,
         ))
     })
     .await
-    .map_err(|e| anyhow::anyhow!(e.to_string()))
 }

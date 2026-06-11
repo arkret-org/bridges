@@ -308,6 +308,9 @@ impl MessageStore {
             .optional()?)
     }
 
+    // The argument list mirrors the user_mappings row shape one-to-one; a
+    // params struct would only restate the same fields.
+    #[allow(clippy::too_many_arguments)]
     pub fn upsert_user(
         &self,
         protocol: &str,
@@ -1007,11 +1010,10 @@ fn sender_display_for_event(store: &MessageStore, event: &Event) -> Result<Strin
             .unwrap_or(row.external_user_id),
         None => actor_id,
     };
-    if let Some(executed_by) = event.executed_by.as_ref() {
-        if executed_by != &event.actor_id {
+    if let Some(executed_by) = event.executed_by.as_ref()
+        && executed_by != &event.actor_id {
             display = format!("{display} via {executed_by}");
         }
-    }
     Ok(display)
 }
 
@@ -1037,7 +1039,7 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
             let Some(target) = event.redacts.as_ref() else {
                 return Ok(());
             };
-            let Some(app_message_id) = self.ctx.store.app_message_for_event(&target.to_string())?
+            let Some(app_message_id) = self.ctx.store.app_message_for_event(target.as_ref())?
             else {
                 return Ok(());
             };
@@ -1099,7 +1101,7 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
             self.ctx.store.record_message(
                 &mapping_channel_key,
                 &app_message_id,
-                &event.event_id.to_string(),
+                event.event_id.as_ref(),
                 &realm_id,
             )?;
         }
@@ -1140,4 +1142,71 @@ where
         Ok(MessageAdapter { user, ctx })
     })
     .await
+}
+
+/// Unified executable entry point for message-bridge binaries.
+///
+/// Factors out the per-bridge `main.rs` boilerplate: CLI parsing (a single
+/// `--config` flag), [`runtime::Config::load`], logging init, strongly typed
+/// `config.app` deserialization into `C`, and [`run_message_bridge`]. A bridge
+/// binary reduces to its `AppConfig` definition plus a factory closure:
+///
+/// ```ignore
+/// #[derive(serde::Deserialize)]
+/// struct AppConfig { bot_token: String }
+///
+/// #[tokio::main]
+/// async fn main() -> anyhow::Result<()> {
+///     cokret_bridge_messaging::bridge_main("cokret <-> Example bridge", |app: AppConfig, _ctx| {
+///         Ok(ExampleApp::new(app.bot_token))
+///     })
+///     .await
+/// }
+/// ```
+pub async fn bridge_main<C, M, F>(about: &str, factory: F) -> anyhow::Result<()>
+where
+    C: serde::de::DeserializeOwned,
+    M: MessageBridge,
+    F: FnOnce(C, Arc<MessageContext>) -> Result<M>,
+{
+    // Use the invoked binary name (e.g. `cokret-bridge-slack`) for help/version
+    // output instead of hardcoding one shared name here.
+    let bin_name = std::env::args()
+        .next()
+        .as_deref()
+        .map(std::path::Path::new)
+        .and_then(|p| p.file_stem())
+        .and_then(|s| s.to_str())
+        .unwrap_or("cokret-bridge")
+        .to_owned();
+    let matches = clap::Command::new(bin_name)
+        .version(env!("CARGO_PKG_VERSION"))
+        .about(about.to_owned())
+        .arg(
+            clap::Arg::new("config")
+                .short('c')
+                .long("config")
+                .value_name("FILE")
+                .help("Configuration file path (.yaml)")
+                .default_value("config.yaml"),
+        )
+        .get_matches();
+    let config_path = matches
+        .get_one::<String>("config")
+        .expect("config has a default value");
+
+    let config = runtime::Config::load(config_path)?;
+    runtime::logging::init(&config.logging);
+
+    // `config.app` defaults to JSON null when the section is omitted; map that
+    // to an empty object so serde reports each missing field by name.
+    let app = match config.app.clone() {
+        Value::Null => json!({}),
+        value => value,
+    };
+    let app_config: C =
+        serde_json::from_value(app).map_err(|e| anyhow::anyhow!("config.app is invalid: {e}"))?;
+
+    run_message_bridge(config, move |ctx| factory(app_config, ctx)).await?;
+    Ok(())
 }

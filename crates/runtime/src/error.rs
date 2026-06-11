@@ -97,10 +97,7 @@ fn query_value_terminator(c: char) -> bool {
 
 fn redact_telegram_bot_token(value: &mut String) {
     let mut search_from = 0;
-    loop {
-        let Some(relative_start) = value[search_from..].find("/bot") else {
-            break;
-        };
+    while let Some(relative_start) = value[search_from..].find("/bot") {
         let value_start = search_from + relative_start + "/bot".len();
         let value_end = value[value_start..]
             .find(telegram_token_terminator)

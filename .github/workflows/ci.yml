@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  typos:
+    name: Typos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout bridges
+        uses: actions/checkout@v6
+
+      - name: Check spelling
+        uses: crate-ci/typos@v1.45.2
+
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout bridges
+        uses: actions/checkout@v6
+        with:
+          path: bridges
+
+      # The workspace depends on the cokret SDK via a `../cokret-rust-sdk`
+      # path dependency, so the SDK must be checked out as a sibling.
+      - name: Checkout Cokret Rust SDK
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository_owner }}/cokret-rust-sdk
+          path: cokret-rust-sdk
+          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bridges -> target
+
+      - name: Rustfmt
+        run: cargo fmt --all -- --check
+        working-directory: bridges
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        working-directory: bridges
+
+      - name: Test
+        run: cargo test --workspace --locked
+        working-directory: bridges

@@ -41,15 +41,18 @@ pub trait MessageBridge: Send + Sync + 'static {
 ```
 
 下行(cokret→app)由 messaging 的 `MessageAdapter::on_cokret_event` 自动驱动 `send_to_app`,
-适配器无需自己实现 `on_cokret_event`。`config.app` 是 `serde_json::Value`,放该 app 专属配置
-(token 等),适配器自取。错误统一用 `BridgeError::App(String)`。
+适配器无需自己实现 `on_cokret_event`。`config.app` 放该 app 专属配置(token 等),由
+`bridge_main` 经 serde 反序列化成每桥自定义的强类型 `AppConfig`(缺字段由 serde 按字段名报错)。
+错误统一用 `BridgeError::App(String)`。
 
 ## 每个 crate 必须产出的文件
 
 1. `Cargo.toml`:依赖 `cokret-bridge-runtime` + `cokret-bridge-messaging`(均 `{ workspace = true }`)
    + 该 app 传输库;`[[bin]]` name 同 crate;features 转发 sqlite/postgres/mysql 到这两个 crate(见 discord)。
-2. `src/main.rs`:`clap` 解析 `--config` → `Config::load` → `logging::init` →
-   从 `config.app` 取 token → `run_message_bridge(config, move |_ctx| Ok(App::new(...)))`。
+   只声明源码实际 `use` 的依赖(`ctx.http` 已带 reqwest,桥自身通常无需再声明)。
+2. `src/main.rs`:定义 `#[derive(Deserialize)] struct AppConfig {...}` →
+   `bridge_main("cokret <-> Xxx bridge", |app: AppConfig, _ctx| Ok(App::new(...)))`(CLI/配置加载/
+   日志初始化/`run_message_bridge` 都在 `messaging::bridge_main` 里,勿在桥内重写)。
 3. `src/<app>.rs`:实现 `MessageBridge`。
 4. `config/config.sample.yaml`:含 `bridge`/`cokret`/`database`/`logging`/`app` 段
    (照抄 discord,改 bridge_id、端口、app 段)。

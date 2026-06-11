@@ -2,40 +2,21 @@
 
 mod telegram;
 
-use std::sync::Arc;
-
-use clap::Parser;
-use cokret_bridge_messaging::run_message_bridge;
-use cokret_bridge_runtime::{Config, logging};
+use cokret_bridge_messaging::bridge_main;
+use serde::Deserialize;
 
 use crate::telegram::TelegramApp;
 
-#[derive(Parser, Debug)]
-#[command(
-    name = "cokret-bridge-telegram",
-    version,
-    about = "cokret <-> Telegram bridge"
-)]
-struct Cli {
-    /// Path to the config file (.yaml or .kdl).
-    #[arg(short, long, default_value = "config.yaml")]
-    config: String,
+#[derive(Debug, Deserialize)]
+struct AppConfig {
+    /// Telegram bot token used by the teloxide long-polling client.
+    bot_token: String,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-    let config = Config::load(&cli.config)?;
-    logging::init(&config.logging);
-
-    let token = config
-        .app
-        .get("bot_token")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("config.app.bot_token is missing"))?
-        .to_owned();
-
-    run_message_bridge(config, move |_ctx: Arc<_>| Ok(TelegramApp::new(token)))
-        .await
-        .map_err(|e| anyhow::anyhow!(e.to_string()))
+    bridge_main("cokret <-> Telegram bridge", |app: AppConfig, _ctx| {
+        Ok(TelegramApp::new(app.bot_token))
+    })
+    .await
 }

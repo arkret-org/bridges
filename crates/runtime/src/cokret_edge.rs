@@ -809,7 +809,7 @@ impl cokret::AppletHandler for BridgeAppletHandler {
             // event's realm MUST fall inside the realm namespace this applet
             // declared in `describe`. A trusted-channel event for a realm outside
             // our namespace is rejected before it can be forwarded to the app.
-            if !self.realm_in_namespace(&event.realm_id.to_string()) {
+            if !self.realm_in_namespace(event.realm_id.as_ref()) {
                 tracing::warn!(
                     %event_id,
                     realm = %event.realm_id,
@@ -864,13 +864,11 @@ impl cokret::AppletHandler for BridgeAppletHandler {
         // Forward ephemeral (typing/presence/receipts) when present instead of
         // silently dropping it; consumers receive the raw JSON. Ephemeral loss is
         // non-fatal (best-effort) and does not affect the durable ack.
-        if !req.ephemeral.is_null() {
-            if let Some(tx) = self.ephemeral_tx.as_ref() {
-                if let Err(err) = tx.send(req.ephemeral) {
+        if !req.ephemeral.is_null()
+            && let Some(tx) = self.ephemeral_tx.as_ref()
+                && let Err(err) = tx.send(req.ephemeral) {
                     tracing::warn!(error = %err, "failed to enqueue ephemeral payload");
                 }
-            }
-        }
 
         // `ok` reflects whether every durable event was accepted (either freshly
         // enqueued or de-duplicated). When enqueueing failed, signal a retry so
@@ -887,8 +885,7 @@ impl cokret::AppletHandler for BridgeAppletHandler {
             .resolver
             .as_ref()
             .and_then(|r| r.resolve_actor(actor_id))
-        {
-            if let Ok(did) = Did::new(resolved.actor_id) {
+            && let Ok(did) = Did::new(resolved.actor_id) {
                 return Ok(AppletActorView {
                     exists: true,
                     actor_id: Some(did),
@@ -896,7 +893,6 @@ impl cokret::AppletHandler for BridgeAppletHandler {
                     external_ref: resolved.external_ref,
                 });
             }
-        }
         Ok(AppletActorView {
             exists: false,
             actor_id: None,
@@ -910,8 +906,7 @@ impl cokret::AppletHandler for BridgeAppletHandler {
             .resolver
             .as_ref()
             .and_then(|r| r.resolve_realm(realm_id_or_alias))
-        {
-            if let Ok(realm) = RealmId::new(resolved.realm_id) {
+            && let Ok(realm) = RealmId::new(resolved.realm_id) {
                 return Ok(AppletRealmView {
                     exists: true,
                     realm_id: Some(realm),
@@ -919,7 +914,6 @@ impl cokret::AppletHandler for BridgeAppletHandler {
                     external_ref: resolved.external_ref,
                 });
             }
-        }
         Ok(AppletRealmView {
             exists: false,
             realm_id: None,

@@ -714,6 +714,46 @@ fn request_target_uri(
     format!("{scheme}://{authority}{path}")
 }
 
+/// Render the spec standard error response shape
+/// (`{"ok":false,"error":{"code":..,"message":..}}`, see
+/// `service-http-binding.md` §9) with a registry error code. The protocol
+/// surface (`/_cokret/edge/applet/*`) is part of the universal failure surface
+/// in `operations-error-mapping.json`, so the `code` must come from the closed
+/// `error-code-registry.json` set rather than being a free-form string.
+fn applet_error(res: &mut Response, status: StatusCode, code: &str, message: impl Into<String>) {
+    res.status_code(status);
+    res.render(Json(json!({
+        "ok": false,
+        "error": { "code": code, "message": message.into() },
+    })));
+}
+
+fn bad_request(res: &mut Response, message: impl Into<String>) {
+    applet_error(res, StatusCode::BAD_REQUEST, "bad_json", message);
+}
+
+fn unauthorized(res: &mut Response, message: impl Into<String>) {
+    applet_error(res, StatusCode::UNAUTHORIZED, "invalid_signature", message);
+}
+
+fn internal_error(res: &mut Response, message: impl Into<String>) {
+    applet_error(
+        res,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal_error",
+        message,
+    );
+}
+
+fn unsupported_feature(res: &mut Response, message: impl Into<String>) {
+    applet_error(
+        res,
+        StatusCode::NOT_IMPLEMENTED,
+        "unsupported_feature",
+        message,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -821,44 +861,4 @@ mod tests {
             CachedTransactionLookup::Claimed
         ));
     }
-}
-
-/// Render the spec standard error response shape
-/// (`{"ok":false,"error":{"code":..,"message":..}}`, see
-/// `service-http-binding.md` §9) with a registry error code. The protocol
-/// surface (`/_cokret/edge/applet/*`) is part of the universal failure surface
-/// in `operations-error-mapping.json`, so the `code` must come from the closed
-/// `error-code-registry.json` set rather than being a free-form string.
-fn applet_error(res: &mut Response, status: StatusCode, code: &str, message: impl Into<String>) {
-    res.status_code(status);
-    res.render(Json(json!({
-        "ok": false,
-        "error": { "code": code, "message": message.into() },
-    })));
-}
-
-fn bad_request(res: &mut Response, message: impl Into<String>) {
-    applet_error(res, StatusCode::BAD_REQUEST, "bad_json", message);
-}
-
-fn unauthorized(res: &mut Response, message: impl Into<String>) {
-    applet_error(res, StatusCode::UNAUTHORIZED, "invalid_signature", message);
-}
-
-fn internal_error(res: &mut Response, message: impl Into<String>) {
-    applet_error(
-        res,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "internal_error",
-        message,
-    );
-}
-
-fn unsupported_feature(res: &mut Response, message: impl Into<String>) {
-    applet_error(
-        res,
-        StatusCode::NOT_IMPLEMENTED,
-        "unsupported_feature",
-        message,
-    );
 }

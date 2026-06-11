@@ -82,6 +82,55 @@ pub fn verify_meta_x_hub_signature_256(app_secret: &[u8], body: &[u8], header: &
     verify_hmac_sha256(app_secret, body, hex_sig, SigEncoding::Hex)
 }
 
+/// Handle the Meta (WhatsApp / Messenger) GET webhook verification handshake:
+/// echo `hub.challenge` when `hub.mode == "subscribe"` and `hub.verify_token`
+/// matches `verify_token` (constant time); reject with 401 otherwise. An empty
+/// configured token always rejects (fail closed).
+pub fn meta_hub_verify(req: &mut Request, res: &mut Response, verify_token: &str) {
+    let mode = req.query::<String>("hub.mode").unwrap_or_default();
+    let token = req.query::<String>("hub.verify_token").unwrap_or_default();
+    let challenge = req.query::<String>("hub.challenge").unwrap_or_default();
+    let token_ok =
+        !verify_token.is_empty() && constant_time_eq(token.as_bytes(), verify_token.as_bytes());
+    if mode == "subscribe" && token_ok {
+        ok_text(res, challenge);
+    } else {
+        unauthorized(res, "Meta hub.verify_token mismatch");
+    }
+}
+
+/// The fail-closed preamble shared by Meta (WhatsApp / Messenger) POST
+/// delivery handlers: require a configured `app_secret`, read the raw body,
+/// verify `X-Hub-Signature-256` over the exact wire bytes, then parse JSON.
+/// On any failure the response is already rendered and `None` is returned.
+pub async fn meta_signed_json_body(
+    req: &mut Request,
+    res: &mut Response,
+    app_secret: &str,
+) -> Option<(Vec<u8>, Value)> {
+    // Fail closed: every POST delivery MUST carry a valid
+    // `X-Hub-Signature-256: sha256=<hmac>` over the exact raw body.
+    if app_secret.is_empty() {
+        unauthorized(res, "Meta app_secret not configured");
+        return None;
+    }
+    let raw = raw_body(req, res).await?;
+    let signature = req
+        .header::<String>("x-hub-signature-256")
+        .unwrap_or_default();
+    if !verify_meta_x_hub_signature_256(app_secret.as_bytes(), &raw, &signature) {
+        unauthorized(res, "Meta X-Hub-Signature-256 mismatch");
+        return None;
+    }
+    match serde_json::from_slice::<Value>(&raw) {
+        Ok(body) => Some((raw, body)),
+        Err(err) => {
+            bad_request(res, format!("invalid Meta webhook JSON body: {err}"));
+            None
+        }
+    }
+}
+
 /// Compute lowercase-hex `SHA1(parts sorted lexicographically, concatenated)`.
 /// Used by WeChat server verification (`signature = sha1(sort(token, timestamp, nonce))`).
 pub fn sha1_hex_sorted(parts: &[&str]) -> String {

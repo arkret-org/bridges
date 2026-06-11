@@ -196,9 +196,5 @@ fn json_id_string(value: &Value) -> Option<String> {
         }
     } else if let Some(n) = value.as_i64() {
         Some(n.to_string())
-    } else if let Some(n) = value.as_u64() {
-        Some(n.to_string())
-    } else {
-        None
-    }
+    } else { value.as_u64().map(|n| n.to_string()) }
 }

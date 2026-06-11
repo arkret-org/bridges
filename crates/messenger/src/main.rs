@@ -2,62 +2,31 @@
 
 mod messenger;
 
-use std::sync::Arc;
-
-use clap::Parser;
-use cokret_bridge_messaging::run_message_bridge;
-use cokret_bridge_runtime::{Config, logging};
+use cokret_bridge_messaging::bridge_main;
+use serde::Deserialize;
 
 use crate::messenger::MessengerApp;
 
-#[derive(Parser, Debug)]
-#[command(
-    name = "cokret-bridge-messenger",
-    version,
-    about = "cokret <-> Messenger bridge"
-)]
-struct Cli {
-    /// Config file path (.yaml or .kdl).
-    #[arg(short, long, default_value = "config.yaml")]
-    config: String,
+/// Facebook Messenger credentials.
+#[derive(Debug, Deserialize)]
+struct AppConfig {
+    /// Page access token used for sending (Bearer).
+    page_access_token: String,
+    /// Webhook verification token; required (parity with WhatsApp) so a missing
+    /// value fails at startup rather than at the first Meta GET handshake.
+    verify_token: String,
+    /// Meta app secret used to verify X-Hub-Signature-256 on each POST.
+    app_secret: String,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-    let config = Config::load(&cli.config)?;
-    logging::init(&config.logging);
-
-    // Facebook Messenger: the Page access token is used for sending, verify_token for webhook verification.
-    let page_access_token = config
-        .app
-        .get("page_access_token")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("config.app.page_access_token missing"))?
-        .to_owned();
-    // verify_token is required (parity with WhatsApp): fail fast at startup
-    // rather than at the first Meta GET handshake.
-    let verify_token = config
-        .app
-        .get("verify_token")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("config.app.verify_token missing"))?
-        .to_owned();
-    // app_secret: Meta app secret used to verify X-Hub-Signature-256 on each POST.
-    let app_secret = config
-        .app
-        .get("app_secret")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("config.app.app_secret missing"))?
-        .to_owned();
-
-    run_message_bridge(config, move |_ctx: Arc<_>| {
+    bridge_main("cokret <-> Messenger bridge", |app: AppConfig, _ctx| {
         Ok(MessengerApp::new(
-            page_access_token,
-            verify_token,
-            app_secret,
+            app.page_access_token,
+            app.verify_token,
+            app.app_secret,
         ))
     })
     .await
-    .map_err(|e| anyhow::anyhow!(e.to_string()))
 }

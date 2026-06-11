@@ -123,16 +123,7 @@ async fn messenger_verify(req: &mut Request, depot: &mut Depot, res: &mut Respon
         webhook::bad_request(res, "webhook state missing");
         return;
     };
-    let mode = req.query::<String>("hub.mode").unwrap_or_default();
-    let token = req.query::<String>("hub.verify_token").unwrap_or_default();
-    let challenge = req.query::<String>("hub.challenge").unwrap_or_default();
-    let token_ok = !state.app.verify_token.is_empty()
-        && webhook::constant_time_eq(token.as_bytes(), state.app.verify_token.as_bytes());
-    if mode == "subscribe" && token_ok {
-        webhook::ok_text(res, challenge);
-    } else {
-        webhook::unauthorized(res, "Messenger verify token mismatch");
-    }
+    webhook::meta_hub_verify(req, res, &state.app.verify_token);
 }
 
 #[handler]
@@ -141,29 +132,9 @@ async fn messenger_delivery(req: &mut Request, depot: &mut Depot, res: &mut Resp
         webhook::bad_request(res, "webhook state missing");
         return;
     };
-    // Fail closed: every POST delivery MUST carry a valid
-    // `X-Hub-Signature-256: sha256=<hmac>` over the exact raw body.
-    if state.app.app_secret.is_empty() {
-        webhook::unauthorized(res, "Messenger app_secret not configured");
+    let Some((_raw, body)) = webhook::meta_signed_json_body(req, res, &state.app.app_secret).await
+    else {
         return;
-    }
-    let Some(raw) = webhook::raw_body(req, res).await else {
-        return;
-    };
-    let signature = req
-        .header::<String>("x-hub-signature-256")
-        .unwrap_or_default();
-    if !webhook::verify_meta_x_hub_signature_256(state.app.app_secret.as_bytes(), &raw, &signature)
-    {
-        webhook::unauthorized(res, "Messenger X-Hub-Signature-256 mismatch");
-        return;
-    }
-    let body: Value = match serde_json::from_slice(&raw) {
-        Ok(value) => value,
-        Err(err) => {
-            webhook::bad_request(res, format!("invalid Messenger JSON body: {err}"));
-            return;
-        }
     };
 
     for entry in body

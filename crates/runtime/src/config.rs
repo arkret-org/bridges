@@ -229,7 +229,7 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
     // Operate on bytes (not the str) so multi-byte UTF-8 input cannot panic on a
     // non-char-boundary slice; non-ASCII hex digits simply fail `from_str_radix`.
     let bytes = s.as_bytes();
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return None;
     }
     bytes

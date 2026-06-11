@@ -20,11 +20,9 @@ mysql = ["cokret-bridge-runtime/mysql", "cokret-bridge-messaging/mysql"]
 [dependencies]
 anyhow = {workspace = true}
 async-trait = {workspace = true}
-clap = {workspace = true}
 cokret-bridge-messaging = {workspace = true,default-features = false}
 cokret-bridge-runtime = {workspace = true,default-features = false}
 serde = {workspace = true}
-serde_json = {workspace = true}
 serenity = {workspace = true,default-features = false,features = [
     "client",
     "gateway",

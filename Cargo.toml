@@ -16,7 +16,7 @@ anyhow = "1.0"
 async-trait = "0.1"
 base64 = "0.22"
 chrono = {version = "0.4",features = ["serde"]}
-clap = {version = "4.6",features = ["derive", "env"]}
+clap = {version = "4.6",features = ["string"]}
 cokret = {path = "../cokret-rust-sdk/crates/sdk",default-features = false,features = [
     "client",
     "salvo",
@@ -25,15 +25,12 @@ cokret = {path = "../cokret-rust-sdk/crates/sdk",default-features = false,featur
 ]}
 cokret-bridge-messaging = {path = "crates/messaging",default-features = false}
 cokret-bridge-runtime = {path = "crates/runtime",default-features = false}
-config = "0.15"
 diesel = {version = "2.3",default-features = false,features = ["r2d2", "chrono"]}
 futures = "0.3"
 hex = "0.4"
 hmac = "0.13"
 jsonwebtoken = "10.4"
-kdl = "6"
 libsqlite3-sys = "0.35"
-once_cell = "1.21"
 parking_lot = "0.12"
 quick-xml = "0.40"
 reqwest = {version = "0.13",default-features = false,features = ["form", "json", "rustls", "stream"]}
@@ -52,7 +49,6 @@ tokio-tungstenite = {version = "0.29",default-features = false}
 tracing = "0.1"
 tracing-subscriber = {version = "0.3",features = ["env-filter", "json"]}
 url = "2.5"
-uuid = {version = "1.23",features = ["v4", "v7", "serde"]}
 
 
 [profile.release]
