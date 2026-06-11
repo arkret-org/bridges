@@ -13,7 +13,7 @@ use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, webhook,
 };
-use cokret_bridge_runtime::{BridgeError, Result};
+use cokret_bridge_runtime::{BridgeError, Result, redact_sensitive_url_values};
 use serde_json::json;
 
 /// iMessage bridge adapter.
@@ -22,8 +22,8 @@ pub struct IMessageApp {
     gateway_url: String,
     /// Gateway access password (BlueBubbles uses it as the `?guid=` query parameter).
     password: Option<String>,
-    /// Optional shared secret required on inbound webhook calls (compared against
-    /// the `x-webhook-secret` header). When `None`, the webhook is unauthenticated.
+    /// Shared secret required on inbound webhook calls. When `None`, inbound
+    /// webhooks are rejected fail-closed.
     webhook_secret: Option<String>,
 }
 
@@ -74,12 +74,18 @@ impl MessageBridge for IMessageApp {
             .json(&payload)
             .send()
             .await
-            .map_err(|e| BridgeError::App(format!("iMessage gateway send request failed: {e}")))?;
+            .map_err(|e| {
+                BridgeError::App(format!(
+                    "iMessage gateway send request failed: {}",
+                    redact_sensitive_url_values(e.to_string())
+                ))
+            })?;
 
         let status = resp.status();
         let value: serde_json::Value = resp.json().await.map_err(|e| {
             BridgeError::App(format!(
-                "iMessage gateway response parse failed (status={status}): {e}"
+                "iMessage gateway response parse failed (status={status}): {}",
+                redact_sensitive_url_values(e.to_string())
             ))
         })?;
         if !status.is_success() {

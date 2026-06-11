@@ -79,8 +79,7 @@ cargo run -p cokret-bridge-discord -- --config config.yaml
 ```
 
 每个 crate 默认 `sqlite` feature;`--features postgres` / `--features mysql` 切换后端。
-配置文件支持 YAML 与 KDL；KDL loader 只覆盖当前桥配置使用的标量与嵌套节点形态。
-需要数组或多值节点时使用 YAML，避免 KDL 转换时丢失结构。
+配置文件使用 YAML。
 所有桥都必须显式建立 app channel 到 Realm 的映射；没有 room mapping 的入站消息会直接失败,
 不再回退到默认 Realm。
 

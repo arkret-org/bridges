@@ -16,7 +16,7 @@ use cokret_bridge_messaging::{
     SenderRenderStyle, webhook,
 };
 use cokret_bridge_runtime::cache::TokenCache;
-use cokret_bridge_runtime::{BridgeError, Result};
+use cokret_bridge_runtime::{BridgeError, Result, redact_sensitive_url_values};
 use quick_xml::Reader;
 use quick_xml::events::Event as XmlEvent;
 use serde_json::{Value, json};
@@ -84,12 +84,22 @@ impl WeChatApp {
                     .get(&url)
                     .send()
                     .await
-                    .map_err(|e| BridgeError::App(format!("WeChat token request failed: {e}")))?;
+                    .map_err(|e| {
+                        BridgeError::App(format!(
+                            "WeChat token request failed: {}",
+                            redact_sensitive_url_values(e.to_string())
+                        ))
+                    })?;
 
                 let body: Value = resp
                     .json()
                     .await
-                    .map_err(|e| BridgeError::App(format!("WeChat token parse failed: {e}")))?;
+                    .map_err(|e| {
+                        BridgeError::App(format!(
+                            "WeChat token parse failed: {}",
+                            redact_sensitive_url_values(e.to_string())
+                        ))
+                    })?;
 
                 if body.get("errcode").and_then(|v| v.as_i64()).unwrap_or(0) != 0 {
                     return Err(BridgeError::App(format!(
@@ -152,12 +162,19 @@ impl MessageBridge for WeChatApp {
             .json(&payload)
             .send()
             .await
-            .map_err(|e| BridgeError::App(format!("WeChat send failed: {e}")))?;
+            .map_err(|e| {
+                BridgeError::App(format!(
+                    "WeChat send failed: {}",
+                    redact_sensitive_url_values(e.to_string())
+                ))
+            })?;
 
-        let body: Value = resp
-            .json()
-            .await
-            .map_err(|e| BridgeError::App(format!("WeChat send response parse failed: {e}")))?;
+        let body: Value = resp.json().await.map_err(|e| {
+            BridgeError::App(format!(
+                "WeChat send response parse failed: {}",
+                redact_sensitive_url_values(e.to_string())
+            ))
+        })?;
 
         if body.get("errcode").and_then(|v| v.as_i64()).unwrap_or(0) != 0 {
             return Err(BridgeError::App(format!(
@@ -202,7 +219,7 @@ struct WechatWebhookState {
     webhook_token: String,
 }
 
-/// Verify the WeChat接入 `signature` query parameter, which is
+/// Verify the WeChat server-verification `signature` query parameter, which is
 /// `sha1(sort(token, timestamp, nonce))`, in constant time.
 fn wechat_signature_ok(token: &str, req: &Request) -> bool {
     if token.is_empty() {
@@ -221,7 +238,7 @@ async fn wechat_verify(req: &mut Request, depot: &mut Depot, res: &mut Response)
         webhook::bad_request(res, "webhook state missing");
         return;
     };
-    // Fail closed: only echo `echostr` after the接入 signature checks out.
+    // Fail closed: only echo `echostr` after the server-verification signature checks out.
     if !wechat_signature_ok(&state.webhook_token, req) {
         webhook::unauthorized(res, "WeChat signature mismatch");
         return;

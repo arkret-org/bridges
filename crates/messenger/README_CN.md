@@ -7,7 +7,8 @@ Rust 实现的 **cokret ⇄ Messenger** 桥接(通用 / Facebook Messenger)。�
 ## 架构
 
 - **入站(Messenger → cokret)**:Facebook 经 webhook 推送的 `messages` 事件由
-  `MessageBridge::webhook_router` 暴露的路由处理(含 GET `verify_token` 验证握手),
+  `MessageBridge::webhook_router` 暴露的路由处理(含 GET `verify_token` 验证握手与
+  POST `X-Hub-Signature-256` 校验),
   经 `webhook::submit` → `MessageContext::submit_app_message` 构造并签名
   `ck.message.create` 事件 → `events_submit` 提交到 cokret;`run` 为保活循环。
 - **出站(cokret → Messenger)**:cokret server 经 applet 端点
@@ -20,7 +21,7 @@ Rust 实现的 **cokret ⇄ Messenger** 桥接(通用 / Facebook Messenger)。�
 
 ```bash
 cp config/config.sample.yaml config.yaml
-# 填入 cokret.access_token / signing_key_seed_hex 与 app.page_access_token / verify_token
+# 填入 cokret.access_token / signing_key_seed_hex 与 app.page_access_token / verify_token / app_secret
 cargo run -p cokret-bridge-messenger -- --config config.yaml
 ```
 
@@ -29,6 +30,7 @@ cargo run -p cokret-bridge-messenger -- --config config.yaml
 - `cokret.*`:cokret 接入(server_url、service_did、applet_id、access_token、签名种子)。
 - `app.page_access_token`:Facebook Page 访问令牌(发送鉴权)。
 - `app.verify_token`:webhook 验证令牌(GET 握手比对)。
+- `app.app_secret`:Meta App Secret,必填;POST 投递用 `X-Hub-Signature-256` 校验。
 - `database.url`:`sqlite://...` / `postgres://...` / `mysql://...`(对应 feature)。
 
 ## 待办

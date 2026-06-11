@@ -25,7 +25,7 @@ use cokret_bridge_runtime::app::{
     AppletResolver, BridgeApp, BridgeContext, ResolvedActor, ResolvedRealm,
 };
 use cokret_bridge_runtime::db::DatabaseManager;
-use cokret_bridge_runtime::{BridgeError, Result};
+use cokret_bridge_runtime::{BridgeError, Result, redact_sensitive_url_values};
 use diesel::prelude::*;
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -767,13 +767,18 @@ impl MessageContext {
         if let Some(token) = bearer_token {
             request = request.bearer_auth(token);
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|err| BridgeError::App(format!("media download failed: {err}")))?;
-        let response = response
-            .error_for_status()
-            .map_err(|err| BridgeError::App(format!("media download status failed: {err}")))?;
+        let response = request.send().await.map_err(|err| {
+            BridgeError::App(format!(
+                "media download failed: {}",
+                redact_sensitive_url_values(err.to_string())
+            ))
+        })?;
+        let response = response.error_for_status().map_err(|err| {
+            BridgeError::App(format!(
+                "media download status failed: {}",
+                redact_sensitive_url_values(err.to_string())
+            ))
+        })?;
         if let Some(size) = response.content_length()
             && size > MAX_EXTERNAL_MEDIA_BYTES as u64
         {
@@ -790,8 +795,12 @@ impl MessageContext {
         let mut bytes = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk
-                .map_err(|err| BridgeError::App(format!("media download read failed: {err}")))?;
+            let chunk = chunk.map_err(|err| {
+                BridgeError::App(format!(
+                    "media download read failed: {}",
+                    redact_sensitive_url_values(err.to_string())
+                ))
+            })?;
             if bytes.len() + chunk.len() > MAX_EXTERNAL_MEDIA_BYTES {
                 return Err(BridgeError::App(format!(
                     "media download exceeded {MAX_EXTERNAL_MEDIA_BYTES} bytes"
@@ -1022,20 +1031,13 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
         // adapter's `redact_in_app`. Honors the `disable_deletion_forwarding`
         // switch.
         if event.kind == "ck.message.redact" {
-            if self
-                .ctx
-                .core()
-                .config
-                .bridge
-                .disable_deletion_forwarding
-            {
+            if self.ctx.core().config.bridge.disable_deletion_forwarding {
                 return Ok(());
             }
             let Some(target) = event.redacts.as_ref() else {
                 return Ok(());
             };
-            let Some(app_message_id) =
-                self.ctx.store.app_message_for_event(&target.to_string())?
+            let Some(app_message_id) = self.ctx.store.app_message_for_event(&target.to_string())?
             else {
                 return Ok(());
             };
@@ -1057,6 +1059,9 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
             .and_then(Value::as_str)
             == Some(our_id.as_str());
         if originated_here {
+            return Ok(());
+        }
+        if event.executed_by.as_ref() == Some(self.ctx.core().edge.service_did()) {
             return Ok(());
         }
         if &event.actor_id == self.ctx.core().edge.service_did() {
@@ -1136,4 +1141,3 @@ where
     })
     .await
 }
-

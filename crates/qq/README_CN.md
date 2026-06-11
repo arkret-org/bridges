@@ -6,8 +6,8 @@ HTTP API(go-cqhttp / NapCat / Lagrange 等)或 **QQ 官方机器人**。
 
 ## 架构
 
-- **入站(QQ → cokret)**:QQ 侧消息经 OneBot/官方 webhook 上报到达,由
-  `MessageBridge::webhook_router` 暴露的路由接收,经 `webhook::submit` →
+- **入站(QQ → cokret)**:QQ 侧消息经 OneBot webhook 上报到达,由
+  `MessageBridge::webhook_router` 暴露的路由先校验 `X-Signature`,再经 `webhook::submit` →
   `MessageContext::submit_app_message` 构造并签名 `ck.message.create` 事件 →
   `events_submit` 提交到 cokret;`run` 为保活循环。
 - **出站(cokret → QQ)**:cokret server 经 applet 端点
@@ -19,7 +19,7 @@ HTTP API(go-cqhttp / NapCat / Lagrange 等)或 **QQ 官方机器人**。
 
 ```bash
 cp config/config.sample.yaml config.yaml
-# 填入 cokret.access_token / signing_key_seed_hex 与 app.onebot_url / access_token
+# 填入 cokret.access_token / signing_key_seed_hex 与 app.onebot_url / access_token / signing_secret
 cargo run -p cokret-bridge-qq -- --config config.yaml
 ```
 
@@ -28,6 +28,7 @@ cargo run -p cokret-bridge-qq -- --config config.yaml
 - `cokret.*`:cokret 接入(server_url、service_did、applet_id、access_token、签名种子)。
 - `app.onebot_url`:OneBot 实现的 HTTP API 基址。
 - `app.access_token`:OneBot access_token(可选)。
+- `app.signing_secret`:OneBot `X-Signature` HMAC secret,必填。
 - `database.url`:`sqlite://...` / `postgres://...` / `mysql://...`(对应 feature)。
 
 ## 待办

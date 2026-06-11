@@ -9,7 +9,7 @@ Rust 实现的 **cokret ⇄ WhatsApp** 桥接。基于共享核心
 
 - **入站(WhatsApp → cokret)**:Cloud API 通过 webhook(GET 校验 + POST 接收)推送消息,
   由 `MessageBridge::webhook_router` 暴露的路由处理(GET 校验 `verify_token`、POST 解析
-  `entry[].changes[].value.messages[]`),经 `webhook::submit` → `MessageContext::submit_app_message`
+  前校验 `X-Hub-Signature-256` 后解析 `entry[].changes[].value.messages[]`),经 `webhook::submit` → `MessageContext::submit_app_message`
   构造并签名 `ck.message.create` 事件提交到 cokret;`run` 为保活循环。
 - **出站(cokret → WhatsApp)**:cokret server 经 applet 端点
   `POST /_cokret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
@@ -22,7 +22,7 @@ Rust 实现的 **cokret ⇄ WhatsApp** 桥接。基于共享核心
 ```bash
 cp config/config.sample.yaml config.yaml
 # 填入 cokret.access_token / signing_key_seed_hex 与
-# app.phone_number_id / access_token / verify_token
+# app.phone_number_id / access_token / verify_token / app_secret
 cargo run -p cokret-bridge-whatsapp -- --config config.yaml
 ```
 
@@ -32,6 +32,7 @@ cargo run -p cokret-bridge-whatsapp -- --config config.yaml
 - `app.phone_number_id`:发送方电话号码 ID(出站 URL 路径段)。
 - `app.access_token`:Cloud API 令牌(Bearer)。
 - `app.verify_token`:webhook 校验回显令牌(入站接入时使用)。
+- `app.app_secret`:Meta App Secret,必填;POST 投递用 `X-Hub-Signature-256` 校验。
 - `database.url`:`sqlite://...` / `postgres://...` / `mysql://...`(对应 feature)。
 
 ## 待完善(TODO)

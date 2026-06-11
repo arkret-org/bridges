@@ -31,8 +31,8 @@ cargo run -p cokret-bridge-zulip -- --config config.yaml
 
 ## 不确定点(TODO)
 
-- event queue 失效(`BAD_EVENT_QUEUE_ID`)的自动重注册尚未实现,当前简化为继续轮询。
-- `app_channel` 的频道键格式(stream_id vs `pm/<id>`)需与 core 的频道↔realm 映射约定对齐。
+- event queue 失效(`BAD_EVENT_QUEUE_ID`)时会跳出当前轮询并重新 register。
+- `app_channel` 的频道键格式(stream_id vs `pm/<id>`)需与 messaging 的频道↔realm 映射约定对齐。
 - stream 出站消息的 `topic` 当前用占位值 `cokret`。
 
 详见 [`../_bridges_todos.md`](../../_bridges_todos.md) 的总体规划与映射表。

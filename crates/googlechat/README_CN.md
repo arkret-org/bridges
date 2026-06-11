@@ -20,10 +20,9 @@ Rust 实现的 **cokret ⇄ Google Chat** 桥接。基于共享核心
 
 Google Chat API 需 OAuth2 Bearer 令牌(scope `https://www.googleapis.com/auth/chat.bot`)。
 
-- 简单方式:在 `app.token` 直接填入已就绪的 access_token。
-- 推荐方式:在 `app.service_account_json` 填 service-account JSON 路径,由其 JWT
-  断言向 `https://oauth2.googleapis.com/token` 换取 access_token —— **此换取逻辑标注为
-  `// TODO`,尚未实现**。
+- 简单方式:在 `app.token` 直接填入已就绪的短期 access_token。
+- 推荐方式:在 `app.service_account_json` 填 service-account JSON 对象,由其 JWT
+  断言向 `https://oauth2.googleapis.com/token` 换取 access_token 并缓存到过期前。
 
 ## 快速开始
 
@@ -36,13 +35,12 @@ cargo run -p cokret-bridge-googlechat -- --config config.yaml
 ## 配置要点
 
 - `cokret.*`:cokret 接入(server_url、service_did、applet_id、access_token、签名种子)。
-- `app.token` / `app.service_account_json`:Google Chat 鉴权,二选一。
+- `app.token` / `app.service_account_json`:Google Chat 鉴权,二选一;推荐 `service_account_json` 自动刷新。
 - `app.inbound_jwt`:Google Chat webhook Bearer JWT 验签配置(`issuer`/`audience`/`jwks_url`)。
 - `database.url`:`sqlite://...` / `postgres://...` / `mysql://...`(对应 feature)。
 
 ## 待办
 
-- service-account JSON → OAuth2 access_token 的换取(`bearer_token` 中的 TODO)。
 - Pub/Sub 订阅模式可作后续可选增强。
 
 详见 [`../_bridges_todos.md`](../../_bridges_todos.md) 的总体规划与映射表。

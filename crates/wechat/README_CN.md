@@ -7,8 +7,9 @@ Rust 实现的 **cokret ⇄ 微信(企业微信 / 公众号)** 桥接。基于�
 ## 架构
 
 - **入站(微信 → cokret)**:微信经平台后台配置的「接收消息服务器」回调推送消息
-  (XML,可能加密),由 `MessageBridge::webhook_router` 暴露的路由接收
-  (含 URL 校验 echostr 与消息解密),再经 `webhook::submit` 入站;`run` 为保活循环。
+  (plaintext XML),由 `MessageBridge::webhook_router` 暴露的路由接收
+  (含 URL 校验 echostr 与 plaintext `signature` 校验),再经 `webhook::submit` 入站;`run` 为保活循环。
+  加密回调当前会 fail closed 拒绝,AES 解密尚未实现。
 - **出站(cokret → 微信)**:cokret server 经 applet 端点
   `POST /_cokret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
   用 `ctx.http` 先用 corp_id/corp_secret(或 app_id/app_secret)换 `access_token`,
@@ -28,11 +29,12 @@ cargo run -p cokret-bridge-wechat -- --config config.yaml
 - `cokret.*`:cokret 接入(server_url、service_did、applet_id、access_token、签名种子)。
 - `app.corp_id` / `app.corp_secret` / `app.agent_id`:企业微信应用凭证;
   公众号场景改填 `app.app_id` / `app.app_secret`。
+- `app.webhook_token`:微信回调 Token,必填;GET/POST 均校验 plaintext `signature`。
 - `database.url`:`sqlite://...` / `postgres://...` / `mysql://...`(对应 feature)。
 
 ## 不确定点(TODO)
 
-- 入站回调 webhook 已接入(`webhook_router`,含 echostr 校验与消息解密)。
+- 入站回调 webhook 已接入(`webhook_router`,含 echostr 与 plaintext `signature` 校验;加密模式未实现)。
 - `access_token` 经 `TokenCache` 缓存,按 `expires_in` 提前 60s 刷新(不再每次现取)。
 - 出站 URL 与消息体当前按**企业微信应用消息**实现;公众号客服消息需切换
   `https://api.weixin.qq.com` 基址、`message/custom/send` 路径与不同消息体结构。

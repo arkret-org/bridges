@@ -191,8 +191,7 @@ fn default_log_format() -> String {
 }
 
 impl Config {
-    /// Load from a file, choosing the parser by extension (`.kdl` / otherwise
-    /// All bridge sample configs are YAML.
+    /// Load a YAML configuration file.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path)
