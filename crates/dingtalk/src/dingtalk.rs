@@ -1,15 +1,15 @@
 //! DingTalk adapter (reqwest HTTP).
 //!
-//! - Inbound (DingTalk -> cokret): DingTalk callback messages are accepted at
-//!   `/webhooks/dingtalk`.
-//! - Outbound (cokret -> DingTalk): [`MessageBridge::send_to_app`] uses `ctx.http` (reqwest)
-//!   to POST the DingTalk enterprise robot message-sending API.
+//! - Inbound (DingTalk -> cokret): DingTalk callback messages are accepted at `/webhooks/dingtalk`.
+//! - Outbound (cokret -> DingTalk): [`MessageBridge::send_to_app`] uses `ctx.http` (reqwest) to
+//!   POST the DingTalk enterprise robot message-sending API.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
+use cokret_bridge_messaging::salvo::prelude::*;
+use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, webhook,
@@ -101,8 +101,8 @@ impl MessageBridge for DingTalkApp {
 
         let text = msg.rendered_body(SenderRenderStyle::Plain);
 
-        // DingTalk enterprise robot group message API; app_channel is treated as openConversationId.
-        // msgParam must be a JSON string.
+        // DingTalk enterprise robot group message API; app_channel is treated as
+        // openConversationId. msgParam must be a JSON string.
         let body = json!({
             "robotCode": self.robot_code,
             "openConversationId": msg.app_channel,
@@ -147,11 +147,16 @@ impl MessageBridge for DingTalkApp {
 
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
         let app_secret = self.app_secret.clone();
+        let replay_window = Arc::new(webhook::ReplayWindow::new(
+            Duration::from_millis(DINGTALK_TIMESTAMP_WINDOW_MS as u64),
+            8192,
+        ));
         Some(
             salvo::Router::with_path("webhooks/dingtalk")
                 .hoop(affix_state::inject(DingTalkWebhookState {
                     ctx,
                     app_secret,
+                    replay_window,
                 }))
                 .post(dingtalk_delivery),
         )
@@ -167,6 +172,7 @@ struct DingTalkWebhookState {
     ctx: Arc<MessageContext>,
     /// Enterprise app AppSecret, used for outgoing-callback signature checks.
     app_secret: String,
+    replay_window: Arc<webhook::ReplayWindow>,
 }
 
 /// Verify a DingTalk outgoing-robot callback: `sign` header equals
@@ -205,6 +211,11 @@ async fn dingtalk_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
     let sign = req.header::<String>("sign").unwrap_or_default();
     if !dingtalk_signature_ok(&state.app_secret, &timestamp, &sign) {
         webhook::unauthorized(res, "DingTalk signature mismatch");
+        return;
+    }
+    let replay_key = format!("{timestamp}\u{1f}{sign}");
+    if !state.replay_window.check_and_record(replay_key) {
+        webhook::unauthorized(res, "DingTalk callback replay");
         return;
     }
     let Some(body) = webhook::json_body(req, res).await else {

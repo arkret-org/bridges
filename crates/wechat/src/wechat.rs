@@ -1,16 +1,16 @@
 //! WeChat (WeChat Work / Official Account) adapter (reqwest).
 //!
-//! - Inbound (WeChat -> cokret): WeChat plaintext XML callbacks are accepted
-//!   at `/webhooks/wechat`.
-//! - Outbound (cokret -> WeChat): [`MessageBridge::send_to_app`] uses `ctx.http` to first
-//!   exchange corp_id/corp_secret (or app_id/app_secret) for an `access_token`, then POST to
-//!   the WeChat Work app-message / Official Account customer-service-message API.
+//! - Inbound (WeChat -> cokret): WeChat plaintext XML callbacks are accepted at `/webhooks/wechat`.
+//! - Outbound (cokret -> WeChat): [`MessageBridge::send_to_app`] uses `ctx.http` to first exchange
+//!   corp_id/corp_secret (or app_id/app_secret) for an `access_token`, then POST to the WeChat Work
+//!   app-message / Official Account customer-service-message API.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
+use cokret_bridge_messaging::salvo::prelude::*;
+use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, webhook,
@@ -25,6 +25,7 @@ const WECHAT_OFFICIAL_BASE: &str = "https://api.weixin.qq.com/cgi-bin";
 const WECHAT_WORK_BASE: &str = "https://qyapi.weixin.qq.com/cgi-bin";
 /// Fallback validity (seconds) when the API omits `expires_in`.
 const WECHAT_TOKEN_FALLBACK_SECS: u64 = 7000;
+const WECHAT_TIMESTAMP_WINDOW_SECS: i64 = 5 * 60;
 
 /// WeChat bridge adapter.
 pub struct WeChatApp {
@@ -32,7 +33,8 @@ pub struct WeChatApp {
     cred_id: String,
     /// WeChat Work corp_secret or Official Account app_secret.
     cred_secret: String,
-    /// WeChat Work app agent_id (required to send app messages); None for Official Account customer-service messages.
+    /// WeChat Work app agent_id (required to send app messages); None for Official Account
+    /// customer-service messages.
     agent_id: Option<i64>,
     /// Callback Token used to verify the `signature` of inbound calls
     /// (`sha1(sort(token, timestamp, nonce))`). Required (fail closed).
@@ -194,11 +196,16 @@ impl MessageBridge for WeChatApp {
 
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
         let webhook_token = self.webhook_token.clone();
+        let replay_window = Arc::new(webhook::ReplayWindow::new(
+            Duration::from_secs(WECHAT_TIMESTAMP_WINDOW_SECS as u64),
+            8192,
+        ));
         Some(
             salvo::Router::with_path("webhooks/wechat")
                 .hoop(affix_state::inject(WechatWebhookState {
                     ctx,
                     webhook_token,
+                    replay_window,
                 }))
                 .get(wechat_verify)
                 .post(wechat_delivery),
@@ -217,19 +224,55 @@ struct WechatWebhookState {
     ctx: Arc<MessageContext>,
     /// Callback Token for `signature` verification.
     webhook_token: String,
+    replay_window: Arc<webhook::ReplayWindow>,
 }
 
 /// Verify the WeChat server-verification `signature` query parameter, which is
-/// `sha1(sort(token, timestamp, nonce))`, in constant time.
-fn wechat_signature_ok(token: &str, req: &Request) -> bool {
-    if token.is_empty() {
+/// `sha1(sort(token, timestamp, nonce))`, in constant time. Plaintext mode
+/// cannot authenticate the body, so delivery handlers also bind each accepted
+/// query triple to a short replay window.
+#[derive(Default)]
+struct WechatSignatureInput {
+    signature: String,
+    timestamp: String,
+    nonce: String,
+}
+
+fn wechat_signature_input(req: &Request) -> WechatSignatureInput {
+    WechatSignatureInput {
+        signature: req.query::<String>("signature").unwrap_or_default(),
+        timestamp: req.query::<String>("timestamp").unwrap_or_default(),
+        nonce: req.query::<String>("nonce").unwrap_or_default(),
+    }
+}
+
+fn wechat_signature_ok(token: &str, input: &WechatSignatureInput) -> bool {
+    if token.is_empty()
+        || input.signature.is_empty()
+        || input.timestamp.is_empty()
+        || input.nonce.is_empty()
+    {
         return false;
     }
-    let signature = req.query::<String>("signature").unwrap_or_default();
-    let timestamp = req.query::<String>("timestamp").unwrap_or_default();
-    let nonce = req.query::<String>("nonce").unwrap_or_default();
-    let expected = webhook::sha1_hex_sorted(&[token, &timestamp, &nonce]);
-    webhook::constant_time_eq(expected.as_bytes(), signature.as_bytes())
+    let Ok(ts) = input.timestamp.parse::<i64>() else {
+        return false;
+    };
+    let now_secs = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs() as i64,
+        Err(_) => return false,
+    };
+    if (now_secs - ts).abs() > WECHAT_TIMESTAMP_WINDOW_SECS {
+        return false;
+    }
+    let expected = webhook::sha1_hex_sorted(&[token, &input.timestamp, &input.nonce]);
+    webhook::constant_time_eq(expected.as_bytes(), input.signature.as_bytes())
+}
+
+fn wechat_replay_key(input: &WechatSignatureInput) -> String {
+    format!(
+        "{}\u{1f}{}\u{1f}{}",
+        input.timestamp, input.nonce, input.signature
+    )
 }
 
 #[handler]
@@ -239,7 +282,8 @@ async fn wechat_verify(req: &mut Request, depot: &mut Depot, res: &mut Response)
         return;
     };
     // Fail closed: only echo `echostr` after the server-verification signature checks out.
-    if !wechat_signature_ok(&state.webhook_token, req) {
+    let signature_input = wechat_signature_input(req);
+    if !wechat_signature_ok(&state.webhook_token, &signature_input) {
         webhook::unauthorized(res, "WeChat signature mismatch");
         return;
     }
@@ -258,8 +302,16 @@ async fn wechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respons
         return;
     };
     // Fail closed: verify the plaintext-mode `signature` before processing.
-    if !wechat_signature_ok(&state.webhook_token, req) {
+    let signature_input = wechat_signature_input(req);
+    if !wechat_signature_ok(&state.webhook_token, &signature_input) {
         webhook::unauthorized(res, "WeChat signature mismatch");
+        return;
+    }
+    if !state
+        .replay_window
+        .check_and_record(wechat_replay_key(&signature_input))
+    {
+        webhook::unauthorized(res, "WeChat callback replay");
         return;
     }
     // Use the shared `raw_body` helper so the webhook body is bounded by
@@ -359,4 +411,64 @@ fn parse_wechat_xml(xml: &str) -> WechatXmlFields {
     }
 
     fields
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn current_unix_timestamp() -> String {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            .to_string()
+    }
+
+    #[test]
+    fn wechat_signature_accepts_fresh_matching_query() {
+        let token = "callback-token";
+        let timestamp = current_unix_timestamp();
+        let nonce = "nonce-1".to_owned();
+        let signature = webhook::sha1_hex_sorted(&[token, &timestamp, &nonce]);
+        let input = WechatSignatureInput {
+            signature,
+            timestamp,
+            nonce,
+        };
+
+        assert!(wechat_signature_ok(token, &input));
+    }
+
+    #[test]
+    fn wechat_signature_rejects_stale_query() {
+        let token = "callback-token";
+        let timestamp = "1700000000".to_owned();
+        let nonce = "nonce-1".to_owned();
+        let signature = webhook::sha1_hex_sorted(&[token, &timestamp, &nonce]);
+        let input = WechatSignatureInput {
+            signature,
+            timestamp,
+            nonce,
+        };
+
+        assert!(!wechat_signature_ok(token, &input));
+    }
+
+    #[test]
+    fn parse_wechat_xml_reads_text_message_fields() {
+        let fields = parse_wechat_xml(
+            r#"<xml>
+                <FromUserName><![CDATA[user-openid]]></FromUserName>
+                <MsgType><![CDATA[text]]></MsgType>
+                <Content><![CDATA[hello]]></Content>
+                <MsgId>12345</MsgId>
+            </xml>"#,
+        );
+
+        assert_eq!(fields.from_user.as_deref(), Some("user-openid"));
+        assert_eq!(fields.msg_type.as_deref(), Some("text"));
+        assert_eq!(fields.content.as_deref(), Some("hello"));
+        assert_eq!(fields.msg_id.as_deref(), Some("12345"));
+    }
 }

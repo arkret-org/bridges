@@ -29,14 +29,12 @@ logging:
   format: "pretty"
 
 # 微信适配器专属
-# 企业微信:填 corp_id / corp_secret / agent_id
-# 公众号:改填 app_id / app_secret(agent_id 可省略)
+# 当前仅支持公众号明文回调:填 app_id / app_secret,不要设置 agent_id。
+# 企业微信回调强制加密 safe mode,在 AES 解密支持落地前启动期会拒绝 agent_id。
 app:
-  corp_id: "CHANGE_ME_WECHAT_CORP_ID"
-  corp_secret: "CHANGE_ME_WECHAT_CORP_SECRET"
-  agent_id: 1000002
+  app_id: "CHANGE_ME_WECHAT_APP_ID"
+  app_secret: "CHANGE_ME_WECHAT_APP_SECRET"
   # 回调 Token(必填):用于校验接入 signature = sha1(sort(token, timestamp, nonce))。
   # 仅支持明文模式;加密回调(EncodingAESKey)直接拒绝(fail closed)。
   webhook_token: "CHANGE_ME_WECHAT_CALLBACK_TOKEN"
-  # app_id: "CHANGE_ME_WECHAT_APP_ID"
-  # app_secret: "CHANGE_ME_WECHAT_APP_SECRET"
+  # agent_id: 1000002

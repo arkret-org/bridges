@@ -3,6 +3,7 @@
 mod wechat;
 
 use cokret_bridge_messaging::bridge_main;
+use cokret_bridge_runtime::BridgeError;
 use serde::Deserialize;
 
 use crate::wechat::WeChatApp;
@@ -26,6 +27,12 @@ struct AppConfig {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     bridge_main("cokret <-> WeChat bridge", |app: AppConfig, _ctx| {
+        if app.agent_id.is_some() {
+            return Err(BridgeError::Config(
+                "WeChat Work inbound callbacks require encrypted safe mode, which is not implemented; use Official Account mode or add safe-mode support before setting agent_id"
+                    .to_owned(),
+            ));
+        }
         Ok(WeChatApp::new(
             app.corp_id,
             app.corp_secret,

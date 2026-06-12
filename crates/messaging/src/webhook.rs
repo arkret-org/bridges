@@ -1,6 +1,7 @@
 //! Small helpers for adapter-owned Salvo webhook handlers.
 
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -33,6 +34,82 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         return false;
     }
     a.ct_eq(b).into()
+}
+
+/// Bounded in-memory replay guard for webhook schemes whose vendor signature
+/// does not cover a unique request body token. The key should contain the
+/// vendor timestamp plus signature material that must be accepted at most once
+/// during the source's freshness window.
+pub struct ReplayWindow {
+    ttl: Duration,
+    capacity: usize,
+    inner: StdMutex<ReplayWindowInner>,
+}
+
+#[derive(Default)]
+struct ReplayWindowInner {
+    entries: HashMap<String, Instant>,
+    order: VecDeque<(String, Instant)>,
+}
+
+impl ReplayWindow {
+    pub fn new(ttl: Duration, capacity: usize) -> Self {
+        Self {
+            ttl,
+            capacity: capacity.max(1),
+            inner: StdMutex::new(ReplayWindowInner::default()),
+        }
+    }
+
+    /// Returns true when the key is fresh and records it; false means replay.
+    pub fn check_and_record(&self, key: impl Into<String>) -> bool {
+        let key = key.into();
+        if key.trim().is_empty() {
+            return false;
+        }
+
+        let now = Instant::now();
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner.purge_expired(now, self.ttl);
+        if inner.entries.contains_key(&key) {
+            return false;
+        }
+        while inner.entries.len() >= self.capacity {
+            inner.evict_oldest();
+        }
+        inner.entries.insert(key.clone(), now);
+        inner.order.push_back((key, now));
+        true
+    }
+}
+
+impl ReplayWindowInner {
+    fn purge_expired(&mut self, now: Instant, ttl: Duration) {
+        while let Some((key, seen_at)) = self.order.front() {
+            if *seen_at + ttl > now {
+                break;
+            }
+            let key = key.clone();
+            let seen_at = *seen_at;
+            self.order.pop_front();
+            if self.entries.get(&key).copied() == Some(seen_at) {
+                self.entries.remove(&key);
+            }
+        }
+    }
+
+    fn evict_oldest(&mut self) {
+        if let Some((key, seen_at)) = self.order.pop_front() {
+            if self.entries.get(&key).copied() == Some(seen_at) {
+                self.entries.remove(&key);
+            }
+        } else {
+            self.entries.clear();
+        }
+    }
 }
 
 /// Encoding of an HMAC digest as carried in a signature header.
@@ -410,6 +487,16 @@ mod tests {
         assert!(!constant_time_eq(b"abc", b"abcd"));
         assert!(!constant_time_eq(b"", b"x"));
         assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn replay_window_rejects_duplicate_until_evicted() {
+        let window = ReplayWindow::new(Duration::from_secs(60), 2);
+        assert!(window.check_and_record("a"));
+        assert!(!window.check_and_record("a"));
+        assert!(window.check_and_record("b"));
+        assert!(window.check_and_record("c"));
+        assert!(window.check_and_record("a"));
     }
 
     #[test]
