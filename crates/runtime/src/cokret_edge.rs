@@ -33,7 +33,7 @@ use parking_lot::Mutex;
 use serde_json::Value;
 #[cfg(any(feature = "web", test))]
 use serde_json::json;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{Sender, UnboundedSender};
 
 #[cfg(any(feature = "web", test))]
 use crate::app::AppletResolver;
@@ -41,6 +41,18 @@ use crate::config::Config;
 use crate::error::{BridgeError, Result};
 #[cfg(any(feature = "web", test))]
 use crate::idempotency::{DedupVerdict, EventDedupStore};
+
+/// Bound on the inbound (cokret → app) event queue. Past this depth the applet
+/// handler stops accepting events and asks the server to retry (backpressure)
+/// rather than buffering without limit. Sized so a healthy consumer drains it
+/// well within the server's retry window; a persistently full queue means the
+/// app side is wedged, in which case shedding load back to the server (which
+/// will redeliver) is the correct behaviour.
+pub const INBOUND_QUEUE_CAPACITY: usize = 1024;
+
+/// Retry hint (ms) returned to the server when the inbound queue is full, so it
+/// re-pushes the unaccepted events after a short delay instead of dropping them.
+const INBOUND_QUEUE_FULL_RETRY_MS: u64 = 1000;
 
 /// How many actor sequence numbers to reserve in the store per refill. A larger
 /// block means fewer store writes at the cost of skipping more numbers on each
@@ -121,9 +133,11 @@ pub struct CokretEdge {
     /// the logical counter resets to 0 whenever the millisecond advances and only
     /// increments within the same millisecond (classic HLC), never wrapping.
     hlc_state: AtomicU64,
-    /// Inbound event queue: cokret server push → core consumer loop. `None` for
-    /// outbound-only edges.
-    inbound_tx: Option<UnboundedSender<Event>>,
+    /// Inbound event queue: cokret server push → core consumer loop. Bounded so
+    /// a slow consumer applies backpressure (the handler returns `retry_after_ms`
+    /// when full) instead of buffering without limit. `None` for outbound-only
+    /// edges.
+    inbound_tx: Option<Sender<Event>>,
     /// Inbound ephemeral queue (typing/presence/receipts; raw JSON until a typed
     /// schema is defined): cokret server push → core consumer loop. `None` for
     /// outbound-only edges.
@@ -136,7 +150,7 @@ impl CokretEdge {
     pub fn new(
         config: Arc<Config>,
         seq: Arc<dyn SeqStore>,
-        inbound_tx: UnboundedSender<Event>,
+        inbound_tx: Sender<Event>,
     ) -> Result<Self> {
         let service_did = Did::new(config.cokret.service_did.clone())?;
         let seed = config.signing_seed()?;
@@ -148,37 +162,12 @@ impl CokretEdge {
         Self::build(config, seq, signer, service_did, Some(inbound_tx))
     }
 
-    /// Build an outbound-only edge (no inbound queue), signing with the seed
-    /// from [`Config::signing_seed`].
-    pub fn for_outbound(config: Arc<Config>, seq: Arc<dyn SeqStore>) -> Result<Self> {
-        let service_did = Did::new(config.cokret.service_did.clone())?;
-        let seed = config.signing_seed()?;
-        let signer = Ed25519MoveSigner::from_did_key_seed(
-            seed,
-            service_did.clone(),
-            config.cokret.verification_method_id.clone(),
-        );
-        Self::build(config, seq, signer, service_did, None)
-    }
-
-    /// Build an outbound-only edge using a caller-supplied signer (rather than
-    /// deriving one from the configured seed). `service_did` / `node_id` are
-    /// still derived from `config`.
-    pub fn with_signer(
-        config: Arc<Config>,
-        seq: Arc<dyn SeqStore>,
-        signer: cokret::Ed25519MoveSigner,
-    ) -> Result<Self> {
-        let service_did = Did::new(config.cokret.service_did.clone())?;
-        Self::build(config, seq, signer, service_did, None)
-    }
-
     fn build(
         config: Arc<Config>,
         seq: Arc<dyn SeqStore>,
         signer: Ed25519MoveSigner,
         service_did: Did,
-        inbound_tx: Option<UnboundedSender<Event>>,
+        inbound_tx: Option<Sender<Event>>,
     ) -> Result<Self> {
         let base = url::Url::parse(&config.cokret.server_url)
             .map_err(|e| BridgeError::Config(format!("server_url: {e}")))?;
@@ -222,8 +211,8 @@ impl CokretEdge {
         &self.service_did
     }
 
-    /// The inbound event sender, if this edge was built with one.
-    pub fn inbound_sender(&self) -> Option<UnboundedSender<Event>> {
+    /// The inbound event sender (bounded), if this edge was built with one.
+    pub fn inbound_sender(&self) -> Option<Sender<Event>> {
         self.inbound_tx.clone()
     }
 
@@ -367,14 +356,6 @@ impl CokretEdge {
         Ok(event_id)
     }
 
-    /// Outbound convenience: mint + sign + submit an event of `kind` into
-    /// `realm_id` with `content`. Returns the event_id.
-    pub async fn submit(&self, realm_id: &str, kind: &str, content: Value) -> Result<String> {
-        let realm = RealmId::new(realm_id.to_owned())?;
-        let event = self.mint_event(kind, &realm, content)?;
-        self.submit_event(&event).await
-    }
-
     /// Re-sign an already-minted event after envelope mutation (e.g. setting
     /// `redacts`, overriding `created_at`, or adding `unsigned` hints). Clears
     /// the existing proofs and signs with the service key over the current
@@ -391,29 +372,15 @@ impl CokretEdge {
         Ok(())
     }
 
-    /// Outbound convenience with bridge provenance. applet-integration §8
-    /// requires the signed Event Envelope top-level `external_ref` for
-    /// bridge-originated events; the current SDK `Event` model does not yet
-    /// expose that field (its wire form rejects unknown envelope fields), so the
-    /// value is carried as an `unsigned` transport hint only. Per §8 it MUST NOT
-    /// be used for loop prevention or any other security decision.
-    pub async fn submit_with_external_ref(
-        &self,
-        realm_id: &str,
-        kind: &str,
-        content: Value,
-        external_ref: Value,
-    ) -> Result<String> {
-        let realm = RealmId::new(realm_id.to_owned())?;
-        let mut event = self.mint_event(kind, &realm, content)?;
-        stamp_external_ref(&mut event, external_ref);
-        self.resign_event(&mut event)?;
-        self.submit_event(&event).await
-    }
-
     /// Outbound convenience with bridge provenance and an explicit delegated
     /// actor. Used by messaging bridges to submit per-user Ghost Actor events
     /// after provisioning returned a durable authorization ref.
+    ///
+    /// applet-integration §8 requires the signed Event Envelope top-level
+    /// `external_ref` for bridge-originated events; the current SDK `Event` model
+    /// does not yet expose that field (its wire form rejects unknown envelope
+    /// fields), so the value is carried as an `unsigned` transport hint only. Per
+    /// §8 it MUST NOT be used for loop prevention or any other security decision.
     pub async fn submit_with_external_ref_as(
         &self,
         actor: &Did,
@@ -430,15 +397,29 @@ impl CokretEdge {
         self.submit_event(&event).await
     }
 
-    /// Outbound: redact a previously submitted event by id.
-    pub async fn submit_redaction(&self, realm_id: &str, target_event_id: &str) -> Result<String> {
-        let realm = RealmId::new(realm_id.to_owned())?;
-        let content = serde_json::json!({ "target_event_id": target_event_id });
-        let mut event = self.mint_event("ck.message.redact", &realm, content)?;
-        event.redacts = Some(cokret::EventId::new(target_event_id.to_owned())?);
-        // redacts is set after minting, so re-sign to override.
+    /// Emit a `ck.applet.bridge_error` Event so a bridging failure is durable
+    /// and auditable rather than silently dropped (applet-integration §14/§16;
+    /// SDK [`cokret::AppletBridgeErrorBuilder`]). The builder is filled with all
+    /// required bindings (realm/failed_transaction_ref/retriable/visibility) by
+    /// the caller; this allocates the actor seq + HLC, signs with the service
+    /// key, and submits. Returns the new event_id.
+    pub async fn submit_bridge_error(
+        &self,
+        builder: cokret::AppletBridgeErrorBuilder,
+    ) -> Result<String> {
+        let seq = self.seq.alloc()?;
+        let hlc = self.next_hlc()?;
+        let mut event = builder.build(seq, hlc)?;
+        stamp_applet_metadata(&mut event, &self.config.cokret.applet_id);
+        // The builder produced an unsigned event; sign it with the service key
+        // over the current canonical envelope.
         self.resign_event(&mut event)?;
         self.submit_event(&event).await
+    }
+
+    /// The configured applet id this bridge presents to cokret.
+    pub fn applet_id(&self) -> &str {
+        &self.config.cokret.applet_id
     }
 
     /// Media upload: returns the blob reference string.
@@ -591,9 +572,13 @@ pub struct BridgeAppletHandler {
     namespaces: Value,
     limits: Value,
     auth: Value,
-    inbound_tx: UnboundedSender<Event>,
+    inbound_tx: Sender<Event>,
     ephemeral_tx: Option<UnboundedSender<Value>>,
     resolver: Option<Arc<dyn AppletResolver>>,
+    /// Event kinds this bridge consumes on the inbound path. `None` ⇒ permissive
+    /// (accept all). When `Some`, a pushed event whose kind is not listed is
+    /// rejected as `capability_unsupported` (applet-integration §7/§13).
+    handled_event_kinds: Option<Vec<String>>,
     /// Durable single-event-level dedup store (applet-integration §7.3; the
     /// runtime path injects [`crate::db::DbEventDedupStore`]).
     dedup: Arc<dyn EventDedupStore>,
@@ -654,6 +639,7 @@ impl BridgeAppletHandler {
         edge: &CokretEdge,
         resolver: Option<Arc<dyn AppletResolver>>,
         dedup: Arc<dyn EventDedupStore>,
+        handled_event_kinds: Option<Vec<String>>,
     ) -> Self {
         let bridge_id = edge.config.bridge.bridge_id.clone();
         let service_did = edge.service_did.clone();
@@ -684,6 +670,16 @@ impl BridgeAppletHandler {
             ephemeral_tx: edge.ephemeral_sender(),
             resolver,
             dedup,
+            handled_event_kinds,
+        }
+    }
+
+    /// Whether this applet consumes `kind` on the inbound path. Permissive when
+    /// no kind set was declared (a generic bridge that did not constrain kinds).
+    fn handles_event_kind(&self, kind: &str) -> bool {
+        match &self.handled_event_kinds {
+            Some(kinds) => kinds.iter().any(|k| k == kind),
+            None => true,
         }
     }
 
@@ -752,9 +748,25 @@ impl cokret::AppletHandler for BridgeAppletHandler {
     ) -> cokret::Result<AppletTransactionOutcome> {
         let mut rejected: Vec<Value> = Vec::new();
         let mut enqueue_failed = false;
+        // Set when the bounded inbound queue is full: we ask the server to retry
+        // the whole batch shortly (backpressure) rather than buffering without
+        // limit or dropping events.
+        let mut queue_full = false;
 
         for event in req.events {
             let event_id = event.event_id.to_string();
+
+            // Backpressure (BRG-02-001): once the bounded inbound queue is full we
+            // stop accepting the remainder of this batch and ask the server to
+            // redeliver, instead of growing memory without bound. Events skipped
+            // here were never dedup-recorded, so the redelivery is clean.
+            if queue_full {
+                rejected.push(serde_json::json!({
+                    "event_id": event_id,
+                    "reason": "queue_full",
+                }));
+                continue;
+            }
 
             // Namespace enforcement (applet-integration §7 / §13): the pushed
             // event's realm MUST fall inside the realm namespace this applet
@@ -773,16 +785,64 @@ impl cokret::AppletHandler for BridgeAppletHandler {
                 continue;
             }
 
+            // Capability enforcement (applet-integration §7 / §13; BRG-01-009):
+            // reject event kinds this bridge did not declare it handles, so an
+            // unsupported kind is surfaced to the server rather than forwarded
+            // and silently ignored by the adapter. Permissive when no kind set
+            // was declared (generic bridges).
+            if !self.handles_event_kind(event.kind.as_str()) {
+                tracing::warn!(
+                    %event_id,
+                    kind = %event.kind,
+                    "rejecting event: kind is not in this applet's declared capability set"
+                );
+                rejected.push(serde_json::json!({
+                    "event_id": event_id,
+                    "reason": "capability_unsupported",
+                }));
+                continue;
+            }
+
+            // Reserve a slot in the bounded queue BEFORE recording dedup, so an
+            // event that cannot be enqueued is never marked as seen (otherwise a
+            // server redelivery would be silently dropped as a duplicate). A full
+            // queue switches the rest of the batch to the backpressure path; a
+            // closed receiver means the consumer is gone (internal error).
+            let permit = match self.inbound_tx.try_reserve() {
+                Ok(permit) => permit,
+                Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {
+                    queue_full = true;
+                    rejected.push(serde_json::json!({
+                        "event_id": event_id,
+                        "reason": "queue_full",
+                    }));
+                    continue;
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
+                    enqueue_failed = true;
+                    tracing::error!(%event_id, "failed to enqueue inbound event: consumer gone");
+                    rejected.push(serde_json::json!({
+                        "event_id": event_id,
+                        "reason": "internal_error",
+                    }));
+                    continue;
+                }
+            };
+
             // Single-event-level dedup (§7.3): identical re-push is accepted
             // without re-forwarding; a conflicting body under the same id is
             // rejected. The store is durable, so the rule holds across
             // restarts. A store failure must not silently double-deliver:
-            // signal a retry instead.
+            // signal a retry instead. The reserved permit is released (dropped)
+            // on every non-Fresh path, returning the queue slot.
             match self
                 .dedup
                 .check_and_record(&event_id, event_content_fingerprint(&event))
             {
-                Ok(DedupVerdict::Fresh) => {}
+                Ok(DedupVerdict::Fresh) => {
+                    // Enqueue for the core consumer loop via the reserved permit.
+                    permit.send(event);
+                }
                 Ok(DedupVerdict::DuplicateSameContent) => {
                     // Already processed with identical content — accept silently,
                     // do not fan out again.
@@ -809,18 +869,6 @@ impl cokret::AppletHandler for BridgeAppletHandler {
                     continue;
                 }
             }
-
-            // Enqueue for the core consumer loop. A closed/dropped receiver means
-            // the consumer is gone; surface it instead of silently dropping the
-            // event so the server can retry rather than treat it as delivered.
-            if let Err(err) = self.inbound_tx.send(event) {
-                enqueue_failed = true;
-                tracing::error!(%event_id, error = %err, "failed to enqueue inbound event");
-                rejected.push(serde_json::json!({
-                    "event_id": event_id,
-                    "reason": "internal_error",
-                }));
-            }
         }
 
         // Forward ephemeral (typing/presence/receipts) when present instead of
@@ -834,12 +882,14 @@ impl cokret::AppletHandler for BridgeAppletHandler {
         }
 
         // `ok` reflects whether every durable event was accepted (either freshly
-        // enqueued or de-duplicated). When enqueueing failed, signal a retry so
-        // the server re-pushes rather than dropping the batch.
+        // enqueued or de-duplicated). When enqueueing failed or the queue is full
+        // (backpressure), signal a retry so the server re-pushes the unaccepted
+        // events rather than dropping the batch.
+        let retry_after_ms = (enqueue_failed || queue_full).then_some(INBOUND_QUEUE_FULL_RETRY_MS);
         Ok(AppletTransactionOutcome {
             ok: rejected.is_empty(),
             rejected,
-            retry_after_ms: enqueue_failed.then_some(1000),
+            retry_after_ms,
         })
     }
 

@@ -268,7 +268,7 @@ async fn dingtalk_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
         webhook::bad_request(res, "DingTalk message id missing");
         return;
     };
-    webhook::submit(
+    let outcome = webhook::submit(
         state.ctx.clone(),
         "dingtalk",
         InboundAppMessage {
@@ -279,5 +279,5 @@ async fn dingtalk_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
         },
     )
     .await;
-    webhook::ok_json(res, json!({ "ok": true }));
+    webhook::respond_submit(res, outcome);
 }

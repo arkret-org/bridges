@@ -14,9 +14,11 @@ postgres = ["cokret-bridge-runtime/runtime", "cokret-bridge-runtime/postgres"]
 mysql = ["cokret-bridge-runtime/runtime", "cokret-bridge-runtime/mysql"]
 
 [dependencies]
+aes = {workspace = true}
 anyhow = {workspace = true}
 async-trait = {workspace = true}
 base64 = {workspace = true}
+cbc = {workspace = true}
 chrono = {workspace = true}
 clap = {workspace = true}
 cokret = {workspace = true}

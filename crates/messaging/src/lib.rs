@@ -20,9 +20,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cokret::http_client::ClientRequestOptions;
 use cokret::{
-    AppletId, BlobRef, ContentBlock, Did, Event, FlowCreateObject, FlowId, FlowTrackConfig,
-    GhostActorProvisionOutcome, GhostActorProvisionRequestBody, MessageCreatePayload,
-    ObjectCreatePayload, RealmId,
+    AppletBridgeErrorBuilder, AppletBridgeErrorVisibility, AppletId, BlobRef, ContentBlock, Did,
+    Event, FlowCreateObject, FlowId, FlowTrackConfig, GhostActorProvisionOutcome,
+    GhostActorProvisionRequestBody, MessageCreatePayload, ObjectCreatePayload, RealmId,
 };
 use cokret_bridge_runtime::app::{
     AppletResolver, BridgeApp, BridgeContext, ResolvedActor, ResolvedRealm,
@@ -45,6 +45,12 @@ use models::{NewMessageMapping, NewRoomMapping, NewUserMapping};
 // colliding with any future spec-defined messaging external_ref schema.
 const EXTERNAL_REF_SCHEMA: &str = "org.cokret.bridge.external_ref.messaging.v1";
 const MESSAGE_MAPPING_KEY_SEPARATOR: char = '\u{1f}';
+
+/// The inbound (cokret → app) event kinds this messaging bridge consumes, used
+/// for capability enforcement (BRG-01-009): the runtime rejects any pushed event
+/// whose kind is not listed. `MessageAdapter::on_cokret_event` handles exactly
+/// message creation and redaction.
+const BRIDGE_HANDLED_EVENT_KINDS: [&str; 2] = ["ck.message.create", "ck.message.redact"];
 
 /// The flow track bridged messages write into. applet-integration §10.1: 桥接
 /// 消息默认写入 `discussion`;v1 的 `message_create_payload.track_name` 在
@@ -465,14 +471,40 @@ impl MessageStore {
         use schema::user_mappings::dsl;
 
         let mut conn = self.db.conn()?;
-        let exists = dsl::user_mappings
-            .filter(dsl::protocol.eq(protocol))
-            .filter(dsl::tenant.eq(tenant))
-            .filter(dsl::external_user_id.eq(external_user_id))
-            .first::<UserMapping>(&mut conn)
-            .optional()?;
-        if let Some(existing) = exists {
-            diesel::update(dsl::user_mappings.filter(dsl::id.eq(existing.id)))
+        // Ghost provisioning races: the same external user can first appear on two
+        // channels concurrently (BRG-02-004). The serial domain key is the channel,
+        // but the user mapping's unique key is (protocol, tenant, external_user_id),
+        // so both racers can reach `insert` and one would hit a UNIQUE violation.
+        // Try insert first; on a conflict, fall back to update by the conflict key
+        // (an atomic upsert in effect, portable across sqlite/postgres/mysql and
+        // matching the existing dedup-store pattern). The losing racer then re-reads
+        // the winner's mapping (via `ghost_actor_for_app_user`) and continues
+        // submitting rather than failing the message.
+        let inserted = diesel::insert_into(dsl::user_mappings)
+            .values(NewUserMapping {
+                protocol,
+                tenant,
+                external_user_id,
+                cokret_actor_id: actor_id,
+                profile_event_ref,
+                accountability_grant_ref,
+                authorization_ref,
+                display_name: display,
+                created_at: now_ts(),
+            })
+            .execute(&mut conn);
+        match inserted {
+            Ok(_) => Ok(()),
+            Err(diesel::result::Error::DatabaseError(
+                diesel::result::DatabaseErrorKind::UniqueViolation,
+                _,
+            )) => {
+                diesel::update(
+                    dsl::user_mappings
+                        .filter(dsl::protocol.eq(protocol))
+                        .filter(dsl::tenant.eq(tenant))
+                        .filter(dsl::external_user_id.eq(external_user_id)),
+                )
                 .set((
                     dsl::cokret_actor_id.eq(actor_id),
                     dsl::profile_event_ref.eq(profile_event_ref),
@@ -481,22 +513,10 @@ impl MessageStore {
                     dsl::display_name.eq(display),
                 ))
                 .execute(&mut conn)?;
-        } else {
-            diesel::insert_into(dsl::user_mappings)
-                .values(NewUserMapping {
-                    protocol,
-                    tenant,
-                    external_user_id,
-                    cokret_actor_id: actor_id,
-                    profile_event_ref,
-                    accountability_grant_ref,
-                    authorization_ref,
-                    display_name: display,
-                    created_at: now_ts(),
-                })
-                .execute(&mut conn)?;
+                Ok(())
+            }
+            Err(err) => Err(err.into()),
         }
-        Ok(())
     }
 
     pub fn ghost_actor_for_app_user(
@@ -740,6 +760,20 @@ fn require_nonempty_ref(label: &str, value: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Map a `BridgeError` variant to a stable, plaintext-free `error_code` for the
+/// `ck.applet.bridge_error` payload (§16: the code is a coarse class, not the
+/// underlying message text, so it never leaks external content).
+fn bridge_error_code(error: &BridgeError) -> &'static str {
+    match error {
+        BridgeError::Cokret(_) => "cokret_unavailable",
+        BridgeError::Database(_) => "bridge_storage_error",
+        BridgeError::Runtime(_) => "bridge_runtime_error",
+        BridgeError::App(_) => "app_adapter_error",
+        BridgeError::Config(_) => "bridge_misconfigured",
+        BridgeError::Other(_) => "bridge_internal_error",
+    }
 }
 
 fn message_mapping_channel_key(config: &runtime::Config, app_channel: &str) -> String {
@@ -1028,6 +1062,70 @@ impl MessageContext {
 
     pub fn core(&self) -> &Arc<BridgeContext> {
         &self.inner
+    }
+
+    /// Emit a `ck.applet.bridge_error` Event for a failed inbound (app → cokret)
+    /// submission so the failure is durable and visible to realm admins, rather
+    /// than only logged (applet-integration §14 SHOULD, §16 bindings;
+    /// `ck.profile.applet_bridge.v1` "bridge error event visibility" test item).
+    ///
+    /// Per §16 the bridge MUST NOT inline unauthorized external plaintext: the
+    /// payload binds only the external `protocol`/`network_id`/`location_id` and
+    /// the external event id (used as `failed_transaction_ref`) — never the
+    /// message body. When the app channel has no realm mapping yet (provisioning
+    /// or mapping gap) there is no realm to bind the error to, so emission is
+    /// skipped (the failure is still logged by the caller). This is best-effort:
+    /// a failure to emit the bridge error must not mask the original failure.
+    pub async fn report_inbound_bridge_error(
+        &self,
+        msg: &InboundAppMessage,
+        error: &BridgeError,
+        retriable: bool,
+    ) {
+        // §16: no realm to bind to ⇒ nothing durable to emit. (Provisioning /
+        // mapping-gap failures fall here; the caller already logged them.)
+        let realm_id = match self.store.portal_for_channel(&msg.app_channel) {
+            Ok(Some(row)) => row.cokret_realm_id,
+            Ok(None) => return,
+            Err(lookup_err) => {
+                tracing::warn!(error = %lookup_err, "bridge_error realm lookup failed; skipping emit");
+                return;
+            }
+        };
+        if let Err(emit_err) = self
+            .emit_bridge_error(&realm_id, msg, error, retriable)
+            .await
+        {
+            tracing::warn!(error = %emit_err, "failed to emit ck.applet.bridge_error event");
+        }
+    }
+
+    async fn emit_bridge_error(
+        &self,
+        realm_id: &str,
+        msg: &InboundAppMessage,
+        error: &BridgeError,
+        retriable: bool,
+    ) -> Result<()> {
+        let edge = &self.inner.edge;
+        let realm = RealmId::new(realm_id.to_owned())?;
+        // `failed_transaction_ref` points at the source external event, never the
+        // body. external_ref carries only network coordinates (no plaintext).
+        let failed_ref = normalized_external_id(&msg.app_message_id);
+        let external_ref = portal_location_ref(&self.inner.config, &msg.app_channel);
+        let builder = AppletBridgeErrorBuilder::new(
+            realm,
+            edge.applet_id().to_owned(),
+            edge.service_did().clone(),
+            failed_ref,
+            "inbound_submit_failed",
+            bridge_error_code(error),
+            retriable,
+            AppletBridgeErrorVisibility::RealmAdmins,
+        )
+        .with_external_ref(external_ref);
+        edge.submit_bridge_error(builder).await?;
+        Ok(())
     }
 
     /// Upload bytes to cokret blob storage, returning the blob_ref string.
@@ -1517,6 +1615,10 @@ where
         core_ctx.set_resolver(Arc::new(MessageResolver {
             store: store.clone(),
         }));
+        // Declare the inbound event kinds this messaging bridge consumes so the
+        // applet handler rejects anything else as `capability_unsupported`
+        // (BRG-01-009). `MessageAdapter::on_cokret_event` handles exactly these.
+        core_ctx.set_handled_event_kinds(BRIDGE_HANDLED_EVENT_KINDS);
         let ctx = Arc::new(MessageContext::new(core_ctx, store));
         let user = Arc::new(factory(ctx.clone())?);
         Ok(MessageAdapter { user, ctx })

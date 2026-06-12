@@ -33,7 +33,12 @@ pub async fn serve(ctx: Arc<BridgeContext>, extra: Option<Router>) -> Result<()>
     let dedup: Arc<dyn EventDedupStore> = Arc::new(DbEventDedupStore::new(ctx.db.clone())?);
     let idempotency: Arc<dyn TransactionIdempotencyStore> =
         Arc::new(DbTransactionIdempotencyStore::new(ctx.db.clone())?);
-    let handler = Arc::new(BridgeAppletHandler::new(&ctx.edge, ctx.resolver(), dedup));
+    let handler = Arc::new(BridgeAppletHandler::new(
+        &ctx.edge,
+        ctx.resolver(),
+        dedup,
+        ctx.handled_event_kinds(),
+    ));
     let event_proof_resolver = Arc::new(build_event_proof_resolver()?);
     let applet = applet_router(AppletWebState {
         handler,
@@ -42,23 +47,37 @@ pub async fn serve(ctx: Arc<BridgeContext>, extra: Option<Router>) -> Result<()>
         event_proof_resolver,
     });
 
-    let mut router = Router::new()
+    // Internal plane: the trusted applet protocol surface
+    // (`/_cokret/edge/applet/*`) and the ops surface (`/health` + `/metrics`)
+    // share one loopback-by-default acceptor. Keeping these off the public
+    // webhook bind means "no reverse proxy configured" still isolates the
+    // trusted and ops planes from the public network (BRG-06-004).
+    let admin_router = Router::new()
         .push(Router::with_path("health").get(health))
         .push(Router::with_path("metrics").get(metrics))
         .push(applet);
 
+    let admin_addr = ctx.config.bridge.admin_addr();
+    tracing::info!(addr = %admin_addr, "admin/edge plane listening (applet + health/metrics)");
+    let admin_acceptor = TcpListener::new(admin_addr).bind().await;
+    let admin_server = Server::new(admin_acceptor).serve(admin_router);
+
+    // Public plane: each adapter's webhook routes (`/webhooks/*`, plus Teams'
+    // Bot Framework `/api/messages`). This is the only plane that must face the
+    // external platform callbacks, so it binds `0.0.0.0` by default.
     if let Some(app_routes) = extra {
-        router = router.push(app_routes);
+        let webhook_router = Router::new().push(app_routes);
+        let webhook_addr = ctx.config.bridge.webhook_addr();
+        tracing::info!(addr = %webhook_addr, "webhook plane listening (public platform callbacks)");
+        let webhook_acceptor = TcpListener::new(webhook_addr).bind().await;
+        let webhook_server = Server::new(webhook_acceptor).serve(webhook_router);
+        tokio::join!(admin_server, webhook_server);
+    } else {
+        // Gateway / long-poll bridges expose no public webhook plane; only the
+        // internal admin/edge acceptor runs.
+        admin_server.await;
     }
 
-    let addr = format!(
-        "{}:{}",
-        ctx.config.bridge.bind_address, ctx.config.bridge.port
-    );
-    tracing::info!(%addr, "web service listening");
-
-    let acceptor = TcpListener::new(addr).bind().await;
-    Server::new(acceptor).serve(router).await;
     Err(BridgeError::Runtime(
         "web service exited unexpectedly".into(),
     ))

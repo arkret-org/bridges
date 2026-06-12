@@ -22,23 +22,35 @@ struct AppConfig {
     agent_id: Option<i64>,
     /// Callback Token used to verify the inbound `signature` (required, fail closed).
     webhook_token: String,
+    /// Optional EncodingAESKey (43-char base64). When set, inbound callbacks run
+    /// in encrypted **safe mode** (AES-256-CBC + `msg_signature`). Required for
+    /// WeChat Work inbound, whose callbacks are always encrypted.
+    encoding_aes_key: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     bridge_main("cokret <-> WeChat bridge", |app: AppConfig, _ctx| {
-        if app.agent_id.is_some() {
+        let has_safe_mode = app
+            .encoding_aes_key
+            .as_ref()
+            .map(|k| !k.trim().is_empty())
+            .unwrap_or(false);
+        // WeChat Work callbacks are always encrypted, so Work inbound requires an
+        // EncodingAESKey for safe mode. Fail closed without one.
+        if app.agent_id.is_some() && !has_safe_mode {
             return Err(BridgeError::Config(
-                "WeChat Work inbound callbacks require encrypted safe mode, which is not implemented; use Official Account mode or add safe-mode support before setting agent_id"
+                "WeChat Work inbound callbacks require encrypted safe mode; set encoding_aes_key (43-char EncodingAESKey) or use Official Account mode"
                     .to_owned(),
             ));
         }
-        Ok(WeChatApp::new(
+        WeChatApp::from_config(
             app.corp_id,
             app.corp_secret,
             app.agent_id,
             app.webhook_token,
-        ))
+            app.encoding_aes_key,
+        )
     })
     .await
 }

@@ -172,7 +172,7 @@ async fn qq_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
         webhook::bad_request(res, "QQ message_id missing");
         return;
     };
-    webhook::submit(
+    let outcome = webhook::submit(
         state.ctx.clone(),
         "qq",
         InboundAppMessage {
@@ -183,7 +183,7 @@ async fn qq_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
         },
     )
     .await;
-    webhook::ok_json(res, json!({ "ok": true }));
+    webhook::respond_submit(res, outcome);
 }
 
 fn json_id_string(value: &Value) -> Option<String> {

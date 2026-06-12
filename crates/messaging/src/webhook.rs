@@ -4,7 +4,11 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
+use aes::{Aes128, Aes256};
 use base64::Engine as _;
+use cbc::Decryptor;
+use cbc::cipher::block_padding::Pkcs7;
+use cbc::cipher::{BlockDecryptMut, KeyIvInit};
 use hmac::{Hmac, KeyInit, Mac};
 use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
@@ -217,6 +221,68 @@ pub fn sha1_hex_sorted(parts: &[&str]) -> String {
     let mut hasher = Sha1::new();
     hasher.update(sorted.concat().as_bytes());
     hex::encode(hasher.finalize())
+}
+
+/// Decode standard base64 (no URL-safe alphabet), returning `None` on any
+/// malformed input. Shared by encrypted-callback schemes (WeChat EncodingAESKey,
+/// Feishu Encrypt Key) that base64-encode the AES ciphertext.
+pub fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    base64::engine::general_purpose::STANDARD
+        .decode(input.trim())
+        .ok()
+}
+
+/// SHA-256 digest of `input` as a 32-byte array. Used by the Feishu Encrypt Key
+/// mode, where the AES-256 key is `SHA256(encrypt_key)`.
+pub fn sha256_bytes(input: &[u8]) -> [u8; 32] {
+    use sha2::Digest;
+    let mut hasher = Sha256::new();
+    hasher.update(input);
+    hasher.finalize().into()
+}
+
+/// AES-CBC decrypt `ciphertext` under `key` (16 or 32 bytes -> AES-128 / AES-256)
+/// and `iv` (16 bytes), stripping PKCS#7 padding. Returns `None` on any keying,
+/// length, or padding error so callers can fail closed without branching on the
+/// specific failure (which would leak a padding oracle). The ciphertext length
+/// must be a non-zero multiple of the 16-byte block size.
+pub fn aes_cbc_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Option<Vec<u8>> {
+    if iv.len() != 16 || ciphertext.is_empty() || !ciphertext.len().is_multiple_of(16) {
+        return None;
+    }
+    let mut buf = ciphertext.to_vec();
+    let plain = match key.len() {
+        16 => Decryptor::<Aes128>::new_from_slices(key, iv)
+            .ok()?
+            .decrypt_padded_mut::<Pkcs7>(&mut buf)
+            .ok()?,
+        32 => Decryptor::<Aes256>::new_from_slices(key, iv)
+            .ok()?
+            .decrypt_padded_mut::<Pkcs7>(&mut buf)
+            .ok()?,
+        _ => return None,
+    };
+    Some(plain.to_vec())
+}
+
+/// Verify a Feishu `X-Lark-Signature` header, defined as the lowercase-hex
+/// `SHA256(timestamp || nonce || encrypt_key || raw_body)` (a plain digest, not
+/// an HMAC). Constant-time compared.
+pub fn verify_lark_signature(
+    encrypt_key: &[u8],
+    timestamp: &str,
+    nonce: &str,
+    body: &[u8],
+    provided: &str,
+) -> bool {
+    use sha2::Digest;
+    let mut hasher = Sha256::new();
+    hasher.update(timestamp.as_bytes());
+    hasher.update(nonce.as_bytes());
+    hasher.update(encrypt_key);
+    hasher.update(body);
+    let expected = hex::encode(hasher.finalize());
+    constant_time_eq(expected.as_bytes(), provided.as_bytes())
 }
 
 /// Read the raw request body bytes, rendering a 400 and returning `None` on
@@ -439,10 +505,64 @@ fn bearer_token(authorization: Option<&str>) -> std::result::Result<&str, String
     Ok(token)
 }
 
-pub async fn submit(ctx: Arc<MessageContext>, label: &str, inbound: InboundAppMessage) {
-    if let Err(error) = ctx.submit_app_message(inbound).await {
-        tracing::warn!(%error, bridge = label, "webhook submission failed");
+/// Outcome of forwarding one inbound app message to cokret. The webhook handler
+/// turns this into the HTTP status the platform sees: a retriable failure (cokret
+/// unreachable, connection pool exhausted) becomes 5xx so the platform redelivers;
+/// a deterministic failure (no realm mapping, malformed input) and success both
+/// stay 2xx (the message is not recoverable by redelivery, and the platform must
+/// not be made to retry it forever).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubmitOutcome {
+    /// The message was accepted by cokret, or failed deterministically (no
+    /// redelivery would help). Respond 2xx.
+    Accepted,
+    /// The message hit a transient failure; ask the platform to redeliver by
+    /// responding 5xx. Inbound dedup (`event_for_channel_message`) makes the
+    /// redelivery idempotent.
+    Retry,
+}
+
+/// Forward one inbound app message and classify the result. A retriable error
+/// (cokret unreachable, pool exhausted) yields [`SubmitOutcome::Retry`]; success
+/// and deterministic errors yield [`SubmitOutcome::Accepted`]. On any error a
+/// `ck.applet.bridge_error` Event is best-effort emitted so the failure is
+/// auditable rather than silently logged (applet-integration §14/§16).
+pub async fn submit(
+    ctx: Arc<MessageContext>,
+    label: &str,
+    inbound: InboundAppMessage,
+) -> SubmitOutcome {
+    match ctx.submit_app_message(inbound.clone()).await {
+        Ok(_) => SubmitOutcome::Accepted,
+        Err(error) => {
+            let retriable = error.is_retriable();
+            tracing::warn!(%error, bridge = label, retriable, "webhook submission failed");
+            ctx.report_inbound_bridge_error(&inbound, &error, retriable)
+                .await;
+            if retriable {
+                SubmitOutcome::Retry
+            } else {
+                SubmitOutcome::Accepted
+            }
+        }
     }
+}
+
+/// Render the HTTP response for a [`SubmitOutcome`] in the common (single
+/// message, JSON body) case: `{"ok":true}` on accept, 5xx on retry.
+pub fn respond_submit(res: &mut Response, outcome: SubmitOutcome) {
+    match outcome {
+        SubmitOutcome::Accepted => ok_json(res, json!({ "ok": true })),
+        SubmitOutcome::Retry => submission_retry(res),
+    }
+}
+
+/// Render a 503 asking the platform to redeliver this webhook later.
+pub fn submission_retry(res: &mut Response) {
+    res.status_code(StatusCode::SERVICE_UNAVAILABLE);
+    res.render(Json(
+        json!({ "ok": false, "error": "transient upstream failure; retry later" }),
+    ));
 }
 
 pub fn str_at<'a>(value: &'a Value, pointer: &str) -> Option<&'a str> {
@@ -548,6 +668,40 @@ mod tests {
         let b = sha1_hex_sorted(&[nonce, token, timestamp]);
         assert_eq!(a, b, "order of inputs must not change the digest");
         assert_eq!(a.len(), 40, "sha1 hex is 40 chars");
+    }
+
+    #[test]
+    fn aes_256_cbc_round_trips_pkcs7() {
+        // NIST SP 800-38A F.2.5 AES-256-CBC first block: known key/iv/plaintext.
+        // We encrypt with a fresh cipher and confirm `aes_cbc_decrypt` recovers
+        // the PKCS#7-padded plaintext.
+        use cbc::Encryptor;
+        use cbc::cipher::BlockEncryptMut;
+        let key = [0x42u8; 32];
+        let iv = [0x24u8; 16];
+        let plaintext = b"feishu-encrypt-key-mode-sample".to_vec();
+        let mut buf = vec![0u8; plaintext.len() + 16];
+        let ct = Encryptor::<Aes256>::new_from_slices(&key, &iv)
+            .unwrap()
+            .encrypt_padded_b2b_mut::<Pkcs7>(&plaintext, &mut buf)
+            .unwrap()
+            .to_vec();
+        let recovered = aes_cbc_decrypt(&key, &iv, &ct).expect("decrypt");
+        assert_eq!(recovered, plaintext);
+        // Wrong key fails closed (None), not a panic.
+        assert!(aes_cbc_decrypt(&[0u8; 32], &iv, &ct).is_none());
+        // Non-block-aligned ciphertext is rejected.
+        assert!(aes_cbc_decrypt(&key, &iv, &ct[..ct.len() - 1]).is_none());
+    }
+
+    #[test]
+    fn sha256_bytes_known_vector() {
+        // SHA-256("abc") per FIPS 180-4.
+        let digest = sha256_bytes(b"abc");
+        assert_eq!(
+            hex::encode(digest),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]

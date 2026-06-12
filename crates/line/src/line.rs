@@ -134,6 +134,9 @@ async fn line_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response)
         }
     };
 
+    // When any message in the batch hits a transient failure we respond 5xx so
+    // LINE redelivers the whole batch; inbound dedup makes the replay idempotent.
+    let mut retry = false;
     for event in body
         .get("events")
         .and_then(Value::as_array)
@@ -161,7 +164,7 @@ async fn line_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response)
             let Some(text) = webhook::str_at(event, "/message/text") else {
                 continue;
             };
-            webhook::submit(
+            let outcome = webhook::submit(
                 state.ctx.clone(),
                 "line",
                 InboundAppMessage {
@@ -172,6 +175,7 @@ async fn line_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response)
                 },
             )
             .await;
+            retry |= outcome == webhook::SubmitOutcome::Retry;
             continue;
         }
 
@@ -190,7 +194,11 @@ async fn line_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response)
             }
         }
     }
-    webhook::ok_json(res, json!({ "ok": true }));
+    if retry {
+        webhook::submission_retry(res);
+    } else {
+        webhook::ok_json(res, json!({ "ok": true }));
+    }
 }
 
 /// Download LINE message content (image/video/audio/file) from the content

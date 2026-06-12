@@ -137,6 +137,9 @@ async fn messenger_delivery(req: &mut Request, depot: &mut Depot, res: &mut Resp
         return;
     };
 
+    // Respond 5xx if any message hit a transient failure so Meta redelivers the
+    // batch; inbound dedup keeps the replay idempotent.
+    let mut retry = false;
     for entry in body
         .get("entry")
         .and_then(Value::as_array)
@@ -157,7 +160,7 @@ async fn messenger_delivery(req: &mut Request, depot: &mut Depot, res: &mut Resp
                 tracing::warn!("Messenger event missing message.mid; skipping");
                 continue;
             };
-            webhook::submit(
+            let outcome = webhook::submit(
                 state.ctx.clone(),
                 "messenger",
                 InboundAppMessage {
@@ -168,7 +171,12 @@ async fn messenger_delivery(req: &mut Request, depot: &mut Depot, res: &mut Resp
                 },
             )
             .await;
+            retry |= outcome == webhook::SubmitOutcome::Retry;
         }
     }
-    webhook::ok_json(res, json!({ "ok": true }));
+    if retry {
+        webhook::submission_retry(res);
+    } else {
+        webhook::ok_json(res, json!({ "ok": true }));
+    }
 }

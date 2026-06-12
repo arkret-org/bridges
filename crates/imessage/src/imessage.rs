@@ -175,7 +175,7 @@ async fn imessage_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
         webhook::bad_request(res, "iMessage message id missing");
         return;
     };
-    webhook::submit(
+    let outcome = webhook::submit(
         state.ctx.clone(),
         "imessage",
         InboundAppMessage {
@@ -186,5 +186,5 @@ async fn imessage_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
         },
     )
     .await;
-    webhook::ok_json(res, json!({ "ok": true }));
+    webhook::respond_submit(res, outcome);
 }

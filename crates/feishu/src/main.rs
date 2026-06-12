@@ -13,8 +13,9 @@ struct AppConfig {
     app_secret: String,
     /// Event-subscription Verification Token (required, fail closed).
     verification_token: String,
-    /// Optional Encrypt Key; when set, encrypted callback mode is rejected
-    /// (decryption not implemented). Leave unset for plaintext mode.
+    /// Optional Encrypt Key; when set, enables encrypted callback mode
+    /// (AES-256-CBC decryption under `SHA256(encrypt_key)`). Leave unset for
+    /// plaintext mode.
     encrypt_key: Option<String>,
 }
 

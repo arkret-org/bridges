@@ -25,6 +25,24 @@ pub enum BridgeError {
     Other(#[from] anyhow::Error),
 }
 
+impl BridgeError {
+    /// Whether this failure is plausibly transient and worth a retry by the
+    /// caller (e.g. the platform redelivering a webhook, or the outbound
+    /// consumer re-attempting).
+    ///
+    /// Retriable: cokret server unreachable / 5xx / connection pool exhaustion /
+    /// generic runtime hiccups ([`BridgeError::Cokret`] / [`BridgeError::Database`]
+    /// / [`BridgeError::Runtime`]). Deterministic (not worth retrying): bad
+    /// input, missing realm mapping, malformed config
+    /// ([`BridgeError::App`] / [`BridgeError::Config`] / [`BridgeError::Other`]).
+    pub fn is_retriable(&self) -> bool {
+        matches!(
+            self,
+            BridgeError::Cokret(_) | BridgeError::Database(_) | BridgeError::Runtime(_)
+        )
+    }
+}
+
 impl From<cokret::Error> for BridgeError {
     fn from(e: cokret::Error) -> Self {
         BridgeError::Cokret(e.to_string())

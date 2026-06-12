@@ -88,9 +88,12 @@ where
     let config = Arc::new(config);
 
     // Events pushed by the cokret server are queued first, then forwarded to
-    // the adapter by the background consumer loop.
-    let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
-    // Ephemeral (typing/presence/receipts) uses a parallel queue.
+    // the adapter by the background consumer loop. Bounded so a slow consumer
+    // applies backpressure (the applet handler returns `retry_after_ms` when
+    // full) instead of buffering without limit (BRG-02-001).
+    let (inbound_tx, inbound_rx) = mpsc::channel(cokret_edge::INBOUND_QUEUE_CAPACITY);
+    // Ephemeral (typing/presence/receipts) is best-effort and may be dropped, so
+    // it keeps an unbounded queue.
     let (ephemeral_tx, ephemeral_rx) = mpsc::unbounded_channel();
 
     let db = Arc::new(db::DatabaseManager::connect(&config.database)?);

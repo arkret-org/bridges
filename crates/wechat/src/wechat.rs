@@ -39,23 +39,78 @@ pub struct WeChatApp {
     /// Callback Token used to verify the `signature` of inbound calls
     /// (`sha1(sort(token, timestamp, nonce))`). Required (fail closed).
     webhook_token: String,
+    /// Optional EncodingAESKey (43-char base64). When set, inbound callbacks run
+    /// in **safe mode**: the body is AES-256-CBC encrypted and authenticated by
+    /// `msg_signature = sha1(sort(token, timestamp, nonce, encrypt))`.
+    aes_key: Option<WechatAesKey>,
     token_cache: TokenCache,
 }
 
+/// 32-byte AES key decoded from a 43-char EncodingAESKey. WeChat safe mode uses
+/// AES-256-CBC with the IV taken as the first 16 bytes of this key.
+#[derive(Clone)]
+struct WechatAesKey([u8; 32]);
+
+impl WechatAesKey {
+    /// Decode `EncodingAESKey` (43-char standard base64 without padding) into the
+    /// 32-byte AES key. WeChat documents appending a single `=` before decoding.
+    fn from_encoding_key(encoding_aes_key: &str) -> Option<Self> {
+        let key = encoding_aes_key.trim();
+        if key.len() != 43 {
+            return None;
+        }
+        let decoded = webhook::base64_decode(&format!("{key}="))?;
+        let bytes: [u8; 32] = decoded.try_into().ok()?;
+        Some(Self(bytes))
+    }
+}
+
 impl WeChatApp {
-    pub fn new(
+    fn new(
         cred_id: impl Into<String>,
         cred_secret: impl Into<String>,
         agent_id: Option<i64>,
         webhook_token: impl Into<String>,
+        aes_key: Option<WechatAesKey>,
     ) -> Self {
         Self {
             cred_id: cred_id.into(),
             cred_secret: cred_secret.into(),
             agent_id,
             webhook_token: webhook_token.into(),
+            aes_key,
             token_cache: TokenCache::new(),
         }
+    }
+
+    /// Build the adapter from raw config strings, decoding the optional
+    /// EncodingAESKey. Returns an error when an EncodingAESKey is configured but
+    /// malformed (fail closed rather than silently dropping safe mode).
+    pub fn from_config(
+        cred_id: impl Into<String>,
+        cred_secret: impl Into<String>,
+        agent_id: Option<i64>,
+        webhook_token: impl Into<String>,
+        encoding_aes_key: Option<String>,
+    ) -> Result<Self> {
+        let aes_key = match encoding_aes_key
+            .map(|k| k.trim().to_owned())
+            .filter(|k| !k.is_empty())
+        {
+            Some(key) => Some(WechatAesKey::from_encoding_key(&key).ok_or_else(|| {
+                BridgeError::Config(
+                    "WeChat encoding_aes_key must be a 43-character base64 EncodingAESKey".to_owned(),
+                )
+            })?),
+            None => None,
+        };
+        Ok(Self::new(
+            cred_id,
+            cred_secret,
+            agent_id,
+            webhook_token,
+            aes_key,
+        ))
     }
 
     fn mode(&self) -> WechatMode {
@@ -205,6 +260,8 @@ impl MessageBridge for WeChatApp {
                 .hoop(affix_state::inject(WechatWebhookState {
                     ctx,
                     webhook_token,
+                    aes_key: self.aes_key.clone(),
+                    cred_id: self.cred_id.clone(),
                     replay_window,
                 }))
                 .get(wechat_verify)
@@ -224,6 +281,11 @@ struct WechatWebhookState {
     ctx: Arc<MessageContext>,
     /// Callback Token for `signature` verification.
     webhook_token: String,
+    /// EncodingAESKey-derived key for safe mode; `None` means plaintext mode.
+    aes_key: Option<WechatAesKey>,
+    /// Configured corp_id / app_id, checked against the receiveid trailer of a
+    /// safe-mode decrypted body.
+    cred_id: String,
     replay_window: Arc<webhook::ReplayWindow>,
 }
 
@@ -275,24 +337,115 @@ fn wechat_replay_key(input: &WechatSignatureInput) -> String {
     )
 }
 
+/// Verify the WeChat **safe mode** `msg_signature`, which authenticates the
+/// encrypted body: `msg_signature = sha1(sort(token, timestamp, nonce, encrypt))`.
+/// Constant-time compared. The `signature` field of `input` carries the
+/// `msg_signature` query parameter in safe mode.
+fn wechat_msg_signature_ok(
+    token: &str,
+    input: &WechatSignatureInput,
+    encrypt: &str,
+    timestamp_window_secs: i64,
+) -> bool {
+    if token.is_empty()
+        || input.signature.is_empty()
+        || input.timestamp.is_empty()
+        || input.nonce.is_empty()
+        || encrypt.is_empty()
+    {
+        return false;
+    }
+    let Ok(ts) = input.timestamp.parse::<i64>() else {
+        return false;
+    };
+    let now_secs = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs() as i64,
+        Err(_) => return false,
+    };
+    if (now_secs - ts).abs() > timestamp_window_secs {
+        return false;
+    }
+    let expected = webhook::sha1_hex_sorted(&[token, &input.timestamp, &input.nonce, encrypt]);
+    webhook::constant_time_eq(expected.as_bytes(), input.signature.as_bytes())
+}
+
+/// Decrypt a WeChat safe-mode `Encrypt` payload. The base64-decoded ciphertext is
+/// AES-256-CBC under the EncodingAESKey-derived key, with the IV being the first
+/// 16 bytes of that key. The recovered plaintext is:
+///   16-byte random prefix || 4-byte network-order msg length || msg || receiveid
+/// where `receiveid` MUST equal the configured corp_id / app_id. Returns the
+/// inner `msg` (the original XML) only when every check passes; `None` otherwise
+/// (fail closed, no padding-oracle branching surfaced to the caller).
+fn wechat_decrypt_safe_mode(key: &WechatAesKey, expected_receiveid: &str, encrypt: &str) -> Option<String> {
+    let ciphertext = webhook::base64_decode(encrypt)?;
+    let iv = &key.0[..16];
+    let plain = webhook::aes_cbc_decrypt(&key.0, iv, &ciphertext)?;
+    // 16-byte random prefix + 4-byte length header is the minimum.
+    if plain.len() < 20 {
+        return None;
+    }
+    let msg_len = u32::from_be_bytes([plain[16], plain[17], plain[18], plain[19]]) as usize;
+    let msg_start: usize = 20;
+    let msg_end = msg_start.checked_add(msg_len)?;
+    if msg_end > plain.len() {
+        return None;
+    }
+    let receiveid = &plain[msg_end..];
+    // Constant-time bind the trailing receiveid to the configured credential id.
+    if !webhook::constant_time_eq(receiveid, expected_receiveid.as_bytes()) {
+        return None;
+    }
+    String::from_utf8(plain[msg_start..msg_end].to_vec()).ok()
+}
+
+/// Build the safe-mode signature input from a request: in safe mode the
+/// authenticating query parameter is `msg_signature` (not `signature`).
+fn wechat_msg_signature_input(req: &Request) -> WechatSignatureInput {
+    WechatSignatureInput {
+        signature: req.query::<String>("msg_signature").unwrap_or_default(),
+        timestamp: req.query::<String>("timestamp").unwrap_or_default(),
+        nonce: req.query::<String>("nonce").unwrap_or_default(),
+    }
+}
+
 #[handler]
 async fn wechat_verify(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let Ok(state) = depot.obtain::<WechatWebhookState>() else {
         webhook::bad_request(res, "webhook state missing");
         return;
     };
-    // Fail closed: only echo `echostr` after the server-verification signature checks out.
+    let echostr = req.query::<String>("echostr").unwrap_or_default();
+    if echostr.is_empty() {
+        webhook::bad_request(res, "missing echostr");
+        return;
+    }
+    // Safe mode: `echostr` is the encrypted payload, authenticated by
+    // `msg_signature = sha1(sort(token, timestamp, nonce, echostr))`. Echo the
+    // decrypted plaintext after verifying.
+    if let Some(aes_key) = state.aes_key.as_ref() {
+        let sig_input = wechat_msg_signature_input(req);
+        if !wechat_msg_signature_ok(
+            &state.webhook_token,
+            &sig_input,
+            &echostr,
+            WECHAT_TIMESTAMP_WINDOW_SECS,
+        ) {
+            webhook::unauthorized(res, "WeChat msg_signature mismatch");
+            return;
+        }
+        match wechat_decrypt_safe_mode(aes_key, &state.cred_id, &echostr) {
+            Some(plain) => webhook::ok_text(res, plain),
+            None => webhook::unauthorized(res, "WeChat echostr decryption failed"),
+        }
+        return;
+    }
+    // Plaintext mode: only echo `echostr` after the server-verification signature checks out.
     let signature_input = wechat_signature_input(req);
     if !wechat_signature_ok(&state.webhook_token, &signature_input) {
         webhook::unauthorized(res, "WeChat signature mismatch");
         return;
     }
-    let echostr = req.query::<String>("echostr").unwrap_or_default();
-    if echostr.is_empty() {
-        webhook::bad_request(res, "missing echostr");
-    } else {
-        webhook::ok_text(res, echostr);
-    }
+    webhook::ok_text(res, echostr);
 }
 
 #[handler]
@@ -301,21 +454,8 @@ async fn wechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respons
         webhook::bad_request(res, "webhook state missing");
         return;
     };
-    // Fail closed: verify the plaintext-mode `signature` before processing.
-    let signature_input = wechat_signature_input(req);
-    if !wechat_signature_ok(&state.webhook_token, &signature_input) {
-        webhook::unauthorized(res, "WeChat signature mismatch");
-        return;
-    }
-    if !state
-        .replay_window
-        .check_and_record(wechat_replay_key(&signature_input))
-    {
-        webhook::unauthorized(res, "WeChat callback replay");
-        return;
-    }
-    // Use the shared `raw_body` helper so the webhook body is bounded by
-    // `MAX_WEBHOOK_BODY_BYTES` instead of reading an unbounded payload.
+
+    // Read raw body first (bounded by `MAX_WEBHOOK_BODY_BYTES`).
     let Some(payload) = webhook::raw_body(req, res).await else {
         return;
     };
@@ -326,14 +466,68 @@ async fn wechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respons
             return;
         }
     };
-    let fields = parse_wechat_xml(xml);
-    if fields.encrypt.is_some() && fields.content.is_none() {
-        webhook::bad_request(
-            res,
-            "encrypted WeChat callbacks require AES decryption configuration",
-        );
-        return;
-    }
+
+    // Safe mode: the body carries an `<Encrypt>` element authenticated by
+    // `msg_signature` over the encrypted text; decrypt to the original XML.
+    let inner_xml: String = if let Some(aes_key) = state.aes_key.as_ref() {
+        let sig_input = wechat_msg_signature_input(req);
+        let envelope = parse_wechat_xml(xml);
+        let Some(encrypt) = envelope.encrypt else {
+            webhook::bad_request(res, "WeChat safe mode requires an Encrypt body");
+            return;
+        };
+        if !wechat_msg_signature_ok(
+            &state.webhook_token,
+            &sig_input,
+            &encrypt,
+            WECHAT_TIMESTAMP_WINDOW_SECS,
+        ) {
+            webhook::unauthorized(res, "WeChat msg_signature mismatch");
+            return;
+        }
+        // Replay-bind the authenticated (timestamp, nonce, msg_signature) triple.
+        if !state
+            .replay_window
+            .check_and_record(wechat_replay_key(&sig_input))
+        {
+            webhook::unauthorized(res, "WeChat callback replay");
+            return;
+        }
+        match wechat_decrypt_safe_mode(aes_key, &state.cred_id, &encrypt) {
+            Some(plain) => plain,
+            None => {
+                webhook::unauthorized(res, "WeChat safe-mode decryption failed");
+                return;
+            }
+        }
+    } else {
+        // Plaintext mode: verify the `signature` query parameter over the query
+        // triple (it does not cover the body) and replay-bind it.
+        let signature_input = wechat_signature_input(req);
+        if !wechat_signature_ok(&state.webhook_token, &signature_input) {
+            webhook::unauthorized(res, "WeChat signature mismatch");
+            return;
+        }
+        if !state
+            .replay_window
+            .check_and_record(wechat_replay_key(&signature_input))
+        {
+            webhook::unauthorized(res, "WeChat callback replay");
+            return;
+        }
+        if parse_wechat_xml(xml).encrypt.is_some() {
+            // An encrypted body arrived but no EncodingAESKey is configured: we
+            // cannot authenticate or read it. Reject (fail closed).
+            webhook::bad_request(
+                res,
+                "encrypted WeChat callback received but no EncodingAESKey is configured",
+            );
+            return;
+        }
+        xml.to_owned()
+    };
+
+    let fields = parse_wechat_xml(&inner_xml);
     if fields.msg_type.as_deref() != Some("text") {
         webhook::ok_text(res, "success");
         return;
@@ -348,7 +542,7 @@ async fn wechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respons
         webhook::bad_request(res, "WeChat MsgId missing");
         return;
     };
-    webhook::submit(
+    let outcome = webhook::submit(
         state.ctx.clone(),
         "wechat",
         InboundAppMessage {
@@ -359,7 +553,11 @@ async fn wechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respons
         },
     )
     .await;
-    webhook::ok_text(res, "success");
+    match outcome {
+        // WeChat treats the literal body "success" as acknowledgement.
+        webhook::SubmitOutcome::Accepted => webhook::ok_text(res, "success"),
+        webhook::SubmitOutcome::Retry => webhook::submission_retry(res),
+    }
 }
 
 #[derive(Default)]
@@ -453,6 +651,92 @@ mod tests {
         };
 
         assert!(!wechat_signature_ok(token, &input));
+    }
+
+    /// Encrypt `msg` into a WeChat safe-mode `Encrypt` base64 string using the
+    /// documented envelope: 16B random || 4B BE length || msg || receiveid.
+    fn encrypt_safe_mode(key: &WechatAesKey, receiveid: &str, msg: &str) -> String {
+        use base64::Engine as _;
+        use cbc::Encryptor;
+        use cbc::cipher::block_padding::Pkcs7;
+        use cbc::cipher::{BlockEncryptMut, KeyIvInit};
+
+        let mut plain = Vec::new();
+        plain.extend_from_slice(&[0u8; 16]); // random prefix (fixed for the test)
+        plain.extend_from_slice(&(msg.len() as u32).to_be_bytes());
+        plain.extend_from_slice(msg.as_bytes());
+        plain.extend_from_slice(receiveid.as_bytes());
+
+        let iv = &key.0[..16];
+        let mut buf = vec![0u8; plain.len() + 16];
+        let ct = Encryptor::<aes::Aes256>::new_from_slices(&key.0, iv)
+            .unwrap()
+            .encrypt_padded_b2b_mut::<Pkcs7>(&plain, &mut buf)
+            .unwrap();
+        base64::engine::general_purpose::STANDARD.encode(ct)
+    }
+
+    fn sample_aes_key() -> WechatAesKey {
+        // 43-char base64 -> 32 bytes. Use a deterministic key for the test.
+        let encoding = "A".repeat(43);
+        WechatAesKey::from_encoding_key(&encoding).expect("valid encoding key")
+    }
+
+    #[test]
+    fn encoding_aes_key_requires_43_chars() {
+        assert!(WechatAesKey::from_encoding_key(&"A".repeat(43)).is_some());
+        assert!(WechatAesKey::from_encoding_key(&"A".repeat(42)).is_none());
+        assert!(WechatAesKey::from_encoding_key("not-base64-#####").is_none());
+    }
+
+    #[test]
+    fn safe_mode_decrypts_and_binds_receiveid() {
+        let key = sample_aes_key();
+        let receiveid = "wx-corp-id";
+        let msg = "<xml><FromUserName><![CDATA[u1]]></FromUserName>\
+                   <MsgType><![CDATA[text]]></MsgType>\
+                   <Content><![CDATA[hello safe]]></Content><MsgId>99</MsgId></xml>";
+        let encrypt = encrypt_safe_mode(&key, receiveid, msg);
+
+        // Correct receiveid recovers the inner XML.
+        let recovered = wechat_decrypt_safe_mode(&key, receiveid, &encrypt).expect("decrypt");
+        assert_eq!(recovered, msg);
+        let fields = parse_wechat_xml(&recovered);
+        assert_eq!(fields.content.as_deref(), Some("hello safe"));
+
+        // Wrong receiveid fails closed.
+        assert!(wechat_decrypt_safe_mode(&key, "other-corp", &encrypt).is_none());
+        // Tampered ciphertext fails closed.
+        let mut bad = encrypt.clone();
+        bad.push('A');
+        assert!(wechat_decrypt_safe_mode(&key, receiveid, &bad).is_none());
+    }
+
+    #[test]
+    fn msg_signature_matches_sorted_sha1() {
+        let token = "callback-token";
+        let timestamp = current_unix_timestamp();
+        let nonce = "n-1".to_owned();
+        let encrypt = "ENCRYPTED-PAYLOAD";
+        let signature = webhook::sha1_hex_sorted(&[token, &timestamp, &nonce, encrypt]);
+        let input = WechatSignatureInput {
+            signature,
+            timestamp,
+            nonce,
+        };
+        assert!(wechat_msg_signature_ok(
+            token,
+            &input,
+            encrypt,
+            WECHAT_TIMESTAMP_WINDOW_SECS
+        ));
+        // Different encrypt body invalidates the signature (body is authenticated).
+        assert!(!wechat_msg_signature_ok(
+            token,
+            &input,
+            "OTHER",
+            WECHAT_TIMESTAMP_WINDOW_SECS
+        ));
     }
 
     #[test]

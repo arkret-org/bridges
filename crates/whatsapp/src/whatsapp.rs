@@ -151,6 +151,9 @@ async fn whatsapp_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
         return;
     };
 
+    // Respond 5xx if any message hit a transient failure so Meta redelivers the
+    // batch; inbound dedup keeps the replay idempotent.
+    let mut retry = false;
     for entry in body
         .get("entry")
         .and_then(Value::as_array)
@@ -177,7 +180,7 @@ async fn whatsapp_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
                 };
 
                 if let Some(text) = webhook::str_at(message, "/text/body") {
-                    webhook::submit(
+                    let outcome = webhook::submit(
                         state.ctx.clone(),
                         "whatsapp",
                         InboundAppMessage {
@@ -188,6 +191,7 @@ async fn whatsapp_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
                         },
                     )
                     .await;
+                    retry |= outcome == webhook::SubmitOutcome::Retry;
                     continue;
                 }
 
@@ -201,7 +205,11 @@ async fn whatsapp_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
             }
         }
     }
-    webhook::ok_json(res, json!({ "ok": true }));
+    if retry {
+        webhook::submission_retry(res);
+    } else {
+        webhook::ok_json(res, json!({ "ok": true }));
+    }
 }
 
 /// Identify an inbound media object on a WhatsApp message: `(media_id, mime, filename)`.

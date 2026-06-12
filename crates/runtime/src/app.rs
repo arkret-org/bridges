@@ -28,7 +28,7 @@ use cokret::Event;
 #[cfg(feature = "runtime")]
 use parking_lot::Mutex;
 #[cfg(feature = "runtime")]
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
 
 // `Value` is also used below for the ephemeral payload type.
 
@@ -86,6 +86,14 @@ pub struct BridgeContext {
     /// Installed by a higher layer before the web service starts; read by the
     /// applet handler to answer actor/realm resolution probes.
     resolver: Mutex<Option<Arc<dyn AppletResolver>>>,
+    /// The set of cokret event kinds this bridge actually consumes on the inbound
+    /// (cokret → app) path, declared by a higher layer (e.g. messaging declares
+    /// `ck.message.create` + `ck.message.redact`). The applet handler rejects any
+    /// pushed event whose kind is not in this set as `capability_unsupported`
+    /// (applet-integration §7/§13 capability enforcement). `None` (the generic
+    /// default) is permissive: a bridge that has not declared a kind set accepts
+    /// every kind, preserving prior behaviour for non-messaging bridges.
+    handled_event_kinds: Mutex<Option<Vec<String>>>,
 }
 
 #[cfg(feature = "runtime")]
@@ -107,6 +115,7 @@ impl BridgeContext {
             queue: ChannelQueue::new(),
             http,
             resolver: Mutex::new(None),
+            handled_event_kinds: Mutex::new(None),
         })
     }
 
@@ -119,6 +128,27 @@ impl BridgeContext {
     /// Current resolver, if any.
     pub fn resolver(&self) -> Option<Arc<dyn AppletResolver>> {
         self.resolver.lock().clone()
+    }
+
+    /// Declare the inbound event kinds this bridge consumes (capability
+    /// enforcement). Must be called during the adapter factory (before the web
+    /// service is spawned) to take effect. Empty input is ignored (a bridge that
+    /// handles nothing would otherwise reject everything).
+    pub fn set_handled_event_kinds<I, S>(&self, kinds: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let kinds: Vec<String> = kinds.into_iter().map(Into::into).collect();
+        if kinds.is_empty() {
+            return;
+        }
+        *self.handled_event_kinds.lock() = Some(kinds);
+    }
+
+    /// The declared inbound event-kind set, if any.
+    pub fn handled_event_kinds(&self) -> Option<Vec<String>> {
+        self.handled_event_kinds.lock().clone()
     }
 }
 
@@ -152,19 +182,106 @@ pub trait BridgeApp: Send + Sync + 'static {
     }
 }
 
+/// Maximum delivery attempts for one inbound (cokret → app) event before it is
+/// dead-lettered. Only transient ([`BridgeError::is_retriable`]) failures are
+/// retried; deterministic failures fail fast on the first attempt.
+#[cfg(feature = "runtime")]
+const INBOUND_MAX_DELIVERY_ATTEMPTS: u32 = 4;
+
+/// Base backoff between inbound delivery retries; doubled each attempt.
+#[cfg(feature = "runtime")]
+const INBOUND_RETRY_BASE_BACKOFF: Duration = Duration::from_millis(200);
+
+/// Per-realm worker mailbox depth. Each realm gets its own ordered worker; this
+/// bounds how far ahead the dispatcher may run before a slow realm applies
+/// back-pressure to the shared dispatch loop (which in turn back-pressures the
+/// applet handler's bounded inbound queue).
+#[cfg(feature = "runtime")]
+const INBOUND_REALM_MAILBOX_DEPTH: usize = 256;
+
 /// Inbound consumer loop: events pushed by the cokret server -> adapter.
+///
+/// Events are routed to a per-realm worker so distinct realms drain in parallel
+/// (one slow channel no longer head-of-line-blocks the rest) while events within
+/// a realm stay strictly ordered (each worker drains its mailbox sequentially in
+/// receive order). Delivery to the adapter is retried with exponential backoff on
+/// transient failures and dead-lettered after [`INBOUND_MAX_DELIVERY_ATTEMPTS`]
+/// (BRG-02-002).
 #[cfg(feature = "runtime")]
 pub async fn consume_inbound<A: BridgeApp>(
     ctx: Arc<BridgeContext>,
     app: Arc<A>,
-    mut rx: UnboundedReceiver<Event>,
+    mut rx: Receiver<Event>,
 ) -> Result<()> {
+    use std::collections::HashMap;
+    use tokio::sync::mpsc;
+
+    // One ordered worker per realm. The sender keeps the worker alive; workers
+    // exit when their sender is dropped (here, only at shutdown when the map is
+    // dropped).
+    let mut workers: HashMap<String, mpsc::Sender<Event>> = HashMap::new();
+
     while let Some(event) = rx.recv().await {
-        if let Err(e) = app.on_cokret_event(ctx.clone(), event).await {
-            tracing::warn!(error = %e, "failed to forward cokret event to adapter");
+        let realm = event.realm_id.to_string();
+        let tx = workers.entry(realm.clone()).or_insert_with(|| {
+            let (tx, mut worker_rx) = mpsc::channel::<Event>(INBOUND_REALM_MAILBOX_DEPTH);
+            let ctx = ctx.clone();
+            let app = app.clone();
+            tokio::spawn(async move {
+                // Drain this realm's events strictly in order.
+                while let Some(event) = worker_rx.recv().await {
+                    deliver_inbound_event(ctx.clone(), app.clone(), event).await;
+                }
+            });
+            tx
+        });
+        // Await the per-realm mailbox: a full mailbox back-pressures the shared
+        // dispatcher (and thus the applet handler's bounded queue) rather than
+        // buffering without limit. A closed worker means it panicked; re-create
+        // it on the next event.
+        if tx.send(event).await.is_err() {
+            workers.remove(&realm);
+            tracing::error!(realm = %realm, "inbound realm worker is gone; dropping event");
         }
     }
     Ok(())
+}
+
+/// Deliver one inbound event to the adapter with bounded retry + backoff, then
+/// dead-letter on persistent failure.
+#[cfg(feature = "runtime")]
+async fn deliver_inbound_event<A: BridgeApp>(ctx: Arc<BridgeContext>, app: Arc<A>, event: Event) {
+    let event_id = event.event_id.to_string();
+    let mut backoff = INBOUND_RETRY_BASE_BACKOFF;
+    for attempt in 1..=INBOUND_MAX_DELIVERY_ATTEMPTS {
+        match app.on_cokret_event(ctx.clone(), event.clone()).await {
+            Ok(()) => return,
+            Err(e) => {
+                let retriable = e.is_retriable();
+                if !retriable || attempt == INBOUND_MAX_DELIVERY_ATTEMPTS {
+                    // Dead-letter: a deterministic failure (no point retrying) or
+                    // retries exhausted. Surface loudly so the failure is
+                    // observable rather than silently dropped.
+                    tracing::error!(
+                        %event_id,
+                        error = %e,
+                        attempt,
+                        retriable,
+                        "dead-lettering inbound event: delivery to adapter failed"
+                    );
+                    return;
+                }
+                tracing::warn!(
+                    %event_id,
+                    error = %e,
+                    attempt,
+                    "inbound delivery failed; retrying after backoff"
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(5));
+            }
+        }
+    }
 }
 
 /// Ephemeral consumer loop: typing/presence/receipts pushed by the cokret

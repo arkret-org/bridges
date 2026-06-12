@@ -12,9 +12,11 @@ license = "Apache-2.0"
 [workspace.dependencies]
 # Local cokret SDK (protocol side). Path is relative to the workspace root.
 # Applet bridge runtime and chat/social helper layer.
+aes = "0.8"
 anyhow = "1.0"
 async-trait = "0.1"
 base64 = "0.22"
+cbc = {version = "0.1",features = ["block-padding"]}
 chrono = {version = "0.4",features = ["serde"]}
 clap = {version = "4.6",features = ["string"]}
 cokret = {path = "../cokret-rust-sdk/crates/sdk",default-features = false,features = [

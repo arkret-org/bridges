@@ -83,9 +83,16 @@ cargo run -p cokret-bridge-discord -- --config config.yaml
 所有桥都必须显式建立 app channel 到 Realm 的映射；没有 room mapping 的入站消息会直接失败,
 不再回退到默认 Realm。
 
-生产部署应把桥服务放在反向代理之后并按 path 做访问控制:`/webhooks/*` 暴露给对应
-平台回调,`/_cokret/edge/applet/*` 配置 `trusted_server_did` 与
-`trusted_verification_methods` 后会校验 HTTP Message Signature、source/destination DID 与
-event proof,仍建议网络层仅允许可信 Cokret server 访问;`/metrics` 仅内网或受认证访问。
-默认 `bind_address=0.0.0.0` 只是便于容器/开发环境绑定端口,不代表这些不同信任面的路径都应
-直接公网开放。
+三个信任面绑在**两个独立监听**上,默认即隔离,不再仅靠反代 path 规则:
+
+- **公网 webhook 面**(`/webhooks/*`,Teams 另含 Bot Framework 的 `/api/messages`):
+  绑 `webhook_bind:port`,默认 `webhook_bind=0.0.0.0`,必须可被对应平台回调可达。
+- **内网 admin/edge 面**(受信协议面 `/_cokret/edge/applet/*` 与运维面 `/health`、
+  `/metrics`):绑 `admin_bind:admin_port`,默认 `admin_bind=127.0.0.1`(仅回环),
+  `admin_port` 省略时回落到 `port + 1000`。即使不配反向代理,协议面与运维面也默认不对
+  公网开放。
+
+`/_cokret/edge/applet/*` 配置 `trusted_server_did` 与 `trusted_verification_methods` 后会
+校验 HTTP Message Signature、source/destination DID 与 event proof;生产仍建议在反代/网络层
+进一步限制为仅可信 Cokret server 访问,并对 `/metrics` 做内网或认证访问控制。若需把 admin/edge
+面也对外(如 cokret server 在另一网段),显式设置 `admin_bind` 即可,但应自行收敛网络层暴露面。

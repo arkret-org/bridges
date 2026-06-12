@@ -54,16 +54,51 @@ pub struct BridgeConfig {
     /// event deduplication.
     #[serde(default)]
     pub tenant_id: Option<String>,
-    /// HTTP listen port.
+    /// Public webhook listen port. The webhook plane (`/webhooks/*`, plus the
+    /// Teams Bot Framework `/api/messages`) binds here; it must be reachable by
+    /// the external platforms that call back into the bridge.
     #[serde(default = "default_port")]
     pub port: u16,
-    /// HTTP bind address.
-    #[serde(default = "default_bind")]
-    pub bind_address: String,
+    /// Public webhook bind address. Defaults to `0.0.0.0` because this plane is
+    /// expected to face the platform callbacks (behind a reverse proxy).
+    #[serde(default = "default_webhook_bind")]
+    pub webhook_bind: String,
+    /// Internal admin/edge listen port. The trusted applet protocol plane
+    /// (`/_cokret/edge/applet/*`) and the ops plane (`/health` + `/metrics`)
+    /// bind here, separated from the public webhook plane so that "no reverse
+    /// proxy configured" still yields plane isolation by default. When omitted,
+    /// it falls back to `port + 1000`.
+    #[serde(default)]
+    pub admin_port: Option<u16>,
+    /// Internal bind address for the applet protocol plane and the ops plane.
+    /// Defaults to `127.0.0.1` (loopback) so these planes are not reachable from
+    /// the public network unless an operator explicitly opens them.
+    #[serde(default = "default_admin_bind")]
+    pub admin_bind: String,
     /// When set, `ck.message.redact` events from cokret are not forwarded as
     /// app-side deletions (see `MessageAdapter::on_cokret_event`).
     #[serde(default)]
     pub disable_deletion_forwarding: bool,
+}
+
+impl BridgeConfig {
+    /// The public webhook plane listen address (`webhook_bind:port`).
+    pub fn webhook_addr(&self) -> String {
+        format!("{}:{}", self.webhook_bind, self.port)
+    }
+
+    /// The effective internal admin/edge port. When `admin_port` is unset it
+    /// falls back to `port + 1000` (saturating), keeping the applet protocol
+    /// plane and the ops plane on a distinct, predictable internal port so the
+    /// default loopback bind does not collide with the public webhook plane.
+    pub fn effective_admin_port(&self) -> u16 {
+        self.admin_port.unwrap_or_else(|| self.port.saturating_add(1000))
+    }
+
+    /// The internal admin/edge plane listen address (`admin_bind:admin_port`).
+    pub fn admin_addr(&self) -> String {
+        format!("{}:{}", self.admin_bind, self.effective_admin_port())
+    }
 }
 
 /// cokret protocol-side integration parameters (server URL, service DID,
@@ -171,8 +206,11 @@ impl Default for LoggingConfig {
 fn default_port() -> u16 {
     9100
 }
-fn default_bind() -> String {
+fn default_webhook_bind() -> String {
     "0.0.0.0".to_owned()
+}
+fn default_admin_bind() -> String {
+    "127.0.0.1".to_owned()
 }
 fn default_kid() -> String {
     "#key-1".to_owned()

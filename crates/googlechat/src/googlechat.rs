@@ -254,7 +254,7 @@ async fn googlechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Res
         webhook::bad_request(res, "Google Chat message name missing");
         return;
     };
-    webhook::submit(
+    let outcome = webhook::submit(
         state.ctx.clone(),
         "googlechat",
         InboundAppMessage {
@@ -265,5 +265,5 @@ async fn googlechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Res
         },
     )
     .await;
-    webhook::ok_json(res, json!({ "ok": true }));
+    webhook::respond_submit(res, outcome);
 }

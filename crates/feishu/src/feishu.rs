@@ -31,8 +31,9 @@ pub struct FeishuApp {
     /// events) MUST carry this token; compared in constant time (fail closed).
     verification_token: String,
     /// Event-subscription Encrypt Key. When set, Feishu encrypts the callback
-    /// body (`{"encrypt": "..."}`). AES-decryption is not implemented here, so
-    /// encrypted mode is rejected (fail closed) rather than silently passed.
+    /// body (`{"encrypt": "..."}`) with AES-256-CBC under `SHA256(encrypt_key)`;
+    /// the bridge decrypts it to the plaintext JSON before running the token /
+    /// challenge logic.
     encrypt_key: Option<String>,
     token_cache: TokenCache,
 }
@@ -152,13 +153,19 @@ impl MessageBridge for FeishuApp {
 
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
         let verification_token = self.verification_token.clone();
-        let encrypted_mode = self.encrypt_key.is_some();
+        // Derive the AES-256 key once: key = SHA256(encrypt_key).
+        let encrypt_aes_key = self
+            .encrypt_key
+            .as_ref()
+            .map(|k| webhook::sha256_bytes(k.as_bytes()));
+        let encrypt_key = self.encrypt_key.clone();
         Some(
             salvo::Router::with_path("webhooks/feishu")
                 .hoop(affix_state::inject(FeishuWebhookState {
                     ctx,
                     verification_token,
-                    encrypted_mode,
+                    encrypt_key,
+                    encrypt_aes_key,
                 }))
                 .post(feishu_delivery),
         )
@@ -179,8 +186,11 @@ struct FeishuWebhookState {
     ctx: Arc<MessageContext>,
     /// Event-subscription Verification Token (constant-time compared).
     verification_token: String,
-    /// Whether an Encrypt Key is configured (encrypted callback mode).
-    encrypted_mode: bool,
+    /// Raw Encrypt Key (used for the optional `X-Lark-Signature` HMAC-less
+    /// `sha256(timestamp+nonce+encrypt_key+body)` header check).
+    encrypt_key: Option<String>,
+    /// AES-256 key (`SHA256(encrypt_key)`) when encrypted mode is configured.
+    encrypt_aes_key: Option<[u8; 32]>,
 }
 
 /// Read the verification token carried by a Feishu callback. v2 events nest it
@@ -191,6 +201,21 @@ fn feishu_callback_token(body: &Value) -> &str {
         .or_else(|| body.get("token").and_then(Value::as_str))
         .unwrap_or_default()
 }
+
+/// Decrypt a Feishu Encrypt Key payload. The `encrypt` field is base64; the
+/// decoded bytes are `IV(16) || AES-256-CBC ciphertext` under
+/// `key = SHA256(encrypt_key)`. Returns the decrypted plaintext JSON string, or
+/// `None` on any decode / decrypt / padding failure (fail closed).
+fn feishu_decrypt(aes_key: &[u8; 32], encrypt_b64: &str) -> Option<Value> {
+    let raw = webhook::base64_decode(encrypt_b64)?;
+    if raw.len() <= 16 {
+        return None;
+    }
+    let (iv, ciphertext) = raw.split_at(16);
+    let plain = webhook::aes_cbc_decrypt(aes_key, iv, ciphertext)?;
+    serde_json::from_slice::<Value>(&plain).ok()
+}
+
 
 #[handler]
 async fn feishu_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
@@ -203,17 +228,59 @@ async fn feishu_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respons
         webhook::unauthorized(res, "Feishu verification_token not configured");
         return;
     }
-    let Some(body) = webhook::json_body(req, res).await else {
+    // Read the raw body first: the optional `X-Lark-Signature` covers the exact
+    // wire bytes, and encrypted mode must decode the envelope before JSON parse.
+    let Some(raw) = webhook::raw_body(req, res).await else {
         return;
     };
-    // Encrypted callback mode is not supported here; reject rather than pass an
-    // unverified payload. Configure plaintext mode (no Encrypt Key) to use this
-    // bridge.
-    if state.encrypted_mode || body.get("encrypt").is_some() {
-        webhook::unauthorized(res, "Feishu encrypted callback mode not supported");
+    let Ok(envelope) = serde_json::from_slice::<Value>(&raw) else {
+        webhook::bad_request(res, "invalid Feishu webhook JSON body");
         return;
-    }
-    // Authenticate the callback by its Verification Token (plaintext mode).
+    };
+
+    // Resolve the effective body: in encrypted mode (`encrypt_key` configured, or
+    // an `{"encrypt": ...}` envelope present) decrypt to the plaintext JSON.
+    let body: Value = if let Some(aes_key) = state.encrypt_aes_key.as_ref() {
+        // Optional X-Lark-Signature: sha256(timestamp+nonce+encrypt_key+body).
+        // Feishu only sends it in encrypted mode; when present it must verify.
+        if let Some(signature) = req.header::<String>("x-lark-signature") {
+            let timestamp = req.header::<String>("x-lark-request-timestamp").unwrap_or_default();
+            let nonce = req.header::<String>("x-lark-request-nonce").unwrap_or_default();
+            let encrypt_key = state.encrypt_key.as_deref().unwrap_or_default();
+            if !webhook::verify_lark_signature(
+                encrypt_key.as_bytes(),
+                &timestamp,
+                &nonce,
+                &raw,
+                &signature,
+            ) {
+                webhook::unauthorized(res, "Feishu X-Lark-Signature mismatch");
+                return;
+            }
+        }
+        let Some(encrypt_b64) = envelope.get("encrypt").and_then(Value::as_str) else {
+            // Encrypted mode is configured but the body is not encrypted: reject
+            // rather than fall through to a weaker check (fail closed).
+            webhook::unauthorized(res, "Feishu encrypted mode requires an encrypted body");
+            return;
+        };
+        match feishu_decrypt(aes_key, encrypt_b64) {
+            Some(plain) => plain,
+            None => {
+                webhook::unauthorized(res, "Feishu callback decryption failed");
+                return;
+            }
+        }
+    } else if envelope.get("encrypt").is_some() {
+        // An encrypted body arrived but no Encrypt Key is configured: we cannot
+        // decrypt or authenticate it. Reject (fail closed).
+        webhook::unauthorized(res, "Feishu encrypted callback received but no encrypt_key configured");
+        return;
+    } else {
+        envelope
+    };
+
+    // Authenticate the (now plaintext) callback by its Verification Token.
     let provided = feishu_callback_token(&body);
     if !webhook::constant_time_eq(provided.as_bytes(), state.verification_token.as_bytes()) {
         webhook::unauthorized(res, "Feishu verification token mismatch");
@@ -245,7 +312,7 @@ async fn feishu_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respons
         webhook::bad_request(res, "Feishu message_id missing");
         return;
     };
-    webhook::submit(
+    let outcome = webhook::submit(
         state.ctx.clone(),
         "feishu",
         InboundAppMessage {
@@ -256,5 +323,85 @@ async fn feishu_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respons
         },
     )
     .await;
-    webhook::ok_json(res, json!({ "ok": true }));
+    webhook::respond_submit(res, outcome);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Encrypt a plaintext JSON string the way Feishu does: AES-256-CBC under
+    /// `SHA256(encrypt_key)`, with a 16-byte IV prepended to the ciphertext, the
+    /// whole thing base64-encoded.
+    fn encrypt(encrypt_key: &str, plaintext: &str) -> String {
+        use base64::Engine as _;
+        use cbc::Encryptor;
+        use cbc::cipher::block_padding::Pkcs7;
+        use cbc::cipher::{BlockEncryptMut, KeyIvInit};
+
+        let key = webhook::sha256_bytes(encrypt_key.as_bytes());
+        let iv = [0x11u8; 16];
+        let mut buf = vec![0u8; plaintext.len() + 16];
+        let ct = Encryptor::<aes::Aes256>::new_from_slices(&key, &iv)
+            .unwrap()
+            .encrypt_padded_b2b_mut::<Pkcs7>(plaintext.as_bytes(), &mut buf)
+            .unwrap();
+        let mut framed = iv.to_vec();
+        framed.extend_from_slice(ct);
+        base64::engine::general_purpose::STANDARD.encode(framed)
+    }
+
+    #[test]
+    fn feishu_decrypt_recovers_plaintext_json() {
+        let encrypt_key = "test-encrypt-key";
+        let aes_key = webhook::sha256_bytes(encrypt_key.as_bytes());
+        let plaintext = r#"{"challenge":"abc","token":"verif","type":"url_verification"}"#;
+        let envelope = encrypt(encrypt_key, plaintext);
+
+        let decrypted = feishu_decrypt(&aes_key, &envelope).expect("decrypt");
+        assert_eq!(decrypted.get("challenge").and_then(Value::as_str), Some("abc"));
+        assert_eq!(decrypted.get("token").and_then(Value::as_str), Some("verif"));
+
+        // Wrong key fails closed.
+        let wrong = webhook::sha256_bytes(b"other-key");
+        assert!(feishu_decrypt(&wrong, &envelope).is_none());
+        // Too-short payload (no room for IV) fails closed.
+        assert!(feishu_decrypt(&aes_key, "AAAA").is_none());
+    }
+
+    #[test]
+    fn lark_signature_matches_reference() {
+        let encrypt_key = "test-encrypt-key";
+        let timestamp = "1700000000";
+        let nonce = "nonce-xyz";
+        let body = br#"{"encrypt":"..."}"#;
+        // Reference digest computed via the same primitive.
+        let sig = {
+            use sha2::{Digest, Sha256};
+            let mut h = Sha256::new();
+            h.update(timestamp.as_bytes());
+            h.update(nonce.as_bytes());
+            h.update(encrypt_key.as_bytes());
+            h.update(body);
+            hex_encode(&h.finalize())
+        };
+        assert!(webhook::verify_lark_signature(
+            encrypt_key.as_bytes(),
+            timestamp,
+            nonce,
+            body,
+            &sig
+        ));
+        assert!(!webhook::verify_lark_signature(
+            encrypt_key.as_bytes(),
+            timestamp,
+            nonce,
+            body,
+            "deadbeef"
+        ));
+    }
+
+    fn hex_encode(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
 }
