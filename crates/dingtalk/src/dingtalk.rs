@@ -281,3 +281,18 @@ async fn dingtalk_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
     .await;
     webhook::respond_submit(res, outcome);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dingtalk_signature_rejects_malformed_or_stale_timestamp() {
+        assert!(!dingtalk_signature_ok(
+            "secret",
+            "not-a-timestamp",
+            "anything"
+        ));
+        assert!(!dingtalk_signature_ok("secret", "0", "anything"));
+    }
+}

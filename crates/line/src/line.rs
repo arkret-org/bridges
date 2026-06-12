@@ -1,14 +1,13 @@
 //! LINE adapter (LINE Messaging API, reqwest HTTP).
 //!
-//! - Inbound (LINE -> cokret): the Messaging API pushes signed events via
-//!   `/webhooks/line`.
-//! - Outbound (cokret → LINE): [`MessageBridge::send_to_app`] uses `ctx.http`
-//!   (reqwest) to POST `https://api.line.me/v2/bot/message/push`.
+//! - Inbound (LINE -> cokret): the Messaging API pushes signed events via `/webhooks/line`.
+//! - Outbound (cokret → LINE): [`MessageBridge::send_to_app`] uses `ctx.http` (reqwest) to POST `https://api.line.me/v2/bot/message/push`.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
+use cokret_bridge_messaging::salvo::prelude::*;
+use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, Attachment, InboundAppMessage, MessageBridge, MessageContext,
     OutboundAppMessage, SenderRenderStyle, webhook,
@@ -251,4 +250,18 @@ fn verify_line_signature(secret: &str, payload: &[u8], signature: &str) -> bool 
         signature,
         webhook::SigEncoding::Base64,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn line_signature_accepts_known_hmac_vector() {
+        let payload = br#"{"events":[{"message":{"type":"text","text":"hi"}}]}"#;
+        let signature = "NQkdfT4RlWYj5i1Rux1N9Evba0OP1IFi6c6/ltJM3Zo=";
+        assert!(verify_line_signature("topsecret", payload, signature));
+        assert!(!verify_line_signature("topsecret", payload, "invalid"));
+        assert!(!verify_line_signature("wrong", payload, signature));
+    }
 }

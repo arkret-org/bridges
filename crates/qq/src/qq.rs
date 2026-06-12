@@ -1,14 +1,14 @@
 //! QQ adapter (OneBot HTTP API / QQ official bot, pure reqwest).
 //!
-//! - Inbound (QQ -> cokret): OneBot HTTP reports are accepted at
-//!   `/webhooks/qq`.
-//! - Outbound (cokret → QQ): [`MessageBridge::send_to_app`] uses `ctx.http` to POST to
-//!   OneBot `send_msg` (or the official `/channels/{id}/messages`).
+//! - Inbound (QQ -> cokret): OneBot HTTP reports are accepted at `/webhooks/qq`.
+//! - Outbound (cokret → QQ): [`MessageBridge::send_to_app`] uses `ctx.http` to POST to OneBot
+//!   `send_msg` (or the official `/channels/{id}/messages`).
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
+use cokret_bridge_messaging::salvo::prelude::*;
+use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, webhook,
@@ -198,5 +198,27 @@ fn json_id_string(value: &Value) -> Option<String> {
         Some(n.to_string())
     } else {
         value.as_u64().map(|n| n.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_id_string_accepts_string_and_integer_ids() {
+        assert_eq!(json_id_string(&json!(" msg-1 ")).as_deref(), Some("msg-1"));
+        assert_eq!(json_id_string(&json!(42)).as_deref(), Some("42"));
+        assert_eq!(
+            json_id_string(&json!(9007199254740993u64)).as_deref(),
+            Some("9007199254740993")
+        );
+    }
+
+    #[test]
+    fn json_id_string_rejects_empty_or_non_scalar_ids() {
+        assert!(json_id_string(&json!("   ")).is_none());
+        assert!(json_id_string(&json!(null)).is_none());
+        assert!(json_id_string(&json!({"id": "nested"})).is_none());
     }
 }

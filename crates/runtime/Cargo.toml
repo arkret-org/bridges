@@ -15,7 +15,7 @@ db       = ["dep:diesel"]
 sqlite   = ["db", "diesel/sqlite", "dep:libsqlite3-sys"]
 postgres = ["db", "diesel/postgres"]
 mysql    = ["db", "diesel/mysql"]
-web      = ["dep:salvo"]
+web      = ["dep:metrics", "dep:metrics-exporter-prometheus", "dep:salvo"]
 runtime  = ["db", "web"]
 
 [dependencies]
@@ -25,6 +25,8 @@ chrono = {workspace = true}
 cokret = {workspace = true}
 diesel = {workspace = true,optional = true}
 libsqlite3-sys = {workspace = true,features = ["bundled"],optional = true}
+metrics = {workspace = true,optional = true}
+metrics-exporter-prometheus = {workspace = true,optional = true}
 parking_lot = {workspace = true}
 reqwest = {workspace = true}
 salvo = {workspace = true,optional = true}

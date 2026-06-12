@@ -1,15 +1,14 @@
 //! Google Chat adapter (Google Chat REST API, pure reqwest).
 //!
-//! - Inbound (Google Chat -> cokret): Google Chat pushes message events via
-//!   `/webhooks/googlechat`.
-//! - Outbound (cokret → Google Chat): [`MessageBridge::send_to_app`] uses `ctx.http` to POST
-//!   `https://chat.googleapis.com/v1/{space}/messages`.
+//! - Inbound (Google Chat -> cokret): Google Chat pushes message events via `/webhooks/googlechat`.
+//! - Outbound (cokret → Google Chat): [`MessageBridge::send_to_app`] uses `ctx.http` to POST `https://chat.googleapis.com/v1/{space}/messages`.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
+use cokret_bridge_messaging::salvo::prelude::*;
+use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, webhook,
@@ -41,6 +40,16 @@ pub struct ServiceAccountKey {
 
 fn default_token_uri() -> String {
     GOOGLE_TOKEN_URL.to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_token_uri_is_google_oauth_token_endpoint() {
+        assert_eq!(default_token_uri(), "https://oauth2.googleapis.com/token");
+    }
 }
 
 /// How the bridge authenticates outbound Chat API calls.

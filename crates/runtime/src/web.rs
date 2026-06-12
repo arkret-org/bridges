@@ -2,8 +2,9 @@
 //! the cokret applet routes (`/_cokret/edge/applet/*`) to receive event pushes
 //! from the cokret server.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
+use ::metrics::{counter, describe_counter};
 use cokret::identity::{ResolverFailMode, ResolverPolicy};
 use cokret::model::AppletTransactionRequestBody;
 use cokret::signatures::http_signature::{
@@ -14,7 +15,10 @@ use cokret::signatures::{Ed25519DetachedJwsVerifier, EventProofBuilder, PublicKe
 use cokret::{
     AppletHandler, CompositeDidResolver, Did, DidKeyResolver, DidResolver, HttpDidResolver,
 };
-use salvo::{affix_state, http::StatusCode, prelude::*};
+use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use salvo::affix_state;
+use salvo::http::StatusCode;
+use salvo::prelude::*;
 use serde_json::{Value, json};
 
 use crate::app::BridgeContext;
@@ -24,9 +28,19 @@ use crate::db::{DbEventDedupStore, DbTransactionIdempotencyStore};
 use crate::error::{BridgeError, Result};
 use crate::idempotency::{EventDedupStore, TransactionClaim, TransactionIdempotencyStore};
 
+static PROMETHEUS_HANDLE: OnceLock<std::result::Result<PrometheusHandle, String>> = OnceLock::new();
+
 /// Start the web service and run it blocking. `extra` is each app adapter's
 /// webhook routes (optional).
 pub async fn serve(ctx: Arc<BridgeContext>, extra: Option<Router>) -> Result<()> {
+    prometheus_handle()
+        .map_err(|err| BridgeError::Runtime(format!("metrics recorder init failed: {err}")))?;
+    counter!(
+        "cokret_bridge_runtime_starts_total",
+        "bridge_id" => ctx.config.bridge.bridge_id.clone()
+    )
+    .increment(1);
+
     // Durable idempotency / dedup records (applet-integration §7.3 / §13):
     // both stores persist in the bridge database so restarts do not turn
     // server retries into duplicate deliveries.
@@ -54,7 +68,7 @@ pub async fn serve(ctx: Arc<BridgeContext>, extra: Option<Router>) -> Result<()>
     // trusted and ops planes from the public network (BRG-06-004).
     let admin_router = Router::new()
         .push(Router::with_path("health").get(health))
-        .push(Router::with_path("metrics").get(metrics))
+        .push(Router::with_path("metrics").get(metrics_endpoint))
         .push(applet);
 
     let admin_addr = ctx.config.bridge.admin_addr();
@@ -85,13 +99,54 @@ pub async fn serve(ctx: Arc<BridgeContext>, extra: Option<Router>) -> Result<()>
 
 #[handler]
 async fn health(res: &mut Response) {
+    counter!("cokret_bridge_health_requests_total").increment(1);
     res.render(Json(serde_json::json!({ "status": "ok" })));
 }
 
 #[handler]
-async fn metrics(res: &mut Response) {
-    // Placeholder: can be wired to metrics-exporter-prometheus.
-    res.render(Text::Plain("# cokret bridge metrics\n"));
+async fn metrics_endpoint(res: &mut Response) {
+    counter!("cokret_bridge_metrics_scrapes_total").increment(1);
+    match prometheus_handle() {
+        Ok(handle) => res.render(Text::Plain(handle.render())),
+        Err(err) => {
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            res.render(Text::Plain(format!(
+                "metrics recorder unavailable: {err}\n"
+            )));
+        }
+    }
+}
+
+fn prometheus_handle() -> std::result::Result<&'static PrometheusHandle, String> {
+    match PROMETHEUS_HANDLE.get_or_init(|| {
+        let handle = PrometheusBuilder::new()
+            .install_recorder()
+            .map_err(|err| err.to_string())?;
+        describe_counter!(
+            "cokret_bridge_runtime_starts_total",
+            "Bridge runtime start count, labelled by bridge_id."
+        );
+        describe_counter!(
+            "cokret_bridge_health_requests_total",
+            "Bridge /health request count."
+        );
+        describe_counter!(
+            "cokret_bridge_metrics_scrapes_total",
+            "Bridge /metrics scrape count."
+        );
+        describe_counter!(
+            "cokret_bridge_applet_transactions_total",
+            "Applet transaction request count, labelled by result."
+        );
+        Ok(handle)
+    }) {
+        Ok(handle) => Ok(handle),
+        Err(err) => Err(err.clone()),
+    }
+}
+
+fn record_applet_transaction(result: &'static str) {
+    counter!("cokret_bridge_applet_transactions_total", "result" => result).increment(1);
 }
 
 #[derive(Clone)]
@@ -152,12 +207,14 @@ async fn applet_describe(req: &mut Request, depot: &mut Depot, res: &mut Respons
 #[handler]
 async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let Some(state) = applet_state(depot, res) else {
+        record_applet_transaction("missing_state");
         return;
     };
     let Some(idempotency_key) = header_value(req, "idempotency-key")
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
     else {
+        record_applet_transaction("bad_request");
         bad_request(res, "Idempotency-Key header is required");
         return;
     };
@@ -166,12 +223,14 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
     let body_bytes = match req.payload().await {
         Ok(bytes) => bytes.to_vec(),
         Err(err) => {
+            record_applet_transaction("bad_request");
             bad_request(res, format!("failed to read request body: {err}"));
             return;
         }
     };
 
     if let Err(err) = verify_http_transaction_request(req, &headers, &body_bytes, &state.config) {
+        record_applet_transaction("unauthorized");
         unauthorized(res, err);
         return;
     }
@@ -179,6 +238,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
     let value: Value = match serde_json::from_slice(&body_bytes) {
         Ok(value) => value,
         Err(err) => {
+            record_applet_transaction("bad_request");
             bad_request(res, format!("invalid JSON body: {err}"));
             return;
         }
@@ -186,6 +246,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
     let request_hash = match cokret::canonical::canonical_sha256(&value) {
         Ok(hash) => hash,
         Err(err) => {
+            record_applet_transaction("bad_request");
             bad_request(res, format!("non-canonical transaction JSON: {err}"));
             return;
         }
@@ -193,6 +254,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
     let body: AppletTransactionRequestBody = match serde_json::from_value(value) {
         Ok(body) => body,
         Err(err) => {
+            record_applet_transaction("bad_request");
             bad_request(res, format!("invalid transaction body: {err}"));
             return;
         }
@@ -200,6 +262,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
 
     let source = body.source_service_did.to_string();
     if source != state.config.cokret.trusted_server_did {
+        record_applet_transaction("unauthorized");
         unauthorized(res, "transaction source_service_did is not trusted");
         return;
     }
@@ -211,10 +274,12 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         .claim(&source, &idempotency_key, &request_hash)
     {
         Ok(TransactionClaim::Duplicate(response)) => {
+            record_applet_transaction("duplicate");
             res.render(Json(response));
             return;
         }
         Ok(TransactionClaim::Pending) => {
+            record_applet_transaction("pending");
             res.render(Json(cokret::model::AppletTransactionOutcome {
                 ok: false,
                 rejected: Vec::new(),
@@ -223,6 +288,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
             return;
         }
         Ok(TransactionClaim::Conflict) => {
+            record_applet_transaction("conflict");
             // Same (source_service_did, Idempotency-Key) with a different body:
             // applet-integration §7.3/§14 require the closed error code
             // `duplicate_conflict` (the registry has no `idempotency_conflict`).
@@ -235,6 +301,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         }
         Ok(TransactionClaim::Claimed) => {}
         Err(err) => {
+            record_applet_transaction("internal_error");
             internal_error(res, err.to_string());
             return;
         }
@@ -248,6 +315,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         {
             tracing::warn!(error = %release_err, "failed to release idempotency claim");
         }
+        record_applet_transaction("unauthorized");
         unauthorized(res, err);
         return;
     }
@@ -264,6 +332,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
             {
                 tracing::warn!(error = %err, "failed to record idempotency outcome");
             }
+            record_applet_transaction("accepted");
             res.render(Json(response));
         }
         Err(err) => {
@@ -274,6 +343,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
             {
                 tracing::warn!(error = %release_err, "failed to release idempotency claim");
             }
+            record_applet_transaction("internal_error");
             internal_error(res, err.to_string());
         }
     }

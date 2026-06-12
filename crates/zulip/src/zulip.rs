@@ -1,8 +1,8 @@
 //! Zulip adapter (event queue long-polling).
 //!
-//! - Inbound (Zulip -> cokret): `run` uses reqwest to call Zulip `register` to
-//!   create an event queue, then loops `GET /api/v1/events` long-polling to pull
-//!   new messages -> [`MessageContext::submit_app_message`].
+//! - Inbound (Zulip -> cokret): `run` uses reqwest to call Zulip `register` to create an event
+//!   queue, then loops `GET /api/v1/events` long-polling to pull new messages ->
+//!   [`MessageContext::submit_app_message`].
 //! - Outbound (cokret -> Zulip): [`MessageBridge::send_to_app`] uses `ctx.http` to POST
 //!   `{site}/api/v1/messages` (HTTP basic auth: bot_email + api_key).
 //!
@@ -91,7 +91,8 @@ impl MessageBridge for ZulipApp {
             tracing::info!(queue = %queue_id, "Zulip event queue registered, starting long-polling");
 
             loop {
-                // Long-polling: dont_block=false -> the server blocks until a new event arrives or it times out.
+                // Long-polling: dont_block=false -> the server blocks until a new event arrives or
+                // it times out.
                 let resp = ctx
                     .http
                     .get(&events_url)
@@ -151,28 +152,7 @@ impl MessageBridge for ZulipApp {
                         continue;
                     }
 
-                    // Stream channels are keyed as "<stream_id>/<topic>" so outbound can preserve the topic.
-                    let app_channel = match message.get("type").and_then(|v| v.as_str()) {
-                        Some("stream") => {
-                            let stream_id = message
-                                .get("stream_id")
-                                .and_then(|v| v.as_i64())
-                                .unwrap_or_default();
-                            let topic = message
-                                .get("subject")
-                                .or_else(|| message.get("topic"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("cokret");
-                            format!("{stream_id}/{topic}")
-                        }
-                        _ => format!(
-                            "pm/{}",
-                            message
-                                .get("sender_id")
-                                .and_then(|v| v.as_i64())
-                                .unwrap_or_default()
-                        ),
-                    };
+                    let app_channel = zulip_app_channel(message);
 
                     let Some(app_message_id) = message
                         .get("id")
@@ -254,5 +234,54 @@ impl MessageBridge for ZulipApp {
             .map(|n| n.to_string())
             .unwrap_or_default();
         Ok(AppMessageRef { app_message_id: id })
+    }
+}
+
+fn zulip_app_channel(message: &Value) -> String {
+    if message.get("type").and_then(|v| v.as_str()) == Some("stream") {
+        let stream_id = message
+            .get("stream_id")
+            .and_then(|v| v.as_i64())
+            .unwrap_or_default();
+        let topic = message
+            .get("subject")
+            .or_else(|| message.get("topic"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("cokret");
+        format!("{stream_id}/{topic}")
+    } else {
+        format!(
+            "pm/{}",
+            message
+                .get("sender_id")
+                .and_then(|v| v.as_i64())
+                .unwrap_or_default()
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn zulip_app_channel_preserves_stream_topic() {
+        let message = json!({
+            "type": "stream",
+            "stream_id": 42,
+            "subject": "deploys"
+        });
+        assert_eq!(zulip_app_channel(&message), "42/deploys");
+    }
+
+    #[test]
+    fn zulip_app_channel_falls_back_to_pm_sender() {
+        let message = json!({
+            "type": "private",
+            "sender_id": 7
+        });
+        assert_eq!(zulip_app_channel(&message), "pm/7");
     }
 }

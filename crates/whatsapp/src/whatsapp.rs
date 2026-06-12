@@ -1,14 +1,15 @@
 //! WhatsApp adapter (WhatsApp Cloud API, reqwest HTTP).
 //!
-//! - Inbound (WhatsApp -> cokret): the Cloud API pushes messages via
-//!   `/webhooks/whatsapp` (GET verification + POST delivery).
-//! - Outbound (cokret → WhatsApp): [`MessageBridge::send_to_app`] uses `ctx.http`
-//!   (reqwest) to POST `https://graph.facebook.com/v20.0/{phone_number_id}/messages`.
+//! - Inbound (WhatsApp -> cokret): the Cloud API pushes messages via `/webhooks/whatsapp` (GET
+//!   verification + POST delivery).
+//! - Outbound (cokret → WhatsApp): [`MessageBridge::send_to_app`] uses `ctx.http` (reqwest) to POST
+//!   `https://graph.facebook.com/v20.0/{phone_number_id}/messages`.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
+use cokret_bridge_messaging::salvo::prelude::*;
+use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, Attachment, InboundAppMessage, MessageBridge, MessageContext,
     OutboundAppMessage, SenderRenderStyle, webhook,
@@ -229,6 +230,36 @@ fn whatsapp_media_ref(message: &Value) -> Option<(String, Option<String>, Option
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn whatsapp_media_ref_extracts_id_mime_and_filename() {
+        let message = json!({
+            "document": {
+                "id": "media-1",
+                "mime_type": "application/pdf",
+                "filename": "brief.pdf"
+            }
+        });
+        assert_eq!(
+            whatsapp_media_ref(&message),
+            Some((
+                "media-1".to_owned(),
+                Some("application/pdf".to_owned()),
+                Some("brief.pdf".to_owned())
+            ))
+        );
+    }
+
+    #[test]
+    fn whatsapp_media_ref_requires_media_id() {
+        assert!(whatsapp_media_ref(&json!({"image": {"mime_type": "image/jpeg"}})).is_none());
+        assert!(whatsapp_media_ref(&json!({"text": {"body": "hello"}})).is_none());
+    }
 }
 
 /// Resolve a WhatsApp media id to its download URL, fetch the bytes (Bearer
