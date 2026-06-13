@@ -1,17 +1,17 @@
 //! Microsoft Teams adapter (Bot Framework).
 //!
-//! - Outbound (cokret → Teams): [`MessageBridge::send_to_app`] first uses
-//!   client_credentials to fetch an access token from AAD, then uses `ctx.http` to
-//!   POST to the Bot Framework
+//! - Outbound (cokret → Teams): [`MessageBridge::send_to_app`] first uses client_credentials to
+//!   fetch an access token from AAD, then uses `ctx.http` to POST to the Bot Framework
 //!   `{serviceUrl}/v3/conversations/{conversationId}/activities`.
-//! - Inbound (Teams → cokret): the Bot Framework POSTs an Activity to the bot's
-//!   `/api/messages` via an HTTPS webhook.
+//! - Inbound (Teams → cokret): the Bot Framework POSTs an Activity to the bot's `/api/messages` via
+//!   an HTTPS webhook.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
+use cokret_bridge_messaging::salvo::prelude::*;
+use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, webhook,
@@ -210,31 +210,99 @@ async fn teams_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response
             return;
         }
     }
-    if body.get("type").and_then(Value::as_str) != Some("message") {
-        webhook::ok_json(res, json!({ "ok": true }));
-        return;
-    }
-    let text = webhook::str_at(&body, "/text").unwrap_or_default();
-    if text.is_empty() {
-        webhook::ok_json(res, json!({ "ok": true }));
-        return;
-    }
-    let channel = webhook::string_at(&body, "/conversation/id").unwrap_or_default();
-    let user = webhook::string_at(&body, "/from/id").unwrap_or_default();
-    let Some(message_id) = webhook::first_non_empty_string_at(&body, &["/id", "/replyToId"]) else {
-        webhook::bad_request(res, "Teams activity id missing");
-        return;
+    let inbound = match teams_inbound_activity(&body) {
+        Ok(Some(inbound)) => inbound,
+        Ok(None) => {
+            webhook::ok_json(res, json!({ "ok": true }));
+            return;
+        }
+        Err(message) => {
+            webhook::bad_request(res, message);
+            return;
+        }
     };
-    let outcome = webhook::submit(
-        state.ctx.clone(),
-        "teams",
-        InboundAppMessage {
-            app_channel: channel,
-            app_user: user,
-            app_message_id: message_id,
-            body: text.to_owned(),
-        },
-    )
-    .await;
+    let outcome = webhook::submit(state.ctx.clone(), "teams", inbound).await;
     webhook::respond_submit(res, outcome);
+}
+
+fn teams_inbound_activity(
+    body: &Value,
+) -> std::result::Result<Option<InboundAppMessage>, &'static str> {
+    if body.get("type").and_then(Value::as_str) != Some("message") {
+        return Ok(None);
+    }
+    let text = webhook::str_at(body, "/text").unwrap_or_default();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let Some(message_id) = webhook::first_non_empty_string_at(body, &["/id", "/replyToId"]) else {
+        return Err("Teams activity id missing");
+    };
+    Ok(Some(InboundAppMessage {
+        app_channel: webhook::string_at(body, "/conversation/id").unwrap_or_default(),
+        app_user: webhook::string_at(body, "/from/id").unwrap_or_default(),
+        app_message_id: message_id,
+        body: text.to_owned(),
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn teams_inbound_activity_extracts_message() {
+        let body = json!({
+            "type": "message",
+            "id": "activity-id",
+            "conversation": {"id": "conversation-id"},
+            "from": {"id": "user-id"},
+            "text": "hello"
+        });
+        let inbound = teams_inbound_activity(&body).unwrap().expect("message");
+        assert_eq!(inbound.app_channel, "conversation-id");
+        assert_eq!(inbound.app_user, "user-id");
+        assert_eq!(inbound.app_message_id, "activity-id");
+        assert_eq!(inbound.body, "hello");
+    }
+
+    #[test]
+    fn teams_inbound_activity_accepts_reply_to_id_fallback() {
+        let body = json!({
+            "type": "message",
+            "replyToId": "reply-id",
+            "conversation": {"id": "conversation-id"},
+            "from": {"id": "user-id"},
+            "text": "reply"
+        });
+        let inbound = teams_inbound_activity(&body).unwrap().expect("message");
+        assert_eq!(inbound.app_message_id, "reply-id");
+    }
+
+    #[test]
+    fn teams_inbound_activity_skips_non_message_and_requires_id() {
+        assert!(
+            teams_inbound_activity(&json!({
+                "type": "conversationUpdate",
+                "id": "activity-id"
+            }))
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            teams_inbound_activity(&json!({
+                "type": "message",
+                "text": ""
+            }))
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            teams_inbound_activity(&json!({
+                "type": "message",
+                "text": "no id"
+            }))
+            .is_err()
+        );
+    }
 }

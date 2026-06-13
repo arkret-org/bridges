@@ -1,20 +1,20 @@
 //! iMessage adapter (via HTTP gateways such as BlueBubbles / AirMessage, pure reqwest).
 //!
-//! - Inbound (iMessage -> cokret): gateway JSON callbacks are accepted at
-//!   `/webhooks/imessage`.
-//! - Outbound (cokret → iMessage): [`MessageBridge::send_to_app`] uses `ctx.http` to POST
-//!   the gateway's send endpoint (using BlueBubbles `/api/v1/message/text` as an example).
+//! - Inbound (iMessage -> cokret): gateway JSON callbacks are accepted at `/webhooks/imessage`.
+//! - Outbound (cokret → iMessage): [`MessageBridge::send_to_app`] uses `ctx.http` to POST the
+//!   gateway's send endpoint (using BlueBubbles `/api/v1/message/text` as an example).
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
+use cokret_bridge_messaging::salvo::prelude::*;
+use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, webhook,
 };
 use cokret_bridge_runtime::{BridgeError, Result, redact_sensitive_url_values};
-use serde_json::json;
+use serde_json::{Value, json};
 
 /// iMessage bridge adapter.
 pub struct IMessageApp {
@@ -142,15 +142,37 @@ async fn imessage_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
     let Some(body) = webhook::json_body(req, res).await else {
         return;
     };
+    let inbound = match imessage_inbound_message(&body) {
+        Ok(Some(inbound)) => inbound,
+        Ok(None) => {
+            webhook::ok_json(res, json!({ "ok": true }));
+            return;
+        }
+        Err(message) => {
+            webhook::bad_request(res, message);
+            return;
+        }
+    };
+    let outcome = webhook::submit(state.ctx.clone(), "imessage", inbound).await;
+    webhook::respond_submit(res, outcome);
+}
+
+fn imessage_inbound_message(
+    body: &Value,
+) -> std::result::Result<Option<InboundAppMessage>, &'static str> {
     let text =
-        webhook::first_string_at(&body, &["/data/text", "/data/message", "/text", "/message"])
+        webhook::first_string_at(body, &["/data/text", "/data/message", "/text", "/message"])
             .unwrap_or_default();
     if text.is_empty() {
-        webhook::ok_json(res, json!({ "ok": true }));
-        return;
+        return Ok(None);
     }
+    let Some(message_id) =
+        webhook::first_non_empty_string_at(body, &["/data/guid", "/guid", "/id"])
+    else {
+        return Err("iMessage message id missing");
+    };
     let channel = webhook::first_string_at(
-        &body,
+        body,
         &[
             "/data/chatGuid",
             "/chatGuid",
@@ -160,7 +182,7 @@ async fn imessage_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
     )
     .unwrap_or_default();
     let user = webhook::first_string_at(
-        &body,
+        body,
         &[
             "/data/handle/address",
             "/handle/address",
@@ -169,22 +191,57 @@ async fn imessage_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
         ],
     )
     .unwrap_or_default();
-    let Some(message_id) =
-        webhook::first_non_empty_string_at(&body, &["/data/guid", "/guid", "/id"])
-    else {
-        webhook::bad_request(res, "iMessage message id missing");
-        return;
-    };
-    let outcome = webhook::submit(
-        state.ctx.clone(),
-        "imessage",
-        InboundAppMessage {
-            app_channel: channel,
-            app_user: user,
-            app_message_id: message_id,
-            body: text,
-        },
-    )
-    .await;
-    webhook::respond_submit(res, outcome);
+    Ok(Some(InboundAppMessage {
+        app_channel: channel,
+        app_user: user,
+        app_message_id: message_id,
+        body: text,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn imessage_inbound_message_extracts_bluebubbles_shape() {
+        let body = json!({
+            "data": {
+                "text": "hello",
+                "guid": "msg-guid",
+                "chatGuid": "iMessage;-;+15551234567",
+                "handle": {"address": "+15559876543"}
+            }
+        });
+        let inbound = imessage_inbound_message(&body).unwrap().expect("message");
+        assert_eq!(inbound.app_channel, "iMessage;-;+15551234567");
+        assert_eq!(inbound.app_user, "+15559876543");
+        assert_eq!(inbound.app_message_id, "msg-guid");
+        assert_eq!(inbound.body, "hello");
+    }
+
+    #[test]
+    fn imessage_inbound_message_accepts_flat_gateway_shape() {
+        let body = json!({
+            "message": "hi",
+            "id": "flat-id",
+            "chat": {"guid": "chat-guid"},
+            "sender": "alice"
+        });
+        let inbound = imessage_inbound_message(&body).unwrap().expect("message");
+        assert_eq!(inbound.app_channel, "chat-guid");
+        assert_eq!(inbound.app_user, "alice");
+        assert_eq!(inbound.app_message_id, "flat-id");
+        assert_eq!(inbound.body, "hi");
+    }
+
+    #[test]
+    fn imessage_inbound_message_skips_empty_text_or_missing_id() {
+        assert!(
+            imessage_inbound_message(&json!({"data": {"text": "", "guid": "id"}}))
+                .unwrap()
+                .is_none()
+        );
+        assert!(imessage_inbound_message(&json!({"data": {"text": "hello"}})).is_err());
+    }
 }

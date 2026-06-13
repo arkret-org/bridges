@@ -1,9 +1,9 @@
 //! Discord adapter (serenity).
 //!
-//! - Inbound (Discord → cokret): once the gateway `EventHandler::message`
-//!   receives a message, it calls [`MessageContext::submit_app_message`].
-//! - Outbound (cokret → Discord): [`MessageBridge::send_to_app`] uses the serenity
-//!   HTTP client to send a message to the channel.
+//! - Inbound (Discord → cokret): once the gateway `EventHandler::message` receives a message, it
+//!   calls [`MessageContext::submit_app_message`].
+//! - Outbound (cokret → Discord): [`MessageBridge::send_to_app`] uses the serenity HTTP client to
+//!   send a message to the channel.
 
 use std::sync::Arc;
 
@@ -57,10 +57,7 @@ impl MessageBridge for DiscordApp {
         ctx: Arc<MessageContext>,
         msg: OutboundAppMessage,
     ) -> Result<AppMessageRef> {
-        let channel_raw: u64 = msg.app_channel.parse().map_err(|_| {
-            BridgeError::App(format!("invalid Discord channel id: {}", msg.app_channel))
-        })?;
-        let channel = ChannelId::new(channel_raw);
+        let channel = parse_discord_channel_id(&msg.app_channel)?;
         let body = msg.rendered_body(SenderRenderStyle::MarkdownBold);
 
         // With an attachment: download the cokret blob and upload it to Discord.
@@ -86,6 +83,13 @@ impl MessageBridge for DiscordApp {
             app_message_id: sent.id.to_string(),
         })
     }
+}
+
+fn parse_discord_channel_id(channel: &str) -> Result<ChannelId> {
+    let channel_raw: u64 = channel
+        .parse()
+        .map_err(|_| BridgeError::App(format!("invalid Discord channel id: {channel}")))?;
+    Ok(ChannelId::new(channel_raw))
 }
 
 /// Gateway event handling: forward inbound Discord messages to the core.
@@ -163,5 +167,21 @@ impl Handler {
         };
         self.ctx.submit_media_message(inbound, attachment).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discord_channel_id_parser_accepts_numeric_ids() {
+        assert_eq!(parse_discord_channel_id("123456").unwrap().get(), 123456);
+    }
+
+    #[test]
+    fn discord_channel_id_parser_rejects_non_numeric_ids() {
+        assert!(parse_discord_channel_id("general").is_err());
+        assert!(parse_discord_channel_id("").is_err());
     }
 }

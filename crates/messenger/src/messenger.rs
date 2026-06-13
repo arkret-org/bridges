@@ -1,14 +1,14 @@
 //! Messenger adapter (Facebook Graph API, pure reqwest).
 //!
-//! - Inbound (Messenger -> cokret): Facebook pushes `messages` events via
-//!   `/webhooks/messenger`.
-//! - Outbound (cokret → Messenger): [`MessageBridge::send_to_app`] uses `ctx.http` to POST
-//!   `https://graph.facebook.com/v20.0/me/messages` (Bearer page_access_token).
+//! - Inbound (Messenger -> cokret): Facebook pushes `messages` events via `/webhooks/messenger`.
+//! - Outbound (cokret → Messenger): [`MessageBridge::send_to_app`] uses `ctx.http` to POST `https://graph.facebook.com/v20.0/me/messages`
+//!   (Bearer page_access_token).
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
+use cokret_bridge_messaging::salvo::prelude::*;
+use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, webhook,
@@ -140,6 +140,19 @@ async fn messenger_delivery(req: &mut Request, depot: &mut Depot, res: &mut Resp
     // Respond 5xx if any message hit a transient failure so Meta redelivers the
     // batch; inbound dedup keeps the replay idempotent.
     let mut retry = false;
+    for inbound in messenger_inbound_messages(&body) {
+        let outcome = webhook::submit(state.ctx.clone(), "messenger", inbound).await;
+        retry |= outcome == webhook::SubmitOutcome::Retry;
+    }
+    if retry {
+        webhook::submission_retry(res);
+    } else {
+        webhook::ok_json(res, json!({ "ok": true }));
+    }
+}
+
+fn messenger_inbound_messages(body: &Value) -> Vec<InboundAppMessage> {
+    let mut out = Vec::new();
     for entry in body
         .get("entry")
         .and_then(Value::as_array)
@@ -160,23 +173,49 @@ async fn messenger_delivery(req: &mut Request, depot: &mut Depot, res: &mut Resp
                 tracing::warn!("Messenger event missing message.mid; skipping");
                 continue;
             };
-            let outcome = webhook::submit(
-                state.ctx.clone(),
-                "messenger",
-                InboundAppMessage {
-                    app_channel: user.clone(),
-                    app_user: user,
-                    app_message_id: message_id,
-                    body: text.to_owned(),
-                },
-            )
-            .await;
-            retry |= outcome == webhook::SubmitOutcome::Retry;
+            out.push(InboundAppMessage {
+                app_channel: user.clone(),
+                app_user: user,
+                app_message_id: message_id,
+                body: text.to_owned(),
+            });
         }
     }
-    if retry {
-        webhook::submission_retry(res);
-    } else {
-        webhook::ok_json(res, json!({ "ok": true }));
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn messenger_inbound_messages_extracts_text_events() {
+        let body = json!({
+            "entry": [{
+                "messaging": [{
+                    "sender": {"id": "PSID1"},
+                    "message": {"mid": "m_1", "text": "hi"}
+                }]
+            }]
+        });
+        let messages = messenger_inbound_messages(&body);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].app_channel, "PSID1");
+        assert_eq!(messages[0].app_user, "PSID1");
+        assert_eq!(messages[0].app_message_id, "m_1");
+        assert_eq!(messages[0].body, "hi");
+    }
+
+    #[test]
+    fn messenger_inbound_messages_skips_non_text_and_missing_ids() {
+        let body = json!({
+            "entry": [{
+                "messaging": [
+                    {"sender": {"id": "PSID1"}, "message": {"attachments": []}},
+                    {"sender": {"id": "PSID2"}, "message": {"text": "no id"}}
+                ]
+            }]
+        });
+        assert!(messenger_inbound_messages(&body).is_empty());
     }
 }

@@ -1,9 +1,9 @@
 //! Telegram adapter (teloxide long polling).
 //!
-//! - Inbound (Telegram → cokret): once `teloxide::repl` long polling receives a
-//!   text message, it calls [`MessageContext::submit_app_message`].
-//! - Outbound (cokret → Telegram): [`MessageBridge::send_to_app`] uses the Bot HTTP
-//!   `send_message` to deliver to the corresponding chat.
+//! - Inbound (Telegram → cokret): once `teloxide::repl` long polling receives a text message, it
+//!   calls [`MessageContext::submit_app_message`].
+//! - Outbound (cokret → Telegram): [`MessageBridge::send_to_app`] uses the Bot HTTP `send_message`
+//!   to deliver to the corresponding chat.
 
 use std::sync::Arc;
 
@@ -85,9 +85,7 @@ impl MessageBridge for TelegramApp {
         ctx: Arc<MessageContext>,
         msg: OutboundAppMessage,
     ) -> Result<AppMessageRef> {
-        let chat_raw: i64 = msg.app_channel.parse().map_err(|_| {
-            BridgeError::App(format!("invalid Telegram chat id: {}", msg.app_channel))
-        })?;
+        let chat = parse_telegram_chat_id(&msg.app_channel)?;
         let bot = Bot::new(&self.token);
         let body = msg.rendered_body(SenderRenderStyle::Plain);
 
@@ -97,7 +95,7 @@ impl MessageBridge for TelegramApp {
             let filename = att.filename.clone().unwrap_or_else(|| "file".to_owned());
             let file = InputFile::memory(bytes).file_name(filename);
             let sent = bot
-                .send_document(ChatId(chat_raw), file)
+                .send_document(chat, file)
                 .caption(body)
                 .await
                 .map_err(|e| {
@@ -111,19 +109,23 @@ impl MessageBridge for TelegramApp {
             });
         }
 
-        let sent = bot
-            .send_message(ChatId(chat_raw), body)
-            .await
-            .map_err(|e| {
-                BridgeError::App(format!(
-                    "Telegram send failed: {}",
-                    redact_sensitive_url_values(e.to_string())
-                ))
-            })?;
+        let sent = bot.send_message(chat, body).await.map_err(|e| {
+            BridgeError::App(format!(
+                "Telegram send failed: {}",
+                redact_sensitive_url_values(e.to_string())
+            ))
+        })?;
         Ok(AppMessageRef {
             app_message_id: sent.id.0.to_string(),
         })
     }
+}
+
+fn parse_telegram_chat_id(channel: &str) -> Result<ChatId> {
+    let chat_raw: i64 = channel
+        .parse()
+        .map_err(|_| BridgeError::App(format!("invalid Telegram chat id: {channel}")))?;
+    Ok(ChatId(chat_raw))
 }
 
 /// Extract a downloadable media reference from a Telegram message, if any:
@@ -163,7 +165,7 @@ async fn forward_media(
             redact_sensitive_url_values(e.to_string())
         ))
     })?;
-    let url = format!("https://api.telegram.org/file/bot{token}/{}", file.path);
+    let url = telegram_file_download_url(token, &file.path);
     let media = ctx
         .download_external_media(&url, None, &["api.telegram.org"])
         .await?;
@@ -186,4 +188,33 @@ async fn forward_media(
     };
     ctx.submit_media_message(inbound, attachment).await?;
     Ok(())
+}
+
+fn telegram_file_download_url(token: &str, file_path: &str) -> String {
+    format!("https://api.telegram.org/file/bot{token}/{file_path}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn telegram_chat_id_parser_accepts_signed_numeric_ids() {
+        assert_eq!(parse_telegram_chat_id("12345").unwrap().0, 12345);
+        assert_eq!(parse_telegram_chat_id("-10012345").unwrap().0, -10012345);
+    }
+
+    #[test]
+    fn telegram_chat_id_parser_rejects_non_numeric_ids() {
+        assert!(parse_telegram_chat_id("@channel").is_err());
+        assert!(parse_telegram_chat_id("").is_err());
+    }
+
+    #[test]
+    fn telegram_file_download_url_uses_bot_file_endpoint() {
+        assert_eq!(
+            telegram_file_download_url("TOKEN", "documents/file.dat"),
+            "https://api.telegram.org/file/botTOKEN/documents/file.dat"
+        );
+    }
 }

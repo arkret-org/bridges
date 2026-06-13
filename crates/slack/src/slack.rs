@@ -1,9 +1,8 @@
 //! Slack adapter (socket mode + Web API).
 //!
-//! - Inbound (Slack → cokret): a socket mode WebSocket long-lived read loop
-//!   parses `message` events and then calls [`MessageContext::submit_app_message`].
-//! - Outbound (cokret → Slack): [`MessageBridge::send_to_app`] uses `ctx.http` to POST
-//!   `https://slack.com/api/chat.postMessage`.
+//! - Inbound (Slack → cokret): a socket mode WebSocket long-lived read loop parses `message` events
+//!   and then calls [`MessageContext::submit_app_message`].
+//! - Outbound (cokret → Slack): [`MessageBridge::send_to_app`] uses `ctx.http` to POST `https://slack.com/api/chat.postMessage`.
 //!
 //! Socket mode connection flow: first POST `app_token` (`xapp-`) to
 //! `https://slack.com/api/apps.connections.open` to obtain a one-time wss URL, then
@@ -74,35 +73,86 @@ impl SlackApp {
         // Only care about the events_api type whose inner event is a message.
         let event = envelope.pointer("/payload/event");
         let Some(event) = event else { return };
-        if event.get("type").and_then(Value::as_str) != Some("message") {
+        let Some(inbound) = slack_inbound_message(event) else {
             return;
-        }
-        // Ignore the bot itself and subtype messages (edits, joins, etc.) to avoid loops.
-        if event.get("bot_id").is_some() || event.get("subtype").is_some() {
-            return;
-        }
-        let (Some(channel), Some(text)) = (
-            event.get("channel").and_then(Value::as_str),
-            event.get("text").and_then(Value::as_str),
-        ) else {
-            return;
-        };
-        let user = event
-            .get("user")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        // Slack uses ts as the message identifier.
-        let ts = event.get("ts").and_then(Value::as_str).unwrap_or_default();
-
-        let inbound = InboundAppMessage {
-            app_channel: channel.to_owned(),
-            app_user: user.to_owned(),
-            app_message_id: ts.to_owned(),
-            body: text.to_owned(),
         };
         if let Err(e) = ctx.submit_app_message(inbound).await {
             tracing::warn!(error = %e, "Slack → cokret submission failed");
         }
+    }
+}
+
+fn slack_inbound_message(event: &Value) -> Option<InboundAppMessage> {
+    if event.get("type").and_then(Value::as_str) != Some("message") {
+        return None;
+    }
+    // Ignore the bot itself and subtype messages (edits, joins, etc.) to avoid loops.
+    if event.get("bot_id").is_some() || event.get("subtype").is_some() {
+        return None;
+    }
+    let channel = event.get("channel").and_then(Value::as_str)?;
+    let text = event.get("text").and_then(Value::as_str)?;
+    let user = event
+        .get("user")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let ts = event.get("ts").and_then(Value::as_str).unwrap_or_default();
+    Some(InboundAppMessage {
+        app_channel: channel.to_owned(),
+        app_user: user.to_owned(),
+        app_message_id: ts.to_owned(),
+        body: text.to_owned(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slack_inbound_message_extracts_text_event() {
+        let event = json!({
+            "type": "message",
+            "channel": "C123",
+            "user": "U456",
+            "text": "hello",
+            "ts": "1700000000.123"
+        });
+        let inbound = slack_inbound_message(&event).expect("message");
+        assert_eq!(inbound.app_channel, "C123");
+        assert_eq!(inbound.app_user, "U456");
+        assert_eq!(inbound.app_message_id, "1700000000.123");
+        assert_eq!(inbound.body, "hello");
+    }
+
+    #[test]
+    fn slack_inbound_message_ignores_bot_and_subtype_events() {
+        assert!(
+            slack_inbound_message(&json!({
+                "type": "message",
+                "bot_id": "B1",
+                "channel": "C123",
+                "text": "loop"
+            }))
+            .is_none()
+        );
+        assert!(
+            slack_inbound_message(&json!({
+                "type": "message",
+                "subtype": "message_changed",
+                "channel": "C123",
+                "text": "edited"
+            }))
+            .is_none()
+        );
+        assert!(
+            slack_inbound_message(&json!({
+                "type": "reaction_added",
+                "channel": "C123",
+                "text": "ignored"
+            }))
+            .is_none()
+        );
     }
 }
 
