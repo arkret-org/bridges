@@ -1,13 +1,11 @@
 //! The cokret protocol-side edge (replaces the Matrix bridge's
 //! `MatrixAppservice`).
 //!
-//! - **Outbound (app -> cokret)**: [`CokretEdge::mint_event`] /
-//!   [`CokretEdge::submit`] build and sign an `Event` and submit it via
-//!   [`cokret::http_client::Client::events_submit`].
-//! - **Inbound (cokret → app)**: transactions pushed by the cokret server via
-//!   the applet HTTP endpoints are placed into the `inbound_tx` queue by
-//!   [`BridgeAppletHandler`]; after the core consumes them they are forwarded
-//!   to the app adapter.
+//! - **Outbound (app -> cokret)**: [`CokretEdge::mint_event`] / [`CokretEdge::submit`] build and
+//!   sign an `Event` and submit it via [`cokret::http_client::Client::events_submit`].
+//! - **Inbound (cokret → app)**: transactions pushed by the cokret server via the applet HTTP
+//!   endpoints are placed into the `inbound_tx` queue by [`BridgeAppletHandler`]; after the core
+//!   consumes them they are forwarded to the app adapter.
 //! - **Media**: [`CokretEdge::upload_blob`] / [`CokretEdge::download_blob`].
 //!
 //! The restart-safe monotonic actor-sequence allocator is abstracted behind the
@@ -18,7 +16,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cokret::Ed25519MoveSigner;
 use cokret::http_client::{Auth, Client};
 #[cfg(any(feature = "web", test))]
 use cokret::model::{
@@ -28,7 +25,7 @@ use cokret::model::{
 #[cfg(any(feature = "web", test))]
 use cokret::signatures::EventProofBuilder;
 use cokret::signatures::{SignEventOptions, sign_event};
-use cokret::{Did, Event, Hlc, RealmId};
+use cokret::{Did, Ed25519MoveSigner, Event, Hlc, RealmId};
 use parking_lot::Mutex;
 use serde_json::Value;
 #[cfg(any(feature = "web", test))]
@@ -949,8 +946,9 @@ impl cokret::AppletHandler for BridgeAppletHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::collections::HashMap;
+
+    use super::*;
 
     /// An in-memory [`SeqStore`] for tests: maps key -> reserved high-water mark.
     #[derive(Default)]

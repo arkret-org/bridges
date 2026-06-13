@@ -99,7 +99,8 @@ impl WeChatApp {
         {
             Some(key) => Some(WechatAesKey::from_encoding_key(&key).ok_or_else(|| {
                 BridgeError::Config(
-                    "WeChat encoding_aes_key must be a 43-character base64 EncodingAESKey".to_owned(),
+                    "WeChat encoding_aes_key must be a 43-character base64 EncodingAESKey"
+                        .to_owned(),
                 )
             })?),
             None => None,
@@ -376,7 +377,11 @@ fn wechat_msg_signature_ok(
 /// where `receiveid` MUST equal the configured corp_id / app_id. Returns the
 /// inner `msg` (the original XML) only when every check passes; `None` otherwise
 /// (fail closed, no padding-oracle branching surfaced to the caller).
-fn wechat_decrypt_safe_mode(key: &WechatAesKey, expected_receiveid: &str, encrypt: &str) -> Option<String> {
+fn wechat_decrypt_safe_mode(
+    key: &WechatAesKey,
+    expected_receiveid: &str,
+    encrypt: &str,
+) -> Option<String> {
     let ciphertext = webhook::base64_decode(encrypt)?;
     let iv = &key.0[..16];
     let plain = webhook::aes_cbc_decrypt(&key.0, iv, &ciphertext)?;

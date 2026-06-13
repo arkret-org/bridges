@@ -2,7 +2,8 @@
 //! `bridge` / `cokret` / `database` / `logging` plus a per-adapter `app`
 //! section.
 
-use std::{fmt, path::Path};
+use std::fmt;
+use std::path::Path;
 
 use cokret::signatures::PublicKeyMaterial;
 use serde::Deserialize;
@@ -92,7 +93,8 @@ impl BridgeConfig {
     /// plane and the ops plane on a distinct, predictable internal port so the
     /// default loopback bind does not collide with the public webhook plane.
     pub fn effective_admin_port(&self) -> u16 {
-        self.admin_port.unwrap_or_else(|| self.port.saturating_add(1000))
+        self.admin_port
+            .unwrap_or_else(|| self.port.saturating_add(1000))
     }
 
     /// The internal admin/edge plane listen address (`admin_bind:admin_port`).
@@ -126,15 +128,15 @@ pub struct CokretConfig {
     /// signatures and event envelope proofs on transaction pushes.
     #[serde(default)]
     pub trusted_verification_methods: Vec<TrustedVerificationMethodConfig>,
-    /// Optional `ck.edge.applet.describe.namespaces` override. When omitted,
+    /// Optional `ck.edge.applet.query.describe.namespaces` override. When omitted,
     /// the runtime publishes a narrow namespace derived from the bridge id and
     /// service DID.
     #[serde(default)]
     pub applet_namespaces: Option<serde_json::Value>,
-    /// Optional `ck.edge.applet.describe.limits` override.
+    /// Optional `ck.edge.applet.query.describe.limits` override.
     #[serde(default)]
     pub applet_limits: Option<serde_json::Value>,
-    /// Optional `ck.edge.applet.describe.auth` override.
+    /// Optional `ck.edge.applet.query.describe.auth` override.
     #[serde(default)]
     pub applet_auth: Option<serde_json::Value>,
 }

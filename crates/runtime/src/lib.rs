@@ -6,15 +6,12 @@
 //! crate adds *no new protocol capability*. What it factors out (so that N
 //! bridges don't each re-implement it) is:
 //!
-//! - **Inbound async pump**: turns the SDK's synchronous `AppletHandler`
-//!   transaction pushes into an async [`cokret::Event`] stream + a background
-//!   consumer ([`app::consume_inbound`]).
-//! - **Outbound mint bookkeeping**: monotonic `actor_seq`, HLC generation,
-//!   `applet_id` stamping and signing, wrapped in
-//!   [`cokret_edge::CokretEdge::mint_event`] / `submit_event`.
-//! - **App-runtime scaffolding**: config loading, a diesel pool + migration
-//!   runner, a salvo server (applet routes + health/metrics + app webhooks),
-//!   and the [`run_bridge`] orchestration loop.
+//! - **Inbound async pump**: turns the SDK's synchronous `AppletHandler` transaction pushes into an
+//!   async [`cokret::Event`] stream + a background consumer ([`app::consume_inbound`]).
+//! - **Outbound mint bookkeeping**: monotonic `actor_seq`, HLC generation, `applet_id` stamping and
+//!   signing, wrapped in [`cokret_edge::CokretEdge::mint_event`] / `submit_event`.
+//! - **App-runtime scaffolding**: config loading, a diesel pool + migration runner, a salvo server
+//!   (applet routes + health/metrics + app webhooks), and the [`run_bridge`] orchestration loop.
 //!
 //! The base contract [`app::BridgeApp`] is **generic** (it deals in raw cokret
 //! events) so it can back non-social integrations (IoT, ticketing, CI, ...).
@@ -23,15 +20,14 @@
 //!
 //! ## Cargo features
 //!
-//! - `edge` (always available): the protocol edge ([`CokretEdge`], the
-//!   [`SeqStore`] trait + [`SeqAllocator`], config, errors, cache/queue, and blob helpers)
-//!   without diesel or salvo. A host injects its own [`SeqStore`].
+//! - `edge` (always available): the protocol edge ([`CokretEdge`], the [`SeqStore`] trait +
+//!   [`SeqAllocator`], config, errors, cache/queue, and blob helpers) without diesel or salvo. A
+//!   host injects its own [`SeqStore`].
 //! - `db`: the diesel-backed database pool ([`db`]) and [`DbSeqStore`].
 //! - `web`: the salvo HTTP service ([`web`]).
-//! - `runtime` (= `db` + `web`): [`BridgeContext`] / [`BridgeApp`] /
-//!   [`run_bridge`].
-//! - `full` (= `db` + `web` + `runtime`) and `default` (= `full` + `sqlite`)
-//!   keep all historical behavior.
+//! - `runtime` (= `db` + `web`): [`BridgeContext`] / [`BridgeApp`] / [`run_bridge`].
+//! - `full` (= `db` + `web` + `runtime`) and `default` (= `full` + `sqlite`) keep all historical
+//!   behavior.
 
 pub mod app;
 pub mod cache;
@@ -47,29 +43,25 @@ pub mod db;
 #[cfg(feature = "web")]
 pub mod web;
 
+#[cfg(feature = "runtime")]
+use std::sync::Arc;
+
 pub use app::{AppletResolver, ResolvedActor, ResolvedRealm};
+#[cfg(feature = "runtime")]
+pub use app::{BridgeApp, BridgeContext};
+#[cfg(feature = "db")]
+pub use cokret_edge::DbSeqStore;
 pub use cokret_edge::{CokretEdge, SeqAllocator, SeqStore};
 pub use config::{Config, RoomMappingConfig};
+#[cfg(feature = "db")]
+pub use db::{DbEventDedupStore, DbTransactionIdempotencyStore};
 pub use error::{BridgeError, Result, redact_sensitive_url_values};
 pub use idempotency::{
     DedupVerdict, EventDedupStore, MemoryEventDedupStore, MemoryTransactionIdempotencyStore,
     TransactionClaim, TransactionIdempotencyStore,
 };
-
-#[cfg(feature = "db")]
-pub use cokret_edge::DbSeqStore;
-#[cfg(feature = "db")]
-pub use db::{DbEventDedupStore, DbTransactionIdempotencyStore};
-
 #[cfg(feature = "web")]
 pub use salvo;
-
-#[cfg(feature = "runtime")]
-pub use app::{BridgeApp, BridgeContext};
-
-#[cfg(feature = "runtime")]
-use std::sync::Arc;
-
 #[cfg(feature = "runtime")]
 use tokio::sync::mpsc;
 

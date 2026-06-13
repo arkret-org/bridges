@@ -3,10 +3,10 @@
 //! This crate sits on top of `cokret-bridge-runtime`. It owns the
 //! message-shaped contract shared by the social bridge adapters:
 //!
-//! - app channel/message/user mapping tables (location ↔ `(realm_id, flow_id)`
-//!   per applet-integration §10.1),
-//! - spec-shaped `ck.message.create` payload assembly
-//!   (`{flow_id, track_name, content, blob_refs}`) and parsing,
+//! - app channel/message/user mapping tables (location ↔ `(realm_id, flow_id)` per
+//!   applet-integration §10.1),
+//! - spec-shaped `ck.message.create` payload assembly (`{flow_id, track_name, content, blob_refs}`)
+//!   and parsing,
 //! - portal flow acquisition/creation (`ck.flow.create`),
 //! - `MessageBridge` and `run_message_bridge`,
 //! - `external_ref` provenance for upstream channel/user/message ids.
@@ -46,9 +46,8 @@ const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/mysql");
 
 pub use cokret_bridge_runtime as runtime;
 pub use models::{MessageMapping, RoomMapping, UserMapping};
-pub use runtime::salvo;
-
 use models::{NewMessageMapping, NewRoomMapping, NewUserMapping};
+pub use runtime::salvo;
 
 // Not a `ck.`-prefixed id: the `ck.` namespace is reserved for spec-registered
 // protocol objects/operations/schemas. This is a bridge-private (applet-side)
@@ -655,7 +654,7 @@ fn requested_ghost_actor_id_for_user(
     Ok(did)
 }
 
-/// The spec-registered ghost provision binding: `ck.self.applet.ghost.provision`
+/// The spec-registered ghost provision binding: `ck.self.applet.ghost.command.provision`
 /// = `POST /_cokret/self/applets/{applet_id}/ghosts/provision`
 /// (applet-integration §9.1, `operation-registry.json`, openapi).
 fn ghost_actor_provision_path(applet_id: &str) -> Result<String> {

@@ -1,16 +1,15 @@
 //! Feishu / Lark adapter (reqwest).
 //!
-//! - Inbound (Feishu -> cokret): Feishu events are pushed via
-//!   `/webhooks/feishu`.
-//! - Outbound (cokret -> Feishu): [`MessageBridge::send_to_app`] uses `ctx.http`
-//!   `POST https://open.feishu.cn/open-apis/im/v1/messages`, which first exchanges
-//!   app_id/app_secret for a `tenant_access_token`.
+//! - Inbound (Feishu -> cokret): Feishu events are pushed via `/webhooks/feishu`.
+//! - Outbound (cokret -> Feishu): [`MessageBridge::send_to_app`] uses `ctx.http` `POST https://open.feishu.cn/open-apis/im/v1/messages`,
+//!   which first exchanges app_id/app_secret for a `tenant_access_token`.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::salvo::{self, affix_state, prelude::*};
+use cokret_bridge_messaging::salvo::prelude::*;
+use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, webhook,
@@ -216,7 +215,6 @@ fn feishu_decrypt(aes_key: &[u8; 32], encrypt_b64: &str) -> Option<Value> {
     serde_json::from_slice::<Value>(&plain).ok()
 }
 
-
 #[handler]
 async fn feishu_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let Ok(state) = depot.obtain::<FeishuWebhookState>() else {
@@ -244,8 +242,12 @@ async fn feishu_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respons
         // Optional X-Lark-Signature: sha256(timestamp+nonce+encrypt_key+body).
         // Feishu only sends it in encrypted mode; when present it must verify.
         if let Some(signature) = req.header::<String>("x-lark-signature") {
-            let timestamp = req.header::<String>("x-lark-request-timestamp").unwrap_or_default();
-            let nonce = req.header::<String>("x-lark-request-nonce").unwrap_or_default();
+            let timestamp = req
+                .header::<String>("x-lark-request-timestamp")
+                .unwrap_or_default();
+            let nonce = req
+                .header::<String>("x-lark-request-nonce")
+                .unwrap_or_default();
             let encrypt_key = state.encrypt_key.as_deref().unwrap_or_default();
             if !webhook::verify_lark_signature(
                 encrypt_key.as_bytes(),
@@ -274,7 +276,10 @@ async fn feishu_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respons
     } else if envelope.get("encrypt").is_some() {
         // An encrypted body arrived but no Encrypt Key is configured: we cannot
         // decrypt or authenticate it. Reject (fail closed).
-        webhook::unauthorized(res, "Feishu encrypted callback received but no encrypt_key configured");
+        webhook::unauthorized(
+            res,
+            "Feishu encrypted callback received but no encrypt_key configured",
+        );
         return;
     } else {
         envelope
@@ -359,8 +364,14 @@ mod tests {
         let envelope = encrypt(encrypt_key, plaintext);
 
         let decrypted = feishu_decrypt(&aes_key, &envelope).expect("decrypt");
-        assert_eq!(decrypted.get("challenge").and_then(Value::as_str), Some("abc"));
-        assert_eq!(decrypted.get("token").and_then(Value::as_str), Some("verif"));
+        assert_eq!(
+            decrypted.get("challenge").and_then(Value::as_str),
+            Some("abc")
+        );
+        assert_eq!(
+            decrypted.get("token").and_then(Value::as_str),
+            Some("verif")
+        );
 
         // Wrong key fails closed.
         let wrong = webhook::sha256_bytes(b"other-key");

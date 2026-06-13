@@ -4,17 +4,14 @@
 //! inbound surface and `events_submit` outbound). This module adds only the
 //! reusable *bridge runtime* on top of the SDK:
 //!
-//! - Inbound (cokret -> external): the cokret server pushes transactions; the
-//!   core turns them into an async stream and calls
-//!   [`BridgeApp::on_cokret_event`] with the raw [`cokret::Event`].
+//! - Inbound (cokret -> external): the cokret server pushes transactions; the core turns them into
+//!   an async stream and calls [`BridgeApp::on_cokret_event`] with the raw [`cokret::Event`].
 //! - Outbound (external -> cokret): the adapter mints + submits events via
 //!   [`crate::cokret_edge::CokretEdge`] (any event kind, arbitrary payload).
 //!
 //! A bridge to a non-social system (IoT, ticketing, CI, …) implements
 //! [`BridgeApp`] directly. Social/chat bridges use the ergonomic helpers in the
 //! `cokret-bridge-messaging` crate, which are built on top of this same runtime.
-
-use serde_json::Value;
 
 #[cfg(feature = "runtime")]
 use std::sync::Arc;
@@ -27,11 +24,11 @@ use async_trait::async_trait;
 use cokret::Event;
 #[cfg(feature = "runtime")]
 use parking_lot::Mutex;
+use serde_json::Value;
 #[cfg(feature = "runtime")]
 use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
 
 // `Value` is also used below for the ephemeral payload type.
-
 #[cfg(feature = "runtime")]
 use crate::cokret_edge::CokretEdge;
 #[cfg(feature = "runtime")]
@@ -214,6 +211,7 @@ pub async fn consume_inbound<A: BridgeApp>(
     mut rx: Receiver<Event>,
 ) -> Result<()> {
     use std::collections::HashMap;
+
     use tokio::sync::mpsc;
 
     // One ordered worker per realm. The sender keeps the worker alive; workers
