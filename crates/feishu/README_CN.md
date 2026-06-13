@@ -29,12 +29,16 @@ cargo run -p cokret-bridge-feishu -- --config config.yaml
 - `cokret.*`:cokret 接入(server_url、service_did、applet_id、access_token、签名种子)。
 - `app.app_id` / `app.app_secret`:飞书开放平台应用凭证(用于换取 tenant_access_token)。
 - `app.verification_token`:事件订阅 Verification Token,必填;challenge 与事件投递均会常量时间校验。
-- `app.encrypt_key`:可选;当前不实现加密回调解密,配置后加密回调会被拒绝。
+- `app.encrypt_key`:**必填(生产强制)**。启用加密回调模式后,飞书对每次投递附带
+  `X-Lark-Signature`(`sha256(timestamp+nonce+encrypt_key+body)`)。本桥对**每条**投递强制:
+  (1) 验签;(2) 时间戳新鲜度(±300s);(3) 重放窗口去重;(4) 解密 `{"encrypt":...}` 信封。
+  明文回调无逐次来源签名,违反 bridge 合约,故 `encrypt_key` 留空时 webhook 路由**不挂载**(fail closed)。
 - `database.url`:`sqlite://...` / `postgres://...` / `mysql://...`(对应 feature)。
 
 ## 不确定点(TODO)
 
-- 入站事件订阅 webhook 已接入(`webhook_router`,含 challenge 校验与事件分发)。
+- 入站事件订阅 webhook 已接入(`webhook_router`,含每条投递强制 `X-Lark-Signature` 验签、
+  时间戳新鲜度、重放窗口、challenge 校验与事件分发)。
 - `tenant_access_token` 经 `TokenCache` 缓存,按 `expire` 提前 60s 刷新(不再每次现取)。
 - 出站 `receive_id_type` 默认 `chat_id`,实际可能为 `open_id`/`user_id`,需按频道键格式确定。
 

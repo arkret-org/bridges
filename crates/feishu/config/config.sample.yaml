@@ -39,6 +39,8 @@ app:
   app_secret: "CHANGE_ME_FEISHU_APP_SECRET"
   # 事件订阅 Verification Token(必填):入站回调(challenge / 事件)须携带,常量时间比对。
   verification_token: "CHANGE_ME_FEISHU_VERIFICATION_TOKEN"
-  # 事件订阅 Encrypt Key(可选):一旦填写即视为加密回调模式,本桥不实现解密、直接拒绝(fail closed);
-  # 留空使用明文模式。
-  encrypt_key: ""
+  # 事件订阅 Encrypt Key(必填,生产强制):启用加密回调模式后,飞书会对每次投递
+  # 附带 X-Lark-Signature(sha256(timestamp+nonce+encrypt_key+body))。本桥对每条
+  # 投递强制验签 + 时间戳新鲜度 + 重放窗口,并解密 {"encrypt":...} 信封。
+  # 明文回调无逐次来源签名,违反 bridge 合约,故留空时 webhook 路由不挂载(fail closed)。
+  encrypt_key: "CHANGE_ME_FEISHU_ENCRYPT_KEY"

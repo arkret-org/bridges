@@ -21,6 +21,14 @@ use serde_json::{Value, json};
 const FEISHU_BASE: &str = "https://open.feishu.cn/open-apis";
 /// Fallback validity (seconds) when the API omits `expire`.
 const FEISHU_TOKEN_FALLBACK_SECS: u64 = 7000;
+/// Freshness window for the `X-Lark-Request-Timestamp` carried by each delivery.
+/// Deliveries whose timestamp is outside this skew (past or future) are rejected,
+/// bounding the replay window the source signature alone cannot close.
+const FEISHU_DELIVERY_MAX_SKEW: Duration = Duration::from_secs(300);
+/// Capacity of the in-memory replay guard. Each accepted delivery records its
+/// `timestamp:nonce:signature` so a captured request cannot be re-played inside
+/// the freshness window.
+const FEISHU_REPLAY_CAPACITY: usize = 8192;
 
 /// Feishu bridge adapter.
 pub struct FeishuApp {
@@ -29,10 +37,13 @@ pub struct FeishuApp {
     /// Event-subscription Verification Token. Inbound callbacks (challenge and
     /// events) MUST carry this token; compared in constant time (fail closed).
     verification_token: String,
-    /// Event-subscription Encrypt Key. When set, Feishu encrypts the callback
-    /// body (`{"encrypt": "..."}`) with AES-256-CBC under `SHA256(encrypt_key)`;
-    /// the bridge decrypts it to the plaintext JSON before running the token /
-    /// challenge logic.
+    /// Event-subscription Encrypt Key (REQUIRED). Feishu encrypts the callback
+    /// body (`{"encrypt": "..."}`) with AES-256-CBC under `SHA256(encrypt_key)`
+    /// and signs every delivery with `X-Lark-Signature`. The bridge mandates this
+    /// mode because plaintext callbacks carry no per-delivery body signature, and
+    /// the bridge contract requires every inbound delivery to be source-verified
+    /// (a one-time challenge / verification token is NOT a substitute). When the
+    /// Encrypt Key is missing the webhook router is not mounted (fail closed).
     encrypt_key: Option<String>,
     token_cache: TokenCache,
 }
@@ -151,13 +162,29 @@ impl MessageBridge for FeishuApp {
     }
 
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
+        // Fail closed: without an Encrypt Key, Feishu sends neither an encrypted
+        // body nor the `X-Lark-Signature` over each delivery, so there is no
+        // per-delivery source signature to verify. Refuse to mount the webhook at
+        // all rather than accept plaintext callbacks authenticated only by a
+        // static verification token (which the bridge contract forbids as a
+        // substitute for per-delivery verification).
+        let Some(encrypt_key) = self.encrypt_key.clone() else {
+            eprintln!(
+                "Feishu inbound webhook disabled: encrypt_key is required so every \
+                 delivery carries an X-Lark-Signature; plaintext callback mode is not \
+                 permitted (per-delivery source verification is mandatory)"
+            );
+            return None;
+        };
+        if self.verification_token.is_empty() {
+            eprintln!(
+                "Feishu inbound webhook disabled: verification_token is required (fail closed)"
+            );
+            return None;
+        }
         let verification_token = self.verification_token.clone();
         // Derive the AES-256 key once: key = SHA256(encrypt_key).
-        let encrypt_aes_key = self
-            .encrypt_key
-            .as_ref()
-            .map(|k| webhook::sha256_bytes(k.as_bytes()));
-        let encrypt_key = self.encrypt_key.clone();
+        let encrypt_aes_key = webhook::sha256_bytes(encrypt_key.as_bytes());
         Some(
             salvo::Router::with_path("webhooks/feishu")
                 .hoop(affix_state::inject(FeishuWebhookState {
@@ -165,6 +192,10 @@ impl MessageBridge for FeishuApp {
                     verification_token,
                     encrypt_key,
                     encrypt_aes_key,
+                    replay: Arc::new(webhook::ReplayWindow::new(
+                        FEISHU_DELIVERY_MAX_SKEW,
+                        FEISHU_REPLAY_CAPACITY,
+                    )),
                 }))
                 .post(feishu_delivery),
         )
@@ -185,11 +216,14 @@ struct FeishuWebhookState {
     ctx: Arc<MessageContext>,
     /// Event-subscription Verification Token (constant-time compared).
     verification_token: String,
-    /// Raw Encrypt Key (used for the optional `X-Lark-Signature` HMAC-less
-    /// `sha256(timestamp+nonce+encrypt_key+body)` header check).
-    encrypt_key: Option<String>,
-    /// AES-256 key (`SHA256(encrypt_key)`) when encrypted mode is configured.
-    encrypt_aes_key: Option<[u8; 32]>,
+    /// Raw Encrypt Key, used for the mandatory `X-Lark-Signature`
+    /// `sha256(timestamp+nonce+encrypt_key+body)` header check on every delivery.
+    encrypt_key: String,
+    /// AES-256 key (`SHA256(encrypt_key)`) for decrypting the callback body.
+    encrypt_aes_key: [u8; 32],
+    /// Bounded replay guard keyed on `timestamp:nonce:signature`; a captured
+    /// (and validly signed) delivery cannot be accepted twice inside the window.
+    replay: Arc<webhook::ReplayWindow>,
 }
 
 /// Read the verification token carried by a Feishu callback. v2 events nest it
@@ -215,6 +249,20 @@ fn feishu_decrypt(aes_key: &[u8; 32], encrypt_b64: &str) -> Option<Value> {
     serde_json::from_slice::<Value>(&plain).ok()
 }
 
+/// Parse Feishu's `X-Lark-Request-Timestamp` (Unix seconds, as a string) and
+/// return true when it is within `max_skew` of now (in either direction). A
+/// non-numeric or far-skewed timestamp is rejected (fail closed).
+fn timestamp_is_fresh(timestamp: &str, max_skew: Duration) -> bool {
+    let Ok(ts) = timestamp.trim().parse::<i64>() else {
+        return false;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    (now - ts).unsigned_abs() <= max_skew.as_secs()
+}
+
 #[handler]
 async fn feishu_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let Ok(state) = depot.obtain::<FeishuWebhookState>() else {
@@ -226,63 +274,77 @@ async fn feishu_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respons
         webhook::unauthorized(res, "Feishu verification_token not configured");
         return;
     }
-    // Read the raw body first: the optional `X-Lark-Signature` covers the exact
-    // wire bytes, and encrypted mode must decode the envelope before JSON parse.
+    // Read the raw body first: the `X-Lark-Signature` covers the exact wire
+    // bytes, and the envelope must be decoded before the JSON parse.
     let Some(raw) = webhook::raw_body(req, res).await else {
         return;
     };
+
+    // Fail closed on EVERY delivery: a valid `X-Lark-Signature` over
+    // `timestamp || nonce || encrypt_key || raw_body` is mandatory. Missing,
+    // malformed, or mismatched signatures are rejected before any parsing so a
+    // forged or tampered request never reaches the message pipeline.
+    let Some(signature) = req
+        .header::<String>("x-lark-signature")
+        .filter(|s| !s.trim().is_empty())
+    else {
+        webhook::unauthorized(res, "Feishu X-Lark-Signature header is required");
+        return;
+    };
+    let Some(timestamp) = req
+        .header::<String>("x-lark-request-timestamp")
+        .filter(|s| !s.trim().is_empty())
+    else {
+        webhook::unauthorized(res, "Feishu X-Lark-Request-Timestamp header is required");
+        return;
+    };
+    let Some(nonce) = req
+        .header::<String>("x-lark-request-nonce")
+        .filter(|s| !s.trim().is_empty())
+    else {
+        webhook::unauthorized(res, "Feishu X-Lark-Request-Nonce header is required");
+        return;
+    };
+    // Reject deliveries whose timestamp falls outside the freshness window. This
+    // bounds replay to the window and lets the replay guard stay small.
+    if !timestamp_is_fresh(&timestamp, FEISHU_DELIVERY_MAX_SKEW) {
+        webhook::unauthorized(res, "Feishu delivery timestamp is stale or invalid");
+        return;
+    }
+    if !webhook::verify_lark_signature(
+        state.encrypt_key.as_bytes(),
+        &timestamp,
+        &nonce,
+        &raw,
+        &signature,
+    ) {
+        webhook::unauthorized(res, "Feishu X-Lark-Signature mismatch");
+        return;
+    }
+    // Replay guard: a validly signed delivery is accepted at most once inside the
+    // freshness window. Keyed on the signature (which covers timestamp+nonce+body)
+    // so two distinct deliveries are never conflated.
+    if !state
+        .replay
+        .check_and_record(format!("{timestamp}:{nonce}:{signature}"))
+    {
+        webhook::unauthorized(res, "Feishu delivery replayed");
+        return;
+    }
+
     let Ok(envelope) = serde_json::from_slice::<Value>(&raw) else {
         webhook::bad_request(res, "invalid Feishu webhook JSON body");
         return;
     };
-
-    // Resolve the effective body: in encrypted mode (`encrypt_key` configured, or
-    // an `{"encrypt": ...}` envelope present) decrypt to the plaintext JSON.
-    let body: Value = if let Some(aes_key) = state.encrypt_aes_key.as_ref() {
-        // Optional X-Lark-Signature: sha256(timestamp+nonce+encrypt_key+body).
-        // Feishu only sends it in encrypted mode; when present it must verify.
-        if let Some(signature) = req.header::<String>("x-lark-signature") {
-            let timestamp = req
-                .header::<String>("x-lark-request-timestamp")
-                .unwrap_or_default();
-            let nonce = req
-                .header::<String>("x-lark-request-nonce")
-                .unwrap_or_default();
-            let encrypt_key = state.encrypt_key.as_deref().unwrap_or_default();
-            if !webhook::verify_lark_signature(
-                encrypt_key.as_bytes(),
-                &timestamp,
-                &nonce,
-                &raw,
-                &signature,
-            ) {
-                webhook::unauthorized(res, "Feishu X-Lark-Signature mismatch");
-                return;
-            }
-        }
-        let Some(encrypt_b64) = envelope.get("encrypt").and_then(Value::as_str) else {
-            // Encrypted mode is configured but the body is not encrypted: reject
-            // rather than fall through to a weaker check (fail closed).
-            webhook::unauthorized(res, "Feishu encrypted mode requires an encrypted body");
-            return;
-        };
-        match feishu_decrypt(aes_key, encrypt_b64) {
-            Some(plain) => plain,
-            None => {
-                webhook::unauthorized(res, "Feishu callback decryption failed");
-                return;
-            }
-        }
-    } else if envelope.get("encrypt").is_some() {
-        // An encrypted body arrived but no Encrypt Key is configured: we cannot
-        // decrypt or authenticate it. Reject (fail closed).
-        webhook::unauthorized(
-            res,
-            "Feishu encrypted callback received but no encrypt_key configured",
-        );
+    // Encrypted mode is mandatory: the body MUST be an `{"encrypt": "..."}`
+    // envelope decryptable under `SHA256(encrypt_key)` (fail closed otherwise).
+    let Some(encrypt_b64) = envelope.get("encrypt").and_then(Value::as_str) else {
+        webhook::unauthorized(res, "Feishu encrypted mode requires an encrypted body");
         return;
-    } else {
-        envelope
+    };
+    let Some(body) = feishu_decrypt(&state.encrypt_aes_key, encrypt_b64) else {
+        webhook::unauthorized(res, "Feishu callback decryption failed");
+        return;
     };
 
     // Authenticate the (now plaintext) callback by its Verification Token.
@@ -414,5 +476,34 @@ mod tests {
 
     fn hex_encode(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn timestamp_freshness_rejects_stale_future_and_garbage() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let skew = Duration::from_secs(300);
+        // Within the window (now, and just inside either edge) is accepted.
+        assert!(timestamp_is_fresh(&now.to_string(), skew));
+        assert!(timestamp_is_fresh(&(now - 299).to_string(), skew));
+        assert!(timestamp_is_fresh(&(now + 299).to_string(), skew));
+        // Outside the window (past or future) is rejected.
+        assert!(!timestamp_is_fresh(&(now - 3600).to_string(), skew));
+        assert!(!timestamp_is_fresh(&(now + 3600).to_string(), skew));
+        // Non-numeric / empty timestamps fail closed.
+        assert!(!timestamp_is_fresh("not-a-number", skew));
+        assert!(!timestamp_is_fresh("", skew));
+    }
+
+    #[test]
+    fn replay_guard_rejects_second_identical_delivery() {
+        // The handler keys the replay guard on `timestamp:nonce:signature`. A
+        // captured (validly signed) delivery must be accepted at most once.
+        let window = webhook::ReplayWindow::new(Duration::from_secs(300), 16);
+        let key = "1700000000:nonce-xyz:deadbeef";
+        assert!(window.check_and_record(key));
+        assert!(!window.check_and_record(key));
     }
 }

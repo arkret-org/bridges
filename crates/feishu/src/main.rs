@@ -13,9 +13,11 @@ struct AppConfig {
     app_secret: String,
     /// Event-subscription Verification Token (required, fail closed).
     verification_token: String,
-    /// Optional Encrypt Key; when set, enables encrypted callback mode
-    /// (AES-256-CBC decryption under `SHA256(encrypt_key)`). Leave unset for
-    /// plaintext mode.
+    /// Encrypt Key (required for production). Enables encrypted callback mode so
+    /// Feishu signs every delivery with `X-Lark-Signature`; the bridge enforces
+    /// per-delivery signature + freshness + replay checks. When unset the webhook
+    /// router is not mounted (plaintext callbacks have no per-delivery signature,
+    /// so they are refused — fail closed).
     encrypt_key: Option<String>,
 }
 
