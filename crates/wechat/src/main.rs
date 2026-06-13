@@ -6,7 +6,7 @@ use cokret_bridge_messaging::bridge_main;
 use cokret_bridge_runtime::BridgeError;
 use serde::Deserialize;
 
-use crate::wechat::WeChatApp;
+use crate::wechat::WechatApp;
 
 /// WeChat Work uses `corp_id`/`corp_secret`; Official Accounts use
 /// `app_id`/`app_secret`. Both spellings are accepted (serde aliases) and
@@ -44,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
                     .to_owned(),
             ));
         }
-        WeChatApp::from_config(
+        WechatApp::from_config(
             app.corp_id,
             app.corp_secret,
             app.agent_id,

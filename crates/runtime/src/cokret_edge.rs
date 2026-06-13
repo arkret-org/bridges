@@ -16,6 +16,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(any(feature = "web", test))]
+use cokret::DidResolver;
 use cokret::http_client::{Auth, Client};
 #[cfg(any(feature = "web", test))]
 use cokret::model::{
@@ -578,6 +580,12 @@ pub struct BridgeAppletHandler {
     /// Durable single-event-level dedup store (applet-integration §7.3; the
     /// runtime path injects [`crate::db::DbEventDedupStore`]).
     dedup: Arc<dyn EventDedupStore>,
+    /// Trust-root DID resolver the SDK applet router uses to authenticate the
+    /// source service DID's HTTP message signature and every pushed Event proof
+    /// on the inbound `POST /_cokret/edge/applet/transactions` path
+    /// (applet-integration §7.3). Scoped to the methods this bridge accepts for
+    /// inbound pushes (did:key / did:web / did:webvh, fail-closed).
+    source_did_resolver: Arc<dyn DidResolver + Send + Sync>,
 }
 
 #[cfg(any(feature = "web", test))]
@@ -636,6 +644,7 @@ impl BridgeAppletHandler {
         resolver: Option<Arc<dyn AppletResolver>>,
         dedup: Arc<dyn EventDedupStore>,
         handled_event_kinds: Option<Vec<String>>,
+        source_did_resolver: Arc<dyn DidResolver + Send + Sync>,
     ) -> Self {
         let bridge_id = edge.config.bridge.bridge_id.clone();
         let service_did = edge.service_did.clone();
@@ -667,6 +676,7 @@ impl BridgeAppletHandler {
             resolver,
             dedup,
             handled_event_kinds,
+            source_did_resolver,
         }
     }
 
@@ -717,6 +727,10 @@ fn glob_suffix_match(pattern: &str, candidate: &str) -> bool {
 
 #[cfg(any(feature = "web", test))]
 impl cokret::AppletHandler for BridgeAppletHandler {
+    fn source_did_resolver(&self) -> &dyn DidResolver {
+        self.source_did_resolver.as_ref()
+    }
+
     fn ping(&self) -> cokret::Result<AppletPingOutcome> {
         Ok(AppletPingOutcome {
             ok: true,
@@ -759,7 +773,7 @@ impl cokret::AppletHandler for BridgeAppletHandler {
             if queue_full {
                 rejected.push(serde_json::json!({
                     "event_id": event_id,
-                    "reason": "queue_full",
+                    "reason_code": "queue_full",
                 }));
                 continue;
             }
@@ -776,7 +790,7 @@ impl cokret::AppletHandler for BridgeAppletHandler {
                 );
                 rejected.push(serde_json::json!({
                     "event_id": event_id,
-                    "reason": "namespace_mismatch",
+                    "reason_code": "namespace_mismatch",
                 }));
                 continue;
             }
@@ -794,7 +808,7 @@ impl cokret::AppletHandler for BridgeAppletHandler {
                 );
                 rejected.push(serde_json::json!({
                     "event_id": event_id,
-                    "reason": "capability_unsupported",
+                    "reason_code": "capability_unsupported",
                 }));
                 continue;
             }
@@ -810,7 +824,7 @@ impl cokret::AppletHandler for BridgeAppletHandler {
                     queue_full = true;
                     rejected.push(serde_json::json!({
                         "event_id": event_id,
-                        "reason": "queue_full",
+                        "reason_code": "queue_full",
                     }));
                     continue;
                 }
@@ -819,7 +833,7 @@ impl cokret::AppletHandler for BridgeAppletHandler {
                     tracing::error!(%event_id, "failed to enqueue inbound event: consumer gone");
                     rejected.push(serde_json::json!({
                         "event_id": event_id,
-                        "reason": "internal_error",
+                        "reason_code": "internal_error",
                     }));
                     continue;
                 }
@@ -851,7 +865,7 @@ impl cokret::AppletHandler for BridgeAppletHandler {
                     );
                     rejected.push(serde_json::json!({
                         "event_id": event_id,
-                        "reason": "duplicate_conflict",
+                        "reason_code": "duplicate_conflict",
                     }));
                     continue;
                 }
@@ -860,7 +874,7 @@ impl cokret::AppletHandler for BridgeAppletHandler {
                     tracing::error!(%event_id, error = %err, "event dedup store failed");
                     rejected.push(serde_json::json!({
                         "event_id": event_id,
-                        "reason": "internal_error",
+                        "reason_code": "internal_error",
                     }));
                     continue;
                 }

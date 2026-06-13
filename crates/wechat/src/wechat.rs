@@ -28,7 +28,7 @@ const WECHAT_TOKEN_FALLBACK_SECS: u64 = 7000;
 const WECHAT_TIMESTAMP_WINDOW_SECS: i64 = 5 * 60;
 
 /// WeChat bridge adapter.
-pub struct WeChatApp {
+pub struct WechatApp {
     /// WeChat Work corp_id or Official Account app_id.
     cred_id: String,
     /// WeChat Work corp_secret or Official Account app_secret.
@@ -65,7 +65,7 @@ impl WechatAesKey {
     }
 }
 
-impl WeChatApp {
+impl WechatApp {
     fn new(
         cred_id: impl Into<String>,
         cred_secret: impl Into<String>,
@@ -180,7 +180,7 @@ impl WeChatApp {
 }
 
 #[async_trait]
-impl MessageBridge for WeChatApp {
+impl MessageBridge for WechatApp {
     fn name(&self) -> &str {
         "wechat"
     }

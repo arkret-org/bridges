@@ -47,13 +47,18 @@ pub async fn serve(ctx: Arc<BridgeContext>, extra: Option<Router>) -> Result<()>
     let dedup: Arc<dyn EventDedupStore> = Arc::new(DbEventDedupStore::new(ctx.db.clone())?);
     let idempotency: Arc<dyn TransactionIdempotencyStore> =
         Arc::new(DbTransactionIdempotencyStore::new(ctx.db.clone())?);
+    // The trust-root DID resolver authenticates the inbound source service DID
+    // signature and every pushed Event proof. The same resolver is shared with
+    // the applet handler so its `source_did_resolver()` (SDK AppletHandler
+    // contract) and the per-event proof verification trust the same roots.
+    let event_proof_resolver = Arc::new(build_event_proof_resolver()?);
     let handler = Arc::new(BridgeAppletHandler::new(
         &ctx.edge,
         ctx.resolver(),
         dedup,
         ctx.handled_event_kinds(),
+        event_proof_resolver.clone(),
     ));
-    let event_proof_resolver = Arc::new(build_event_proof_resolver()?);
     let applet = applet_router(AppletWebState {
         handler,
         config: ctx.config.clone(),
@@ -293,10 +298,11 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
             // applet-integration §7.3/§14 require the closed error code
             // `duplicate_conflict` (the registry has no `idempotency_conflict`).
             res.status_code(StatusCode::CONFLICT);
-            res.render(Json(json!({
-                "ok": false,
-                "rejected": [{ "reason": "duplicate_conflict" }]
-            })));
+            res.render(Json(cokret::model::AppletTransactionOutcome {
+                ok: false,
+                rejected: vec![json!({ "reason_code": "duplicate_conflict" })],
+                retry_after_ms: None,
+            }));
             return;
         }
         Ok(TransactionClaim::Claimed) => {}

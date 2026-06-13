@@ -196,6 +196,17 @@ const INBOUND_RETRY_BASE_BACKOFF: Duration = Duration::from_millis(200);
 #[cfg(feature = "runtime")]
 const INBOUND_REALM_MAILBOX_DEPTH: usize = 256;
 
+/// How long a per-realm worker may sit idle (no events received) before it
+/// exits and its `workers` map entry is reclaimed. Without this, deployments
+/// with high realm cardinality (e.g. per-user PSID/chat realms on
+/// WhatsApp/Messenger/Telegram) would grow the worker map and the count of
+/// resident tokio tasks without bound for the life of the process (BRG-02-005).
+/// A reclaimed realm's worker is transparently recreated when its next event
+/// arrives; per-realm ordering still holds because at most one worker runs for
+/// a given realm at any instant.
+#[cfg(feature = "runtime")]
+const INBOUND_REALM_IDLE_TTL: Duration = Duration::from_secs(300);
+
 /// Inbound consumer loop: events pushed by the cokret server -> adapter.
 ///
 /// Events are routed to a per-realm worker so distinct realms drain in parallel
@@ -214,32 +225,68 @@ pub async fn consume_inbound<A: BridgeApp>(
 
     use tokio::sync::mpsc;
 
-    // One ordered worker per realm. The sender keeps the worker alive; workers
-    // exit when their sender is dropped (here, only at shutdown when the map is
-    // dropped).
+    // One ordered worker per realm. Workers self-exit after
+    // `INBOUND_REALM_IDLE_TTL` of inactivity (or at shutdown when their sender is
+    // dropped) so the map and the count of resident tasks stay bounded even with
+    // high realm cardinality (BRG-02-005). A reclaimed realm is recreated on its
+    // next event; ordering holds because at most one worker exists per realm at
+    // any instant.
     let mut workers: HashMap<String, mpsc::Sender<Event>> = HashMap::new();
+
+    // Spawn a fresh ordered worker for `realm`, returning its mailbox sender. The
+    // worker drains events strictly in order and exits once idle past the TTL.
+    let spawn_worker = |realm: String| -> mpsc::Sender<Event> {
+        let (tx, mut worker_rx) = mpsc::channel::<Event>(INBOUND_REALM_MAILBOX_DEPTH);
+        let ctx = ctx.clone();
+        let app = app.clone();
+        tokio::spawn(async move {
+            loop {
+                match tokio::time::timeout(INBOUND_REALM_IDLE_TTL, worker_rx.recv()).await {
+                    // Sender dropped (shutdown / realm reclaimed): exit.
+                    Ok(None) => break,
+                    Ok(Some(event)) => {
+                        deliver_inbound_event(ctx.clone(), app.clone(), event).await;
+                    }
+                    // Idle past the TTL with an empty mailbox: exit so the entry
+                    // can be reclaimed. The dispatcher recreates the worker if the
+                    // realm sees traffic again.
+                    Err(_) => {
+                        tracing::debug!(realm = %realm, "inbound realm worker idle; reclaiming");
+                        break;
+                    }
+                }
+            }
+        });
+        tx
+    };
 
     while let Some(event) = rx.recv().await {
         let realm = event.realm_id.to_string();
-        let tx = workers.entry(realm.clone()).or_insert_with(|| {
-            let (tx, mut worker_rx) = mpsc::channel::<Event>(INBOUND_REALM_MAILBOX_DEPTH);
-            let ctx = ctx.clone();
-            let app = app.clone();
-            tokio::spawn(async move {
-                // Drain this realm's events strictly in order.
-                while let Some(event) = worker_rx.recv().await {
-                    deliver_inbound_event(ctx.clone(), app.clone(), event).await;
-                }
-            });
-            tx
-        });
+
+        // Reclaim map entries whose worker has self-exited (idle TTL) or
+        // panicked: a closed sender means its receiver was dropped. Pruning here
+        // keeps the map bounded by the count of *currently active* realms rather
+        // than the total ever seen (BRG-02-005). Cheap: `is_closed` is a flag
+        // read, and the entry for the realm we are about to serve is recreated
+        // just below if it was pruned.
+        workers.retain(|_, tx| !tx.is_closed());
+
+        let mut tx = workers
+            .entry(realm.clone())
+            .or_insert_with(|| spawn_worker(realm.clone()))
+            .clone();
         // Await the per-realm mailbox: a full mailbox back-pressures the shared
         // dispatcher (and thus the applet handler's bounded queue) rather than
-        // buffering without limit. A closed worker means it panicked; re-create
-        // it on the next event.
-        if tx.send(event).await.is_err() {
-            workers.remove(&realm);
-            tracing::error!(realm = %realm, "inbound realm worker is gone; dropping event");
+        // buffering without limit. A closed worker means it exited (idle-reclaimed
+        // or panicked) after we cloned its sender; recreate it once and re-send so
+        // the event is never dropped on a benign idle-reclaim race.
+        if let Err(mpsc::error::SendError(event)) = tx.send(event).await {
+            tx = spawn_worker(realm.clone());
+            let recreated = tx.clone();
+            if recreated.send(event).await.is_err() {
+                tracing::error!(realm = %realm, "inbound realm worker is gone; dropping event");
+            }
+            workers.insert(realm, tx);
         }
     }
     Ok(())
