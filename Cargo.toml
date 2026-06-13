@@ -28,6 +28,7 @@ cokret = {path = "../cokret-rust-sdk/crates/sdk",default-features = false,featur
 cokret-bridge-messaging = {path = "crates/messaging",default-features = false}
 cokret-bridge-runtime = {path = "crates/runtime",default-features = false}
 diesel = {version = "2.3",default-features = false,features = ["r2d2", "chrono"]}
+diesel_migrations = "2.3"
 futures = "0.3"
 hex = "0.4"
 hmac = "0.13"

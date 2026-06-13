@@ -11,7 +11,7 @@ description = "Applet bridge runtime for Cokret integrations: protocol-side even
 default  = ["full", "sqlite"]
 full     = ["db", "web", "runtime"]
 edge     = []
-db       = ["dep:diesel"]
+db       = ["dep:diesel", "dep:diesel_migrations"]
 sqlite   = ["db", "diesel/sqlite", "dep:libsqlite3-sys"]
 postgres = ["db", "diesel/postgres"]
 mysql    = ["db", "diesel/mysql"]
@@ -24,6 +24,7 @@ async-trait = {workspace = true}
 chrono = {workspace = true}
 cokret = {workspace = true}
 diesel = {workspace = true,optional = true}
+diesel_migrations = {workspace = true,optional = true}
 libsqlite3-sys = {workspace = true,features = ["bundled"],optional = true}
 metrics = {workspace = true,optional = true}
 metrics-exporter-prometheus = {workspace = true,optional = true}

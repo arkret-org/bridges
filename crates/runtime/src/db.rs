@@ -12,6 +12,7 @@ use std::sync::Arc;
 use cokret::model::AppletTransactionOutcome;
 use diesel::prelude::*;
 use diesel::r2d2::{ConnectionManager, Pool, PooledConnection};
+use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 
 use crate::config::DatabaseConfig;
 use crate::error::{BridgeError, Result};
@@ -19,6 +20,16 @@ use crate::idempotency::{
     DedupVerdict, EventDedupStore, IDEMPOTENCY_TTL_SECS, PENDING_TAKEOVER_GRACE_SECS,
     TransactionClaim, TransactionIdempotencyStore,
 };
+
+/// Embedded migrations for the runtime-owned tables (`transaction_idempotency`,
+/// `event_dedup`, `bridge_state`). The backend dialect is selected at compile
+/// time via the active connection feature, matching [`DbConnection`].
+#[cfg(feature = "sqlite")]
+pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
+#[cfg(all(feature = "postgres", not(feature = "sqlite")))]
+pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/postgres");
+#[cfg(all(feature = "mysql", not(feature = "sqlite"), not(feature = "postgres")))]
+pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/mysql");
 
 /// The backend connection type (selected by feature, exactly one).
 #[cfg(feature = "sqlite")]
@@ -54,16 +65,15 @@ impl DatabaseManager {
         self.pool.get().map_err(Into::into)
     }
 
-    /// Run a batch of idempotent DDL statements (e.g.
-    /// `CREATE TABLE IF NOT EXISTS ...`). In production you can switch to
-    /// diesel_migrations.
-    pub fn run_migrations(&self, statements: &[&str]) -> Result<()> {
+    /// Run the embedded, versioned migrations for one layer's tables. Each
+    /// layer passes its own [`EmbeddedMigrations`] (built with
+    /// [`embed_migrations!`] against its per-backend migration directory).
+    /// Already-applied migrations are skipped via `__diesel_schema_migrations`,
+    /// so this is safe to call once per store at startup.
+    pub fn run_migrations(&self, migrations: EmbeddedMigrations) -> Result<()> {
         let mut conn = self.conn()?;
-        for stmt in statements {
-            diesel::sql_query(*stmt)
-                .execute(&mut conn)
-                .map_err(|e| BridgeError::Database(e.to_string()))?;
-        }
+        conn.run_pending_migrations(migrations)
+            .map_err(|e| BridgeError::Database(e.to_string()))?;
         Ok(())
     }
 }
@@ -110,63 +120,6 @@ mod idempotency_schema {
     }
 }
 
-#[cfg(feature = "sqlite")]
-fn idempotency_schema_sql() -> &'static [&'static str] {
-    &[
-        "CREATE TABLE IF NOT EXISTS transaction_idempotency (\
-            source_service_did TEXT NOT NULL,\
-            idempotency_key TEXT NOT NULL,\
-            body_hash TEXT NOT NULL,\
-            status TEXT NOT NULL,\
-            outcome TEXT,\
-            created_at BIGINT NOT NULL,\
-            expires_at BIGINT NOT NULL,\
-            PRIMARY KEY (source_service_did, idempotency_key))",
-        "CREATE TABLE IF NOT EXISTS event_dedup (\
-            event_id TEXT PRIMARY KEY,\
-            fingerprint BIGINT NOT NULL,\
-            expires_at BIGINT NOT NULL)",
-    ]
-}
-
-#[cfg(all(feature = "postgres", not(feature = "sqlite")))]
-fn idempotency_schema_sql() -> &'static [&'static str] {
-    &[
-        "CREATE TABLE IF NOT EXISTS transaction_idempotency (\
-            source_service_did TEXT NOT NULL,\
-            idempotency_key TEXT NOT NULL,\
-            body_hash TEXT NOT NULL,\
-            status TEXT NOT NULL,\
-            outcome TEXT,\
-            created_at BIGINT NOT NULL,\
-            expires_at BIGINT NOT NULL,\
-            PRIMARY KEY (source_service_did, idempotency_key))",
-        "CREATE TABLE IF NOT EXISTS event_dedup (\
-            event_id TEXT PRIMARY KEY,\
-            fingerprint BIGINT NOT NULL,\
-            expires_at BIGINT NOT NULL)",
-    ]
-}
-
-#[cfg(all(feature = "mysql", not(feature = "sqlite"), not(feature = "postgres")))]
-fn idempotency_schema_sql() -> &'static [&'static str] {
-    &[
-        "CREATE TABLE IF NOT EXISTS transaction_idempotency (\
-            source_service_did VARCHAR(191) NOT NULL,\
-            idempotency_key VARCHAR(191) NOT NULL,\
-            body_hash TEXT NOT NULL,\
-            status TEXT NOT NULL,\
-            outcome TEXT,\
-            created_at BIGINT NOT NULL,\
-            expires_at BIGINT NOT NULL,\
-            PRIMARY KEY (source_service_did, idempotency_key))",
-        "CREATE TABLE IF NOT EXISTS event_dedup (\
-            event_id VARCHAR(191) PRIMARY KEY,\
-            fingerprint BIGINT NOT NULL,\
-            expires_at BIGINT NOT NULL)",
-    ]
-}
-
 fn now_ts() -> i64 {
     chrono::Utc::now().timestamp()
 }
@@ -185,7 +138,7 @@ impl DbTransactionIdempotencyStore {
     /// Build the store, running its migration (idempotent; shared with
     /// [`DbEventDedupStore`]).
     pub fn new(db: Arc<DatabaseManager>) -> Result<Self> {
-        db.run_migrations(idempotency_schema_sql())?;
+        db.run_migrations(MIGRATIONS)?;
         Ok(Self { db })
     }
 }
@@ -329,7 +282,7 @@ impl DbEventDedupStore {
     /// Build the store, running its migration (idempotent; shared with
     /// [`DbTransactionIdempotencyStore`]).
     pub fn new(db: Arc<DatabaseManager>) -> Result<Self> {
-        db.run_migrations(idempotency_schema_sql())?;
+        db.run_migrations(MIGRATIONS)?;
         Ok(Self { db })
     }
 }

@@ -24,6 +24,7 @@ clap = {workspace = true}
 cokret = {workspace = true}
 cokret-bridge-runtime = {workspace = true,default-features = false}
 diesel = {workspace = true}
+diesel_migrations = {workspace = true}
 futures = {workspace = true}
 hex = {workspace = true}
 hmac = {workspace = true}

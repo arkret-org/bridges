@@ -495,11 +495,10 @@ mod state_schema {
 
 #[cfg(feature = "db")]
 impl DbSeqStore {
-    /// Build the store, running the `bridge_state` migration (idempotent).
+    /// Build the store, running the embedded runtime migrations (which include
+    /// the `bridge_state` table; already-applied migrations are skipped).
     pub fn new(db: Arc<crate::db::DatabaseManager>) -> Result<Self> {
-        db.run_migrations(&["CREATE TABLE IF NOT EXISTS bridge_state (\
-                state_key TEXT PRIMARY KEY,\
-                state_value BIGINT NOT NULL)"])?;
+        db.run_migrations(crate::db::MIGRATIONS)?;
         Ok(Self { db })
     }
 }

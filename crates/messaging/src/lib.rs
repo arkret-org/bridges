@@ -30,8 +30,19 @@ use cokret_bridge_runtime::app::{
 use cokret_bridge_runtime::db::DatabaseManager;
 use cokret_bridge_runtime::{BridgeError, Result, redact_sensitive_url_values};
 use diesel::prelude::*;
+use diesel_migrations::{EmbeddedMigrations, embed_migrations};
 use futures::StreamExt;
 use serde_json::{Value, json};
+
+/// Embedded migrations for the messaging-owned mapping tables (`room_mappings`,
+/// `message_mappings`, `user_mappings`). The backend dialect is selected at
+/// compile time, matching the runtime's active connection feature.
+#[cfg(feature = "sqlite")]
+const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
+#[cfg(all(feature = "postgres", not(feature = "sqlite")))]
+const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/postgres");
+#[cfg(all(feature = "mysql", not(feature = "sqlite"), not(feature = "postgres")))]
+const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/mysql");
 
 pub use cokret_bridge_runtime as runtime;
 pub use models::{MessageMapping, RoomMapping, UserMapping};
@@ -292,7 +303,7 @@ pub struct MessageStore {
 
 impl MessageStore {
     pub fn new(db: Arc<DatabaseManager>) -> Result<Self> {
-        db.run_migrations(schema_sql())?;
+        db.run_migrations(MIGRATIONS)?;
         Ok(Self { db })
     }
 
@@ -933,114 +944,6 @@ fn host_allowed(host: &str, allowed_hosts: &[&str]) -> bool {
                 .to_ascii_lowercase()
                 .ends_with(&format!(".{}", allowed.to_ascii_lowercase()))
     })
-}
-
-#[cfg(feature = "sqlite")]
-fn schema_sql() -> &'static [&'static str] {
-    &[
-        "CREATE TABLE IF NOT EXISTS room_mappings (\
-            id INTEGER PRIMARY KEY AUTOINCREMENT,\
-            app_channel_id TEXT NOT NULL UNIQUE,\
-            cokret_realm_id TEXT NOT NULL UNIQUE,\
-            portal_alias TEXT,\
-            portal_flow_id TEXT,\
-            created_at BIGINT NOT NULL)",
-        "CREATE TABLE IF NOT EXISTS message_mappings (\
-            id INTEGER PRIMARY KEY AUTOINCREMENT,\
-            app_channel_id TEXT NOT NULL,\
-            app_message_id TEXT NOT NULL,\
-            normalized_sender TEXT NOT NULL,\
-            cokret_event_id TEXT NOT NULL UNIQUE,\
-            cokret_realm_id TEXT NOT NULL,\
-            created_at BIGINT NOT NULL,\
-            UNIQUE(app_channel_id, app_message_id, normalized_sender))",
-        "CREATE TABLE IF NOT EXISTS user_mappings (\
-            id INTEGER PRIMARY KEY AUTOINCREMENT,\
-            protocol TEXT NOT NULL,\
-            tenant TEXT NOT NULL,\
-            external_user_id TEXT NOT NULL,\
-            cokret_actor_id TEXT NOT NULL UNIQUE,\
-            profile_event_ref TEXT NOT NULL,\
-            accountability_grant_ref TEXT NOT NULL,\
-            authorization_ref TEXT NOT NULL,\
-            display_name TEXT,\
-            created_at BIGINT NOT NULL,\
-            UNIQUE(protocol, tenant, external_user_id))",
-    ]
-}
-
-#[cfg(all(feature = "postgres", not(feature = "sqlite")))]
-fn schema_sql() -> &'static [&'static str] {
-    &[
-        "CREATE TABLE IF NOT EXISTS room_mappings (\
-            id BIGSERIAL PRIMARY KEY,\
-            app_channel_id TEXT NOT NULL UNIQUE,\
-            cokret_realm_id TEXT NOT NULL UNIQUE,\
-            portal_alias TEXT,\
-            portal_flow_id TEXT,\
-            created_at BIGINT NOT NULL)",
-        "CREATE TABLE IF NOT EXISTS message_mappings (\
-            id BIGSERIAL PRIMARY KEY,\
-            app_channel_id TEXT NOT NULL,\
-            app_message_id TEXT NOT NULL,\
-            normalized_sender TEXT NOT NULL,\
-            cokret_event_id TEXT NOT NULL UNIQUE,\
-            cokret_realm_id TEXT NOT NULL,\
-            created_at BIGINT NOT NULL,\
-            UNIQUE(app_channel_id, app_message_id, normalized_sender))",
-        "CREATE TABLE IF NOT EXISTS user_mappings (\
-            id BIGSERIAL PRIMARY KEY,\
-            protocol TEXT NOT NULL,\
-            tenant TEXT NOT NULL,\
-            external_user_id TEXT NOT NULL,\
-            cokret_actor_id TEXT NOT NULL UNIQUE,\
-            profile_event_ref TEXT NOT NULL,\
-            accountability_grant_ref TEXT NOT NULL,\
-            authorization_ref TEXT NOT NULL,\
-            display_name TEXT,\
-            created_at BIGINT NOT NULL,\
-            UNIQUE(protocol, tenant, external_user_id))",
-    ]
-}
-
-#[cfg(all(feature = "mysql", not(feature = "sqlite"), not(feature = "postgres")))]
-fn schema_sql() -> &'static [&'static str] {
-    &[
-        "CREATE TABLE IF NOT EXISTS room_mappings (\
-            id BIGINT AUTO_INCREMENT PRIMARY KEY,\
-            app_channel_id TEXT NOT NULL,\
-            cokret_realm_id TEXT NOT NULL,\
-            portal_alias TEXT,\
-            portal_flow_id TEXT,\
-            created_at BIGINT NOT NULL,\
-            UNIQUE KEY room_app_channel_id_unique (app_channel_id(191)),\
-            UNIQUE KEY room_cokret_realm_id_unique (cokret_realm_id(191)))",
-        "CREATE TABLE IF NOT EXISTS message_mappings (\
-            id BIGINT AUTO_INCREMENT PRIMARY KEY,\
-            app_channel_id TEXT NOT NULL,\
-            app_message_id TEXT NOT NULL,\
-            normalized_sender TEXT NOT NULL,\
-            cokret_event_id TEXT NOT NULL,\
-            cokret_realm_id TEXT NOT NULL,\
-            created_at BIGINT NOT NULL,\
-            UNIQUE KEY message_app_id_unique \
-                (app_channel_id(191), app_message_id(120), normalized_sender(120)),\
-            UNIQUE KEY message_cokret_event_id_unique (cokret_event_id(191)))",
-        "CREATE TABLE IF NOT EXISTS user_mappings (\
-            id BIGINT AUTO_INCREMENT PRIMARY KEY,\
-            protocol TEXT NOT NULL,\
-            tenant TEXT NOT NULL,\
-            external_user_id TEXT NOT NULL,\
-            cokret_actor_id TEXT NOT NULL,\
-            profile_event_ref TEXT NOT NULL,\
-            accountability_grant_ref TEXT NOT NULL,\
-            authorization_ref TEXT NOT NULL,\
-            display_name TEXT,\
-            created_at BIGINT NOT NULL,\
-            UNIQUE KEY user_protocol_tenant_external_id_unique \
-                (protocol(64), tenant(191), external_user_id(191)),\
-            UNIQUE KEY user_cokret_actor_id_unique (cokret_actor_id(191)))",
-    ]
 }
 
 /// Runtime context handed to a [`MessageBridge`].
