@@ -584,7 +584,6 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "chrono-tz",
- "cokret-contracts",
  "cokret-core",
  "cokret-crypto",
  "cokret-ffi",
@@ -869,22 +868,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cokret-contracts"
-version = "0.3.0"
-dependencies = [
- "chrono",
- "cokret-core",
- "cokret-crypto",
- "cokret-html",
- "cokret-signatures",
- "salvo",
- "salvo-oapi",
- "serde",
- "serde_json",
- "tracing",
-]
-
-[[package]]
 name = "cokret-core"
 version = "0.3.0"
 dependencies = [
@@ -901,6 +884,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "thiserror 2.0.18",
+ "tracing",
  "unicode-normalization",
  "url",
 ]
@@ -977,7 +961,6 @@ dependencies = [
 name = "cokret-server"
 version = "0.3.0"
 dependencies = [
- "cokret-contracts",
  "cokret-core",
  "cokret-signatures",
  "serde",
