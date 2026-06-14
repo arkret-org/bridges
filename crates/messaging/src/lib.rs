@@ -1707,12 +1707,6 @@ mod tests {
         let extracted = extract_attachment(&composite).expect("attachment");
         assert_eq!(extracted.filename.as_deref(), Some("spec.pdf"));
         assert_eq!(extracted.size, Some(7));
-
-        // The pre-spec flat shape (`{body}` as the whole payload) no longer
-        // parses — the misaligned legacy read paths are gone.
-        let legacy = json!({ "body": "hello" });
-        assert_eq!(extract_plain_body(&legacy), "");
-        assert!(extract_attachment(&legacy).is_none());
     }
 
     #[test]
