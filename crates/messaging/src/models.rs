@@ -12,9 +12,9 @@ pub struct RoomMapping {
     pub app_channel_id: String,
     pub cokret_realm_id: String,
     pub portal_alias: Option<String>,
-    /// The portal flow this external location maps to (applet-integration
-    /// §10.1: mapping unit is `(realm_id, flow_id)`); resolved lazily.
-    pub portal_flow_id: Option<String>,
+    /// The portal strand this external location maps to (applet-integration
+    /// §10.1: mapping unit is `(realm_id, strand_id)`); resolved lazily.
+    pub portal_strand_id: Option<String>,
     pub created_at: i64,
 }
 
@@ -24,7 +24,7 @@ pub struct NewRoomMapping<'a> {
     pub app_channel_id: &'a str,
     pub cokret_realm_id: &'a str,
     pub portal_alias: Option<&'a str>,
-    pub portal_flow_id: Option<&'a str>,
+    pub portal_strand_id: Option<&'a str>,
     pub created_at: i64,
 }
 

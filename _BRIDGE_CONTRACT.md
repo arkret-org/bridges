@@ -18,12 +18,12 @@ where M: MessageBridge, F: FnOnce(Arc<MessageContext>) -> Result<M>;
 // cokret-bridge-runtime 重导出:Config(Config::load(path))、BridgeError/Result、logging::init
 pub struct MessageContext { pub http: reqwest::Client, /* + core()/store() */ }
 impl MessageContext {
-    // 出站:把 app 入站消息作为 per-user Ghost Actor 事件提交到 cokret portal flow,
+    // 出站:把 app 入站消息作为 per-user Ghost Actor 事件提交到 cokret portal strand,
     // 返回 event_id。payload 按权威 message_create_payload 组装
-    // ({flow_id, track_name:"discussion", content: content_block, blob_refs[]}),
-    // 外部 location 的映射单位是 (realm_id, flow_id)(applet-integration §10.1):
-    // portal flow 按「持久化映射 → projection 按 external_ref 匹配 → ck.flow.create」
-    // 顺序惰性解析并缓存在 room_mappings.portal_flow_id。
+    // ({strand_id, track_name:"discussion", content: content_block, blob_refs[]}),
+    // 外部 location 的映射单位是 (realm_id, strand_id)(applet-integration §10.1):
+    // portal strand 按「持久化映射 → projection 按 external_ref 匹配 → ck.strand.create」
+    // 顺序惰性解析并缓存在 room_mappings.portal_strand_id。
     pub async fn submit_app_message(&self, msg: InboundAppMessage) -> Result<String>;
 }
 pub struct InboundAppMessage  { pub app_channel: String, pub app_user: String,
@@ -45,8 +45,8 @@ pub trait MessageBridge: Send + Sync + 'static {
 ```
 
 下行(cokret→app)由 messaging 的 `MessageAdapter::on_cokret_event` 自动驱动 `send_to_app`,
-适配器无需自己实现 `on_cokret_event`;只转发 portal flow 上的 `ck.message.create`(§10.1 映射
-单位是 `(realm_id, flow_id)`),正文从 `payload.content`(content_block)解析,媒体从
+适配器无需自己实现 `on_cokret_event`;只转发 portal strand 上的 `ck.message.create`(§10.1 映射
+单位是 `(realm_id, strand_id)`),正文从 `payload.content`(content_block)解析,媒体从
 `blob_ref`/`blob_refs[]` 解析。`config.app` 放该 app 专属配置(token 等),由
 `bridge_main` 经 serde 反序列化成每桥自定义的强类型 `AppConfig`(缺字段由 serde 按字段名报错)。
 错误统一用 `BridgeError::App(String)`。
@@ -59,7 +59,7 @@ pub trait MessageBridge: Send + Sync + 'static {
 - 当前 SDK `Event` 模型(HEAD)尚未暴露这两个顶层字段(wire 形 deny_unknown_fields),本仓
   不改 SDK,故桥侧现状为:`unsigned.applet_id`/`unsigned.external_ref` 仅作传输 hint;
   **回环判据只用签名覆盖的字段**(`executed_by == service_did` 或 `actor_id == service_did`),
-  不再读取 unsigned。portal flow 的外部 location 出处写入 flow 对象的签名 metadata
+  不再读取 unsigned。portal strand 的外部 location 出处写入 strand 对象的签名 metadata
   (`metadata.fields.external_ref`,受 event_digest 覆盖)。SDK 补齐 envelope 顶层签名
   `external_ref`/`applet_id` 后,应迁移到顶层签名承载位。
 

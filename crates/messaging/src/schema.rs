@@ -2,14 +2,14 @@
 
 diesel::table! {
     /// App channel/conversation <-> Cokret portal mapping. The mapping unit is
-    /// `(realm_id, flow_id)` per applet-integration §10.1: `portal_flow_id` is
+    /// `(realm_id, strand_id)` per applet-integration §10.1: `portal_strand_id` is
     /// resolved lazily through the §10.1 acquisition path and cached here.
     room_mappings (id) {
         id -> BigInt,
         app_channel_id -> Text,
         cokret_realm_id -> Text,
         portal_alias -> Nullable<Text>,
-        portal_flow_id -> Nullable<Text>,
+        portal_strand_id -> Nullable<Text>,
         created_at -> BigInt,
     }
 }

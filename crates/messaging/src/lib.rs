@@ -3,11 +3,11 @@
 //! This crate sits on top of `cokret-bridge-runtime`. It owns the
 //! message-shaped contract shared by the social bridge adapters:
 //!
-//! - app channel/message/user mapping tables (location ↔ `(realm_id, flow_id)` per
+//! - app channel/message/user mapping tables (location ↔ `(realm_id, strand_id)` per
 //!   applet-integration §10.1),
-//! - spec-shaped `ck.message.create` payload assembly (`{flow_id, track_name, content, blob_refs}`)
+//! - spec-shaped `ck.message.create` payload assembly (`{strand_id, track_name, content, blob_refs}`)
 //!   and parsing,
-//! - portal flow acquisition/creation (`ck.flow.create`),
+//! - portal strand acquisition/creation (`ck.strand.create`),
 //! - `MessageBridge` and `run_message_bridge`,
 //! - `external_ref` provenance for upstream channel/user/message ids.
 
@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use cokret::http_client::ClientRequestOptions;
 use cokret::{
     AppletBridgeErrorBuilder, AppletBridgeErrorVisibility, AppletId, BlobRef, ContentBlock, Did,
-    Event, FlowCreateObject, FlowId, FlowTrackConfig, GhostActorProvisionOutcome,
+    Event, StrandCreateObject, StrandId, StrandTrackConfig, GhostActorProvisionOutcome,
     GhostActorProvisionRequestBody, MessageCreatePayload, ObjectCreatePayload, RealmId,
 };
 use cokret_bridge_runtime::app::{
@@ -62,16 +62,16 @@ const MESSAGE_MAPPING_KEY_SEPARATOR: char = '\u{1f}';
 /// message creation and redaction.
 const BRIDGE_HANDLED_EVENT_KINDS: [&str; 2] = ["ck.message.create", "ck.message.redact"];
 
-/// The flow track bridged messages write into. applet-integration §10.1: 桥接
+/// The strand track bridged messages write into. applet-integration §10.1: 桥接
 /// 消息默认写入 `discussion`;v1 的 `message_create_payload.track_name` 在
 /// schema 中即 const `"discussion"`。
-const PORTAL_FLOW_TRACK: &str = "discussion";
+const PORTAL_STRAND_TRACK: &str = "discussion";
 
 /// Page size for the §10.1 step-2 projection scan over realm history.
-const PORTAL_FLOW_SCAN_PAGE_LIMIT: u32 = 200;
+const PORTAL_STRAND_SCAN_PAGE_LIMIT: u32 = 200;
 /// Page cap for the §10.1 step-2 projection scan (bounds startup cost on large
 /// realms; a fresh portal realm resolves in one page).
-const PORTAL_FLOW_SCAN_MAX_PAGES: usize = 25;
+const PORTAL_STRAND_SCAN_MAX_PAGES: usize = 25;
 
 /// An inbound message from an external app into Cokret.
 #[derive(Clone, Debug)]
@@ -205,15 +205,15 @@ pub fn media_content_block(att: &Attachment) -> Result<Value> {
 
 /// Assemble the authoritative `ck.message.create` payload
 /// (`event-payload.schema.json#/$defs/message_create_payload`, closed schema:
-/// required `flow_id` + `track_name`, body in `content`, media listed in
+/// required `strand_id` + `track_name`, body in `content`, media listed in
 /// `blob_refs[]`).
 fn build_message_create_payload(
-    flow_id: &str,
+    strand_id: &str,
     content: Value,
     blob_refs: Vec<String>,
 ) -> Result<Value> {
-    let flow_id = FlowId::new(flow_id.to_owned())?;
-    let mut payload = MessageCreatePayload::with_content(flow_id, PORTAL_FLOW_TRACK, content);
+    let strand_id = StrandId::new(strand_id.to_owned())?;
+    let mut payload = MessageCreatePayload::with_content(strand_id, PORTAL_STRAND_TRACK, content);
     payload.blob_refs = blob_refs;
     payload
         .to_value()
@@ -232,9 +232,9 @@ pub fn extract_plain_body(payload: &Value) -> String {
         .to_owned()
 }
 
-/// The `flow_id` carried by a `ck.message.create` payload, if present.
-pub fn extract_flow_id(payload: &Value) -> Option<&str> {
-    payload.get("flow_id").and_then(Value::as_str)
+/// The `strand_id` carried by a `ck.message.create` payload, if present.
+pub fn extract_strand_id(payload: &Value) -> Option<&str> {
+    payload.get("strand_id").and_then(Value::as_str)
 }
 
 /// Locate the media block inside a `content_block`: the block itself when it is
@@ -320,10 +320,10 @@ impl MessageStore {
             .first::<RoomMapping>(&mut conn)
             .optional()?;
         if let Some(existing) = exists {
-            // A realm change invalidates the cached portal flow (the flow
+            // A realm change invalidates the cached portal strand (the strand
             // belongs to the previous realm); it is re-resolved lazily.
-            let portal_flow_id = if existing.cokret_realm_id == realm_id {
-                existing.portal_flow_id.clone()
+            let portal_strand_id = if existing.cokret_realm_id == realm_id {
+                existing.portal_strand_id.clone()
             } else {
                 None
             };
@@ -331,7 +331,7 @@ impl MessageStore {
                 .set((
                     dsl::cokret_realm_id.eq(realm_id),
                     dsl::portal_alias.eq(alias),
-                    dsl::portal_flow_id.eq(portal_flow_id),
+                    dsl::portal_strand_id.eq(portal_strand_id),
                 ))
                 .execute(&mut conn)?;
         } else {
@@ -340,7 +340,7 @@ impl MessageStore {
                     app_channel_id: app_channel,
                     cokret_realm_id: realm_id,
                     portal_alias: alias,
-                    portal_flow_id: None,
+                    portal_strand_id: None,
                     created_at: now_ts(),
                 })
                 .execute(&mut conn)?;
@@ -349,7 +349,7 @@ impl MessageStore {
     }
 
     /// The full portal mapping row for an app channel (realm + cached portal
-    /// flow, applet-integration §10.1).
+    /// strand, applet-integration §10.1).
     pub fn portal_for_channel(&self, app_channel: &str) -> Result<Option<RoomMapping>> {
         use schema::room_mappings::dsl;
 
@@ -360,13 +360,13 @@ impl MessageStore {
             .optional()?)
     }
 
-    /// Persist the resolved portal flow for an app channel (§10.1 step 1 cache).
-    pub fn set_channel_portal_flow(&self, app_channel: &str, flow_id: &str) -> Result<()> {
+    /// Persist the resolved portal strand for an app channel (§10.1 step 1 cache).
+    pub fn set_channel_portal_strand(&self, app_channel: &str, strand_id: &str) -> Result<()> {
         use schema::room_mappings::dsl;
 
         let mut conn = self.db.conn()?;
         diesel::update(dsl::room_mappings.filter(dsl::app_channel_id.eq(app_channel)))
-            .set(dsl::portal_flow_id.eq(Some(flow_id)))
+            .set(dsl::portal_strand_id.eq(Some(strand_id)))
             .execute(&mut conn)?;
         Ok(())
     }
@@ -838,24 +838,24 @@ fn location_matches(candidate: Option<&Value>, location: &Value) -> bool {
 }
 
 /// §10.1 step 2: scan the portal realm's history (a projection over regular
-/// event reads) for an existing portal flow whose recorded external location
-/// matches. Concurrent/retried creates resolve to the earliest flow in
+/// event reads) for an existing portal strand whose recorded external location
+/// matches. Concurrent/retried creates resolve to the earliest strand in
 /// effective (HLC) order, per the §10.1 create-idempotency rule.
 ///
-/// The location is matched against the flow object's signed
+/// The location is matched against the strand object's signed
 /// `metadata.fields.external_ref` (covered by the event digest). The spec's
 /// envelope-top-level signed `external_ref` is not yet representable in the SDK
-/// `Event` model, so flow creation mirrors the location into the signed flow
-/// metadata (see [`create_portal_flow`]).
-async fn find_existing_portal_flow(
+/// `Event` model, so strand creation mirrors the location into the signed strand
+/// metadata (see [`create_portal_strand`]).
+async fn find_existing_portal_strand(
     edge: &runtime::CokretEdge,
     realm_id: &str,
     location: &Value,
 ) -> Result<Option<String>> {
     let mut cursor: Option<String> = None;
-    // (hlc, event_id, flow_id) — keep the earliest in effective order.
+    // (hlc, event_id, strand_id) — keep the earliest in effective order.
     let mut earliest: Option<(String, String, String)> = None;
-    for _ in 0..PORTAL_FLOW_SCAN_MAX_PAGES {
+    for _ in 0..PORTAL_STRAND_SCAN_MAX_PAGES {
         let page = edge
             .client()
             .events_query(
@@ -863,11 +863,11 @@ async fn find_existing_portal_flow(
                 cursor.as_deref(),
                 None,
                 None,
-                Some(PORTAL_FLOW_SCAN_PAGE_LIMIT),
+                Some(PORTAL_STRAND_SCAN_PAGE_LIMIT),
             )
             .await?;
         for event in &page.events {
-            if event.kind.as_str() != "ck.flow.create" {
+            if event.kind.as_str() != "ck.strand.create" {
                 continue;
             }
             let Some(object) = event.content.get("object") else {
@@ -876,14 +876,14 @@ async fn find_existing_portal_flow(
             if !location_matches(object.pointer("/metadata/fields/external_ref"), location) {
                 continue;
             }
-            let Some(flow_id) = object.get("id").and_then(Value::as_str) else {
+            let Some(strand_id) = object.get("id").and_then(Value::as_str) else {
                 continue;
             };
             let key = (event.hlc.to_string(), event.event_id.to_string());
             if earliest.as_ref().is_none_or(|(hlc, event_id, _)| {
                 (key.0.as_str(), key.1.as_str()) < (hlc.as_str(), event_id.as_str())
             }) {
-                earliest = Some((key.0, key.1, flow_id.to_owned()));
+                earliest = Some((key.0, key.1, strand_id.to_owned()));
             }
         }
         if page.events.is_empty() {
@@ -894,13 +894,13 @@ async fn find_existing_portal_flow(
             None => break,
         }
     }
-    Ok(earliest.map(|(_, _, flow_id)| flow_id))
+    Ok(earliest.map(|(_, _, strand_id)| strand_id))
 }
 
-/// §10.1 step 3: create the portal flow by submitting `ck.flow.create` under
+/// §10.1 step 3: create the portal strand by submitting `ck.strand.create` under
 /// the bridge's own signable identity (the service actor), recording the
-/// external location in the signed flow metadata, and return the new flow id.
-async fn create_portal_flow(
+/// external location in the signed strand metadata, and return the new strand id.
+async fn create_portal_strand(
     edge: &runtime::CokretEdge,
     app_channel: &str,
     alias: Option<&str>,
@@ -908,32 +908,32 @@ async fn create_portal_flow(
     location: &Value,
 ) -> Result<String> {
     let realm = RealmId::new(realm_id.to_owned())?;
-    let flow_id = FlowId::new(cokret::new_prefixed_uuid7("ck:flow:"))?;
+    let strand_id = StrandId::new(cokret::new_prefixed_uuid7("ck:strand:"))?;
     let title = alias
         .filter(|alias| !alias.trim().is_empty())
         .unwrap_or(app_channel);
-    let flow = FlowCreateObject::new(flow_id.clone(), realm.clone(), edge.service_did().clone())
+    let strand = StrandCreateObject::new(strand_id.clone(), realm.clone(), edge.service_did().clone())
         .with_metadata_title(title)
         .with_metadata_field("external_ref", location.clone())
-        .with_track(PORTAL_FLOW_TRACK, FlowTrackConfig::discussion_primary());
-    let flow_created_at = flow.created_at;
-    let payload = ObjectCreatePayload::new(flow)
+        .with_track(PORTAL_STRAND_TRACK, StrandTrackConfig::discussion_primary());
+    let strand_created_at = strand.created_at;
+    let payload = ObjectCreatePayload::new(strand)
         .to_value()
         .map_err(|e| BridgeError::App(e.to_string()))?;
-    let mut event = edge.mint_event("ck.flow.create", &realm, payload)?;
-    // flow_create_payload semantic validation requires object.created_by ==
+    let mut event = edge.mint_event("ck.strand.create", &realm, payload)?;
+    // strand_create_payload semantic validation requires object.created_by ==
     // actor_id (both are the service DID here) and object.created_at == the
     // envelope created_at.
-    event.created_at = flow_created_at;
+    event.created_at = strand_created_at;
     // §10.1 asks for a signed envelope top-level external_ref recording the
     // location; the SDK Event model cannot carry that field yet, so the signed
-    // copy lives in the flow metadata above and unsigned only carries a hint.
+    // copy lives in the strand metadata above and unsigned only carries a hint.
     event
         .unsigned
         .insert("external_ref".to_owned(), location.clone());
     edge.resign_event(&mut event)?;
     edge.submit_event(&event).await?;
-    Ok(flow_id.to_string())
+    Ok(strand_id.to_string())
 }
 
 fn host_allowed(host: &str, allowed_hosts: &[&str]) -> bool {
@@ -1116,14 +1116,14 @@ impl MessageContext {
         })
     }
 
-    /// Resolve the portal flow for an app channel following the §10.1
+    /// Resolve the portal strand for an app channel following the §10.1
     /// acquisition order: persisted mapping → projection scan over the portal
-    /// realm (match by external location) → `ck.flow.create`. The result is
+    /// realm (match by external location) → `ck.strand.create`. The result is
     /// cached in the room mapping. Serialized per channel so concurrent first
     /// messages cannot double-create.
-    pub async fn ensure_portal_flow(&self, app_channel: &str, realm_id: &str) -> Result<String> {
+    pub async fn ensure_portal_strand(&self, app_channel: &str, realm_id: &str) -> Result<String> {
         let channel_key = message_mapping_channel_key(&self.inner.config, app_channel);
-        let queue_key = format!("portal_flow{MESSAGE_MAPPING_KEY_SEPARATOR}{channel_key}");
+        let queue_key = format!("portal_strand{MESSAGE_MAPPING_KEY_SEPARATOR}{channel_key}");
         self.inner
             .queue
             .run(&queue_key, || {
@@ -1133,26 +1133,26 @@ impl MessageContext {
                 let app_channel = app_channel.to_owned();
                 let realm_id = realm_id.to_owned();
                 async move {
-                    // §10.1 step 1: the persisted location ↔ (realm_id, flow_id)
+                    // §10.1 step 1: the persisted location ↔ (realm_id, strand_id)
                     // mapping.
                     let row = store.portal_for_channel(&app_channel)?;
                     let alias = row.as_ref().and_then(|row| row.portal_alias.clone());
                     if let Some(row) = row
                         && row.cokret_realm_id == realm_id
-                        && let Some(flow_id) = row
-                            .portal_flow_id
-                            .filter(|flow_id| !flow_id.trim().is_empty())
+                        && let Some(strand_id) = row
+                            .portal_strand_id
+                            .filter(|strand_id| !strand_id.trim().is_empty())
                     {
-                        return Ok::<String, BridgeError>(flow_id);
+                        return Ok::<String, BridgeError>(strand_id);
                     }
                     let location = portal_location_ref(&config, &app_channel);
-                    // §10.1 step 2: look for an existing portal flow.
-                    let flow_id =
-                        match find_existing_portal_flow(&edge, &realm_id, &location).await? {
-                            Some(flow_id) => flow_id,
+                    // §10.1 step 2: look for an existing portal strand.
+                    let strand_id =
+                        match find_existing_portal_strand(&edge, &realm_id, &location).await? {
+                            Some(strand_id) => strand_id,
                             // §10.1 step 3: create it.
                             None => {
-                                create_portal_flow(
+                                create_portal_strand(
                                     &edge,
                                     &app_channel,
                                     alias.as_deref(),
@@ -1162,8 +1162,8 @@ impl MessageContext {
                                 .await?
                             }
                         };
-                    store.set_channel_portal_flow(&app_channel, &flow_id)?;
-                    Ok(flow_id)
+                    store.set_channel_portal_strand(&app_channel, &strand_id)?;
+                    Ok(strand_id)
                 }
             })
             .await
@@ -1191,7 +1191,7 @@ impl MessageContext {
             .await
     }
 
-    /// Shared submit path: resolve the portal `(realm_id, flow_id)`, assemble
+    /// Shared submit path: resolve the portal `(realm_id, strand_id)`, assemble
     /// the spec `message_create_payload`, attach provenance, submit on the
     /// per-channel serial queue, and record the message mapping.
     async fn submit_content(
@@ -1218,9 +1218,9 @@ impl MessageContext {
                 ))
             })?;
         // §10.1: the mapping unit for an external location is (realm_id,
-        // flow_id) — resolve the portal flow before submitting.
-        let flow_id = self.ensure_portal_flow(&msg.app_channel, &realm).await?;
-        let payload = build_message_create_payload(&flow_id, content, blob_refs)?;
+        // strand_id) — resolve the portal strand before submitting.
+        let strand_id = self.ensure_portal_strand(&msg.app_channel, &realm).await?;
+        let payload = build_message_create_payload(&strand_id, content, blob_refs)?;
 
         let protocol = bridge_protocol(&self.inner.config);
         let tenant = bridge_tenant(&self.inner.config);
@@ -1443,17 +1443,17 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
             return Ok(());
         };
         let channel = room.app_channel_id.clone();
-        // §10.1: the external location maps to (realm_id, flow_id), not the
-        // bare realm — only messages on the portal flow cross the bridge.
-        let portal_flow = match room.portal_flow_id.filter(|f| !f.trim().is_empty()) {
-            Some(flow_id) => flow_id,
-            None => self.ctx.ensure_portal_flow(&channel, &realm_id).await?,
+        // §10.1: the external location maps to (realm_id, strand_id), not the
+        // bare realm — only messages on the portal strand cross the bridge.
+        let portal_strand = match room.portal_strand_id.filter(|f| !f.trim().is_empty()) {
+            Some(strand_id) => strand_id,
+            None => self.ctx.ensure_portal_strand(&channel, &realm_id).await?,
         };
-        if extract_flow_id(&event.content) != Some(portal_flow.as_str()) {
+        if extract_strand_id(&event.content) != Some(portal_strand.as_str()) {
             tracing::debug!(
                 realm = %realm_id,
-                portal_flow = %portal_flow,
-                "message is not on the portal flow, dropping"
+                portal_strand = %portal_strand,
+                "message is not on the portal strand, dropping"
             );
             return Ok(());
         }
@@ -1599,7 +1599,7 @@ where
 mod tests {
     use super::*;
 
-    const FLOW_ID: &str = "ck:flow:01904100-0000-7000-8000-000000000001";
+    const STRAND_ID: &str = "ck:strand:01904100-0000-7000-8000-000000000001";
 
     fn media_attachment() -> Attachment {
         Attachment {
@@ -1614,9 +1614,9 @@ mod tests {
     #[test]
     fn text_payload_matches_message_create_schema_shape() {
         let content = text_content_block("hello").unwrap();
-        let payload = build_message_create_payload(FLOW_ID, content, Vec::new()).unwrap();
-        assert_eq!(payload["flow_id"], FLOW_ID);
-        assert_eq!(payload["track_name"], PORTAL_FLOW_TRACK);
+        let payload = build_message_create_payload(STRAND_ID, content, Vec::new()).unwrap();
+        assert_eq!(payload["strand_id"], STRAND_ID);
+        assert_eq!(payload["track_name"], PORTAL_STRAND_TRACK);
         assert_eq!(payload["content"]["kind"], "ck.content.text");
         assert_eq!(payload["content"]["body"], "hello");
         // Closed-schema hygiene: no stray top-level body / media fields.
@@ -1630,7 +1630,7 @@ mod tests {
         let att = media_attachment();
         let content = media_content_block(&att).unwrap();
         let payload =
-            build_message_create_payload(FLOW_ID, content, vec![att.blob_ref.clone()]).unwrap();
+            build_message_create_payload(STRAND_ID, content, vec![att.blob_ref.clone()]).unwrap();
         assert_eq!(payload["content"]["kind"], "ck.content.image");
         assert_eq!(payload["content"]["body"], "look at this");
         assert_eq!(payload["content"]["blob_ref"], att.blob_ref);
@@ -1671,10 +1671,10 @@ mod tests {
         let att = media_attachment();
         let content = media_content_block(&att).unwrap();
         let payload =
-            build_message_create_payload(FLOW_ID, content, vec![att.blob_ref.clone()]).unwrap();
+            build_message_create_payload(STRAND_ID, content, vec![att.blob_ref.clone()]).unwrap();
 
         assert_eq!(extract_plain_body(&payload), "look at this");
-        assert_eq!(extract_flow_id(&payload), Some(FLOW_ID));
+        assert_eq!(extract_strand_id(&payload), Some(STRAND_ID));
         let extracted = extract_attachment(&payload).expect("attachment");
         assert_eq!(extracted.blob_ref, att.blob_ref);
         assert_eq!(extracted.media_type.as_deref(), Some("image/png"));
@@ -1686,7 +1686,7 @@ mod tests {
     #[test]
     fn extraction_handles_composite_and_legacy_shapes() {
         let composite = json!({
-            "flow_id": FLOW_ID,
+            "strand_id": STRAND_ID,
             "track_name": "discussion",
             "content": {
                 "kind": "ck.content.composite",

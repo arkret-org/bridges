@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS room_mappings (
     app_channel_id TEXT NOT NULL,
     cokret_realm_id TEXT NOT NULL,
     portal_alias TEXT,
-    portal_flow_id TEXT,
+    portal_strand_id TEXT,
     created_at BIGINT NOT NULL,
     UNIQUE KEY room_app_channel_id_unique (app_channel_id(191)),
     UNIQUE KEY room_cokret_realm_id_unique (cokret_realm_id(191)));

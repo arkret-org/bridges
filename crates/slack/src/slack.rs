@@ -4,7 +4,7 @@
 //!   and then calls [`MessageContext::submit_app_message`].
 //! - Outbound (cokret → Slack): [`MessageBridge::send_to_app`] uses `ctx.http` to POST `https://slack.com/api/chat.postMessage`.
 //!
-//! Socket mode connection flow: first POST `app_token` (`xapp-`) to
+//! Socket mode connection strand: first POST `app_token` (`xapp-`) to
 //! `https://slack.com/api/apps.connections.open` to obtain a one-time wss URL, then
 //! connect via tokio-tungstenite; after the server pushes an envelope, reply with a
 //! `{"envelope_id":..}` ack.
