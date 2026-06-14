@@ -6,7 +6,7 @@ use std::sync::{Arc, OnceLock};
 
 use ::metrics::{counter, describe_counter};
 use cokret::identity::{ResolverFailMode, ResolverPolicy};
-use cokret::model::AppletTransactionRequestBody;
+use cokret::models::AppletTransactionRequestBody;
 use cokret::signatures::http_signature::{
     Component, SignatureVerificationPolicy, parse_signature_input, public_key_from_bytes,
     verify_signed_http_message,
@@ -285,7 +285,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         }
         Ok(TransactionClaim::Pending) => {
             record_applet_transaction("pending");
-            res.render(Json(cokret::model::AppletTransactionOutcome {
+            res.render(Json(cokret::models::AppletTransactionOutcome {
                 ok: false,
                 rejected: Vec::new(),
                 retry_after_ms: Some(1000),
@@ -298,7 +298,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
             // applet-integration §7.3/§14 require the closed error code
             // `duplicate_conflict` (the registry has no `idempotency_conflict`).
             res.status_code(StatusCode::CONFLICT);
-            res.render(Json(cokret::model::AppletTransactionOutcome {
+            res.render(Json(cokret::models::AppletTransactionOutcome {
                 ok: false,
                 rejected: vec![json!({ "reason_code": "duplicate_conflict" })],
                 retry_after_ms: None,

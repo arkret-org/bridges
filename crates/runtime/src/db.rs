@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use cokret::model::AppletTransactionOutcome;
+use cokret::models::AppletTransactionOutcome;
 use diesel::prelude::*;
 use diesel::r2d2::{ConnectionManager, Pool, PooledConnection};
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};

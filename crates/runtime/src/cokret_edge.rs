@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cokret::DidResolver;
 use cokret::http_client::{Auth, Client};
 #[cfg(any(feature = "web", test))]
-use cokret::model::{
+use cokret::models::{
     AppletActorView, AppletDescription, AppletPingOutcome, AppletProtocolMetadata, AppletRealmView,
     AppletTransactionOutcome, AppletTransactionRequestBody,
 };
@@ -423,7 +423,7 @@ impl CokretEdge {
 
     /// Media upload: returns the blob reference string.
     pub async fn upload_blob(&self, bytes: &[u8], mime: &str) -> Result<String> {
-        let meta = cokret::model::BlobUploadMetadata {
+        let meta = cokret::models::BlobUploadMetadata {
             realm_id: None,
             content_digest: None,
             size_bytes: bytes.len() as u64,
