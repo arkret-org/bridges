@@ -240,7 +240,7 @@ impl Config {
     }
 
     pub fn from_yaml(text: &str) -> Result<Self> {
-        serde_yaml::from_str(text).map_err(|e| BridgeError::Config(e.to_string()))
+        serde_yaml_ng::from_str(text).map_err(|e| BridgeError::Config(e.to_string()))
     }
 
     /// Decode the signing seed into 32 bytes.
