@@ -5,8 +5,8 @@
 //!
 //! - app channel/message/user mapping tables (location ↔ `(realm_id, strand_id)` per
 //!   applet-integration §10.1),
-//! - spec-shaped `ck.message.create` payload assembly (`{strand_id, track_name, content, blob_refs}`)
-//!   and parsing,
+//! - spec-shaped `ck.message.create` payload assembly (`{strand_id, track_name, content,
+//!   blob_refs}`) and parsing,
 //! - portal strand acquisition/creation (`ck.strand.create`),
 //! - `MessageBridge` and `run_message_bridge`,
 //! - `external_ref` provenance for upstream channel/user/message ids.
@@ -21,8 +21,8 @@ use async_trait::async_trait;
 use cokret::http_client::ClientRequestOptions;
 use cokret::{
     AppletBridgeErrorBuilder, AppletBridgeErrorVisibility, AppletId, BlobRef, ContentBlock, Did,
-    Event, StrandCreateObject, StrandId, StrandTrackConfig, GhostActorProvisionOutcome,
-    GhostActorProvisionRequestBody, MessageCreatePayload, ObjectCreatePayload, RealmId,
+    Event, GhostActorProvisionOutcome, GhostActorProvisionRequestBody, MessageCreatePayload,
+    ObjectCreatePayload, RealmId, StrandCreateObject, StrandId, StrandTrackConfig,
 };
 use cokret_bridge_runtime::app::{
     AppletResolver, BridgeApp, BridgeContext, ResolvedActor, ResolvedRealm,
@@ -912,10 +912,11 @@ async fn create_portal_strand(
     let title = alias
         .filter(|alias| !alias.trim().is_empty())
         .unwrap_or(app_channel);
-    let strand = StrandCreateObject::new(strand_id.clone(), realm.clone(), edge.service_did().clone())
-        .with_metadata_title(title)
-        .with_metadata_field("external_ref", location.clone())
-        .with_track(PORTAL_STRAND_TRACK, StrandTrackConfig::discussion_primary());
+    let strand =
+        StrandCreateObject::new(strand_id.clone(), realm.clone(), edge.service_did().clone())
+            .with_metadata_title(title)
+            .with_metadata_field("external_ref", location.clone())
+            .with_track(PORTAL_STRAND_TRACK, StrandTrackConfig::discussion_primary());
     let strand_created_at = strand.created_at;
     let payload = ObjectCreatePayload::new(strand)
         .to_value()
@@ -1637,7 +1638,7 @@ mod tests {
         assert_eq!(payload["content"]["mime_type"], "image/png");
         assert_eq!(payload["content"]["size_bytes"], 2048);
         // content_block schema forbids `size` (byte counts are `size_bytes`)
-        // and the legacy flat fields must not leak into the payload.
+        // and removed flat fields must not leak into the payload.
         assert!(payload["content"].get("size").is_none());
         assert!(payload["content"].get("mimetype").is_none());
         assert_eq!(payload["blob_refs"][0], att.blob_ref);
@@ -1684,7 +1685,7 @@ mod tests {
     }
 
     #[test]
-    fn extraction_handles_composite_and_legacy_shapes() {
+    fn extraction_handles_composite_payloads() {
         let composite = json!({
             "strand_id": STRAND_ID,
             "track_name": "discussion",
