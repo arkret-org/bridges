@@ -1,0 +1,341 @@
+//! Channel/message/user mapping store and the DB-backed [`AppletResolver`].
+//!
+//! Owns the messaging mapping tables (`room_mappings`, `message_mappings`,
+//! `user_mappings`) per applet-integration §10.1 / §16, and answers the cokret
+//! server's actor/realm probes from them.
+
+use std::sync::Arc;
+
+use cokret_bridge_runtime::app::{AppletResolver, ResolvedActor, ResolvedRealm};
+use cokret_bridge_runtime::db::DatabaseManager;
+use cokret_bridge_runtime::{BridgeError, Result};
+use diesel::prelude::*;
+use diesel_migrations::{EmbeddedMigrations, embed_migrations};
+use serde_json::json;
+
+pub use crate::models::{MessageMapping, RoomMapping, UserMapping};
+use crate::models::{NewMessageMapping, NewRoomMapping, NewUserMapping};
+use crate::schema;
+
+/// Embedded migrations for the messaging-owned mapping tables (`room_mappings`,
+/// `message_mappings`, `user_mappings`). The backend dialect is selected at
+/// compile time, matching the runtime's active connection feature.
+#[cfg(feature = "sqlite")]
+const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
+#[cfg(all(feature = "postgres", not(feature = "sqlite")))]
+const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/postgres");
+#[cfg(all(feature = "mysql", not(feature = "sqlite"), not(feature = "postgres")))]
+const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/mysql");
+
+pub(crate) fn now_ts() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
+/// Channel/message/user mapping store persisted through the runtime database.
+pub struct MessageStore {
+    db: Arc<DatabaseManager>,
+}
+
+impl MessageStore {
+    pub fn new(db: Arc<DatabaseManager>) -> Result<Self> {
+        db.run_migrations(MIGRATIONS)?;
+        Ok(Self { db })
+    }
+
+    pub fn upsert_room(
+        &self,
+        app_channel: &str,
+        realm_id: &str,
+        alias: Option<&str>,
+    ) -> Result<()> {
+        use schema::room_mappings::dsl;
+
+        let mut conn = self.db.conn()?;
+        let exists = dsl::room_mappings
+            .filter(dsl::app_channel_id.eq(app_channel))
+            .first::<RoomMapping>(&mut conn)
+            .optional()?;
+        if let Some(existing) = exists {
+            // A realm change invalidates the cached portal strand (the strand
+            // belongs to the previous realm); it is re-resolved lazily.
+            let portal_strand_id = if existing.cokret_realm_id == realm_id {
+                existing.portal_strand_id.clone()
+            } else {
+                None
+            };
+            diesel::update(dsl::room_mappings.filter(dsl::id.eq(existing.id)))
+                .set((
+                    dsl::cokret_realm_id.eq(realm_id),
+                    dsl::portal_alias.eq(alias),
+                    dsl::portal_strand_id.eq(portal_strand_id),
+                ))
+                .execute(&mut conn)?;
+        } else {
+            diesel::insert_into(dsl::room_mappings)
+                .values(NewRoomMapping {
+                    app_channel_id: app_channel,
+                    cokret_realm_id: realm_id,
+                    portal_alias: alias,
+                    portal_strand_id: None,
+                    created_at: now_ts(),
+                })
+                .execute(&mut conn)?;
+        }
+        Ok(())
+    }
+
+    /// The full portal mapping row for an app channel (realm + cached portal
+    /// strand, applet-integration §10.1).
+    pub fn portal_for_channel(&self, app_channel: &str) -> Result<Option<RoomMapping>> {
+        use schema::room_mappings::dsl;
+
+        let mut conn = self.db.conn()?;
+        Ok(dsl::room_mappings
+            .filter(dsl::app_channel_id.eq(app_channel))
+            .first::<RoomMapping>(&mut conn)
+            .optional()?)
+    }
+
+    /// Persist the resolved portal strand for an app channel (§10.1 step 1 cache).
+    pub fn set_channel_portal_strand(&self, app_channel: &str, strand_id: &str) -> Result<()> {
+        use schema::room_mappings::dsl;
+
+        let mut conn = self.db.conn()?;
+        diesel::update(dsl::room_mappings.filter(dsl::app_channel_id.eq(app_channel)))
+            .set(dsl::portal_strand_id.eq(Some(strand_id)))
+            .execute(&mut conn)?;
+        Ok(())
+    }
+
+    /// The portal mapping row for a realm (cokret → app direction).
+    pub fn room_for_realm(&self, realm_id: &str) -> Result<Option<RoomMapping>> {
+        use schema::room_mappings::dsl;
+
+        let mut conn = self.db.conn()?;
+        Ok(dsl::room_mappings
+            .filter(dsl::cokret_realm_id.eq(realm_id))
+            .first::<RoomMapping>(&mut conn)
+            .optional()?)
+    }
+
+    pub fn record_message(
+        &self,
+        app_channel: &str,
+        app_message_id: &str,
+        normalized_sender: &str,
+        cokret_event_id: &str,
+        realm_id: &str,
+    ) -> Result<()> {
+        use schema::message_mappings::dsl;
+
+        if app_channel.trim().is_empty() {
+            return Err(BridgeError::App("app_channel must not be empty".into()));
+        }
+        if app_message_id.trim().is_empty() {
+            return Err(BridgeError::App("app_message_id must not be empty".into()));
+        }
+        if normalized_sender.trim().is_empty() {
+            return Err(BridgeError::App(
+                "normalized_sender must not be empty".into(),
+            ));
+        }
+
+        let mut conn = self.db.conn()?;
+        let exists = dsl::message_mappings
+            .filter(dsl::app_channel_id.eq(app_channel))
+            .filter(dsl::app_message_id.eq(app_message_id))
+            .filter(dsl::normalized_sender.eq(normalized_sender))
+            .first::<MessageMapping>(&mut conn)
+            .optional()?;
+        if let Some(existing) = exists {
+            diesel::update(dsl::message_mappings.filter(dsl::id.eq(existing.id)))
+                .set((
+                    dsl::cokret_event_id.eq(cokret_event_id),
+                    dsl::cokret_realm_id.eq(realm_id),
+                ))
+                .execute(&mut conn)?;
+        } else {
+            diesel::insert_into(dsl::message_mappings)
+                .values(NewMessageMapping {
+                    app_channel_id: app_channel,
+                    app_message_id,
+                    normalized_sender,
+                    cokret_event_id,
+                    cokret_realm_id: realm_id,
+                    created_at: now_ts(),
+                })
+                .execute(&mut conn)?;
+        }
+        Ok(())
+    }
+
+    /// Dedup lookup keyed by the §16 minimum key set: protocol/tenant/channel
+    /// (folded into `app_channel`), external event id, and normalized sender.
+    pub fn event_for_channel_message(
+        &self,
+        app_channel: &str,
+        app_message_id: &str,
+        normalized_sender: &str,
+    ) -> Result<Option<String>> {
+        use schema::message_mappings::dsl;
+
+        let mut conn = self.db.conn()?;
+        Ok(dsl::message_mappings
+            .filter(dsl::app_channel_id.eq(app_channel))
+            .filter(dsl::app_message_id.eq(app_message_id))
+            .filter(dsl::normalized_sender.eq(normalized_sender))
+            .select(dsl::cokret_event_id)
+            .first::<String>(&mut conn)
+            .optional()?)
+    }
+
+    pub fn app_message_for_event(&self, cokret_event_id: &str) -> Result<Option<String>> {
+        use schema::message_mappings::dsl;
+
+        let mut conn = self.db.conn()?;
+        Ok(dsl::message_mappings
+            .filter(dsl::cokret_event_id.eq(cokret_event_id))
+            .select(dsl::app_message_id)
+            .first::<String>(&mut conn)
+            .optional()?)
+    }
+
+    // The argument list mirrors the user_mappings row shape one-to-one; a
+    // params struct would only restate the same fields.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_user(
+        &self,
+        protocol: &str,
+        tenant: &str,
+        external_user_id: &str,
+        actor_id: &str,
+        profile_event_ref: &str,
+        accountability_grant_ref: &str,
+        authorization_ref: &str,
+        display: Option<&str>,
+    ) -> Result<()> {
+        use schema::user_mappings::dsl;
+
+        let mut conn = self.db.conn()?;
+        // Ghost provisioning races: the same external user can first appear on two
+        // channels concurrently (BRG-02-004). The serial domain key is the channel,
+        // but the user mapping's unique key is (protocol, tenant, external_user_id),
+        // so both racers can reach `insert` and one would hit a UNIQUE violation.
+        // Try insert first; on a conflict, fall back to update by the conflict key
+        // (an atomic upsert in effect, portable across sqlite/postgres/mysql and
+        // matching the existing dedup-store pattern). The losing racer then re-reads
+        // the winner's mapping (via `ghost_actor_for_app_user`) and continues
+        // submitting rather than failing the message.
+        let inserted = diesel::insert_into(dsl::user_mappings)
+            .values(NewUserMapping {
+                protocol,
+                tenant,
+                external_user_id,
+                cokret_actor_id: actor_id,
+                profile_event_ref,
+                accountability_grant_ref,
+                authorization_ref,
+                display_name: display,
+                created_at: now_ts(),
+            })
+            .execute(&mut conn);
+        match inserted {
+            Ok(_) => Ok(()),
+            Err(diesel::result::Error::DatabaseError(
+                diesel::result::DatabaseErrorKind::UniqueViolation,
+                _,
+            )) => {
+                diesel::update(
+                    dsl::user_mappings
+                        .filter(dsl::protocol.eq(protocol))
+                        .filter(dsl::tenant.eq(tenant))
+                        .filter(dsl::external_user_id.eq(external_user_id)),
+                )
+                .set((
+                    dsl::cokret_actor_id.eq(actor_id),
+                    dsl::profile_event_ref.eq(profile_event_ref),
+                    dsl::accountability_grant_ref.eq(accountability_grant_ref),
+                    dsl::authorization_ref.eq(authorization_ref),
+                    dsl::display_name.eq(display),
+                ))
+                .execute(&mut conn)?;
+                Ok(())
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub fn ghost_actor_for_app_user(
+        &self,
+        protocol: &str,
+        tenant: &str,
+        external_user_id: &str,
+    ) -> Result<Option<UserMapping>> {
+        use schema::user_mappings::dsl;
+
+        let mut conn = self.db.conn()?;
+        Ok(dsl::user_mappings
+            .filter(dsl::protocol.eq(protocol))
+            .filter(dsl::tenant.eq(tenant))
+            .filter(dsl::external_user_id.eq(external_user_id))
+            .first::<UserMapping>(&mut conn)
+            .optional()?)
+    }
+
+    /// Reverse lookup for ghost resolution: find the user row by cokret actor DID.
+    pub fn user_by_actor(&self, actor_id: &str) -> Result<Option<UserMapping>> {
+        use schema::user_mappings::dsl;
+
+        let mut conn = self.db.conn()?;
+        Ok(dsl::user_mappings
+            .filter(dsl::cokret_actor_id.eq(actor_id))
+            .first::<UserMapping>(&mut conn)
+            .optional()?)
+    }
+
+    /// Reverse lookup for portal resolution: find the room row by cokret realm
+    /// id or by portal alias.
+    pub fn room_by_realm_or_alias(&self, key: &str) -> Result<Option<RoomMapping>> {
+        use schema::room_mappings::dsl;
+
+        let mut conn = self.db.conn()?;
+        Ok(dsl::room_mappings
+            .filter(dsl::cokret_realm_id.eq(key).or(dsl::portal_alias.eq(key)))
+            .first::<RoomMapping>(&mut conn)
+            .optional()?)
+    }
+}
+
+/// DB-backed [`AppletResolver`] answering the cokret server's actor/realm probes
+/// from the messaging mapping tables.
+pub(crate) struct MessageResolver {
+    pub(crate) store: Arc<MessageStore>,
+}
+
+impl AppletResolver for MessageResolver {
+    fn resolve_actor(&self, actor_id: &str) -> Option<ResolvedActor> {
+        let row = self.store.user_by_actor(actor_id).ok().flatten()?;
+        Some(ResolvedActor {
+            actor_id: row.cokret_actor_id,
+            display_name: row.display_name,
+            external_ref: json!({
+                "protocol": row.protocol,
+                "tenant": row.tenant,
+                "external_user_id": row.external_user_id,
+            }),
+        })
+    }
+
+    fn resolve_realm(&self, realm_id_or_alias: &str) -> Option<ResolvedRealm> {
+        let row = self
+            .store
+            .room_by_realm_or_alias(realm_id_or_alias)
+            .ok()
+            .flatten()?;
+        Some(ResolvedRealm {
+            realm_id: row.cokret_realm_id,
+            title: row.portal_alias,
+            external_ref: json!({ "app_channel": row.app_channel_id }),
+        })
+    }
+}
