@@ -1,6 +1,9 @@
 //! WeChat (WeChat Work / Official Account) adapter (reqwest).
 //!
-//! - Inbound (WeChat -> cokret): WeChat plaintext XML callbacks are accepted at `/webhooks/wechat`.
+//! - Inbound (WeChat -> cokret): WeChat callbacks are accepted at `/webhooks/wechat`.
+//!   Inbound **delivery (POST) requires safe mode** (EncodingAESKey configured): only
+//!   `msg_signature` covers the request body, so plaintext POST deliveries are rejected
+//!   fail-closed. The GET subscription handshake still echoes in either mode.
 //! - Outbound (cokret -> WeChat): [`MessageBridge::send_to_app`] uses `ctx.http` to first exchange
 //!   corp_id/corp_secret (or app_id/app_secret) for an `access_token`, then POST to the WeChat Work
 //!   app-message / Official Account customer-service-message API.
@@ -282,7 +285,9 @@ struct WechatWebhookState {
     ctx: Arc<MessageContext>,
     /// Callback Token for `signature` verification.
     webhook_token: String,
-    /// EncodingAESKey-derived key for safe mode; `None` means plaintext mode.
+    /// EncodingAESKey-derived key for safe mode. `None` means plaintext mode, in
+    /// which inbound POST deliveries are rejected (no body-bound signature); only
+    /// the GET handshake echo is served in plaintext mode.
     aes_key: Option<WechatAesKey>,
     /// Configured corp_id / app_id, checked against the receiveid trailer of a
     /// safe-mode decrypted body.
@@ -403,6 +408,18 @@ fn wechat_decrypt_safe_mode(
     String::from_utf8(plain[msg_start..msg_end].to_vec()).ok()
 }
 
+/// Security invariant for inbound POST deliveries: a delivery may only be
+/// accepted when WeChat **safe mode** is configured (an EncodingAESKey is
+/// present), because only `msg_signature` covers the request body. In plaintext
+/// mode (`aes_key == None`) the `signature` query parameter authenticates the
+/// `(token, timestamp, nonce)` triple but NOT the body, so a forged or replayed
+/// body cannot be detected. Returns `true` when the delivery MUST be rejected
+/// (fail closed). The GET subscription handshake is intentionally not gated by
+/// this — it only echoes a challenge and submits nothing into the ingress.
+fn plaintext_delivery_must_be_rejected(aes_key: Option<&WechatAesKey>) -> bool {
+    aes_key.is_none()
+}
+
 /// Build the safe-mode signature input from a request: in safe mode the
 /// authenticating query parameter is `msg_signature` (not `signature`).
 fn wechat_msg_signature_input(req: &Request) -> WechatSignatureInput {
@@ -472,64 +489,65 @@ async fn wechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respons
         }
     };
 
-    // Safe mode: the body carries an `<Encrypt>` element authenticated by
-    // `msg_signature` over the encrypted text; decrypt to the original XML.
-    let inner_xml: String = if let Some(aes_key) = state.aes_key.as_ref() {
-        let sig_input = wechat_msg_signature_input(req);
-        let envelope = parse_wechat_xml(xml);
-        let Some(encrypt) = envelope.encrypt else {
-            webhook::bad_request(res, "WeChat safe mode requires an Encrypt body");
-            return;
-        };
-        if !wechat_msg_signature_ok(
-            &state.webhook_token,
-            &sig_input,
-            &encrypt,
-            WECHAT_TIMESTAMP_WINDOW_SECS,
-        ) {
-            webhook::unauthorized(res, "WeChat msg_signature mismatch");
+    // Per-delivery source verification REQUIRES a platform signature that covers
+    // the POST body. Only WeChat safe mode provides that: the body carries an
+    // `<Encrypt>` element authenticated by
+    // `msg_signature = sha1(sort(token, timestamp, nonce, encrypt))`.
+    //
+    // Plaintext mode (`aes_key == None`) only has `signature`, which covers the
+    // query triple but NOT the body — an attacker with a valid `(timestamp, nonce,
+    // signature)` triple (or a replay inside the window) could swap the XML body
+    // and inject forged messages into the applet ingress. There is no body-bound
+    // platform signature to fall back on, so we fail closed and refuse plaintext
+    // POST deliveries entirely. EncodingAESKey / safe mode is mandatory for
+    // inbound delivery; the GET handshake echo is unaffected.
+    // Fail closed: plaintext mode has no body-bound platform signature, so a
+    // POST delivery cannot be source-verified per delivery. Reject it. See
+    // `plaintext_delivery_must_be_rejected` for the security invariant under test.
+    let Some(aes_key) = state.aes_key.as_ref() else {
+        debug_assert!(plaintext_delivery_must_be_rejected(state.aes_key.as_ref()));
+        tracing::warn!(
+            target: "wechat",
+            "rejecting WeChat webhook delivery: plaintext mode has no body-bound \
+             signature; configure EncodingAESKey (safe mode) to accept inbound messages"
+        );
+        webhook::unauthorized(
+            res,
+            "WeChat plaintext webhook delivery is rejected: EncodingAESKey (safe mode) \
+             is required for body-bound source verification",
+        );
+        return;
+    };
+
+    let sig_input = wechat_msg_signature_input(req);
+    let envelope = parse_wechat_xml(xml);
+    let Some(encrypt) = envelope.encrypt else {
+        webhook::bad_request(res, "WeChat safe mode requires an Encrypt body");
+        return;
+    };
+    if !wechat_msg_signature_ok(
+        &state.webhook_token,
+        &sig_input,
+        &encrypt,
+        WECHAT_TIMESTAMP_WINDOW_SECS,
+    ) {
+        webhook::unauthorized(res, "WeChat msg_signature mismatch");
+        return;
+    }
+    // Replay-bind the authenticated (timestamp, nonce, msg_signature) triple.
+    if !state
+        .replay_window
+        .check_and_record(wechat_replay_key(&sig_input))
+    {
+        webhook::unauthorized(res, "WeChat callback replay");
+        return;
+    }
+    let inner_xml = match wechat_decrypt_safe_mode(aes_key, &state.cred_id, &encrypt) {
+        Some(plain) => plain,
+        None => {
+            webhook::unauthorized(res, "WeChat safe-mode decryption failed");
             return;
         }
-        // Replay-bind the authenticated (timestamp, nonce, msg_signature) triple.
-        if !state
-            .replay_window
-            .check_and_record(wechat_replay_key(&sig_input))
-        {
-            webhook::unauthorized(res, "WeChat callback replay");
-            return;
-        }
-        match wechat_decrypt_safe_mode(aes_key, &state.cred_id, &encrypt) {
-            Some(plain) => plain,
-            None => {
-                webhook::unauthorized(res, "WeChat safe-mode decryption failed");
-                return;
-            }
-        }
-    } else {
-        // Plaintext mode: verify the `signature` query parameter over the query
-        // triple (it does not cover the body) and replay-bind it.
-        let signature_input = wechat_signature_input(req);
-        if !wechat_signature_ok(&state.webhook_token, &signature_input) {
-            webhook::unauthorized(res, "WeChat signature mismatch");
-            return;
-        }
-        if !state
-            .replay_window
-            .check_and_record(wechat_replay_key(&signature_input))
-        {
-            webhook::unauthorized(res, "WeChat callback replay");
-            return;
-        }
-        if parse_wechat_xml(xml).encrypt.is_some() {
-            // An encrypted body arrived but no EncodingAESKey is configured: we
-            // cannot authenticate or read it. Reject (fail closed).
-            webhook::bad_request(
-                res,
-                "encrypted WeChat callback received but no EncodingAESKey is configured",
-            );
-            return;
-        }
-        xml.to_owned()
     };
 
     let fields = parse_wechat_xml(&inner_xml);
@@ -742,6 +760,17 @@ mod tests {
             "OTHER",
             WECHAT_TIMESTAMP_WINDOW_SECS
         ));
+    }
+
+    #[test]
+    fn plaintext_delivery_is_rejected_safe_mode_is_accepted() {
+        // BRIDGES-01: plaintext mode (no EncodingAESKey) has no body-bound
+        // signature, so inbound POST deliveries MUST be rejected fail-closed.
+        assert!(plaintext_delivery_must_be_rejected(None));
+        // Safe mode (EncodingAESKey configured) authenticates the body via
+        // `msg_signature` and is accepted.
+        let key = sample_aes_key();
+        assert!(!plaintext_delivery_must_be_rejected(Some(&key)));
     }
 
     #[test]
