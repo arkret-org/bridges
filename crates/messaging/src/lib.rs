@@ -11,6 +11,7 @@
 //! - `MessageBridge` and `run_message_bridge`,
 //! - `external_ref` provenance for upstream channel/user/message ids.
 
+mod calendar;
 mod content;
 mod ghost;
 mod models;
@@ -22,6 +23,9 @@ pub mod webhook;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+pub use calendar::{
+    CALENDAR_EVENT_PROFILE, CalendarMapError, bridge_calendar_schedule_fields, bridge_rsvp_payload,
+};
 use cokret::{AppletBridgeErrorBuilder, AppletBridgeErrorVisibility, Did, Event, RealmId};
 pub use cokret_bridge_runtime as runtime;
 use cokret_bridge_runtime::app::{BridgeApp, BridgeContext};

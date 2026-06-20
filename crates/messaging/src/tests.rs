@@ -6,7 +6,10 @@ use crate::content::{
 };
 use crate::ghost::location_matches;
 use crate::types::{AppDeleteOutcome, AppDeleteReason, Attachment};
-use crate::{EXTERNAL_REF_SCHEMA, PORTAL_STRAND_TRACK, redaction_payload_for_app_delete};
+use crate::{
+    CALENDAR_EVENT_PROFILE, CalendarMapError, EXTERNAL_REF_SCHEMA, PORTAL_STRAND_TRACK,
+    bridge_calendar_schedule_fields, bridge_rsvp_payload, redaction_payload_for_app_delete,
+};
 
 const STRAND_ID: &str = "ck:strand:01904100-0000-7000-8000-000000000001";
 
@@ -163,6 +166,141 @@ fn app_delete_expiry_is_not_a_redaction() {
         },
         AppDeleteOutcome::Ignored {
             reason_code: "app_delete_retention_expiry_not_redaction",
+        }
+    );
+}
+
+fn encrypted_comment() -> serde_json::Value {
+    json!({
+        "scheme": "mls-rfc9420",
+        "version": "1.0",
+        "group_id": "group_1",
+        "epoch": 3,
+        "content_type": "application/json",
+        "ciphertext": "abc123",
+        "aad_visibility_event_id": "hidden",
+        "aad": {
+            "realm_id": "ck:realm:01904100-0000-7000-8000-000000000001",
+            "event_kind": "ck.rsvp.set"
+        },
+        "key_ref": {
+            "algorithm": "MLS",
+            "group_state_ref": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "aad_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "payload_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    })
+}
+
+#[test]
+fn calendar_schedule_maps_only_profile_subset() {
+    let schedule = bridge_calendar_schedule_fields(json!({
+        "start": "2026-07-01T10:00:00Z",
+        "end": "2026-07-01T11:00:00Z",
+        "timezone": "America/New_York",
+        "all_day": false,
+        "recurrence": {
+            "frequency": "WEEKLY",
+            "interval": 1,
+            "by_day": ["MO"]
+        },
+        "location": {
+            "title": "Planning room",
+            "url": "https://example.test/meet"
+        }
+    }))
+    .expect("calendar schedule");
+    assert_eq!(CALENDAR_EVENT_PROFILE, "ck.profile.calendar_event.v1");
+    assert_eq!(schedule["timezone"], "America/New_York");
+    assert_eq!(schedule["recurrence"]["frequency"], "WEEKLY");
+    assert!(schedule.get("attendees").is_none());
+    assert!(schedule.get("preserved_fields").is_none());
+}
+
+#[test]
+fn calendar_schedule_rejects_attendees_and_downgrade_fields() {
+    let attendees = bridge_calendar_schedule_fields(json!({
+        "start": "2026-07-01T10:00:00Z",
+        "end": "2026-07-01T11:00:00Z",
+        "timezone": "UTC",
+        "all_day": false,
+        "attendees": [{"actor_id": "did:web:alice.example"}]
+    }))
+    .unwrap_err();
+    assert_eq!(
+        attendees,
+        CalendarMapError::UnsupportedField {
+            field: "attendees".to_owned()
+        }
+    );
+
+    let downgrade = bridge_calendar_schedule_fields(json!({
+        "start": "2026-07-01",
+        "end": "2026-07-01",
+        "timezone": "UTC",
+        "all_day": true,
+        "preserved_fields": {"provider_color": "blue"}
+    }))
+    .unwrap_err();
+    assert_eq!(downgrade.code(), "calendar_downgrade_field_forbidden");
+}
+
+#[test]
+fn calendar_schedule_rejects_unknown_recurrence_shape() {
+    let err = bridge_calendar_schedule_fields(json!({
+        "start": "2026-07-01T10:00:00Z",
+        "end": "2026-07-01T11:00:00Z",
+        "timezone": "UTC",
+        "all_day": false,
+        "recurrence": {
+            "frequency": "WEEKLY",
+            "count": 2,
+            "expires_at": "2026-12-31T00:00:00Z"
+        }
+    }))
+    .unwrap_err();
+    assert_eq!(err.code(), "calendar_payload_invalid");
+}
+
+#[test]
+fn calendar_rsvp_maps_encrypted_comment_only() {
+    let payload = bridge_rsvp_payload(json!({
+        "event_ref": STRAND_ID,
+        "status": "accepted",
+        "occurrence": null,
+        "comment": encrypted_comment()
+    }))
+    .expect("rsvp payload");
+    assert_eq!(payload["event_ref"], STRAND_ID);
+    assert_eq!(payload["status"], "accepted");
+    assert!(payload["comment"].get("ciphertext").is_some());
+
+    let plaintext = bridge_rsvp_payload(json!({
+        "event_ref": STRAND_ID,
+        "status": "tentative",
+        "occurrence": "2026-07-01T10:00:00[America/New_York]",
+        "comment": "I might be late"
+    }))
+    .unwrap_err();
+    assert_eq!(
+        plaintext.code(),
+        "calendar_rsvp_plaintext_comment_unsupported"
+    );
+}
+
+#[test]
+fn calendar_rsvp_rejects_schedule_mutation_fields() {
+    let err = bridge_rsvp_payload(json!({
+        "event_ref": STRAND_ID,
+        "status": "declined",
+        "occurrence": null,
+        "schedule": {"start": "2026-07-01T10:00:00Z"}
+    }))
+    .unwrap_err();
+    assert_eq!(
+        err,
+        CalendarMapError::UnsupportedField {
+            field: "schedule".to_owned()
         }
     );
 }
