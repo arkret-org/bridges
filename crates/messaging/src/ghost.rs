@@ -9,7 +9,7 @@ use cokret::{
 use cokret_bridge_runtime::{BridgeError, Result};
 use serde_json::{Value, json};
 
-use crate::types::InboundAppMessage;
+use crate::types::{InboundAppDelete, InboundAppMessage};
 use crate::{
     EXTERNAL_REF_SCHEMA, MESSAGE_MAPPING_KEY_SEPARATOR, PORTAL_STRAND_SCAN_MAX_PAGES,
     PORTAL_STRAND_SCAN_PAGE_LIMIT, PORTAL_STRAND_TRACK, runtime,
@@ -220,6 +220,39 @@ pub(crate) fn external_ref_for_message(config: &runtime::Config, msg: &InboundAp
         "app_channel": msg.app_channel.clone(),
         "app_user": msg.app_user.clone(),
         "app_message_id": msg.app_message_id.clone(),
+    })
+}
+
+/// External provenance for an app-side delete signal. This deliberately carries
+/// only IDs and coarse cause, never the message body.
+pub(crate) fn external_ref_for_delete(
+    config: &runtime::Config,
+    delete: &InboundAppDelete,
+) -> Value {
+    let protocol = bridge_protocol(config);
+    let tenant = bridge_tenant(config);
+    let external_channel = normalized_external_id(&delete.app_channel);
+    let external_target_event_id = normalized_external_id(&delete.app_message_id);
+    let normalized_actor = normalized_external_id(&delete.app_user);
+    let external_event_id = delete
+        .source_event_id
+        .as_deref()
+        .map(normalized_external_id)
+        .filter(|value| !value.is_empty());
+
+    json!({
+        "schema": EXTERNAL_REF_SCHEMA,
+        "protocol": protocol,
+        "tenant": tenant,
+        "external_channel": external_channel,
+        "external_target_event_id": external_target_event_id,
+        "external_event_id": external_event_id,
+        "normalized_actor": normalized_actor,
+        "operation": "delete",
+        "reason": delete.reason.as_external_ref_reason(),
+        "source": config.bridge.bridge_id.clone(),
+        "app_channel": delete.app_channel.clone(),
+        "app_message_id": delete.app_message_id.clone(),
     })
 }
 

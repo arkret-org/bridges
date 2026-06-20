@@ -33,7 +33,7 @@ pub use content::{
 use futures::StreamExt;
 use ghost::{
     bridge_error_code, bridge_protocol, bridge_tenant, create_portal_strand,
-    external_ref_for_message, find_existing_portal_strand, host_allowed,
+    external_ref_for_delete, external_ref_for_message, find_existing_portal_strand, host_allowed,
     message_mapping_channel_key, normalized_external_id, portal_location_ref,
     provision_ghost_actor, require_nonempty_ref,
 };
@@ -42,8 +42,9 @@ use serde_json::{Value, json};
 use store::MessageResolver;
 pub use store::{MessageMapping, MessageStore, RoomMapping, UserMapping};
 pub use types::{
-    AppMessageRef, Attachment, DownloadedMedia, InboundAppMessage, MAX_EXTERNAL_MEDIA_BYTES,
-    OutboundAppMessage, SenderRenderStyle,
+    AppDeleteOutcome, AppDeleteReason, AppMessageRef, Attachment, DownloadedMedia,
+    InboundAppDelete, InboundAppMessage, MAX_EXTERNAL_MEDIA_BYTES, OutboundAppMessage,
+    SenderRenderStyle,
 };
 
 // Not a `ck.`-prefixed id: the `ck.` namespace is reserved for spec-registered
@@ -69,6 +70,18 @@ pub(crate) const PORTAL_STRAND_SCAN_PAGE_LIMIT: u32 = 200;
 /// Page cap for the §10.1 step-2 projection scan (bounds startup cost on large
 /// realms; a fresh portal realm resolves in one page).
 pub(crate) const PORTAL_STRAND_SCAN_MAX_PAGES: usize = 25;
+
+pub(crate) fn redaction_payload_for_app_delete(
+    target_event_id: &str,
+    reason: AppDeleteReason,
+) -> Option<Value> {
+    reason.redaction_reason().map(|reason| {
+        json!({
+            "target_event_id": target_event_id,
+            "reason": reason,
+        })
+    })
+}
 
 /// Runtime context handed to a [`MessageBridge`].
 pub struct MessageContext {
@@ -313,6 +326,131 @@ impl MessageContext {
         }
         let content = media_content_block(&attachment)?;
         self.submit_content(&msg, content, vec![attachment.blob_ref.clone()])
+            .await
+    }
+
+    /// Submit an inbound app-side explicit delete/recall as a Cokret message
+    /// redaction. Expiry, retention and bridge-drop signals are not redactions
+    /// and are returned as ignored outcomes without minting protocol events.
+    pub async fn submit_app_delete(&self, delete: InboundAppDelete) -> Result<AppDeleteOutcome> {
+        if delete.reason.redaction_reason().is_none() {
+            return Ok(AppDeleteOutcome::Ignored {
+                reason_code: delete.reason.ignored_reason_code(),
+            });
+        }
+        let external_target_event_id = normalized_external_id(&delete.app_message_id);
+        if external_target_event_id.is_empty() {
+            return Err(BridgeError::App(
+                "inbound app_message_id is required for delete target lookup".into(),
+            ));
+        }
+        let external_actor_id = normalized_external_id(&delete.app_user);
+        if external_actor_id.is_empty() {
+            return Err(BridgeError::App(
+                "inbound app_user is required for delete actor mapping".into(),
+            ));
+        }
+        let realm = self
+            .store
+            .portal_for_channel(&delete.app_channel)?
+            .map(|row| row.cokret_realm_id)
+            .ok_or_else(|| {
+                BridgeError::App(format!(
+                    "channel {} has no realm mapping; cannot forward app delete",
+                    delete.app_channel
+                ))
+            })?;
+        let mapping_channel_key =
+            message_mapping_channel_key(&self.inner.config, &delete.app_channel);
+        self.inner
+            .queue
+            .run(&mapping_channel_key, || {
+                let edge = self.inner.edge.clone();
+                let store = self.store.clone();
+                let config = self.inner.config.clone();
+                let mapping_channel_key = mapping_channel_key.clone();
+                let external_target_event_id = external_target_event_id.clone();
+                let external_actor_id = external_actor_id.clone();
+                let realm_for_submit = realm.clone();
+                let delete = delete.clone();
+                async move {
+                    let Some(target_event_id) = store.event_for_channel_message_target(
+                        &mapping_channel_key,
+                        &external_target_event_id,
+                    )?
+                    else {
+                        return Ok::<AppDeleteOutcome, BridgeError>(AppDeleteOutcome::Ignored {
+                            reason_code: "app_delete_unmapped_target",
+                        });
+                    };
+                    let protocol = bridge_protocol(&config);
+                    let tenant = bridge_tenant(&config);
+                    let mapping = match store.ghost_actor_for_app_user(
+                        &protocol,
+                        &tenant,
+                        &external_actor_id,
+                    )? {
+                        Some(mapping) => mapping,
+                        None => {
+                            let provisioned = provision_ghost_actor(
+                                &edge,
+                                &config,
+                                &protocol,
+                                &tenant,
+                                &external_actor_id,
+                                Some(&external_actor_id),
+                                &realm_for_submit,
+                            )
+                            .await?;
+                            let actor_id = provisioned.ghost_actor_id.to_string();
+                            let display_name = provisioned
+                                .display_name
+                                .as_deref()
+                                .or(Some(external_actor_id.as_str()));
+                            store.upsert_user(
+                                &protocol,
+                                &tenant,
+                                &external_actor_id,
+                                &actor_id,
+                                &provisioned.profile_event_ref,
+                                &provisioned.accountability_grant_ref,
+                                &provisioned.authorization_ref,
+                                display_name,
+                            )?;
+                            store
+                                .ghost_actor_for_app_user(&protocol, &tenant, &external_actor_id)?
+                                .ok_or_else(|| {
+                                    BridgeError::Database(
+                                        "ghost actor provisioning row was not persisted".into(),
+                                    )
+                                })?
+                        }
+                    };
+                    require_nonempty_ref("profile_event_ref", &mapping.profile_event_ref)?;
+                    require_nonempty_ref(
+                        "accountability_grant_ref",
+                        &mapping.accountability_grant_ref,
+                    )?;
+                    require_nonempty_ref("authorization_ref", &mapping.authorization_ref)?;
+                    let actor = Did::new(mapping.cokret_actor_id)?;
+                    let payload = redaction_payload_for_app_delete(&target_event_id, delete.reason)
+                        .expect("delete reason was checked before queue submission");
+                    let event_id = edge
+                        .submit_redaction_with_external_ref_as(
+                            &actor,
+                            &realm_for_submit,
+                            &target_event_id,
+                            payload,
+                            external_ref_for_delete(&config, &delete),
+                            &mapping.authorization_ref,
+                        )
+                        .await?;
+                    Ok(AppDeleteOutcome::Submitted {
+                        event_id,
+                        target_event_id,
+                    })
+                }
+            })
             .await
     }
 

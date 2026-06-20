@@ -189,6 +189,27 @@ impl MessageStore {
             .optional()?)
     }
 
+    /// Resolve the target event for an app-side delete/recall. Delete webhooks
+    /// often identify the deleted message and deleter, not the original sender,
+    /// so this lookup intentionally does not participate in create-message
+    /// deduplication.
+    pub fn event_for_channel_message_target(
+        &self,
+        app_channel: &str,
+        app_message_id: &str,
+    ) -> Result<Option<String>> {
+        use schema::message_mappings::dsl;
+
+        let mut conn = self.db.conn()?;
+        Ok(dsl::message_mappings
+            .filter(dsl::app_channel_id.eq(app_channel))
+            .filter(dsl::app_message_id.eq(app_message_id))
+            .order(dsl::created_at.asc())
+            .select(dsl::cokret_event_id)
+            .first::<String>(&mut conn)
+            .optional()?)
+    }
+
     pub fn app_message_for_event(&self, cokret_event_id: &str) -> Result<Option<String>> {
         use schema::message_mappings::dsl;
 

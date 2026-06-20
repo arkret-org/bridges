@@ -5,8 +5,8 @@ use crate::content::{
     media_content_block, media_content_kind, text_content_block,
 };
 use crate::ghost::location_matches;
-use crate::types::Attachment;
-use crate::{EXTERNAL_REF_SCHEMA, PORTAL_STRAND_TRACK};
+use crate::types::{AppDeleteOutcome, AppDeleteReason, Attachment};
+use crate::{EXTERNAL_REF_SCHEMA, PORTAL_STRAND_TRACK, redaction_payload_for_app_delete};
 
 const STRAND_ID: &str = "ck:strand:01904100-0000-7000-8000-000000000001";
 
@@ -131,4 +131,38 @@ fn location_match_requires_protocol_network_and_location() {
     other["location_id"] = json!("chan-2");
     assert!(!location_matches(Some(&other), &location));
     assert!(!location_matches(None, &location));
+}
+
+#[test]
+fn app_delete_recall_builds_message_redact_payload() {
+    let target_event_id = "ck:event:01904100-0000-7000-8000-000000000123";
+    let payload = redaction_payload_for_app_delete(target_event_id, AppDeleteReason::UserDeleted)
+        .expect("redaction payload");
+    assert_eq!(payload["target_event_id"], target_event_id);
+    assert_eq!(payload["reason"], "external_user_delete");
+    assert!(payload.get("message_id").is_none());
+    assert!(payload.get("reason_code").is_none());
+}
+
+#[test]
+fn app_delete_expiry_is_not_a_redaction() {
+    assert_eq!(
+        redaction_payload_for_app_delete(
+            "ck:event:01904100-0000-7000-8000-000000000123",
+            AppDeleteReason::DisappearingExpiry,
+        ),
+        None
+    );
+    assert_eq!(
+        AppDeleteReason::DisappearingExpiry.ignored_reason_code(),
+        "app_delete_disappearing_expiry_not_redaction"
+    );
+    assert_eq!(
+        AppDeleteOutcome::Ignored {
+            reason_code: AppDeleteReason::RetentionExpiry.ignored_reason_code(),
+        },
+        AppDeleteOutcome::Ignored {
+            reason_code: "app_delete_retention_expiry_not_redaction",
+        }
+    );
 }

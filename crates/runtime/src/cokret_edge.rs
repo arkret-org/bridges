@@ -27,7 +27,7 @@ use cokret::models::{
 #[cfg(any(feature = "web", test))]
 use cokret::signatures::EventProofBuilder;
 use cokret::signatures::{SignEventOptions, sign_event};
-use cokret::{Did, Ed25519MoveSigner, Event, Hlc, RealmId};
+use cokret::{Did, Ed25519MoveSigner, Event, EventId, Hlc, RealmId};
 use parking_lot::Mutex;
 use serde_json::Value;
 #[cfg(any(feature = "web", test))]
@@ -391,6 +391,32 @@ impl CokretEdge {
     ) -> Result<String> {
         let realm = RealmId::new(realm_id.to_owned())?;
         let mut event = self.mint_event_as(actor, kind, &realm, content, authorization_ref)?;
+        stamp_external_ref(&mut event, external_ref);
+        self.resign_event(&mut event)?;
+        self.submit_event(&event).await
+    }
+
+    /// Submit a message redaction attributed to a delegated app actor while
+    /// setting the signed envelope `redacts` target. External app expiry or
+    /// retention drops must be filtered by callers before reaching this helper.
+    pub async fn submit_redaction_with_external_ref_as(
+        &self,
+        actor: &Did,
+        realm_id: &str,
+        target_event_id: &str,
+        content: Value,
+        external_ref: Value,
+        authorization_ref: &str,
+    ) -> Result<String> {
+        let realm = RealmId::new(realm_id.to_owned())?;
+        let mut event = self.mint_event_as(
+            actor,
+            "ck.message.redact",
+            &realm,
+            content,
+            authorization_ref,
+        )?;
+        event.redacts = Some(EventId::new(target_event_id.to_owned())?);
         stamp_external_ref(&mut event, external_ref);
         self.resign_event(&mut event)?;
         self.submit_event(&event).await
