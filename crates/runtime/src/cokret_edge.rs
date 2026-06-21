@@ -13,8 +13,8 @@
 //! diesel-backed implementation [`DbSeqStore`] is only compiled under the `db`
 //! feature.
 
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(any(feature = "web", test))]
 use cokret::DidResolver;
@@ -27,7 +27,7 @@ use cokret::models::{
 #[cfg(any(feature = "web", test))]
 use cokret::signatures::EventProofBuilder;
 use cokret::signatures::{SignEventOptions, sign_event};
-use cokret::{Did, Ed25519MoveSigner, Event, EventId, Hlc, RealmId};
+use cokret::{AppletId, Did, Ed25519MoveSigner, Event, EventId, Hlc, HlcGenerator, RealmId};
 use parking_lot::Mutex;
 use serde_json::Value;
 #[cfg(any(feature = "web", test))]
@@ -125,13 +125,15 @@ pub struct CokretEdge {
     client: Client,
     signer: Ed25519MoveSigner,
     service_did: Did,
-    node_id: String,
+    applet_id: AppletId,
     /// Store-backed, restart-safe actor sequence allocator.
     seq: SeqAllocator,
-    /// Packed HLC state: `(last_ms << 16) | logical`. Updated with a CAS loop so
-    /// the logical counter resets to 0 whenever the millisecond advances and only
-    /// increments within the same millisecond (classic HLC), never wrapping.
-    hlc_state: AtomicU64,
+    /// Realm-scoped SDK HLC generators. The node id derives from
+    /// `(realm_id, bridge_id, signing seed)`, so events from the same bridge are
+    /// not linkable across realms by HLC node id.
+    hlc_generators: Mutex<HashMap<String, HlcGenerator>>,
+    hlc_device_id: String,
+    hlc_secret: [u8; 32],
     /// Inbound event queue: cokret server push → core consumer loop. Bounded so
     /// a slow consumer applies backpressure (the handler returns `retry_after_ms`
     /// when full) instead of buffering without limit. `None` for outbound-only
@@ -158,7 +160,7 @@ impl CokretEdge {
             service_did.clone(),
             config.cokret.verification_method_id.clone(),
         );
-        Self::build(config, seq, signer, service_did, Some(inbound_tx))
+        Self::build(config, seq, signer, service_did, seed, Some(inbound_tx))
     }
 
     fn build(
@@ -166,6 +168,7 @@ impl CokretEdge {
         seq: Arc<dyn SeqStore>,
         signer: Ed25519MoveSigner,
         service_did: Did,
+        hlc_secret: [u8; 32],
         inbound_tx: Option<Sender<Event>>,
     ) -> Result<Self> {
         let base = url::Url::parse(&config.cokret.server_url)
@@ -174,8 +177,8 @@ impl CokretEdge {
             .auth(Auth::Bearer(config.cokret.access_token.clone()))
             .build()?;
 
-        // Derive a stable 8-digit hexadecimal HLC node id from bridge_id.
-        let node_id = stable_node_id(&config.bridge.bridge_id);
+        let applet_id = AppletId::new(config.cokret.applet_id.clone())?;
+        let hlc_device_id = config.bridge.bridge_id.clone();
 
         let seq = SeqAllocator::new(seq, SEQ_STATE_KEY);
 
@@ -184,9 +187,11 @@ impl CokretEdge {
             client,
             signer,
             service_did,
-            node_id,
+            applet_id,
             seq,
-            hlc_state: AtomicU64::new(0),
+            hlc_generators: Mutex::new(HashMap::new()),
+            hlc_device_id,
+            hlc_secret,
             inbound_tx,
             ephemeral_tx: None,
         })
@@ -225,49 +230,15 @@ impl CokretEdge {
         self.seq.alloc()
     }
 
-    /// Generate the next HLC (`{ms:012x}-{logical:04x}-{node:08x}`).
-    ///
-    /// The logical counter resets to 0 when the physical millisecond advances and
-    /// increments within the same millisecond, guaranteeing strict monotonicity
-    /// without wraparound. If the wall clock goes backwards (NTP step), the last
-    /// observed millisecond is reused and the logical counter advances instead.
-    pub fn next_hlc(&self) -> Result<Hlc> {
-        const LOGICAL_BITS: u32 = 16;
-        const LOGICAL_MASK: u64 = (1 << LOGICAL_BITS) - 1;
-        const MAX_LOGICAL: u64 = LOGICAL_MASK;
-
-        let now_ms = (chrono::Utc::now().timestamp_millis().max(0) as u64) & 0xFFFF_FFFF_FFFF;
-
-        let mut prev = self.hlc_state.load(Ordering::Relaxed);
-        let (ms, logical) = loop {
-            let last_ms = prev >> LOGICAL_BITS;
-            let last_logical = prev & LOGICAL_MASK;
-            let (ms, logical) = if now_ms > last_ms {
-                (now_ms, 0)
-            } else {
-                // Same millisecond, or clock moved backwards: keep last_ms and
-                // bump the logical counter (saturating at the field width).
-                if last_logical >= MAX_LOGICAL {
-                    return Err(BridgeError::App(format!(
-                        "HLC logical counter exhausted within ms {last_ms}"
-                    )));
-                }
-                (last_ms, last_logical + 1)
-            };
-            let next = (ms << LOGICAL_BITS) | logical;
-            match self.hlc_state.compare_exchange_weak(
-                prev,
-                next,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => break (ms, logical),
-                Err(observed) => prev = observed,
-            }
-        };
-
-        let raw = format!("{ms:012x}-{logical:04x}-{}", self.node_id);
-        Hlc::new(raw).map_err(Into::into)
+    /// Generate the next Realm-scoped HLC through the SDK implementation.
+    pub fn next_hlc(&self, realm_id: &RealmId) -> Result<Hlc> {
+        let mut generators = self.hlc_generators.lock();
+        let generator = generators
+            .entry(realm_id.as_str().to_owned())
+            .or_insert_with(|| {
+                HlcGenerator::new(realm_id.as_str(), &self.hlc_device_id, &self.hlc_secret)
+            });
+        generator.try_generate().map_err(Into::into)
     }
 
     /// Build and sign an event emitted by this bridge's service actor.
@@ -292,11 +263,11 @@ impl CokretEdge {
     ) -> Result<Event> {
         let authorization_ref = validate_authorization_ref(authorization_ref)?;
         let seq = self.seq.alloc()?;
-        let hlc = self.next_hlc()?;
+        let hlc = self.next_hlc(realm_id)?;
         let mut event = Event::new(kind, realm_id.clone(), actor.clone(), seq, hlc, content)?;
         event.executed_by = Some(self.service_did.clone());
         event.authorization_ref = Some(authorization_ref);
-        stamp_applet_metadata(&mut event, &self.config.cokret.applet_id);
+        event.applet_id = Some(self.applet_id.clone());
         let verification_method = self.verification_method_for_actor(&self.service_did)?;
         sign_event(
             &mut event,
@@ -315,9 +286,8 @@ impl CokretEdge {
         content: Value,
     ) -> Result<Event> {
         let seq = self.seq.alloc()?;
-        let hlc = self.next_hlc()?;
+        let hlc = self.next_hlc(realm_id)?;
         let mut event = Event::new(kind, realm_id.clone(), actor, seq, hlc, content)?;
-        stamp_applet_metadata(&mut event, &self.config.cokret.applet_id);
         let verification_method = self.verification_method_for_actor(&event.actor_id)?;
         sign_event(
             &mut event,
@@ -355,10 +325,10 @@ impl CokretEdge {
         Ok(event_id)
     }
 
-    /// Re-sign an already-minted event after envelope mutation (e.g. setting
-    /// `redacts`, overriding `created_at`, or adding `unsigned` hints). Clears
-    /// the existing proofs and signs with the service key over the current
-    /// canonical envelope.
+    /// Re-sign an already-minted event after signed-envelope mutation (e.g.
+    /// setting `redacts`, overriding `created_at`, or adding `external_ref`).
+    /// Clears the existing proofs and signs with the service key over the
+    /// current canonical envelope.
     pub fn resign_event(&self, event: &mut Event) -> Result<()> {
         event.proofs.clear();
         let verification_method = self.verification_method_for_actor(&self.service_did)?;
@@ -376,10 +346,7 @@ impl CokretEdge {
     /// after provisioning returned a durable authorization ref.
     ///
     /// applet-integration §8 requires the signed Event Envelope top-level
-    /// `external_ref` for bridge-originated events; the current SDK `Event` model
-    /// does not yet expose that field (its wire form rejects unknown envelope
-    /// fields), so the value is carried as an `unsigned` transport hint only. Per
-    /// §8 it MUST NOT be used for loop prevention or any other security decision.
+    /// `external_ref` for bridge-originated events.
     pub async fn submit_with_external_ref_as(
         &self,
         actor: &Did,
@@ -391,7 +358,7 @@ impl CokretEdge {
     ) -> Result<String> {
         let realm = RealmId::new(realm_id.to_owned())?;
         let mut event = self.mint_event_as(actor, kind, &realm, content, authorization_ref)?;
-        stamp_external_ref(&mut event, external_ref);
+        event.external_ref = Some(external_ref);
         self.resign_event(&mut event)?;
         self.submit_event(&event).await
     }
@@ -417,7 +384,7 @@ impl CokretEdge {
             authorization_ref,
         )?;
         event.redacts = Some(EventId::new(target_event_id.to_owned())?);
-        stamp_external_ref(&mut event, external_ref);
+        event.external_ref = Some(external_ref);
         self.resign_event(&mut event)?;
         self.submit_event(&event).await
     }
@@ -430,12 +397,12 @@ impl CokretEdge {
     /// key, and submits. Returns the new event_id.
     pub async fn submit_bridge_error(
         &self,
+        realm_id: &RealmId,
         builder: cokret::AppletBridgeErrorBuilder,
     ) -> Result<String> {
         let seq = self.seq.alloc()?;
-        let hlc = self.next_hlc()?;
+        let hlc = self.next_hlc(realm_id)?;
         let mut event = builder.build(seq, hlc)?;
-        stamp_applet_metadata(&mut event, &self.config.cokret.applet_id);
         // The builder produced an unsigned event; sign it with the service key
         // over the current canonical envelope.
         self.resign_event(&mut event)?;
@@ -444,7 +411,7 @@ impl CokretEdge {
 
     /// The configured applet id this bridge presents to cokret.
     pub fn applet_id(&self) -> &str {
-        &self.config.cokret.applet_id
+        self.applet_id.as_str()
     }
 
     /// Media upload: returns the blob reference string.
@@ -476,28 +443,6 @@ fn validate_authorization_ref(authorization_ref: &str) -> Result<String> {
         ));
     }
     Ok(authorization_ref.to_owned())
-}
-
-/// Carry `applet_id` as an `unsigned` transport hint. applet-integration §8 /
-/// §11 and `event-envelope.schema.json` define `applet_id` as a **signed**
-/// envelope top-level field; the current SDK `Event` model does not expose it
-/// (unknown envelope fields are rejected on its wire form), so until the SDK
-/// catches up this hint is display/debug metadata only and MUST NOT feed
-/// authorization or loop-prevention decisions.
-fn stamp_applet_metadata(event: &mut Event, applet_id: &str) {
-    event
-        .unsigned
-        .insert("applet_id".to_owned(), Value::String(applet_id.to_owned()));
-}
-
-/// Carry `external_ref` as an `unsigned` transport hint. See
-/// [`CokretEdge::submit_with_external_ref`]: §8 requires signed top-level
-/// `external_ref` for security-relevant provenance; `unsigned.external_ref` is
-/// a discardable local hint by spec and MUST NOT be a security input.
-fn stamp_external_ref(event: &mut Event, external_ref: Value) {
-    event
-        .unsigned
-        .insert("external_ref".to_owned(), external_ref);
 }
 
 /// Diesel-backed [`SeqStore`]. Persists each key's high-water mark in a
@@ -555,17 +500,6 @@ impl SeqStore for DbSeqStore {
         }
         Ok(reserved)
     }
-}
-
-/// [`stable_node_id`] maps any bridge_id to an 8-digit lower-hex value.
-fn stable_node_id(bridge_id: &str) -> String {
-    // A simple FNV-1a 32-bit hash, to avoid pulling in extra dependencies.
-    let mut hash: u32 = 0x811c_9dc5;
-    for b in bridge_id.bytes() {
-        hash ^= b as u32;
-        hash = hash.wrapping_mul(0x0100_0193);
-    }
-    format!("{hash:08x}")
 }
 
 #[cfg(any(feature = "web", test))]

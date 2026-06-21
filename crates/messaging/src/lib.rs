@@ -158,7 +158,7 @@ impl MessageContext {
         let failed_ref = normalized_external_id(&msg.app_message_id);
         let external_ref = portal_location_ref(&self.inner.config, &msg.app_channel);
         let builder = AppletBridgeErrorBuilder::new(
-            realm,
+            realm.clone(),
             edge.applet_id().to_owned(),
             edge.service_did().clone(),
             failed_ref,
@@ -168,7 +168,7 @@ impl MessageContext {
             AppletBridgeErrorVisibility::RealmAdmins,
         )
         .with_external_ref(external_ref);
-        edge.submit_bridge_error(builder).await?;
+        edge.submit_bridge_error(&realm, builder).await?;
         Ok(())
     }
 
@@ -688,10 +688,9 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
         }
         // Loop prevention: skip events this bridge itself submitted (app ->
         // cokret), which the server echoes back. Only signature-covered fields
-        // are consulted (applet-integration §8: `unsigned.external_ref` is a
-        // discardable hint and MUST NOT be a security-decision input): every
-        // event this bridge submits either carries `executed_by = service_did`
-        // (delegated ghost events) or is authored by the service actor itself.
+        // are consulted: every delegated ghost event this bridge submits carries
+        // `executed_by = service_did` plus signed Applet provenance, and service
+        // actor events are authored by the service DID itself.
         // Both checks are independent of local DB state, so a server push
         // racing ahead of our own mapping write cannot bypass them.
         if event.executed_by.as_ref() == Some(self.ctx.core().edge.service_did()) {

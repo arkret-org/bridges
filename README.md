@@ -2,7 +2,7 @@
 
 cokret 协议的桥接(bridge)applet 集合,与 `palpo-im` 的 `matrix-bridge-*` 一一对应,
 把 **cokret 去中心化协作协议** 与各第三方 chat app 互联。Rust 实现,技术栈 salvo + diesel,
-协议侧基于 [`cokret-rust-sdk`](../cokret/cokret-rust-sdk)。
+协议侧基于 [`cokret-rust-sdk`](../cokret-rust-sdk)。
 
 ## 结构
 
