@@ -3,7 +3,7 @@
 mod wechat;
 
 use cokret_bridge_messaging::bridge_main;
-use cokret_bridge_runtime::BridgeError;
+use cokret_bridge_messaging::runtime::BridgeError;
 use serde::Deserialize;
 
 use crate::wechat::WechatApp;

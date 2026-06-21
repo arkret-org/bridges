@@ -30,14 +30,14 @@ pub struct InboundAppMessage  { pub app_channel: String, pub app_user: String,
                                 pub app_message_id: String, pub body: String }
 pub struct OutboundAppMessage { pub app_channel: String, pub sender_display: String,
                                 pub body: String, pub reply_to: Option<String> }
-pub struct Appmessengeref { pub app_message_id: String }
+pub struct AppMessageRef { pub app_message_id: String }
 
 #[async_trait]
 pub trait MessageBridge: Send + Sync + 'static {
     fn name(&self) -> &str;
     async fn run(self: Arc<Self>, ctx: Arc<MessageContext>) -> Result<()>;    // app 接收循环
     async fn send_to_app(&self, ctx: Arc<MessageContext>, msg: OutboundAppMessage)
-        -> Result<Appmessengeref>;                                            // cokret→app 发送
+        -> Result<AppMessageRef>;                                             // cokret→app 发送
     async fn redact_in_app(&self, _ctx: Arc<MessageContext>, _id: &str) -> Result<()> { Ok(()) }
     // 纯 HTTP 桥重写此项,返回入站 webhook 路由(由 runtime web 服务挂载);默认 None
     fn webhook_router(self: Arc<Self>, _ctx: Arc<MessageContext>) -> Option<salvo::Router> { None }
@@ -65,7 +65,8 @@ pub trait MessageBridge: Send + Sync + 'static {
 
 ## 每个 crate 必须产出的文件
 
-1. `Cargo.toml`:依赖 `cokret-bridge-runtime` + `cokret-bridge-messaging`(均 `{ workspace = true }`)
+1. `Cargo.toml`:应用 crate 只直接依赖 `cokret-bridge-messaging`(`{ workspace = true }`)；
+   如需通用运行时类型，通过 `cokret_bridge_messaging::runtime` 使用 re-export，勿绕过消息层。
    + 该 app 传输库;`[[bin]]` name 同 crate;features 转发 sqlite/postgres/mysql 到这两个 crate(见 discord)。
    只声明源码实际 `use` 的依赖(`ctx.http` 已带 reqwest,桥自身通常无需再声明)。
 2. `src/main.rs`:定义 `#[derive(Deserialize)] struct AppConfig {...}` →

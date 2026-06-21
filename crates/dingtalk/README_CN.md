@@ -37,4 +37,4 @@ cargo run -p cokret-bridge-dingtalk -- --config config.yaml
 - `access_token` 经 `TokenCache` 缓存,按 `expireIn` 提前 60s 刷新(不再每次现取)。
 - 入站 webhook 已接入(`webhook_router`);Stream 长连(wss)模式可作为后续可选增强。
 
-详见 [`../_bridges_todos.md`](../../_bridges_todos.md) 的总体规划与映射表。
+契约与共享层约束见仓库根目录 [`_BRIDGE_CONTRACT.md`](../../_BRIDGE_CONTRACT.md)。

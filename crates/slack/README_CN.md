@@ -35,4 +35,4 @@ cargo run -p cokret-bridge-slack -- --config config.yaml
 - 需在 Slack 应用后台开启 Socket Mode,并订阅 `message.channels` 等事件。
 - 入站只转发普通文本消息;含 `subtype` 或 `bot_id` 的消息(编辑、bot 回声等)被忽略以防回环。
 
-详见 [`../_bridges_todos.md`](../../_bridges_todos.md) 的总体规划与映射表。
+契约与共享层约束见仓库根目录 [`_BRIDGE_CONTRACT.md`](../../_BRIDGE_CONTRACT.md)。

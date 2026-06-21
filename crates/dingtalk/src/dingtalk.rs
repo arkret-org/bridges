@@ -8,14 +8,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use cokret_bridge_messaging::runtime::cache::TokenCache;
+use cokret_bridge_messaging::runtime::{BridgeError, Result};
 use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, webhook,
 };
-use cokret_bridge_runtime::cache::TokenCache;
-use cokret_bridge_runtime::{BridgeError, Result};
 use serde_json::{Value, json};
 
 /// Fallback validity (seconds) when the API omits `expireIn`.
@@ -179,11 +179,10 @@ struct DingTalkWebhookState {
 /// `base64(HMAC-SHA256(app_secret, "{timestamp}\n{app_secret}"))`, with the
 /// `timestamp` constrained to a freshness window.
 fn dingtalk_signature_ok(app_secret: &str, timestamp: &str, sign: &str) -> bool {
-    let Ok(ts) = timestamp.parse::<i64>() else {
-        return false;
-    };
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    if (now_ms - ts).abs() > DINGTALK_TIMESTAMP_WINDOW_MS {
+    if !webhook::unix_timestamp_millis_is_fresh(
+        timestamp,
+        Duration::from_millis(DINGTALK_TIMESTAMP_WINDOW_MS as u64),
+    ) {
         return false;
     }
     let string_to_sign = format!("{timestamp}\n{app_secret}");

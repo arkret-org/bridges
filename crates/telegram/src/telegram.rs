@@ -8,11 +8,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
 use cokret_bridge_messaging::{
     AppMessageRef, Attachment, InboundAppMessage, MessageBridge, MessageContext,
     OutboundAppMessage, SenderRenderStyle,
 };
-use cokret_bridge_runtime::{BridgeError, Result, redact_sensitive_url_values};
 use teloxide::prelude::*;
 use teloxide::types::{ChatId, FileId, InputFile};
 
@@ -58,8 +58,14 @@ impl MessageBridge for TelegramApp {
                         app_message_id: msg.id.0.to_string(),
                         body: text.to_owned(),
                     };
-                    if let Err(e) = ctx.submit_app_message(inbound).await {
-                        tracing::warn!(error = %e, "Telegram → cokret submission failed");
+                    if let Err(e) = ctx.submit_app_message(inbound.clone()).await {
+                        let retriable = e.is_retriable();
+                        tracing::warn!(error = %e, retriable, "Telegram → cokret submission failed");
+                        ctx.report_inbound_bridge_error(&inbound, &e, retriable)
+                            .await;
+                        if retriable {
+                            return telegram_retry_error("Telegram text submit retriable failure");
+                        }
                     }
                 }
 
@@ -69,7 +75,19 @@ impl MessageBridge for TelegramApp {
                     )
                     .await
                 {
-                    tracing::warn!(error = %e, "Telegram media bridging failed");
+                    let retriable = e.is_retriable();
+                    tracing::warn!(error = %e, retriable, "Telegram media bridging failed");
+                    let inbound = InboundAppMessage {
+                        app_channel: channel.clone(),
+                        app_user: user.clone(),
+                        app_message_id: msg.id.0.to_string(),
+                        body: msg.caption().unwrap_or_default().to_owned(),
+                    };
+                    ctx.report_inbound_bridge_error(&inbound, &e, retriable)
+                        .await;
+                    if retriable {
+                        return telegram_retry_error("Telegram media submit retriable failure");
+                    }
                 }
 
                 respond(())
@@ -119,6 +137,12 @@ impl MessageBridge for TelegramApp {
             app_message_id: sent.id.0.to_string(),
         })
     }
+}
+
+fn telegram_retry_error(message: &'static str) -> teloxide::requests::ResponseResult<()> {
+    Err(teloxide::RequestError::Io(Arc::new(std::io::Error::other(
+        message,
+    ))))
 }
 
 fn parse_telegram_chat_id(channel: &str) -> Result<ChatId> {

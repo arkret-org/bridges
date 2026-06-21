@@ -35,4 +35,4 @@ cargo run -p cokret-bridge-zulip -- --config config.yaml
 - `app_channel` 的频道键格式(stream_id vs `pm/<id>`)需与 messaging 的频道↔realm 映射约定对齐。
 - stream 出站消息的 `topic` 当前用占位值 `cokret`。
 
-详见 [`../_bridges_todos.md`](../../_bridges_todos.md) 的总体规划与映射表。
+契约与共享层约束见仓库根目录 [`_BRIDGE_CONTRACT.md`](../../_BRIDGE_CONTRACT.md)。

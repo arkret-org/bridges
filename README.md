@@ -68,8 +68,7 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `cokret-bridge-
 - **防回声**:`on_cokret_event` 跳过本桥 `external_ref.source` 自发事件、由本桥
   service actor 署名的事件,以及已在消息映射表记录的 event,避免出站回环。
 
-详见 [`_bridges_todos.md`](_bridges_todos.md)(规划/并行/进度)与
-[`_BRIDGE_CONTRACT.md`](_BRIDGE_CONTRACT.md)(适配器编写契约)。
+详见 [`_BRIDGE_CONTRACT.md`](_BRIDGE_CONTRACT.md)(适配器编写契约)。
 
 ## 构建
 

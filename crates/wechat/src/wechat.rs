@@ -1,9 +1,9 @@
 //! WeChat (WeChat Work / Official Account) adapter (reqwest).
 //!
-//! - Inbound (WeChat -> cokret): WeChat callbacks are accepted at `/webhooks/wechat`.
-//!   Inbound **delivery (POST) requires safe mode** (EncodingAESKey configured): only
-//!   `msg_signature` covers the request body, so plaintext POST deliveries are rejected
-//!   fail-closed. The GET subscription handshake still echoes in either mode.
+//! - Inbound (WeChat -> cokret): WeChat callbacks are accepted at `/webhooks/wechat`. Inbound
+//!   **delivery (POST) requires safe mode** (EncodingAESKey configured): only `msg_signature`
+//!   covers the request body, so plaintext POST deliveries are rejected fail-closed. The GET
+//!   subscription handshake still echoes in either mode.
 //! - Outbound (cokret -> WeChat): [`MessageBridge::send_to_app`] uses `ctx.http` to first exchange
 //!   corp_id/corp_secret (or app_id/app_secret) for an `access_token`, then POST to the WeChat Work
 //!   app-message / Official Account customer-service-message API.
@@ -12,14 +12,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use cokret_bridge_messaging::runtime::cache::TokenCache;
+use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
 use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, webhook,
 };
-use cokret_bridge_runtime::cache::TokenCache;
-use cokret_bridge_runtime::{BridgeError, Result, redact_sensitive_url_values};
 use quick_xml::Reader;
 use quick_xml::events::Event as XmlEvent;
 use serde_json::{Value, json};
@@ -322,14 +322,10 @@ fn wechat_signature_ok(token: &str, input: &WechatSignatureInput) -> bool {
     {
         return false;
     }
-    let Ok(ts) = input.timestamp.parse::<i64>() else {
-        return false;
-    };
-    let now_secs = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-        Ok(duration) => duration.as_secs() as i64,
-        Err(_) => return false,
-    };
-    if (now_secs - ts).abs() > WECHAT_TIMESTAMP_WINDOW_SECS {
+    if !webhook::unix_timestamp_is_fresh(
+        &input.timestamp,
+        std::time::Duration::from_secs(WECHAT_TIMESTAMP_WINDOW_SECS as u64),
+    ) {
         return false;
     }
     let expected = webhook::sha1_hex_sorted(&[token, &input.timestamp, &input.nonce]);
@@ -361,14 +357,10 @@ fn wechat_msg_signature_ok(
     {
         return false;
     }
-    let Ok(ts) = input.timestamp.parse::<i64>() else {
-        return false;
-    };
-    let now_secs = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-        Ok(duration) => duration.as_secs() as i64,
-        Err(_) => return false,
-    };
-    if (now_secs - ts).abs() > timestamp_window_secs {
+    if !webhook::unix_timestamp_is_fresh(
+        &input.timestamp,
+        std::time::Duration::from_secs(timestamp_window_secs as u64),
+    ) {
         return false;
     }
     let expected = webhook::sha1_hex_sorted(&[token, &input.timestamp, &input.nonce, encrypt]);

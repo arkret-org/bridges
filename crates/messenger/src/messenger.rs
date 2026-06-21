@@ -7,13 +7,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use cokret_bridge_messaging::runtime::{BridgeError, Result};
 use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, webhook,
 };
-use cokret_bridge_runtime::{BridgeError, Result};
 use serde_json::{Value, json};
 
 /// Graph API send endpoint.

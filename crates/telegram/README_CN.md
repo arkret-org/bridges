@@ -34,4 +34,4 @@ cargo run -p cokret-bridge-telegram -- --config config.yaml
 - 入站转发文本与 photo/document 媒体;贴纸等其他类型暂未处理。
 - `app_channel` 为 Telegram chat id(整数,可为负的群组 id)。
 
-详见 [`../_bridges_todos.md`](../../_bridges_todos.md) 的总体规划与映射表。
+契约与共享层约束见仓库根目录 [`_BRIDGE_CONTRACT.md`](../../_BRIDGE_CONTRACT.md)。

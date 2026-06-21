@@ -26,7 +26,7 @@ use cokret::Event;
 use parking_lot::Mutex;
 use serde_json::Value;
 #[cfg(feature = "runtime")]
-use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
+use tokio::sync::mpsc::Receiver;
 
 // `Value` is also used below for the ephemeral payload type.
 #[cfg(feature = "runtime")]
@@ -335,7 +335,7 @@ async fn deliver_inbound_event<A: BridgeApp>(ctx: Arc<BridgeContext>, app: Arc<A
 pub async fn consume_ephemeral<A: BridgeApp>(
     ctx: Arc<BridgeContext>,
     app: Arc<A>,
-    mut rx: UnboundedReceiver<Value>,
+    mut rx: Receiver<Value>,
 ) -> Result<()> {
     while let Some(ephemeral) = rx.recv().await {
         if let Err(e) = app.on_ephemeral(ctx.clone(), ephemeral).await {

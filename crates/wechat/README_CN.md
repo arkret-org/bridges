@@ -42,4 +42,4 @@ cargo run -p cokret-bridge-wechat -- --config config.yaml
 - 出站 URL 与消息体当前按**企业微信应用消息**实现;公众号客服消息需切换
   `https://api.weixin.qq.com` 基址、`message/custom/send` 路径与不同消息体结构。
 
-详见 [`../_bridges_todos.md`](../../_bridges_todos.md) 的总体规划与映射表。
+契约与共享层约束见仓库根目录 [`_BRIDGE_CONTRACT.md`](../../_BRIDGE_CONTRACT.md)。

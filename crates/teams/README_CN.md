@@ -39,4 +39,4 @@ cargo run -p cokret-bridge-teams -- --config config.yaml
 - `service_url` 实际值随会话由 Bot Framework 下发,出站前应以入站 Activity 携带的
   serviceUrl 为准;当前实现要求显式配置。
 
-详见 [`../_bridges_todos.md`](../../_bridges_todos.md) 的总体规划与映射表。
+契约与共享层约束见仓库根目录 [`_BRIDGE_CONTRACT.md`](../../_BRIDGE_CONTRACT.md)。

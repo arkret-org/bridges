@@ -1,10 +1,5 @@
 /target*
 
-# Local development overrides — copy from `.env.example`. Real secrets must
-# never be committed.
-.env
-.env.local
-
 # Editor / OS detritus.
 .idea/
 .vscode/
@@ -13,4 +8,3 @@
 .claude/
 *.pem
 *.log
-/_*_todos.md

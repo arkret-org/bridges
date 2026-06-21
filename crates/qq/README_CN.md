@@ -36,4 +36,4 @@ cargo run -p cokret-bridge-qq -- --config config.yaml
 - webhook/官方上报入站已接入(`webhook_router`);OneBot 反向 ws 模式可作后续可选增强。
 - `send_to_app` 的 endpoint 与 `message_type` 按实际部署确认(群聊/私聊/频道)。
 
-详见 [`../_bridges_todos.md`](../../_bridges_todos.md) 的总体规划与映射表。
+契约与共享层约束见仓库根目录 [`_BRIDGE_CONTRACT.md`](../../_BRIDGE_CONTRACT.md)。

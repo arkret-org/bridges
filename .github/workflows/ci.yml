@@ -63,3 +63,57 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
         working-directory: bridges
+
+  supply-chain:
+    name: Cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout bridges
+        uses: actions/checkout@v6
+        with:
+          path: bridges
+
+      - name: Checkout Cokret Rust SDK
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository_owner }}/cokret-rust-sdk
+          path: cokret-rust-sdk
+          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+
+      - name: Cargo deny
+        run: cargo deny check
+        working-directory: bridges
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout bridges
+        uses: actions/checkout@v6
+        with:
+          path: bridges
+
+      - name: Checkout Cokret Rust SDK
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository_owner }}/cokret-rust-sdk
+          path: cokret-rust-sdk
+          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
+
+      - name: Install Rust 1.96
+        uses: dtolnay/rust-toolchain@1.96
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bridges -> target
+
+      - name: Check MSRV
+        run: cargo check --workspace --all-targets --locked
+        working-directory: bridges

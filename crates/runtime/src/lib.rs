@@ -84,9 +84,10 @@ where
     // applies backpressure (the applet handler returns `retry_after_ms` when
     // full) instead of buffering without limit (BRG-02-001).
     let (inbound_tx, inbound_rx) = mpsc::channel(cokret_edge::INBOUND_QUEUE_CAPACITY);
-    // Ephemeral (typing/presence/receipts) is best-effort and may be dropped, so
-    // it keeps an unbounded queue.
-    let (ephemeral_tx, ephemeral_rx) = mpsc::unbounded_channel();
+    // Ephemeral (typing/presence/receipts) is best-effort and may be dropped.
+    // Keep it bounded so a slow adapter cannot turn provider bursts into
+    // unbounded process memory growth.
+    let (ephemeral_tx, ephemeral_rx) = mpsc::channel(cokret_edge::EPHEMERAL_QUEUE_CAPACITY);
 
     let db = Arc::new(db::DatabaseManager::connect(&config.database)?);
     // The diesel-backed restart-safe sequence store, injected into the edge.

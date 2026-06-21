@@ -8,11 +8,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use cokret_bridge_messaging::runtime::{BridgeError, Result};
 use cokret_bridge_messaging::{
     AppMessageRef, Attachment, InboundAppMessage, MessageBridge, MessageContext,
     OutboundAppMessage, SenderRenderStyle,
 };
-use cokret_bridge_runtime::{BridgeError, Result};
 use serenity::all::{ChannelId, CreateAttachment, CreateMessage, GatewayIntents, Http, Message};
 use serenity::client::{Context as SerenityContext, EventHandler};
 

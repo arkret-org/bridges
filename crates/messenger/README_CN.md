@@ -37,4 +37,4 @@ cargo run -p cokret-bridge-messenger -- --config config.yaml
 
 - Messenger webhook(验证握手 + `messages` 事件解析)已接入(`webhook_router`)。
 
-详见 [`../_bridges_todos.md`](../../_bridges_todos.md) 的总体规划与映射表。
+契约与共享层约束见仓库根目录 [`_BRIDGE_CONTRACT.md`](../../_BRIDGE_CONTRACT.md)。

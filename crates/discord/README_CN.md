@@ -28,4 +28,4 @@ cargo run -p cokret-bridge-discord -- --config config.yaml
 - `app.bot_token`:Discord bot token。
 - `database.url`:`sqlite://...` / `postgres://...` / `mysql://...`(对应 feature)。
 
-详见 [`../_bridges_todos.md`](../../_bridges_todos.md) 的总体规划与映射表。
+契约与共享层约束见仓库根目录 [`_BRIDGE_CONTRACT.md`](../../_BRIDGE_CONTRACT.md)。

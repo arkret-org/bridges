@@ -38,4 +38,4 @@ cargo run -p cokret-bridge-imessage -- --config config.yaml
 - `send_to_app` 的 endpoint 与字段按实际网关(BlueBubbles / AirMessage)确认。
 - 入站网关 webhook 回调已接入(`webhook_router`,必需 `webhook_secret`)。
 
-详见 [`../_bridges_todos.md`](../../_bridges_todos.md) 的总体规划与映射表。
+契约与共享层约束见仓库根目录 [`_BRIDGE_CONTRACT.md`](../../_BRIDGE_CONTRACT.md)。

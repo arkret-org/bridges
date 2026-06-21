@@ -8,14 +8,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use cokret_bridge_messaging::runtime::cache::TokenCache;
+use cokret_bridge_messaging::runtime::{BridgeError, Result};
 use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, webhook,
 };
-use cokret_bridge_runtime::cache::TokenCache;
-use cokret_bridge_runtime::{BridgeError, Result};
 use serde_json::{Value, json};
 
 const FEISHU_BASE: &str = "https://open.feishu.cn/open-apis";
@@ -169,7 +169,7 @@ impl MessageBridge for FeishuApp {
         // static verification token (which the bridge contract forbids as a
         // substitute for per-delivery verification).
         let Some(encrypt_key) = self.encrypt_key.clone() else {
-            eprintln!(
+            tracing::error!(
                 "Feishu inbound webhook disabled: encrypt_key is required so every \
                  delivery carries an X-Lark-Signature; plaintext callback mode is not \
                  permitted (per-delivery source verification is mandatory)"
@@ -177,7 +177,7 @@ impl MessageBridge for FeishuApp {
             return None;
         };
         if self.verification_token.is_empty() {
-            eprintln!(
+            tracing::error!(
                 "Feishu inbound webhook disabled: verification_token is required (fail closed)"
             );
             return None;
@@ -249,20 +249,6 @@ fn feishu_decrypt(aes_key: &[u8; 32], encrypt_b64: &str) -> Option<Value> {
     serde_json::from_slice::<Value>(&plain).ok()
 }
 
-/// Parse Feishu's `X-Lark-Request-Timestamp` (Unix seconds, as a string) and
-/// return true when it is within `max_skew` of now (in either direction). A
-/// non-numeric or far-skewed timestamp is rejected (fail closed).
-fn timestamp_is_fresh(timestamp: &str, max_skew: Duration) -> bool {
-    let Ok(ts) = timestamp.trim().parse::<i64>() else {
-        return false;
-    };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    (now - ts).unsigned_abs() <= max_skew.as_secs()
-}
-
 #[handler]
 async fn feishu_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let Ok(state) = depot.obtain::<FeishuWebhookState>() else {
@@ -307,7 +293,7 @@ async fn feishu_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respons
     };
     // Reject deliveries whose timestamp falls outside the freshness window. This
     // bounds replay to the window and lets the replay guard stay small.
-    if !timestamp_is_fresh(&timestamp, FEISHU_DELIVERY_MAX_SKEW) {
+    if !webhook::unix_timestamp_is_fresh(&timestamp, FEISHU_DELIVERY_MAX_SKEW) {
         webhook::unauthorized(res, "Feishu delivery timestamp is stale or invalid");
         return;
     }
@@ -486,15 +472,27 @@ mod tests {
             .as_secs() as i64;
         let skew = Duration::from_secs(300);
         // Within the window (now, and just inside either edge) is accepted.
-        assert!(timestamp_is_fresh(&now.to_string(), skew));
-        assert!(timestamp_is_fresh(&(now - 299).to_string(), skew));
-        assert!(timestamp_is_fresh(&(now + 299).to_string(), skew));
+        assert!(webhook::unix_timestamp_is_fresh(&now.to_string(), skew));
+        assert!(webhook::unix_timestamp_is_fresh(
+            &(now - 299).to_string(),
+            skew
+        ));
+        assert!(webhook::unix_timestamp_is_fresh(
+            &(now + 299).to_string(),
+            skew
+        ));
         // Outside the window (past or future) is rejected.
-        assert!(!timestamp_is_fresh(&(now - 3600).to_string(), skew));
-        assert!(!timestamp_is_fresh(&(now + 3600).to_string(), skew));
+        assert!(!webhook::unix_timestamp_is_fresh(
+            &(now - 3600).to_string(),
+            skew
+        ));
+        assert!(!webhook::unix_timestamp_is_fresh(
+            &(now + 3600).to_string(),
+            skew
+        ));
         // Non-numeric / empty timestamps fail closed.
-        assert!(!timestamp_is_fresh("not-a-number", skew));
-        assert!(!timestamp_is_fresh("", skew));
+        assert!(!webhook::unix_timestamp_is_fresh("not-a-number", skew));
+        assert!(!webhook::unix_timestamp_is_fresh("", skew));
     }
 
     #[test]

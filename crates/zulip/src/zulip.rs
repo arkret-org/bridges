@@ -12,11 +12,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use cokret_bridge_messaging::runtime::{BridgeError, Result};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle,
 };
-use cokret_bridge_runtime::{BridgeError, Result};
 use serde_json::Value;
 
 /// Zulip bridge adapter.
@@ -132,14 +132,19 @@ impl MessageBridge for ZulipApp {
                     continue;
                 };
 
+                let mut retry_poll = false;
                 for ev in events {
-                    if let Some(id) = ev.get("id").and_then(|v| v.as_i64()) {
-                        last_event_id = last_event_id.max(id);
-                    }
+                    let event_id = ev.get("id").and_then(|v| v.as_i64());
                     if ev.get("type").and_then(|v| v.as_str()) != Some("message") {
+                        if let Some(id) = event_id {
+                            last_event_id = last_event_id.max(id);
+                        }
                         continue;
                     }
                     let Some(message) = ev.get("message") else {
+                        if let Some(id) = event_id {
+                            last_event_id = last_event_id.max(id);
+                        }
                         continue;
                     };
 
@@ -149,6 +154,9 @@ impl MessageBridge for ZulipApp {
                         .and_then(|v| v.as_str())
                         .unwrap_or_default();
                     if sender_email.eq_ignore_ascii_case(&self.bot_email) {
+                        if let Some(id) = event_id {
+                            last_event_id = last_event_id.max(id);
+                        }
                         continue;
                     }
 
@@ -176,9 +184,29 @@ impl MessageBridge for ZulipApp {
                             .unwrap_or_default()
                             .to_owned(),
                     };
-                    if let Err(e) = ctx.submit_app_message(inbound).await {
-                        tracing::warn!(error = %e, "Zulip -> cokret submit failed");
+                    match ctx.submit_app_message(inbound.clone()).await {
+                        Ok(_) => {
+                            if let Some(id) = event_id {
+                                last_event_id = last_event_id.max(id);
+                            }
+                        }
+                        Err(e) => {
+                            let retriable = e.is_retriable();
+                            tracing::warn!(error = %e, retriable, "Zulip -> cokret submit failed");
+                            ctx.report_inbound_bridge_error(&inbound, &e, retriable)
+                                .await;
+                            if retriable {
+                                retry_poll = true;
+                                break;
+                            }
+                            if let Some(id) = event_id {
+                                last_event_id = last_event_id.max(id);
+                            }
+                        }
                     }
+                }
+                if retry_poll {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
             }
         }

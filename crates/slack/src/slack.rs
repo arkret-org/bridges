@@ -12,11 +12,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use cokret_bridge_messaging::runtime::{BridgeError, Result};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle,
 };
-use cokret_bridge_runtime::{BridgeError, Result};
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -68,17 +68,24 @@ impl SlackApp {
             .ok_or_else(|| BridgeError::App("Slack apps.connections.open is missing url".into()))
     }
 
-    /// Handle a single socket mode envelope: parse the message event and submit it to the core.
-    async fn handle_envelope(ctx: &Arc<MessageContext>, envelope: &Value) {
+    /// Handle a single socket mode envelope. Returns whether the envelope may be
+    /// acked back to Slack. Retriable submit failures deliberately withhold the
+    /// ack so Slack redelivers the envelope instead of silently dropping it.
+    async fn handle_envelope(ctx: &Arc<MessageContext>, envelope: &Value) -> bool {
         // Only care about the events_api type whose inner event is a message.
         let event = envelope.pointer("/payload/event");
-        let Some(event) = event else { return };
+        let Some(event) = event else { return true };
         let Some(inbound) = slack_inbound_message(event) else {
-            return;
+            return true;
         };
-        if let Err(e) = ctx.submit_app_message(inbound).await {
-            tracing::warn!(error = %e, "Slack → cokret submission failed");
+        if let Err(e) = ctx.submit_app_message(inbound.clone()).await {
+            let retriable = e.is_retriable();
+            tracing::warn!(error = %e, retriable, "Slack → cokret submission failed");
+            ctx.report_inbound_bridge_error(&inbound, &e, retriable)
+                .await;
+            return !retriable;
         }
+        true
     }
 }
 
@@ -200,18 +207,25 @@ impl MessageBridge for SlackApp {
                     continue;
                 };
 
-                // Socket mode requires an ack for every envelope that carries an envelope_id.
-                if let Some(envelope_id) = envelope.get("envelope_id").and_then(Value::as_str) {
+                // Handle events_api pushes before acking. For retriable submit
+                // failures we withhold the ack, letting Slack redeliver.
+                let should_ack =
+                    if envelope.get("type").and_then(Value::as_str) == Some("events_api") {
+                        Self::handle_envelope(&ctx, &envelope).await
+                    } else {
+                        true
+                    };
+
+                // Socket mode requires an ack for every accepted envelope that
+                // carries an envelope_id.
+                if should_ack
+                    && let Some(envelope_id) = envelope.get("envelope_id").and_then(Value::as_str)
+                {
                     let ack = json!({ "envelope_id": envelope_id }).to_string();
                     if let Err(e) = write.send(WsMessage::text(ack)).await {
                         tracing::warn!(error = %e, "Slack socket ack failed, reconnecting");
                         break;
                     }
-                }
-
-                // Handle events_api pushes (ignore control frames like hello/disconnect).
-                if envelope.get("type").and_then(Value::as_str) == Some("events_api") {
-                    Self::handle_envelope(&ctx, &envelope).await;
                 }
             }
 

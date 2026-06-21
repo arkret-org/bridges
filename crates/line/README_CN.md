@@ -44,4 +44,4 @@ cargo run -p cokret-bridge-line -- --config config.yaml
   `upload_blob` → `submit_media_message`。出站二进制(LINE push 需 `originalContentUrl` 托管 URL)
   暂未实现。
 
-详见 [`../_bridges_todos.md`](../../_bridges_todos.md) 的总体规划与映射表。
+契约与共享层约束见仓库根目录 [`_BRIDGE_CONTRACT.md`](../../_BRIDGE_CONTRACT.md)。

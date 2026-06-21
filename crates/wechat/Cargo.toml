@@ -13,15 +13,14 @@ path = "src/main.rs"
 
 [features]
 default = ["sqlite"]
-sqlite = ["cokret-bridge-runtime/sqlite", "cokret-bridge-messaging/sqlite"]
-postgres = ["cokret-bridge-runtime/postgres", "cokret-bridge-messaging/postgres"]
-mysql = ["cokret-bridge-runtime/mysql", "cokret-bridge-messaging/mysql"]
+sqlite = ["cokret-bridge-messaging/sqlite"]
+postgres = ["cokret-bridge-messaging/postgres"]
+mysql = ["cokret-bridge-messaging/mysql"]
 
 [dependencies]
 anyhow = {workspace = true}
 async-trait = {workspace = true}
 cokret-bridge-messaging = {workspace = true,default-features = false}
-cokret-bridge-runtime = {workspace = true,default-features = false}
 quick-xml = {workspace = true}
 serde = {workspace = true}
 serde_json = {workspace = true}

@@ -32,7 +32,7 @@ use parking_lot::Mutex;
 use serde_json::Value;
 #[cfg(any(feature = "web", test))]
 use serde_json::json;
-use tokio::sync::mpsc::{Sender, UnboundedSender};
+use tokio::sync::mpsc::Sender;
 
 #[cfg(any(feature = "web", test))]
 use crate::app::AppletResolver;
@@ -49,9 +49,25 @@ use crate::idempotency::{DedupVerdict, EventDedupStore};
 /// will redeliver) is the correct behaviour.
 pub const INBOUND_QUEUE_CAPACITY: usize = 1024;
 
+/// Bound on the best-effort ephemeral queue. When full, new ephemeral envelopes
+/// are dropped instead of back-pressuring durable transaction delivery.
+pub const EPHEMERAL_QUEUE_CAPACITY: usize = 1024;
+
 /// Retry hint (ms) returned to the server when the inbound queue is full, so it
 /// re-pushes the unaccepted events after a short delay instead of dropping them.
 const INBOUND_QUEUE_FULL_RETRY_MS: u64 = 1000;
+
+#[cfg(any(feature = "web", test))]
+fn value_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
 
 /// How many actor sequence numbers to reserve in the store per refill. A larger
 /// block means fewer store writes at the cost of skipping more numbers on each
@@ -142,7 +158,7 @@ pub struct CokretEdge {
     /// Inbound ephemeral queue (typing/presence/receipts; raw JSON until a typed
     /// schema is defined): cokret server push → core consumer loop. `None` for
     /// outbound-only edges.
-    ephemeral_tx: Option<UnboundedSender<Value>>,
+    ephemeral_tx: Option<Sender<Value>>,
 }
 
 impl CokretEdge {
@@ -199,7 +215,7 @@ impl CokretEdge {
 
     /// Install the ephemeral (typing/presence/receipts) sender. Used by the
     /// `run_bridge` path which wires a parallel queue.
-    pub fn set_ephemeral_sender(&mut self, tx: UnboundedSender<Value>) {
+    pub fn set_ephemeral_sender(&mut self, tx: Sender<Value>) {
         self.ephemeral_tx = Some(tx);
     }
 
@@ -221,7 +237,7 @@ impl CokretEdge {
     }
 
     /// The ephemeral sender, if installed.
-    pub fn ephemeral_sender(&self) -> Option<UnboundedSender<Value>> {
+    pub fn ephemeral_sender(&self) -> Option<Sender<Value>> {
         self.ephemeral_tx.clone()
     }
 
@@ -531,7 +547,7 @@ pub struct BridgeAppletHandler {
     limits: Value,
     auth: Value,
     inbound_tx: Sender<Event>,
-    ephemeral_tx: Option<UnboundedSender<Value>>,
+    ephemeral_tx: Option<Sender<Value>>,
     resolver: Option<Arc<dyn AppletResolver>>,
     /// Event kinds this bridge consumes on the inbound path. `None` ⇒ permissive
     /// (accept all). When `Some`, a pushed event whose kind is not listed is
@@ -841,14 +857,28 @@ impl cokret::AppletHandler for BridgeAppletHandler {
             }
         }
 
-        // Forward ephemeral (typing/presence/receipts) when present instead of
-        // silently dropping it; consumers receive the raw JSON. Ephemeral loss is
-        // non-fatal (best-effort) and does not affect the durable ack.
-        if !req.ephemeral.is_null()
-            && let Some(tx) = self.ephemeral_tx.as_ref()
-            && let Err(err) = tx.send(req.ephemeral)
-        {
-            tracing::warn!(error = %err, "failed to enqueue ephemeral payload");
+        // Forward spec-shaped ephemeral arrays one envelope at a time. Ephemeral
+        // loss is non-fatal (best-effort) and does not affect the durable ack.
+        if let Some(tx) = self.ephemeral_tx.as_ref() {
+            match req.ephemeral {
+                Value::Null => {}
+                Value::Array(envelopes) => {
+                    for envelope in envelopes {
+                        if let Err(err) = tx.try_send(envelope) {
+                            tracing::warn!(
+                                error = %err,
+                                "dropping ephemeral envelope because the best-effort queue is full or closed"
+                            );
+                        }
+                    }
+                }
+                other => {
+                    tracing::warn!(
+                        payload_type = %value_type_name(&other),
+                        "dropping malformed applet transaction ephemeral payload; expected array"
+                    );
+                }
+            }
         }
 
         // `ok` reflects whether every durable event was accepted (either freshly

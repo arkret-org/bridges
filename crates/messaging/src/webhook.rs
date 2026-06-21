@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aes::{Aes128, Aes256};
 use base64::Engine as _;
@@ -38,6 +38,33 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         return false;
     }
     a.ct_eq(b).into()
+}
+
+/// Parse a Unix timestamp in seconds and verify that it is within `max_skew`
+/// of the local clock. Malformed timestamps and clock errors fail closed.
+pub fn unix_timestamp_is_fresh(timestamp: &str, max_skew: Duration) -> bool {
+    let Ok(ts) = timestamp.trim().parse::<i64>() else {
+        return false;
+    };
+    let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return false;
+    };
+    (now.as_secs() as i64 - ts).unsigned_abs() <= max_skew.as_secs()
+}
+
+/// Parse a Unix timestamp in milliseconds and verify that it is within
+/// `max_skew` of the local clock. Malformed timestamps and clock errors fail
+/// closed.
+pub fn unix_timestamp_millis_is_fresh(timestamp: &str, max_skew: Duration) -> bool {
+    let Ok(ts) = timestamp.trim().parse::<i64>() else {
+        return false;
+    };
+    let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return false;
+    };
+    let now_ms = now.as_millis().min(i64::MAX as u128) as i64;
+    let max_skew_ms = max_skew.as_millis().min(i64::MAX as u128) as u64;
+    (now_ms - ts).unsigned_abs() <= max_skew_ms
 }
 
 /// Bounded in-memory replay guard for webhook schemes whose vendor signature
