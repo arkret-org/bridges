@@ -5,6 +5,7 @@
 //!   gateway's send endpoint (using BlueBubbles `/api/v1/message/text` as an example).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
@@ -22,21 +23,21 @@ pub struct IMessageApp {
     gateway_url: String,
     /// Gateway access password (BlueBubbles uses it as the `?guid=` query parameter).
     password: Option<String>,
-    /// Shared secret required on inbound webhook calls. When `None`, inbound
+    /// HMAC secret required on inbound webhook calls. When `None`, inbound
     /// webhooks are rejected fail-closed.
-    webhook_secret: Option<String>,
+    webhook_secret: String,
 }
 
 impl IMessageApp {
     pub fn new(
         gateway_url: impl Into<String>,
         password: Option<String>,
-        webhook_secret: Option<String>,
+        webhook_secret: impl Into<String>,
     ) -> Self {
         Self {
             gateway_url: gateway_url.into(),
             password,
-            webhook_secret,
+            webhook_secret: webhook_secret.into(),
         }
     }
 }
@@ -108,18 +109,26 @@ impl MessageBridge for IMessageApp {
 
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
         let secret = self.webhook_secret.clone();
+        let replay = Arc::new(webhook::ReplayWindow::new(IMESSAGE_DELIVERY_MAX_SKEW, 8192));
         Some(
             salvo::Router::with_path("webhooks/imessage")
-                .hoop(affix_state::inject(IMessageWebhookState { ctx, secret }))
+                .hoop(affix_state::inject(IMessageWebhookState {
+                    ctx,
+                    secret,
+                    replay,
+                }))
                 .post(imessage_delivery),
         )
     }
 }
 
+const IMESSAGE_DELIVERY_MAX_SKEW: Duration = Duration::from_secs(5 * 60);
+
 #[derive(Clone)]
 struct IMessageWebhookState {
     ctx: Arc<MessageContext>,
-    secret: Option<String>,
+    secret: String,
+    replay: Arc<webhook::ReplayWindow>,
 }
 
 #[handler]
@@ -128,19 +137,48 @@ async fn imessage_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
         webhook::bad_request(res, "webhook state missing");
         return;
     };
-    // Fail closed: a webhook secret MUST be configured, and inbound calls MUST
-    // present it. Compared in constant time to avoid a timing side channel.
-    let Some(expected) = &state.secret else {
+    // Fail closed: a webhook HMAC secret MUST be configured, and each inbound
+    // delivery MUST authenticate the exact raw body bytes plus timestamp.
+    if state.secret.trim().is_empty() {
         webhook::unauthorized(res, "iMessage webhook secret not configured");
         return;
+    }
+    let Some(raw) = webhook::raw_body(req, res).await else {
+        return;
     };
-    let provided = req.header::<String>("x-webhook-secret").unwrap_or_default();
-    if !webhook::constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
-        webhook::unauthorized(res, "iMessage webhook secret mismatch");
+    let timestamp = req
+        .header::<String>("x-cokret-timestamp")
+        .unwrap_or_default();
+    if !webhook::unix_timestamp_is_fresh(&timestamp, IMESSAGE_DELIVERY_MAX_SKEW) {
+        webhook::unauthorized(res, "iMessage webhook timestamp is stale or invalid");
         return;
     }
-    let Some(body) = webhook::json_body(req, res).await else {
+    let signature = req
+        .header::<String>("x-cokret-signature-256")
+        .unwrap_or_default();
+    if !webhook::verify_timestamped_hmac_sha256(
+        state.secret.as_bytes(),
+        &timestamp,
+        &raw,
+        &signature,
+        webhook::SigEncoding::Hex,
+    ) {
+        webhook::unauthorized(res, "iMessage webhook signature mismatch");
         return;
+    }
+    if !state
+        .replay
+        .check_and_record(format!("{timestamp}\u{1f}{signature}"))
+    {
+        webhook::unauthorized(res, "iMessage webhook replay");
+        return;
+    }
+    let body = match serde_json::from_slice::<Value>(&raw) {
+        Ok(body) => body,
+        Err(err) => {
+            webhook::bad_request(res, format!("invalid iMessage webhook JSON body: {err}"));
+            return;
+        }
     };
     let inbound = match imessage_inbound_message(&body) {
         Ok(Some(inbound)) => inbound,
@@ -243,5 +281,23 @@ mod tests {
                 .is_none()
         );
         assert!(imessage_inbound_message(&json!({"data": {"text": "hello"}})).is_err());
+    }
+
+    #[test]
+    fn imessage_timestamped_signature_binds_body() {
+        assert!(webhook::verify_timestamped_hmac_sha256(
+            b"secret",
+            "1700000000",
+            br#"{"hello":"world"}"#,
+            "d3d89618b58441bc1f9fbbcaae8435ebd7a6eebbf9fb96c3b87302a69f0d6ed9",
+            webhook::SigEncoding::Hex
+        ));
+        assert!(!webhook::verify_timestamped_hmac_sha256(
+            b"secret",
+            "1700000000",
+            br#"{"hello":"tampered"}"#,
+            "d3d89618b58441bc1f9fbbcaae8435ebd7a6eebbf9fb96c3b87302a69f0d6ed9",
+            webhook::SigEncoding::Hex
+        ));
     }
 }

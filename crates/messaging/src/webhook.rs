@@ -170,6 +170,25 @@ pub fn verify_hmac_sha256(secret: &[u8], body: &[u8], provided: &str, enc: SigEn
     constant_time_eq(expected.as_bytes(), provided.as_bytes())
 }
 
+/// Verify `provided` equals `HMAC-SHA256(secret, timestamp || "\n" || body)`.
+///
+/// Use this for webhook schemes where the bridge defines a local per-delivery
+/// body signature: binding the freshness timestamp into the MAC prevents an old
+/// body+signature pair from being replayed with a new timestamp header.
+pub fn verify_timestamped_hmac_sha256(
+    secret: &[u8],
+    timestamp: &str,
+    body: &[u8],
+    provided: &str,
+    enc: SigEncoding,
+) -> bool {
+    let mut signed = Vec::with_capacity(timestamp.len() + 1 + body.len());
+    signed.extend_from_slice(timestamp.as_bytes());
+    signed.push(b'\n');
+    signed.extend_from_slice(body);
+    verify_hmac_sha256(secret, &signed, provided, enc)
+}
+
 /// Verify `provided` equals `HMAC-SHA1(secret, body)` rendered in `enc`,
 /// using a constant-time comparison.
 pub fn verify_hmac_sha1(secret: &[u8], body: &[u8], provided: &str, enc: SigEncoding) -> bool {
@@ -662,6 +681,33 @@ mod tests {
             &key,
             b"Hi There",
             "deadbeef",
+            SigEncoding::Hex
+        ));
+    }
+
+    #[test]
+    fn timestamped_hmac_sha256_binds_timestamp_and_body() {
+        let body = br#"{"hello":"world"}"#;
+        let signature = "d3d89618b58441bc1f9fbbcaae8435ebd7a6eebbf9fb96c3b87302a69f0d6ed9";
+        assert!(verify_timestamped_hmac_sha256(
+            b"secret",
+            "1700000000",
+            body,
+            signature,
+            SigEncoding::Hex
+        ));
+        assert!(!verify_timestamped_hmac_sha256(
+            b"secret",
+            "1700000001",
+            body,
+            signature,
+            SigEncoding::Hex
+        ));
+        assert!(!verify_timestamped_hmac_sha256(
+            b"secret",
+            "1700000000",
+            br#"{"hello":"tampered"}"#,
+            signature,
             SigEncoding::Hex
         ));
     }

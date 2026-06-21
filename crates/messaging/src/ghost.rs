@@ -283,10 +283,9 @@ pub(crate) fn location_matches(candidate: Option<&Value>, location: &Value) -> b
 /// effective (HLC) order, per the §10.1 create-idempotency rule.
 ///
 /// The location is matched against the strand object's signed
-/// `metadata.fields.external_ref` (covered by the event digest). The spec's
-/// envelope-top-level signed `external_ref` is not yet representable in the SDK
-/// `Event` model, so strand creation mirrors the location into the signed strand
-/// metadata (see [`create_portal_strand`]).
+/// `metadata.fields.external_ref` (covered by the event digest). Strand creation
+/// also records the same location in the envelope's signed top-level
+/// `external_ref`.
 pub(crate) async fn find_existing_portal_strand(
     edge: &runtime::CokretEdge,
     realm_id: &str,
@@ -339,7 +338,8 @@ pub(crate) async fn find_existing_portal_strand(
 
 /// §10.1 step 3: create the portal strand by submitting `ck.strand.create` under
 /// the bridge's own signable identity (the service actor), recording the
-/// external location in the signed strand metadata, and return the new strand id.
+/// external location in signed envelope/strand fields, and return the new strand
+/// id.
 pub(crate) async fn create_portal_strand(
     edge: &runtime::CokretEdge,
     app_channel: &str,
@@ -366,12 +366,7 @@ pub(crate) async fn create_portal_strand(
     // actor_id (both are the service DID here) and object.created_at == the
     // envelope created_at.
     event.created_at = strand_created_at;
-    // §10.1 asks for a signed envelope top-level external_ref recording the
-    // location; the SDK Event model cannot carry that field yet, so the signed
-    // copy lives in the strand metadata above and unsigned only carries a hint.
-    event
-        .unsigned
-        .insert("external_ref".to_owned(), location.clone());
+    event.external_ref = Some(location.clone());
     edge.resign_event(&mut event)?;
     edge.submit_event(&event).await?;
     Ok(strand_id.to_string())

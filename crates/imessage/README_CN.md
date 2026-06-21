@@ -9,8 +9,9 @@ AirMessage** 之类的 HTTP 网关与 iMessage 收发。
 
 - **入站(iMessage → cokret)**:网关 webhook 回调推送的新消息由
   `MessageBridge::webhook_router` 暴露的路由接收(必填 `webhook_secret`,请求须携带
-  `x-webhook-secret` 头),经 `webhook::submit` → `MessageContext::submit_app_message` 构造并签名
-  `ck.message.create` 事件 → `events_submit` 提交到 cokret;`run` 为保活循环。
+  `x-cokret-timestamp` 与 `x-cokret-signature-256` body HMAC),经 `webhook::submit` →
+  `MessageContext::submit_app_message` 构造并签名 `ck.message.create` 事件 → `events_submit`
+  提交到 cokret;`run` 为保活循环。
 - **出站(cokret → iMessage)**:cokret server 经 applet 端点
   `POST /_cokret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
   用 `ctx.http` POST 网关发送接口(示例为 BlueBubbles `/api/v1/message/text`)。
@@ -29,13 +30,14 @@ cargo run -p cokret-bridge-imessage -- --config config.yaml
 - `cokret.*`:cokret 接入(server_url、service_did、applet_id、access_token、签名种子)。
 - `app.gateway_url`:BlueBubbles / AirMessage 网关基址。
 - `app.password`:网关访问口令(BlueBubbles 作 `?guid=` 查询参数)。
-- `app.webhook_secret`:入站 `/webhooks/imessage` 的共享密钥,必填;请求须带
-  `x-webhook-secret` 头,未配置时 fail closed 拒绝。
+- `app.webhook_secret`:入站 `/webhooks/imessage` 的 HMAC 密钥,必填。签名格式为
+  `hex(HMAC-SHA256(secret, x-cokret-timestamp + "\n" + raw_body))`,放入
+  `x-cokret-signature-256`;时间戳为 Unix 秒,并参与重放防护。未配置时 fail closed 拒绝。
 - `database.url`:`sqlite://...` / `postgres://...` / `mysql://...`(对应 feature)。
 
 ## 待办
 
 - `send_to_app` 的 endpoint 与字段按实际网关(BlueBubbles / AirMessage)确认。
-- 入站网关 webhook 回调已接入(`webhook_router`,必需 `webhook_secret`)。
+- 入站网关 webhook 回调已接入(`webhook_router`,必需 timestamp+body HMAC)。
 
 契约与共享层约束见仓库根目录 [`_BRIDGE_CONTRACT.md`](../../_BRIDGE_CONTRACT.md)。

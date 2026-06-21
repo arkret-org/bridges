@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS room_mappings (
+CREATE TABLE IF NOT EXISTS channel_realm_mappings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     app_channel_id TEXT NOT NULL UNIQUE,
     cokret_realm_id TEXT NOT NULL UNIQUE,

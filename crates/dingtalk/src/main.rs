@@ -8,12 +8,14 @@ use serde::Deserialize;
 use crate::dingtalk::DingTalkApp;
 
 /// DingTalk enterprise internal app credentials: `app_key`/`app_secret` are
-/// used to obtain an access_token; `robot_code` identifies the robot.
+/// used to obtain an access_token; `robot_code` identifies the robot. The
+/// optional inbound body HMAC secret is required to accept message deliveries.
 #[derive(Debug, Deserialize)]
 struct AppConfig {
     app_key: String,
     app_secret: String,
     robot_code: String,
+    webhook_body_hmac_secret: String,
 }
 
 #[tokio::main]
@@ -23,6 +25,7 @@ async fn main() -> anyhow::Result<()> {
             app.app_key,
             app.app_secret,
             app.robot_code,
+            app.webhook_body_hmac_secret,
         ))
     })
     .await

@@ -13,7 +13,7 @@ struct AppConfig {
     gateway_url: String,
     password: Option<String>,
     /// Optional shared secret guarding the inbound `/webhooks/imessage` endpoint.
-    webhook_secret: Option<String>,
+    webhook_secret: String,
 }
 
 #[tokio::main]

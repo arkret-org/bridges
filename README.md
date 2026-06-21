@@ -79,7 +79,7 @@ cargo run -p cokret-bridge-discord -- --config config.yaml
 
 每个 crate 默认 `sqlite` feature;`--features postgres` / `--features mysql` 切换后端。
 配置文件使用 YAML。
-所有桥都必须显式建立 app channel 到 Realm 的映射；没有 room mapping 的入站消息会直接失败,
+所有桥都必须显式建立 app channel 到 Realm 的映射；没有 channel-realm mapping 的入站消息会直接失败,
 不再回退到默认 Realm。
 
 三个信任面绑在**两个独立监听**上,默认即隔离,不再仅靠反代 path 规则:
@@ -95,3 +95,18 @@ cargo run -p cokret-bridge-discord -- --config config.yaml
 校验 HTTP Message Signature、source/destination DID 与 event proof;生产仍建议在反代/网络层
 进一步限制为仅可信 Cokret server 访问,并对 `/metrics` 做内网或认证访问控制。若需把 admin/edge
 面也对外(如 cokret server 在另一网段),显式设置 `admin_bind` 即可,但应自行收敛网络层暴露面。
+
+## 容器发布
+
+仓库提供一个统一的多阶段 `Dockerfile`,通过 `BRIDGE_BIN` 选择要打包的桥二进制。由于 workspace
+依赖 sibling `cokret-rust-sdk`,Docker build context 必须是同时包含 `bridges/` 与
+`cokret-rust-sdk/` 的父目录:
+
+```bash
+docker build -f bridges/Dockerfile \
+  --build-arg BRIDGE_BIN=cokret-bridge-slack \
+  -t cokret-bridge-slack:local .
+```
+
+tag 推送会触发 `.github/workflows/release.yml`,矩阵构建 14 个桥镜像并推送到 GHCR,同时生成
+CycloneDX SBOM;tag 发布的镜像会通过 keyless cosign 签名。

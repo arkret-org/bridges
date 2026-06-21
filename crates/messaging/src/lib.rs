@@ -44,7 +44,7 @@ use ghost::{
 pub use runtime::salvo;
 use serde_json::{Value, json};
 use store::MessageResolver;
-pub use store::{MessageMapping, MessageStore, RoomMapping, UserMapping};
+pub use store::{ChannelRealmMapping, MessageMapping, MessageStore, UserMapping};
 pub use types::{
     AppDeleteOutcome, AppDeleteReason, AppMessageRef, Attachment, DownloadedMedia,
     InboundAppDelete, InboundAppMessage, MAX_EXTERNAL_MEDIA_BYTES, OutboundAppMessage,
@@ -64,9 +64,9 @@ pub(crate) const MESSAGE_MAPPING_KEY_SEPARATOR: char = '\u{1f}';
 /// message creation and redaction.
 const BRIDGE_HANDLED_EVENT_KINDS: [&str; 2] = ["ck.message.create", "ck.message.redact"];
 
-/// The strand track bridged messages write into. applet-integration §10.1: 桥接
-/// 消息默认写入 `discussion`;v1 的 `message_create_payload.track_name` 在
-/// schema 中即 const `"discussion"`。
+/// The strand track bridged messages write into. Applet-integration §10.1
+/// requires bridge messages to use the `discussion` track; the v1
+/// `message_create_payload.track_name` schema constrains it to that value.
 pub(crate) const PORTAL_STRAND_TRACK: &str = "discussion";
 
 /// Page size for the §10.1 step-2 projection scan over realm history.
@@ -261,8 +261,8 @@ impl MessageContext {
     /// Resolve the portal strand for an app channel following the §10.1
     /// acquisition order: persisted mapping → projection scan over the portal
     /// realm (match by external location) → `ck.strand.create`. The result is
-    /// cached in the room mapping. Serialized per channel so concurrent first
-    /// messages cannot double-create.
+    /// cached in the channel↔realm mapping. Serialized per channel so
+    /// concurrent first messages cannot double-create.
     pub async fn ensure_portal_strand(&self, app_channel: &str, realm_id: &str) -> Result<String> {
         let channel_key = message_mapping_channel_key(&self.inner.config, app_channel);
         let queue_key = format!("portal_strand{MESSAGE_MAPPING_KEY_SEPARATOR}{channel_key}");
@@ -480,7 +480,7 @@ impl MessageContext {
             .map(|row| row.cokret_realm_id)
             .ok_or_else(|| {
                 BridgeError::App(format!(
-                    "channel {} has no realm mapping; create an explicit room mapping",
+                    "channel {} has no realm mapping; create an explicit channel-realm mapping",
                     msg.app_channel
                 ))
             })?;
@@ -704,14 +704,17 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
             return Ok(());
         }
         let realm_id = event.realm_id.to_string();
-        let Some(room) = self.ctx.store.room_for_realm(&realm_id)? else {
+        let Some(channel_realm) = self.ctx.store.channel_for_realm(&realm_id)? else {
             tracing::debug!(realm = %realm_id, "realm has no channel mapping, dropping");
             return Ok(());
         };
-        let channel = room.app_channel_id.clone();
+        let channel = channel_realm.app_channel_id.clone();
         // §10.1: the external location maps to (realm_id, strand_id), not the
         // bare realm — only messages on the portal strand cross the bridge.
-        let portal_strand = match room.portal_strand_id.filter(|f| !f.trim().is_empty()) {
+        let portal_strand = match channel_realm
+            .portal_strand_id
+            .filter(|f| !f.trim().is_empty())
+        {
             Some(strand_id) => strand_id,
             None => self.ctx.ensure_portal_strand(&channel, &realm_id).await?,
         };
@@ -771,9 +774,9 @@ where
     runtime::run_bridge(config, move |core_ctx: Arc<BridgeContext>| {
         let store = Arc::new(MessageStore::new(core_ctx.db.clone())?);
         // Apply any static channel↔realm mappings from configuration so a bridge
-        // is operable out of the box without hand-written SQL (see `upsert_room`).
+        // is operable out of the box without hand-written SQL.
         for mapping in &core_ctx.config.mappings {
-            store.upsert_room(
+            store.upsert_channel_realm(
                 &mapping.app_channel,
                 &mapping.realm_id,
                 mapping.alias.as_deref(),

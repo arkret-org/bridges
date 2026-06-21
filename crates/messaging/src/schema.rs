@@ -4,7 +4,7 @@ diesel::table! {
     /// App channel/conversation <-> Cokret portal mapping. The mapping unit is
     /// `(realm_id, strand_id)` per applet-integration §10.1: `portal_strand_id` is
     /// resolved lazily through the §10.1 acquisition path and cached here.
-    room_mappings (id) {
+    channel_realm_mappings (id) {
         id -> BigInt,
         app_channel_id -> Text,
         cokret_realm_id -> Text,
@@ -44,4 +44,8 @@ diesel::table! {
     }
 }
 
-diesel::allow_tables_to_appear_in_same_query!(room_mappings, message_mappings, user_mappings);
+diesel::allow_tables_to_appear_in_same_query!(
+    channel_realm_mappings,
+    message_mappings,
+    user_mappings
+);

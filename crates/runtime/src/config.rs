@@ -29,12 +29,12 @@ pub struct Config {
     /// this gives operators a supported, file-driven way to provision them
     /// instead of writing SQL by hand.
     #[serde(default)]
-    pub mappings: Vec<RoomMappingConfig>,
+    pub mappings: Vec<ChannelRealmMappingConfig>,
 }
 
 /// A static channel↔realm mapping entry from configuration.
 #[derive(Clone, Debug, Deserialize)]
-pub struct RoomMappingConfig {
+pub struct ChannelRealmMappingConfig {
     /// The app-side channel identifier (e.g. a Slack channel id or LINE group id).
     pub app_channel: String,
     /// The cokret realm id this channel maps to.

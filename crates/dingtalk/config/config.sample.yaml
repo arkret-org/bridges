@@ -38,3 +38,7 @@ app:
   app_key: "CHANGE_ME_DINGTALK_APP_KEY"
   app_secret: "CHANGE_ME_DINGTALK_APP_SECRET"
   robot_code: "CHANGE_ME_DINGTALK_ROBOT_CODE"
+  # 钉钉 outgoing-robot 的 timestamp/sign 不覆盖 JSON body。生产入站必须让可信
+  # ingress 代理对原始 body 生成 x-cokret-signature-256:
+  # hex(HMAC-SHA256(secret, x-cokret-timestamp + "\n" + raw_body))。
+  webhook_body_hmac_secret: "CHANGE_ME_DINGTALK_BODY_HMAC_SECRET"

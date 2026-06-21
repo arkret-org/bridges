@@ -3,11 +3,11 @@
 use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use super::schema::{message_mappings, room_mappings, user_mappings};
+use super::schema::{channel_realm_mappings, message_mappings, user_mappings};
 
 #[derive(Debug, Clone, Queryable, Selectable, Serialize, Deserialize)]
-#[diesel(table_name = room_mappings)]
-pub struct RoomMapping {
+#[diesel(table_name = channel_realm_mappings)]
+pub struct ChannelRealmMapping {
     pub id: i64,
     pub app_channel_id: String,
     pub cokret_realm_id: String,
@@ -19,8 +19,8 @@ pub struct RoomMapping {
 }
 
 #[derive(Debug, Clone, Insertable)]
-#[diesel(table_name = room_mappings)]
-pub struct NewRoomMapping<'a> {
+#[diesel(table_name = channel_realm_mappings)]
+pub struct NewChannelRealmMapping<'a> {
     pub app_channel_id: &'a str,
     pub cokret_realm_id: &'a str,
     pub portal_alias: Option<&'a str>,

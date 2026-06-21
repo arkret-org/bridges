@@ -1,0 +1,111 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  containers:
+    name: Container images
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        bridge:
+          - dingtalk
+          - discord
+          - feishu
+          - googlechat
+          - imessage
+          - line
+          - messenger
+          - qq
+          - slack
+          - teams
+          - telegram
+          - wechat
+          - whatsapp
+          - zulip
+
+    steps:
+      - name: Checkout bridges
+        uses: actions/checkout@v6
+        with:
+          path: bridges
+
+      - name: Checkout Cokret Rust SDK
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository_owner }}/cokret-rust-sdk
+          path: cokret-rust-sdk
+          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/cokret-bridge-${{ matrix.bridge }}
+          tags: |
+            type=ref,event=tag
+            type=sha,prefix=sha-
+
+      - name: Login to GHCR
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: bridges/Dockerfile
+          push: ${{ startsWith(github.ref, 'refs/tags/') }}
+          build-args: |
+            BRIDGE_BIN=cokret-bridge-${{ matrix.bridge }}
+          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha,scope=${{ matrix.bridge }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.bridge }}
+
+      - name: Generate source SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: bridges
+          format: cyclonedx-json
+          output-file: sbom-cokret-bridge-${{ matrix.bridge }}.cyclonedx.json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cokret-bridge-${{ matrix.bridge }}
+          path: sbom-cokret-bridge-${{ matrix.bridge }}.cyclonedx.json
+
+      - name: Install cosign
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          while IFS= read -r image; do
+            [ -n "$image" ] && cosign sign --yes "$image"
+          done <<< "$IMAGE_TAGS"

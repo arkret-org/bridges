@@ -1,8 +1,8 @@
 //! Channel/message/user mapping store and the DB-backed [`AppletResolver`].
 //!
-//! Owns the messaging mapping tables (`room_mappings`, `message_mappings`,
-//! `user_mappings`) per applet-integration §10.1 / §16, and answers the cokret
-//! server's actor/realm probes from them.
+//! Owns the messaging mapping tables (`channel_realm_mappings`,
+//! `message_mappings`, `user_mappings`) per applet-integration §10.1 / §16,
+//! and answers the cokret server's actor/realm probes from them.
 
 use std::sync::Arc;
 
@@ -13,13 +13,14 @@ use diesel::prelude::*;
 use diesel_migrations::{EmbeddedMigrations, embed_migrations};
 use serde_json::json;
 
-pub use crate::models::{MessageMapping, RoomMapping, UserMapping};
-use crate::models::{NewMessageMapping, NewRoomMapping, NewUserMapping};
+pub use crate::models::{ChannelRealmMapping, MessageMapping, UserMapping};
+use crate::models::{NewChannelRealmMapping, NewMessageMapping, NewUserMapping};
 use crate::schema;
 
-/// Embedded migrations for the messaging-owned mapping tables (`room_mappings`,
-/// `message_mappings`, `user_mappings`). The backend dialect is selected at
-/// compile time, matching the runtime's active connection feature.
+/// Embedded migrations for the messaging-owned mapping tables
+/// (`channel_realm_mappings`, `message_mappings`, `user_mappings`). The backend
+/// dialect is selected at compile time, matching the runtime's active
+/// connection feature.
 #[cfg(feature = "sqlite")]
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
 #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
@@ -42,18 +43,18 @@ impl MessageStore {
         Ok(Self { db })
     }
 
-    pub fn upsert_room(
+    pub fn upsert_channel_realm(
         &self,
         app_channel: &str,
         realm_id: &str,
         alias: Option<&str>,
     ) -> Result<()> {
-        use schema::room_mappings::dsl;
+        use schema::channel_realm_mappings::dsl;
 
         let mut conn = self.db.conn()?;
-        let exists = dsl::room_mappings
+        let exists = dsl::channel_realm_mappings
             .filter(dsl::app_channel_id.eq(app_channel))
-            .first::<RoomMapping>(&mut conn)
+            .first::<ChannelRealmMapping>(&mut conn)
             .optional()?;
         if let Some(existing) = exists {
             // A realm change invalidates the cached portal strand (the strand
@@ -63,7 +64,7 @@ impl MessageStore {
             } else {
                 None
             };
-            diesel::update(dsl::room_mappings.filter(dsl::id.eq(existing.id)))
+            diesel::update(dsl::channel_realm_mappings.filter(dsl::id.eq(existing.id)))
                 .set((
                     dsl::cokret_realm_id.eq(realm_id),
                     dsl::portal_alias.eq(alias),
@@ -71,8 +72,8 @@ impl MessageStore {
                 ))
                 .execute(&mut conn)?;
         } else {
-            diesel::insert_into(dsl::room_mappings)
-                .values(NewRoomMapping {
+            diesel::insert_into(dsl::channel_realm_mappings)
+                .values(NewChannelRealmMapping {
                     app_channel_id: app_channel,
                     cokret_realm_id: realm_id,
                     portal_alias: alias,
@@ -86,35 +87,35 @@ impl MessageStore {
 
     /// The full portal mapping row for an app channel (realm + cached portal
     /// strand, applet-integration §10.1).
-    pub fn portal_for_channel(&self, app_channel: &str) -> Result<Option<RoomMapping>> {
-        use schema::room_mappings::dsl;
+    pub fn portal_for_channel(&self, app_channel: &str) -> Result<Option<ChannelRealmMapping>> {
+        use schema::channel_realm_mappings::dsl;
 
         let mut conn = self.db.conn()?;
-        Ok(dsl::room_mappings
+        Ok(dsl::channel_realm_mappings
             .filter(dsl::app_channel_id.eq(app_channel))
-            .first::<RoomMapping>(&mut conn)
+            .first::<ChannelRealmMapping>(&mut conn)
             .optional()?)
     }
 
     /// Persist the resolved portal strand for an app channel (§10.1 step 1 cache).
     pub fn set_channel_portal_strand(&self, app_channel: &str, strand_id: &str) -> Result<()> {
-        use schema::room_mappings::dsl;
+        use schema::channel_realm_mappings::dsl;
 
         let mut conn = self.db.conn()?;
-        diesel::update(dsl::room_mappings.filter(dsl::app_channel_id.eq(app_channel)))
+        diesel::update(dsl::channel_realm_mappings.filter(dsl::app_channel_id.eq(app_channel)))
             .set(dsl::portal_strand_id.eq(Some(strand_id)))
             .execute(&mut conn)?;
         Ok(())
     }
 
     /// The portal mapping row for a realm (cokret → app direction).
-    pub fn room_for_realm(&self, realm_id: &str) -> Result<Option<RoomMapping>> {
-        use schema::room_mappings::dsl;
+    pub fn channel_for_realm(&self, realm_id: &str) -> Result<Option<ChannelRealmMapping>> {
+        use schema::channel_realm_mappings::dsl;
 
         let mut conn = self.db.conn()?;
-        Ok(dsl::room_mappings
+        Ok(dsl::channel_realm_mappings
             .filter(dsl::cokret_realm_id.eq(realm_id))
-            .first::<RoomMapping>(&mut conn)
+            .first::<ChannelRealmMapping>(&mut conn)
             .optional()?)
     }
 
@@ -314,15 +315,15 @@ impl MessageStore {
             .optional()?)
     }
 
-    /// Reverse lookup for portal resolution: find the room row by cokret realm
-    /// id or by portal alias.
-    pub fn room_by_realm_or_alias(&self, key: &str) -> Result<Option<RoomMapping>> {
-        use schema::room_mappings::dsl;
+    /// Reverse lookup for portal resolution: find the channel mapping by cokret
+    /// realm id or by portal alias.
+    pub fn channel_by_realm_or_alias(&self, key: &str) -> Result<Option<ChannelRealmMapping>> {
+        use schema::channel_realm_mappings::dsl;
 
         let mut conn = self.db.conn()?;
-        Ok(dsl::room_mappings
+        Ok(dsl::channel_realm_mappings
             .filter(dsl::cokret_realm_id.eq(key).or(dsl::portal_alias.eq(key)))
-            .first::<RoomMapping>(&mut conn)
+            .first::<ChannelRealmMapping>(&mut conn)
             .optional()?)
     }
 }
@@ -350,7 +351,7 @@ impl AppletResolver for MessageResolver {
     fn resolve_realm(&self, realm_id_or_alias: &str) -> Option<ResolvedRealm> {
         let row = self
             .store
-            .room_by_realm_or_alias(realm_id_or_alias)
+            .channel_by_realm_or_alias(realm_id_or_alias)
             .ok()
             .flatten()?;
         Some(ResolvedRealm {

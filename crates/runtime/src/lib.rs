@@ -52,7 +52,7 @@ pub use app::{BridgeApp, BridgeContext};
 #[cfg(feature = "db")]
 pub use cokret_edge::DbSeqStore;
 pub use cokret_edge::{CokretEdge, SeqAllocator, SeqStore};
-pub use config::{Config, RoomMappingConfig};
+pub use config::{ChannelRealmMappingConfig, Config};
 #[cfg(feature = "db")]
 pub use db::{DbEventDedupStore, DbTransactionIdempotencyStore};
 pub use error::{BridgeError, Result, redact_sensitive_url_values};

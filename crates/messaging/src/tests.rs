@@ -205,7 +205,7 @@ fn calendar_schedule_maps_only_profile_subset() {
             "by_day": ["MO"]
         },
         "location": {
-            "title": "Planning room",
+            "title": "Planning area",
             "url": "https://example.test/meet"
         }
     }))

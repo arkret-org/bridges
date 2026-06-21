@@ -2,10 +2,10 @@
 //! switch to postgres/mysql.
 //!
 //! The core only owns the connection pool and a generic migration runner.
-//! Domain-specific tables (e.g. the room/message/user mappings used by the
-//! messaging layer) are defined and migrated by the layer that needs them,
-//! via [`DatabaseManager::run_migrations`]. This keeps the core free of any
-//! chat/messaging assumptions so it can back non-social bridges too.
+//! Domain-specific tables (e.g. the channel/realm/message/user mappings used
+//! by the messaging layer) are defined and migrated by the layer that needs
+//! them, via [`DatabaseManager::run_migrations`]. This keeps the core free of
+//! any chat/messaging assumptions so it can back non-social bridges too.
 
 use std::sync::Arc;
 
@@ -90,9 +90,9 @@ fn normalize_url(url: &str) -> String {
 
 // ---------------------------------------------------------------------------
 // Durable idempotency / dedup stores (applet-integration §7.3 / §13 MUST:
-// "持久化 transaction id,保证幂等" / "对外部事件做去重"). These replace the
-// former process-local caches so restarts and TTL expiry no longer turn server
-// retries into duplicate deliveries.
+// persist transaction ids for idempotency and deduplicate external events).
+// These replace the former process-local caches so restarts and TTL expiry no
+// longer turn server retries into duplicate deliveries.
 // ---------------------------------------------------------------------------
 
 mod idempotency_schema {

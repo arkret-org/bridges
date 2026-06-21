@@ -1,12 +1,12 @@
-CREATE TABLE IF NOT EXISTS room_mappings (
+CREATE TABLE IF NOT EXISTS channel_realm_mappings (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     app_channel_id TEXT NOT NULL,
     cokret_realm_id TEXT NOT NULL,
     portal_alias TEXT,
     portal_strand_id TEXT,
     created_at BIGINT NOT NULL,
-    UNIQUE KEY room_app_channel_id_unique (app_channel_id(191)),
-    UNIQUE KEY room_cokret_realm_id_unique (cokret_realm_id(191)));
+    UNIQUE KEY channel_realm_app_channel_id_unique (app_channel_id(191)),
+    UNIQUE KEY channel_realm_cokret_realm_id_unique (cokret_realm_id(191)));
 
 CREATE TABLE IF NOT EXISTS message_mappings (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,

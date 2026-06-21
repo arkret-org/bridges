@@ -23,7 +23,7 @@ impl MessageContext {
     // ({strand_id, track_name:"discussion", content: content_block, blob_refs[]}),
     // 外部 location 的映射单位是 (realm_id, strand_id)(applet-integration §10.1):
     // portal strand 按「持久化映射 → projection 按 external_ref 匹配 → ck.strand.create」
-    // 顺序惰性解析并缓存在 room_mappings.portal_strand_id。
+    // 顺序惰性解析并缓存在 channel_realm_mappings.portal_strand_id。
     pub async fn submit_app_message(&self, msg: InboundAppMessage) -> Result<String>;
 }
 pub struct InboundAppMessage  { pub app_channel: String, pub app_user: String,
@@ -56,12 +56,12 @@ pub trait MessageBridge: Send + Sync + 'static {
 - spec 现行裁决(applet-integration §8、event-envelope.schema.json):桥接事件的
   `external_ref`/`applet_id` 是 **签名 envelope 顶层字段**;`unsigned.external_ref` 只能作
   可丢弃 hint,MUST NOT 用于安全决策。
-- 当前 SDK `Event` 模型(HEAD)尚未暴露这两个顶层字段(wire 形 deny_unknown_fields),本仓
-  不改 SDK,故桥侧现状为:`unsigned.applet_id`/`unsigned.external_ref` 仅作传输 hint;
-  **回环判据只用签名覆盖的字段**(`executed_by == service_did` 或 `actor_id == service_did`),
-  不再读取 unsigned。portal strand 的外部 location 出处写入 strand 对象的签名 metadata
-  (`metadata.fields.external_ref`,受 event_digest 覆盖)。SDK 补齐 envelope 顶层签名
-  `external_ref`/`applet_id` 后,应迁移到顶层签名承载位。
+- 当前 SDK `Event` 模型已暴露顶层 `external_ref`/`applet_id`;桥侧提交前必须设置这些签名字段,
+  不得把安全相关 provenance 放入 `unsigned`。**回环判据只用签名覆盖的字段**
+  (`executed_by == service_did` 或 `actor_id == service_did`),不读取 unsigned。portal strand
+  的外部 location 同时写入 envelope 顶层 `external_ref` 与 strand 对象签名 metadata
+  (`metadata.fields.external_ref`,受 event_digest 覆盖),前者用于 provenance/审计,后者用于
+  §10.1 projection 扫描匹配。
 
 ## 每个 crate 必须产出的文件
 

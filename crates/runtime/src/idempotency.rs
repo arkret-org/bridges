@@ -1,9 +1,9 @@
 //! Transaction-level idempotency and single-event dedup storage contracts
 //! (applet-integration §7.3 / §13).
 //!
-//! The spec wording is MUST: "持久化 transaction id,保证幂等" and "对外部事件做
-//! 去重". The production path therefore persists both records in the bridge
-//! database ([`crate::db::DbTransactionIdempotencyStore`] /
+//! The spec wording is MUST: persist transaction ids for idempotency and
+//! deduplicate external events. The production path therefore persists both
+//! records in the bridge database ([`crate::db::DbTransactionIdempotencyStore`] /
 //! [`crate::db::DbEventDedupStore`]); the in-memory implementations here remain
 //! for tests and for hosts that inject their own persistence.
 
@@ -44,8 +44,8 @@ pub enum TransactionClaim {
     Conflict,
 }
 
-/// Persistence contract for transaction-level idempotency (§7.3: "Applet SHOULD
-/// 先持久化幂等记录,再执行外部副作用" — `claim` runs before any side effect).
+/// Persistence contract for transaction-level idempotency (§7.3: claim before
+/// any external side effect).
 pub trait TransactionIdempotencyStore: Send + Sync + 'static {
     fn claim(&self, source: &str, key: &str, hash: &str) -> Result<TransactionClaim>;
     fn record(
