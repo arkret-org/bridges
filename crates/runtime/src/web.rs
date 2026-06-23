@@ -8,7 +8,8 @@ use ::metrics::{counter, describe_counter};
 use cokret::identity::{ResolverFailMode, ResolverPolicy};
 use cokret::models::AppletTransactionRequestBody;
 use cokret::signatures::http_signature::{
-    Component, SignatureVerificationPolicy, parse_signature_input, public_key_from_bytes,
+    Component, HttpMessageVerificationError, SignatureInput, SignaturePolicyError,
+    SignatureVerificationPolicy, parse_signature_input, public_key_from_bytes,
     verify_signed_http_message,
 };
 use cokret::signatures::{Ed25519DetachedJwsVerifier, EventProofBuilder, PublicKeyMaterial};
@@ -26,9 +27,17 @@ use crate::cokret_edge::BridgeAppletHandler;
 use crate::config::{Config, TrustedVerificationMethodConfig};
 use crate::db::{DbEventDedupStore, DbTransactionIdempotencyStore};
 use crate::error::{BridgeError, Result};
-use crate::idempotency::{EventDedupStore, TransactionClaim, TransactionIdempotencyStore};
+use crate::idempotency::{
+    EventDedupStore, TransactionClaim, TransactionIdempotencyStore, TransactionReplayKey,
+};
 
 static PROMETHEUS_HANDLE: OnceLock<std::result::Result<PrometheusHandle, String>> = OnceLock::new();
+const APPLET_TRANSACTION_OPERATION_ID: &str = "ck.edge.applet.command.transaction";
+const APPLET_TRANSACTION_DIRECTION: &str = "node_to_applet";
+const APPLET_TRANSACTION_SIGNATURE_MAX_LIFETIME_SECS: i64 = 300;
+const APPLET_TRANSACTION_SIGNATURE_MAX_CLOCK_SKEW_SECS: i64 = 30;
+const SOURCE_SERVICE_DID_HEADER: &str = "source-service-did";
+const DESTINATION_SERVICE_DID_HEADER: &str = "destination-service-did";
 
 /// Start the web service and run it blocking. `extra` is each app adapter's
 /// webhook routes (optional).
@@ -162,6 +171,23 @@ struct AppletWebState {
     event_proof_resolver: Arc<CompositeDidResolver>,
 }
 
+struct VerifiedAppletHttpRequest {
+    source_service_did: String,
+    destination_service_did: String,
+    key_id: String,
+    source_key_state_digest: String,
+    content_digest: Option<String>,
+    covered_components: Vec<String>,
+    created: i64,
+    expires: i64,
+    canonical_message_digest: String,
+}
+
+struct HttpSignatureReject {
+    code: &'static str,
+    message: String,
+}
+
 fn applet_router(state: AppletWebState) -> Router {
     Router::with_path("_cokret/edge/applet")
         .hoop(affix_state::inject(state))
@@ -185,7 +211,7 @@ async fn applet_ping(req: &mut Request, depot: &mut Depot, res: &mut Response) {
         return;
     };
     if let Err(err) = verify_http_applet_get_request(req, &state.config) {
-        unauthorized(res, err);
+        unauthorized_code(res, err.code, err.message);
         return;
     }
     match state.handler.ping() {
@@ -200,7 +226,7 @@ async fn applet_describe(req: &mut Request, depot: &mut Depot, res: &mut Respons
         return;
     };
     if let Err(err) = verify_http_applet_get_request(req, &state.config) {
-        unauthorized(res, err);
+        unauthorized_code(res, err.code, err.message);
         return;
     }
     match state.handler.describe() {
@@ -234,11 +260,15 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         }
     };
 
-    if let Err(err) = verify_http_transaction_request(req, &headers, &body_bytes, &state.config) {
-        record_applet_transaction("unauthorized");
-        unauthorized(res, err);
-        return;
-    }
+    let verified = match verify_http_transaction_request(req, &headers, &body_bytes, &state.config)
+    {
+        Ok(verified) => verified,
+        Err(err) => {
+            record_applet_transaction("unauthorized");
+            unauthorized_code(res, err.code, err.message);
+            return;
+        }
+    };
 
     let value: Value = match serde_json::from_slice(&body_bytes) {
         Ok(value) => value,
@@ -266,17 +296,48 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
     };
 
     let source = body.source_service_did.to_string();
-    if source != state.config.cokret.trusted_server_did {
+    if source != verified.source_service_did {
         record_applet_transaction("unauthorized");
-        unauthorized(res, "transaction source_service_did is not trusted");
+        unauthorized_code(
+            res,
+            "http_signature_invalid",
+            "transaction source_service_did does not match signed origin service DID",
+        );
         return;
     }
+    if source != state.config.cokret.trusted_server_did {
+        record_applet_transaction("unauthorized");
+        unauthorized_code(
+            res,
+            "http_signature_invalid",
+            "transaction source_service_did is not trusted",
+        );
+        return;
+    }
+
+    let destination = verified.destination_service_did.clone();
+    let replay = TransactionReplayKey {
+        operation_id: APPLET_TRANSACTION_OPERATION_ID,
+        direction: APPLET_TRANSACTION_DIRECTION,
+        source_service_did: &source,
+        destination_service_did: &destination,
+        idempotency_key: &idempotency_key,
+    };
+    let source_signature_anchor =
+        match build_source_signature_anchor(&verified, &request_hash, &idempotency_key) {
+            Ok(anchor) => anchor,
+            Err(err) => {
+                record_applet_transaction("internal_error");
+                internal_error(res, err);
+                return;
+            }
+        };
 
     // §7.3: persist the idempotency claim before any side effect (the claim is
     // a durable `pending` record; the completed outcome replaces it below).
     match state
         .idempotency
-        .claim(&source, &idempotency_key, &request_hash)
+        .claim(&replay, &request_hash, &source_signature_anchor)
     {
         Ok(TransactionClaim::Duplicate(response)) => {
             record_applet_transaction("duplicate");
@@ -317,7 +378,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         if let Err(release_err) =
             state
                 .idempotency
-                .release(&source, &idempotency_key, &request_hash)
+                .release(&replay, &request_hash, &source_signature_anchor)
         {
             tracing::warn!(error = %release_err, "failed to release idempotency claim");
         }
@@ -331,11 +392,12 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         .handle_transaction(Some(&idempotency_key), body)
     {
         Ok(response) => {
-            if let Err(err) =
-                state
-                    .idempotency
-                    .record(&source, &idempotency_key, &request_hash, &response)
-            {
+            if let Err(err) = state.idempotency.record(
+                &replay,
+                &request_hash,
+                &source_signature_anchor,
+                &response,
+            ) {
                 tracing::warn!(error = %err, "failed to record idempotency outcome");
             }
             record_applet_transaction("accepted");
@@ -345,7 +407,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
             if let Err(release_err) =
                 state
                     .idempotency
-                    .release(&source, &idempotency_key, &request_hash)
+                    .release(&replay, &request_hash, &source_signature_anchor)
             {
                 tracing::warn!(error = %release_err, "failed to release idempotency claim");
             }
@@ -361,7 +423,7 @@ async fn applet_actor(req: &mut Request, depot: &mut Depot, res: &mut Response) 
         return;
     };
     if let Err(err) = verify_http_applet_get_request(req, &state.config) {
-        unauthorized(res, err);
+        unauthorized_code(res, err.code, err.message);
         return;
     }
     let actor_id = req.param::<String>("actor_id").unwrap_or_default();
@@ -377,7 +439,7 @@ async fn applet_realm(req: &mut Request, depot: &mut Depot, res: &mut Response) 
         return;
     };
     if let Err(err) = verify_http_applet_get_request(req, &state.config) {
-        unauthorized(res, err);
+        unauthorized_code(res, err.code, err.message);
         return;
     }
     let realm = req.param::<String>("realm_id_or_alias").unwrap_or_default();
@@ -393,7 +455,7 @@ async fn applet_protocol(req: &mut Request, depot: &mut Depot, res: &mut Respons
         return;
     };
     if let Err(err) = verify_http_applet_get_request(req, &state.config) {
-        unauthorized(res, err);
+        unauthorized_code(res, err.code, err.message);
         return;
     }
     let protocol = req.param::<String>("protocol").unwrap_or_default();
@@ -409,7 +471,7 @@ async fn applet_third_party_unsupported(req: &mut Request, depot: &mut Depot, re
         return;
     };
     if let Err(err) = verify_http_applet_get_request(req, &state.config) {
-        unauthorized(res, err);
+        unauthorized_code(res, err.code, err.message);
         return;
     }
     unsupported_feature(
@@ -433,16 +495,16 @@ fn verify_http_transaction_request(
     headers: &[(String, String)],
     body: &[u8],
     config: &Config,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<VerifiedAppletHttpRequest, HttpSignatureReject> {
     verify_http_applet_request(req, headers, body, config, true)
 }
 
 fn verify_http_applet_get_request(
     req: &Request,
     config: &Config,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<(), HttpSignatureReject> {
     let headers = collect_headers(req);
-    verify_http_applet_request(req, &headers, &[], config, false)
+    verify_http_applet_request(req, &headers, &[], config, false).map(|_| ())
 }
 
 fn verify_http_applet_request(
@@ -451,34 +513,45 @@ fn verify_http_applet_request(
     body: &[u8],
     config: &Config,
     require_content_digest: bool,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<VerifiedAppletHttpRequest, HttpSignatureReject> {
     let signature_input_header = header_value_from(headers, "signature-input")
-        .ok_or_else(|| "Signature-Input header is required".to_owned())?;
-    let signature_input =
-        parse_signature_input(&signature_input_header).map_err(|err| err.to_string())?;
+        .ok_or_else(|| http_signature_required("Signature-Input header is required"))?;
+    let signature_input = parse_signature_input(&signature_input_header)
+        .map_err(|err| http_signature_invalid(err.to_string()))?;
+    let now_unix_seconds = chrono::Utc::now().timestamp();
+    validate_applet_signature_window(&signature_input, now_unix_seconds)?;
     let trusted_method = trusted_verification_method(config, &signature_input.key_id)?;
-    let signer_did = verification_method_did(&signature_input.key_id)?;
+    let signer_did = verification_method_did(&signature_input.key_id)
+        .map_err(|err| http_signature_invalid(err))?;
     if signer_did != config.cokret.trusted_server_did {
-        return Err("HTTP signature keyid is not owned by the trusted server DID".to_owned());
+        return Err(http_signature_invalid(
+            "HTTP signature keyid is not owned by the trusted server DID",
+        ));
     }
 
-    let origin = header_value_from(headers, "x-cokret-origin-service-did")
-        .ok_or_else(|| "x-cokret-origin-service-did header is required".to_owned())?;
+    let origin = header_value_from(headers, SOURCE_SERVICE_DID_HEADER)
+        .ok_or_else(|| http_signature_invalid("Source-Service-DID header is required"))?;
     if origin != config.cokret.trusted_server_did {
-        return Err("HTTP signature origin service DID is not trusted".to_owned());
+        return Err(http_signature_invalid(
+            "HTTP signature source service DID is not trusted",
+        ));
     }
 
-    let destination = header_value_from(headers, "x-cokret-destination-service-did")
-        .ok_or_else(|| "x-cokret-destination-service-did header is required".to_owned())?;
+    let destination = header_value_from(headers, DESTINATION_SERVICE_DID_HEADER)
+        .ok_or_else(|| http_signature_invalid("Destination-Service-DID header is required"))?;
     if destination != config.cokret.service_did {
-        return Err("HTTP signature destination service DID does not match this bridge".to_owned());
+        return Err(http_signature_invalid(
+            "HTTP signature destination service DID does not match this bridge",
+        ));
     }
 
     let public_key_bytes = trusted_method
         .public_key
         .ed25519_bytes()
-        .map_err(|err| err.to_string())?;
-    let public_key = public_key_from_bytes(&public_key_bytes).map_err(|err| err.to_string())?;
+        .map_err(|err| http_signature_invalid(err.to_string()))?;
+    let source_key_state_digest = cokret::canonical::canonical_digest(&public_key_bytes);
+    let public_key = public_key_from_bytes(&public_key_bytes)
+        .map_err(|err| http_signature_invalid(err.to_string()))?;
     let authority = request_authority(req, headers)?;
     let path = req
         .uri()
@@ -490,15 +563,17 @@ fn verify_http_applet_request(
         Component::Method,
         Component::TargetUri,
         Component::Authority,
-        Component::Header("x-cokret-origin-service-did".to_owned()),
-        Component::Header("x-cokret-destination-service-did".to_owned()),
+        Component::Header(SOURCE_SERVICE_DID_HEADER.to_owned()),
+        Component::Header(DESTINATION_SERVICE_DID_HEADER.to_owned()),
     ];
     if require_content_digest {
         required_components.push(Component::Header("content-digest".to_owned()));
+        required_components.push(Component::Header("idempotency-key".to_owned()));
     }
     let policy = SignatureVerificationPolicy::new(required_components)
-        .require_content_digest(require_content_digest);
-    verify_signed_http_message(
+        .require_content_digest(require_content_digest)
+        .max_clock_skew_seconds(APPLET_TRANSACTION_SIGNATURE_MAX_CLOCK_SKEW_SECS);
+    let verified = verify_signed_http_message(
         req.method().as_str(),
         &target_uri,
         &authority,
@@ -509,10 +584,89 @@ fn verify_http_applet_request(
         body,
         &public_key,
         &policy,
-        chrono::Utc::now().timestamp(),
+        now_unix_seconds,
     )
-    .map_err(|err| err.to_string())?;
+    .map_err(map_http_signature_error)?;
+    let content_digest = verified
+        .content_digest
+        .as_ref()
+        .map(|digest| digest.wire_value.clone());
+    let covered_components = verified
+        .signature_input
+        .covered_components
+        .iter()
+        .map(Component::canonical_name)
+        .collect();
+    let canonical_message_digest = cokret::canonical::canonical_digest(&verified.canonical_message);
+    let key_id = verified.signature_input.key_id.clone();
+    let created = verified.signature_input.created;
+    let expires = verified.signature_input.expires;
+    Ok(VerifiedAppletHttpRequest {
+        source_service_did: origin,
+        destination_service_did: destination,
+        key_id,
+        source_key_state_digest,
+        content_digest,
+        covered_components,
+        created,
+        expires,
+        canonical_message_digest,
+    })
+}
+
+fn validate_applet_signature_window(
+    signature_input: &SignatureInput,
+    now_unix_seconds: i64,
+) -> std::result::Result<(), HttpSignatureReject> {
+    if signature_input.expires < signature_input.created {
+        return Err(signature_window_invalid(
+            "HTTP signature validity window is invalid",
+        ));
+    }
+    if signature_input.expires - signature_input.created
+        > APPLET_TRANSACTION_SIGNATURE_MAX_LIFETIME_SECS
+    {
+        return Err(signature_window_invalid(
+            "HTTP signature validity window exceeds 300 seconds",
+        ));
+    }
+    if signature_input.created
+        < now_unix_seconds.saturating_sub(APPLET_TRANSACTION_SIGNATURE_MAX_CLOCK_SKEW_SECS)
+        || signature_input.created
+            > now_unix_seconds.saturating_add(APPLET_TRANSACTION_SIGNATURE_MAX_CLOCK_SKEW_SECS)
+    {
+        return Err(signature_window_invalid(
+            "HTTP signature created timestamp is outside the accepted clock skew",
+        ));
+    }
     Ok(())
+}
+
+fn build_source_signature_anchor(
+    verified: &VerifiedAppletHttpRequest,
+    canonical_body_digest: &str,
+    idempotency_key: &str,
+) -> std::result::Result<String, String> {
+    let content_digest = verified
+        .content_digest
+        .as_deref()
+        .ok_or_else(|| "verified transaction missing Content-Digest".to_owned())?;
+    cokret::canonical::canonical_sha256(&json!({
+        "canonical_body_digest": canonical_body_digest,
+        "canonical_message_digest": &verified.canonical_message_digest,
+        "content_digest": content_digest,
+        "covered_components": &verified.covered_components,
+        "created": verified.created,
+        "destination_service_did": &verified.destination_service_did,
+        "direction": APPLET_TRANSACTION_DIRECTION,
+        "expires": verified.expires,
+        "idempotency_key": idempotency_key,
+        "operation_id": APPLET_TRANSACTION_OPERATION_ID,
+        "source_key_state_digest": &verified.source_key_state_digest,
+        "source_service_did": &verified.source_service_did,
+        "verification_method": &verified.key_id,
+    }))
+    .map_err(|err| err.to_string())
 }
 
 fn verify_transaction_events(
@@ -658,13 +812,17 @@ fn public_key_material_from_did_document_value(
 fn trusted_verification_method<'a>(
     config: &'a Config,
     verification_method: &str,
-) -> std::result::Result<&'a TrustedVerificationMethodConfig, String> {
+) -> std::result::Result<&'a TrustedVerificationMethodConfig, HttpSignatureReject> {
     config
         .cokret
         .trusted_verification_methods
         .iter()
         .find(|method| method.verification_method == verification_method)
-        .ok_or_else(|| format!("verification method {verification_method} is not trusted"))
+        .ok_or_else(|| {
+            http_signature_invalid(format!(
+                "verification method {verification_method} is not trusted"
+            ))
+        })
 }
 
 fn verification_method_did(verification_method: &str) -> std::result::Result<String, String> {
@@ -709,14 +867,14 @@ fn header_value_from(headers: &[(String, String)], name: &str) -> Option<String>
 fn request_authority(
     req: &Request,
     headers: &[(String, String)],
-) -> std::result::Result<String, String> {
+) -> std::result::Result<String, HttpSignatureReject> {
     header_value_from(headers, "host")
         .or_else(|| {
             req.uri()
                 .authority()
                 .map(|authority| authority.as_str().to_owned())
         })
-        .ok_or_else(|| "request authority/Host is required".to_owned())
+        .ok_or_else(|| http_signature_invalid("request authority/Host is required"))
 }
 
 fn request_target_uri(
@@ -756,6 +914,46 @@ fn bad_request(res: &mut Response, message: impl Into<String>) {
 
 fn unauthorized(res: &mut Response, message: impl Into<String>) {
     applet_error(res, StatusCode::UNAUTHORIZED, "invalid_signature", message);
+}
+
+fn unauthorized_code(res: &mut Response, code: &'static str, message: impl Into<String>) {
+    applet_error(res, StatusCode::UNAUTHORIZED, code, message);
+}
+
+fn http_signature_required(message: impl Into<String>) -> HttpSignatureReject {
+    HttpSignatureReject {
+        code: "http_signature_required",
+        message: message.into(),
+    }
+}
+
+fn http_signature_invalid(message: impl Into<String>) -> HttpSignatureReject {
+    HttpSignatureReject {
+        code: "http_signature_invalid",
+        message: message.into(),
+    }
+}
+
+fn signature_window_invalid(message: impl Into<String>) -> HttpSignatureReject {
+    HttpSignatureReject {
+        code: "signature_window_invalid",
+        message: message.into(),
+    }
+}
+
+fn map_http_signature_error(err: HttpMessageVerificationError) -> HttpSignatureReject {
+    let message = err.to_string();
+    match err {
+        HttpMessageVerificationError::MissingHeader(_) => http_signature_required(message),
+        HttpMessageVerificationError::Policy(
+            SignaturePolicyError::InvalidValidityWindow
+            | SignaturePolicyError::CreatedInFuture
+            | SignaturePolicyError::Expired,
+        ) => signature_window_invalid(message),
+        HttpMessageVerificationError::Policy(_) | HttpMessageVerificationError::Signature(_) => {
+            http_signature_invalid(message)
+        }
+    }
 }
 
 fn internal_error(res: &mut Response, message: impl Into<String>) {

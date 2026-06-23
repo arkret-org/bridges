@@ -1,12 +1,22 @@
 CREATE TABLE IF NOT EXISTS transaction_idempotency (
+    operation_id VARCHAR(96) NOT NULL,
+    direction VARCHAR(32) NOT NULL,
     source_service_did VARCHAR(191) NOT NULL,
+    destination_service_did VARCHAR(191) NOT NULL,
     idempotency_key VARCHAR(191) NOT NULL,
     body_hash TEXT NOT NULL,
+    source_signature_anchor TEXT NOT NULL,
     status TEXT NOT NULL,
     outcome TEXT,
     created_at BIGINT NOT NULL,
     expires_at BIGINT NOT NULL,
-    PRIMARY KEY (source_service_did, idempotency_key));
+    PRIMARY KEY (
+        operation_id,
+        direction,
+        source_service_did,
+        destination_service_did,
+        idempotency_key
+    ));
 
 CREATE TABLE IF NOT EXISTS event_dedup (
     event_id VARCHAR(191) PRIMARY KEY,

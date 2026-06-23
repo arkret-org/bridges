@@ -31,8 +31,18 @@ pub const IDEMPOTENCY_TTL_SECS: i64 = 24 * 60 * 60;
 /// permanent `retry_after_ms` loop.
 pub const PENDING_TAKEOVER_GRACE_SECS: i64 = 300;
 
-/// Outcome of consulting the transaction idempotency store for one
-/// `(source_service_did, Idempotency-Key, body_hash)` triple.
+/// Channel-specific transaction replay identity. The body hash and source
+/// signature anchor are checked values for this identity, not part of the key.
+pub struct TransactionReplayKey<'a> {
+    pub operation_id: &'a str,
+    pub direction: &'a str,
+    pub source_service_did: &'a str,
+    pub destination_service_did: &'a str,
+    pub idempotency_key: &'a str,
+}
+
+/// Outcome of consulting the transaction idempotency store for one replay
+/// identity plus `(body_hash, source_signature_anchor)`.
 pub enum TransactionClaim {
     /// First sight (or takeover of a stale pending claim) — process it.
     Claimed,
@@ -47,17 +57,27 @@ pub enum TransactionClaim {
 /// Persistence contract for transaction-level idempotency (§7.3: claim before
 /// any external side effect).
 pub trait TransactionIdempotencyStore: Send + Sync + 'static {
-    fn claim(&self, source: &str, key: &str, hash: &str) -> Result<TransactionClaim>;
+    fn claim(
+        &self,
+        replay: &TransactionReplayKey<'_>,
+        hash: &str,
+        source_signature_anchor: &str,
+    ) -> Result<TransactionClaim>;
     fn record(
         &self,
-        source: &str,
-        key: &str,
+        replay: &TransactionReplayKey<'_>,
         hash: &str,
+        source_signature_anchor: &str,
         response: &AppletTransactionOutcome,
     ) -> Result<()>;
     /// Drop a pending claim after a processing failure so the server's retry
     /// can be accepted instead of replaying a failure.
-    fn release(&self, source: &str, key: &str, hash: &str) -> Result<()>;
+    fn release(
+        &self,
+        replay: &TransactionReplayKey<'_>,
+        hash: &str,
+        source_signature_anchor: &str,
+    ) -> Result<()>;
 }
 
 /// Outcome of consulting the event dedup store for one `event_id`.
@@ -91,10 +111,12 @@ pub struct MemoryTransactionIdempotencyStore {
 enum CachedTransaction {
     Pending {
         hash: String,
+        source_signature_anchor: String,
         expires_at: Instant,
     },
     Completed {
         hash: String,
+        source_signature_anchor: String,
         response: AppletTransactionOutcome,
         expires_at: Instant,
     },
@@ -108,8 +130,15 @@ impl CachedTransaction {
     }
 }
 
-fn transaction_cache_key(source: &str, key: &str) -> String {
-    format!("{source}\u{1f}{key}")
+fn transaction_cache_key(replay: &TransactionReplayKey<'_>) -> String {
+    [
+        replay.operation_id,
+        replay.direction,
+        replay.source_service_did,
+        replay.destination_service_did,
+        replay.idempotency_key,
+    ]
+    .join("\u{1f}")
 }
 
 impl MemoryTransactionIdempotencyStore {
@@ -122,26 +151,39 @@ impl MemoryTransactionIdempotencyStore {
 }
 
 impl TransactionIdempotencyStore for MemoryTransactionIdempotencyStore {
-    fn claim(&self, source: &str, key: &str, hash: &str) -> Result<TransactionClaim> {
-        let cache_key = transaction_cache_key(source, key);
+    fn claim(
+        &self,
+        replay: &TransactionReplayKey<'_>,
+        hash: &str,
+        source_signature_anchor: &str,
+    ) -> Result<TransactionClaim> {
+        let cache_key = transaction_cache_key(replay);
         let now = Instant::now();
         let mut inner = self.inner.lock();
         inner.retain(|_, cached| cached.expires_at() > now);
         Ok(match inner.get(&cache_key) {
             Some(CachedTransaction::Completed {
                 hash: cached_hash,
+                source_signature_anchor: cached_anchor,
                 response,
                 ..
-            }) if cached_hash == hash => TransactionClaim::Duplicate(response.clone()),
+            }) if cached_hash == hash && cached_anchor == source_signature_anchor => {
+                TransactionClaim::Duplicate(response.clone())
+            }
             Some(CachedTransaction::Pending {
-                hash: cached_hash, ..
-            }) if cached_hash == hash => TransactionClaim::Pending,
+                hash: cached_hash,
+                source_signature_anchor: cached_anchor,
+                ..
+            }) if cached_hash == hash && cached_anchor == source_signature_anchor => {
+                TransactionClaim::Pending
+            }
             Some(_) => TransactionClaim::Conflict,
             None => {
                 inner.insert(
                     cache_key,
                     CachedTransaction::Pending {
                         hash: hash.to_owned(),
+                        source_signature_anchor: source_signature_anchor.to_owned(),
                         expires_at: now + self.ttl,
                     },
                 );
@@ -152,15 +194,16 @@ impl TransactionIdempotencyStore for MemoryTransactionIdempotencyStore {
 
     fn record(
         &self,
-        source: &str,
-        key: &str,
+        replay: &TransactionReplayKey<'_>,
         hash: &str,
+        source_signature_anchor: &str,
         response: &AppletTransactionOutcome,
     ) -> Result<()> {
         self.inner.lock().insert(
-            transaction_cache_key(source, key),
+            transaction_cache_key(replay),
             CachedTransaction::Completed {
                 hash: hash.to_owned(),
+                source_signature_anchor: source_signature_anchor.to_owned(),
                 response: response.clone(),
                 expires_at: Instant::now() + self.ttl,
             },
@@ -168,12 +211,21 @@ impl TransactionIdempotencyStore for MemoryTransactionIdempotencyStore {
         Ok(())
     }
 
-    fn release(&self, source: &str, key: &str, hash: &str) -> Result<()> {
-        let cache_key = transaction_cache_key(source, key);
+    fn release(
+        &self,
+        replay: &TransactionReplayKey<'_>,
+        hash: &str,
+        source_signature_anchor: &str,
+    ) -> Result<()> {
+        let cache_key = transaction_cache_key(replay);
         let mut inner = self.inner.lock();
         let should_remove = matches!(
             inner.get(&cache_key),
-            Some(CachedTransaction::Pending { hash: cached_hash, .. }) if cached_hash == hash
+            Some(CachedTransaction::Pending {
+                hash: cached_hash,
+                source_signature_anchor: cached_anchor,
+                ..
+            }) if cached_hash == hash && cached_anchor == source_signature_anchor
         );
         if should_remove {
             inner.remove(&cache_key);
@@ -219,6 +271,23 @@ impl EventDedupStore for MemoryEventDedupStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn replay_key(idempotency_key: &str) -> TransactionReplayKey<'_> {
+        replay_key_to("did:web:bridge.example", idempotency_key)
+    }
+
+    fn replay_key_to<'a>(
+        destination_service_did: &'a str,
+        idempotency_key: &'a str,
+    ) -> TransactionReplayKey<'a> {
+        TransactionReplayKey {
+            operation_id: "ck.edge.applet.command.transaction",
+            direction: "node_to_applet",
+            source_service_did: "did:web:server.example",
+            destination_service_did,
+            idempotency_key,
+        }
+    }
 
     #[test]
     fn dedup_store_distinguishes_same_and_conflicting_content() {
@@ -266,11 +335,11 @@ mod tests {
     fn idempotency_claim_blocks_duplicate_until_recorded() {
         let cache = MemoryTransactionIdempotencyStore::new(Duration::from_secs(300));
         assert!(matches!(
-            cache.claim("did:web:server.example", "idem-1", "hash-a"),
+            cache.claim(&replay_key("idem-1"), "hash-a", "anchor-a"),
             Ok(TransactionClaim::Claimed)
         ));
         assert!(matches!(
-            cache.claim("did:web:server.example", "idem-1", "hash-a"),
+            cache.claim(&replay_key("idem-1"), "hash-a", "anchor-a"),
             Ok(TransactionClaim::Pending)
         ));
 
@@ -280,10 +349,10 @@ mod tests {
             retry_after_ms: None,
         };
         cache
-            .record("did:web:server.example", "idem-1", "hash-a", &response)
+            .record(&replay_key("idem-1"), "hash-a", "anchor-a", &response)
             .unwrap();
 
-        match cache.claim("did:web:server.example", "idem-1", "hash-a") {
+        match cache.claim(&replay_key("idem-1"), "hash-a", "anchor-a") {
             Ok(TransactionClaim::Duplicate(cached)) => assert_eq!(cached.ok, response.ok),
             _ => panic!("expected duplicate response"),
         }
@@ -293,20 +362,41 @@ mod tests {
     fn idempotency_release_allows_retry_after_failure() {
         let cache = MemoryTransactionIdempotencyStore::new(Duration::from_secs(300));
         assert!(matches!(
-            cache.claim("did:web:server.example", "idem-2", "hash-a"),
+            cache.claim(&replay_key("idem-2"), "hash-a", "anchor-a"),
             Ok(TransactionClaim::Claimed)
         ));
         assert!(matches!(
-            cache.claim("did:web:server.example", "idem-2", "hash-b"),
+            cache.claim(&replay_key("idem-2"), "hash-b", "anchor-a"),
             Ok(TransactionClaim::Conflict)
         ));
 
         cache
-            .release("did:web:server.example", "idem-2", "hash-a")
+            .release(&replay_key("idem-2"), "hash-a", "anchor-a")
             .unwrap();
 
         assert!(matches!(
-            cache.claim("did:web:server.example", "idem-2", "hash-a"),
+            cache.claim(&replay_key("idem-2"), "hash-a", "anchor-a"),
+            Ok(TransactionClaim::Claimed)
+        ));
+    }
+
+    #[test]
+    fn idempotency_binds_replay_to_anchor_and_destination() {
+        let cache = MemoryTransactionIdempotencyStore::new(Duration::from_secs(300));
+        assert!(matches!(
+            cache.claim(&replay_key("idem-3"), "hash-a", "anchor-a"),
+            Ok(TransactionClaim::Claimed)
+        ));
+        assert!(matches!(
+            cache.claim(&replay_key("idem-3"), "hash-a", "anchor-b"),
+            Ok(TransactionClaim::Conflict)
+        ));
+        assert!(matches!(
+            cache.claim(
+                &replay_key_to("did:web:other-bridge.example", "idem-3"),
+                "hash-a",
+                "anchor-b"
+            ),
             Ok(TransactionClaim::Claimed)
         ));
     }

@@ -18,7 +18,7 @@ use crate::config::DatabaseConfig;
 use crate::error::{BridgeError, Result};
 use crate::idempotency::{
     DedupVerdict, EventDedupStore, IDEMPOTENCY_TTL_SECS, PENDING_TAKEOVER_GRACE_SECS,
-    TransactionClaim, TransactionIdempotencyStore,
+    TransactionClaim, TransactionIdempotencyStore, TransactionReplayKey,
 };
 
 /// Embedded migrations for the runtime-owned tables (`transaction_idempotency`,
@@ -98,11 +98,21 @@ fn normalize_url(url: &str) -> String {
 mod idempotency_schema {
     diesel::table! {
         /// Transaction-level idempotency records, keyed by
-        /// `(source_service_did, Idempotency-Key)`.
-        transaction_idempotency (source_service_did, idempotency_key) {
+        /// `(operation_id, direction, source_service_did, destination_service_did, Idempotency-Key)`.
+        transaction_idempotency (
+            operation_id,
+            direction,
+            source_service_did,
+            destination_service_did,
+            idempotency_key
+        ) {
+            operation_id -> Text,
+            direction -> Text,
             source_service_did -> Text,
+            destination_service_did -> Text,
             idempotency_key -> Text,
             body_hash -> Text,
+            source_signature_anchor -> Text,
             status -> Text,
             outcome -> Nullable<Text>,
             created_at -> BigInt,
@@ -127,8 +137,9 @@ fn now_ts() -> i64 {
 const STATUS_PENDING: &str = "pending";
 const STATUS_COMPLETED: &str = "completed";
 
-/// Diesel-backed [`TransactionIdempotencyStore`]: persists
-/// `(source_service_did, Idempotency-Key, body_hash, outcome)` so transaction
+/// Diesel-backed [`TransactionIdempotencyStore`]: persists the channel-specific
+/// replay identity plus `(body_hash, source_signature_anchor, outcome)` so
+/// transaction
 /// idempotency survives restarts (applet-integration §13 MUST).
 pub struct DbTransactionIdempotencyStore {
     db: Arc<DatabaseManager>,
@@ -146,13 +157,19 @@ impl DbTransactionIdempotencyStore {
 #[derive(Queryable)]
 struct TransactionIdempotencyRow {
     body_hash: String,
+    source_signature_anchor: String,
     status: String,
     outcome: Option<String>,
     created_at: i64,
 }
 
 impl TransactionIdempotencyStore for DbTransactionIdempotencyStore {
-    fn claim(&self, source: &str, key: &str, hash: &str) -> Result<TransactionClaim> {
+    fn claim(
+        &self,
+        replay: &TransactionReplayKey<'_>,
+        hash: &str,
+        source_signature_anchor: &str,
+    ) -> Result<TransactionClaim> {
         use idempotency_schema::transaction_idempotency::dsl;
 
         let mut conn = self.db.conn()?;
@@ -163,13 +180,27 @@ impl TransactionIdempotencyStore for DbTransactionIdempotencyStore {
         // Two attempts: a lost insert race re-reads the winner's row once.
         for _ in 0..2 {
             let row = dsl::transaction_idempotency
-                .filter(dsl::source_service_did.eq(source))
-                .filter(dsl::idempotency_key.eq(key))
-                .select((dsl::body_hash, dsl::status, dsl::outcome, dsl::created_at))
+                .filter(dsl::operation_id.eq(replay.operation_id))
+                .filter(dsl::direction.eq(replay.direction))
+                .filter(dsl::source_service_did.eq(replay.source_service_did))
+                .filter(dsl::destination_service_did.eq(replay.destination_service_did))
+                .filter(dsl::idempotency_key.eq(replay.idempotency_key))
+                .select((
+                    dsl::body_hash,
+                    dsl::source_signature_anchor,
+                    dsl::status,
+                    dsl::outcome,
+                    dsl::created_at,
+                ))
                 .first::<TransactionIdempotencyRow>(&mut conn)
                 .optional()?;
             match row {
-                Some(row) if row.body_hash != hash => return Ok(TransactionClaim::Conflict),
+                Some(row)
+                    if row.body_hash != hash
+                        || row.source_signature_anchor != source_signature_anchor =>
+                {
+                    return Ok(TransactionClaim::Conflict);
+                }
                 Some(row) if row.status == STATUS_COMPLETED => {
                     let outcome = row.outcome.ok_or_else(|| {
                         BridgeError::Database("completed idempotency record has no outcome".into())
@@ -189,8 +220,13 @@ impl TransactionIdempotencyStore for DbTransactionIdempotencyStore {
                     if row.created_at + PENDING_TAKEOVER_GRACE_SECS <= now {
                         diesel::update(
                             dsl::transaction_idempotency
-                                .filter(dsl::source_service_did.eq(source))
-                                .filter(dsl::idempotency_key.eq(key)),
+                                .filter(dsl::operation_id.eq(replay.operation_id))
+                                .filter(dsl::direction.eq(replay.direction))
+                                .filter(dsl::source_service_did.eq(replay.source_service_did))
+                                .filter(
+                                    dsl::destination_service_did.eq(replay.destination_service_did),
+                                )
+                                .filter(dsl::idempotency_key.eq(replay.idempotency_key)),
                         )
                         .set((
                             dsl::created_at.eq(now),
@@ -204,9 +240,13 @@ impl TransactionIdempotencyStore for DbTransactionIdempotencyStore {
                 None => {
                     let inserted = diesel::insert_into(dsl::transaction_idempotency)
                         .values((
-                            dsl::source_service_did.eq(source),
-                            dsl::idempotency_key.eq(key),
+                            dsl::operation_id.eq(replay.operation_id),
+                            dsl::direction.eq(replay.direction),
+                            dsl::source_service_did.eq(replay.source_service_did),
+                            dsl::destination_service_did.eq(replay.destination_service_did),
+                            dsl::idempotency_key.eq(replay.idempotency_key),
                             dsl::body_hash.eq(hash),
+                            dsl::source_signature_anchor.eq(source_signature_anchor),
                             dsl::status.eq(STATUS_PENDING),
                             dsl::outcome.eq(None::<String>),
                             dsl::created_at.eq(now),
@@ -230,9 +270,9 @@ impl TransactionIdempotencyStore for DbTransactionIdempotencyStore {
 
     fn record(
         &self,
-        source: &str,
-        key: &str,
+        replay: &TransactionReplayKey<'_>,
         hash: &str,
+        source_signature_anchor: &str,
         response: &AppletTransactionOutcome,
     ) -> Result<()> {
         use idempotency_schema::transaction_idempotency::dsl;
@@ -242,9 +282,13 @@ impl TransactionIdempotencyStore for DbTransactionIdempotencyStore {
         let mut conn = self.db.conn()?;
         diesel::update(
             dsl::transaction_idempotency
-                .filter(dsl::source_service_did.eq(source))
-                .filter(dsl::idempotency_key.eq(key))
-                .filter(dsl::body_hash.eq(hash)),
+                .filter(dsl::operation_id.eq(replay.operation_id))
+                .filter(dsl::direction.eq(replay.direction))
+                .filter(dsl::source_service_did.eq(replay.source_service_did))
+                .filter(dsl::destination_service_did.eq(replay.destination_service_did))
+                .filter(dsl::idempotency_key.eq(replay.idempotency_key))
+                .filter(dsl::body_hash.eq(hash))
+                .filter(dsl::source_signature_anchor.eq(source_signature_anchor)),
         )
         .set((
             dsl::status.eq(STATUS_COMPLETED),
@@ -255,15 +299,24 @@ impl TransactionIdempotencyStore for DbTransactionIdempotencyStore {
         Ok(())
     }
 
-    fn release(&self, source: &str, key: &str, hash: &str) -> Result<()> {
+    fn release(
+        &self,
+        replay: &TransactionReplayKey<'_>,
+        hash: &str,
+        source_signature_anchor: &str,
+    ) -> Result<()> {
         use idempotency_schema::transaction_idempotency::dsl;
 
         let mut conn = self.db.conn()?;
         diesel::delete(
             dsl::transaction_idempotency
-                .filter(dsl::source_service_did.eq(source))
-                .filter(dsl::idempotency_key.eq(key))
+                .filter(dsl::operation_id.eq(replay.operation_id))
+                .filter(dsl::direction.eq(replay.direction))
+                .filter(dsl::source_service_did.eq(replay.source_service_did))
+                .filter(dsl::destination_service_did.eq(replay.destination_service_did))
+                .filter(dsl::idempotency_key.eq(replay.idempotency_key))
                 .filter(dsl::body_hash.eq(hash))
+                .filter(dsl::source_signature_anchor.eq(source_signature_anchor))
                 .filter(dsl::status.eq(STATUS_PENDING)),
         )
         .execute(&mut conn)?;
@@ -357,19 +410,36 @@ mod tests {
         )
     }
 
+    fn replay_key(idempotency_key: &str) -> TransactionReplayKey<'_> {
+        replay_key_to("did:web:bridge.example", idempotency_key)
+    }
+
+    fn replay_key_to<'a>(
+        destination_service_did: &'a str,
+        idempotency_key: &'a str,
+    ) -> TransactionReplayKey<'a> {
+        TransactionReplayKey {
+            operation_id: "ck.edge.applet.command.transaction",
+            direction: "node_to_applet",
+            source_service_did: "did:web:server.example",
+            destination_service_did,
+            idempotency_key,
+        }
+    }
+
     #[test]
     fn db_idempotency_claim_record_replay() {
         let store = DbTransactionIdempotencyStore::new(memory_db()).unwrap();
         assert!(matches!(
-            store.claim("did:web:server.example", "idem-1", "hash-a"),
+            store.claim(&replay_key("idem-1"), "hash-a", "anchor-a"),
             Ok(TransactionClaim::Claimed)
         ));
         assert!(matches!(
-            store.claim("did:web:server.example", "idem-1", "hash-a"),
+            store.claim(&replay_key("idem-1"), "hash-a", "anchor-a"),
             Ok(TransactionClaim::Pending)
         ));
         assert!(matches!(
-            store.claim("did:web:server.example", "idem-1", "hash-b"),
+            store.claim(&replay_key("idem-1"), "hash-b", "anchor-a"),
             Ok(TransactionClaim::Conflict)
         ));
 
@@ -379,9 +449,9 @@ mod tests {
             retry_after_ms: None,
         };
         store
-            .record("did:web:server.example", "idem-1", "hash-a", &response)
+            .record(&replay_key("idem-1"), "hash-a", "anchor-a", &response)
             .unwrap();
-        match store.claim("did:web:server.example", "idem-1", "hash-a") {
+        match store.claim(&replay_key("idem-1"), "hash-a", "anchor-a") {
             Ok(TransactionClaim::Duplicate(cached)) => assert!(cached.ok),
             _ => panic!("expected duplicate replay"),
         }
@@ -391,14 +461,35 @@ mod tests {
     fn db_idempotency_release_allows_retry() {
         let store = DbTransactionIdempotencyStore::new(memory_db()).unwrap();
         assert!(matches!(
-            store.claim("did:web:server.example", "idem-2", "hash-a"),
+            store.claim(&replay_key("idem-2"), "hash-a", "anchor-a"),
             Ok(TransactionClaim::Claimed)
         ));
         store
-            .release("did:web:server.example", "idem-2", "hash-a")
+            .release(&replay_key("idem-2"), "hash-a", "anchor-a")
             .unwrap();
         assert!(matches!(
-            store.claim("did:web:server.example", "idem-2", "hash-a"),
+            store.claim(&replay_key("idem-2"), "hash-a", "anchor-a"),
+            Ok(TransactionClaim::Claimed)
+        ));
+    }
+
+    #[test]
+    fn db_idempotency_binds_replay_to_anchor_and_destination() {
+        let store = DbTransactionIdempotencyStore::new(memory_db()).unwrap();
+        assert!(matches!(
+            store.claim(&replay_key("idem-3"), "hash-a", "anchor-a"),
+            Ok(TransactionClaim::Claimed)
+        ));
+        assert!(matches!(
+            store.claim(&replay_key("idem-3"), "hash-a", "anchor-b"),
+            Ok(TransactionClaim::Conflict)
+        ));
+        assert!(matches!(
+            store.claim(
+                &replay_key_to("did:web:other-bridge.example", "idem-3"),
+                "hash-a",
+                "anchor-b"
+            ),
             Ok(TransactionClaim::Claimed)
         ));
     }

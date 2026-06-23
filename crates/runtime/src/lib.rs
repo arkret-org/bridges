@@ -58,7 +58,7 @@ pub use db::{DbEventDedupStore, DbTransactionIdempotencyStore};
 pub use error::{BridgeError, Result, redact_sensitive_url_values};
 pub use idempotency::{
     DedupVerdict, EventDedupStore, MemoryEventDedupStore, MemoryTransactionIdempotencyStore,
-    TransactionClaim, TransactionIdempotencyStore,
+    TransactionClaim, TransactionIdempotencyStore, TransactionReplayKey,
 };
 #[cfg(feature = "web")]
 pub use salvo;
