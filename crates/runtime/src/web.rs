@@ -521,8 +521,8 @@ fn verify_http_applet_request(
     let now_unix_seconds = chrono::Utc::now().timestamp();
     validate_applet_signature_window(&signature_input, now_unix_seconds)?;
     let trusted_method = trusted_verification_method(config, &signature_input.key_id)?;
-    let signer_did = verification_method_did(&signature_input.key_id)
-        .map_err(|err| http_signature_invalid(err))?;
+    let signer_did =
+        verification_method_did(&signature_input.key_id).map_err(http_signature_invalid)?;
     if signer_did != config.cokret.trusted_server_did {
         return Err(http_signature_invalid(
             "HTTP signature keyid is not owned by the trusted server DID",
