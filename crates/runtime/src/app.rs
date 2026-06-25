@@ -22,13 +22,14 @@ use std::time::Duration;
 use async_trait::async_trait;
 #[cfg(feature = "runtime")]
 use cokret::Event;
+use cokret::models::EphemeralEnvelope;
 #[cfg(feature = "runtime")]
 use parking_lot::Mutex;
 use serde_json::Value;
 #[cfg(feature = "runtime")]
 use tokio::sync::mpsc::Receiver;
 
-// `Value` is also used below for the ephemeral payload type.
+// `Value` is also used below for the `external_ref` payload type.
 #[cfg(feature = "runtime")]
 use crate::cokret_edge::CokretEdge;
 #[cfg(feature = "runtime")]
@@ -165,10 +166,15 @@ pub trait BridgeApp: Send + Sync + 'static {
     /// what (if anything) to do with each event kind.
     async fn on_cokret_event(&self, ctx: Arc<BridgeContext>, event: Event) -> Result<()>;
 
-    /// Handle an ephemeral payload (typing/presence/receipts) pushed by the
-    /// server alongside events. The payload is raw JSON until a typed schema is
-    /// defined; defaults to a no-op so it is observed rather than dropped.
-    async fn on_ephemeral(&self, _ctx: Arc<BridgeContext>, _ephemeral: Value) -> Result<()> {
+    /// Handle an ephemeral signal (typing/presence/receipts/call-signal) pushed
+    /// by the server alongside events, as the SDK [`EphemeralEnvelope`] wire
+    /// type (`schemas/ephemeral-envelope.schema.json`). Defaults to a no-op so
+    /// it is observed rather than dropped.
+    async fn on_ephemeral(
+        &self,
+        _ctx: Arc<BridgeContext>,
+        _ephemeral: EphemeralEnvelope,
+    ) -> Result<()> {
         Ok(())
     }
 
@@ -335,7 +341,7 @@ async fn deliver_inbound_event<A: BridgeApp>(ctx: Arc<BridgeContext>, app: Arc<A
 pub async fn consume_ephemeral<A: BridgeApp>(
     ctx: Arc<BridgeContext>,
     app: Arc<A>,
-    mut rx: Receiver<Value>,
+    mut rx: Receiver<EphemeralEnvelope>,
 ) -> Result<()> {
     while let Some(ephemeral) = rx.recv().await {
         if let Err(e) = app.on_ephemeral(ctx.clone(), ephemeral).await {

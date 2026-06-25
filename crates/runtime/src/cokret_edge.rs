@@ -22,7 +22,7 @@ use cokret::http_client::{Auth, Client};
 #[cfg(any(feature = "web", test))]
 use cokret::models::{
     AppletActorView, AppletDescription, AppletPingOutcome, AppletProtocolMetadata, AppletRealmView,
-    AppletTransactionOutcome, AppletTransactionRequestBody,
+    AppletTransactionOutcome, AppletTransactionRequestBody, EphemeralEnvelope,
 };
 #[cfg(any(feature = "web", test))]
 use cokret::signatures::EventProofBuilder;
@@ -155,10 +155,10 @@ pub struct CokretEdge {
     /// when full) instead of buffering without limit. `None` for outbound-only
     /// edges.
     inbound_tx: Option<Sender<Event>>,
-    /// Inbound ephemeral queue (typing/presence/receipts; raw JSON until a typed
-    /// schema is defined): cokret server push → core consumer loop. `None` for
-    /// outbound-only edges.
-    ephemeral_tx: Option<Sender<Value>>,
+    /// Inbound ephemeral queue (typing/presence/receipts/call-signal as the SDK
+    /// [`EphemeralEnvelope`] wire type): cokret server push → core consumer loop.
+    /// `None` for outbound-only edges.
+    ephemeral_tx: Option<Sender<EphemeralEnvelope>>,
 }
 
 impl CokretEdge {
@@ -215,7 +215,7 @@ impl CokretEdge {
 
     /// Install the ephemeral (typing/presence/receipts) sender. Used by the
     /// `run_bridge` path which wires a parallel queue.
-    pub fn set_ephemeral_sender(&mut self, tx: Sender<Value>) {
+    pub fn set_ephemeral_sender(&mut self, tx: Sender<EphemeralEnvelope>) {
         self.ephemeral_tx = Some(tx);
     }
 
@@ -237,7 +237,7 @@ impl CokretEdge {
     }
 
     /// The ephemeral sender, if installed.
-    pub fn ephemeral_sender(&self) -> Option<Sender<Value>> {
+    pub fn ephemeral_sender(&self) -> Option<Sender<EphemeralEnvelope>> {
         self.ephemeral_tx.clone()
     }
 
@@ -547,7 +547,7 @@ pub struct BridgeAppletHandler {
     limits: Value,
     auth: Value,
     inbound_tx: Sender<Event>,
-    ephemeral_tx: Option<Sender<Value>>,
+    ephemeral_tx: Option<Sender<EphemeralEnvelope>>,
     resolver: Option<Arc<dyn AppletResolver>>,
     /// Event kinds this bridge consumes on the inbound path. `None` ⇒ permissive
     /// (accept all). When `Some`, a pushed event whose kind is not listed is
@@ -857,13 +857,27 @@ impl cokret::AppletHandler for BridgeAppletHandler {
             }
         }
 
-        // Forward spec-shaped ephemeral arrays one envelope at a time. Ephemeral
-        // loss is non-fatal (best-effort) and does not affect the durable ack.
+        // Forward spec-shaped ephemeral arrays one envelope at a time, parsed
+        // into the SDK `EphemeralEnvelope` wire type
+        // (`schemas/ephemeral-envelope.schema.json`). Ephemeral loss is
+        // non-fatal (best-effort) and does not affect the durable ack; an
+        // element that does not deserialize into a valid envelope is dropped
+        // rather than failing the batch.
         if let Some(tx) = self.ephemeral_tx.as_ref() {
             match req.ephemeral {
                 Value::Null => {}
                 Value::Array(envelopes) => {
                     for envelope in envelopes {
+                        let envelope: EphemeralEnvelope = match serde_json::from_value(envelope) {
+                            Ok(envelope) => envelope,
+                            Err(err) => {
+                                tracing::warn!(
+                                    error = %err,
+                                    "dropping ephemeral element that is not a valid EphemeralEnvelope"
+                                );
+                                continue;
+                            }
+                        };
                         if let Err(err) = tx.try_send(envelope) {
                             tracing::warn!(
                                 error = %err,

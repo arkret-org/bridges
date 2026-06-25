@@ -26,6 +26,7 @@ use async_trait::async_trait;
 pub use calendar::{
     CALENDAR_EVENT_PROFILE, CalendarMapError, bridge_calendar_schedule_fields, bridge_rsvp_payload,
 };
+use cokret::models::EphemeralEnvelope;
 use cokret::{AppletBridgeErrorBuilder, AppletBridgeErrorVisibility, Did, Event, RealmId};
 pub use cokret_bridge_runtime as runtime;
 use cokret_bridge_runtime::app::{BridgeApp, BridgeContext};
@@ -685,9 +686,14 @@ pub trait MessageBridge: Send + Sync + 'static {
         Ok(())
     }
 
-    /// Handle an ephemeral payload (typing/presence/receipts) pushed alongside
-    /// events. Raw JSON until a typed schema is defined; defaults to a no-op.
-    async fn on_ephemeral(&self, _ctx: Arc<MessageContext>, _ephemeral: Value) -> Result<()> {
+    /// Handle an ephemeral signal (typing/presence/receipts/call-signal) pushed
+    /// alongside events, as the SDK [`EphemeralEnvelope`] wire type; defaults to
+    /// a no-op.
+    async fn on_ephemeral(
+        &self,
+        _ctx: Arc<MessageContext>,
+        _ephemeral: EphemeralEnvelope,
+    ) -> Result<()> {
         Ok(())
     }
 
@@ -861,7 +867,11 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
         Ok(())
     }
 
-    async fn on_ephemeral(&self, _ctx: Arc<BridgeContext>, ephemeral: Value) -> Result<()> {
+    async fn on_ephemeral(
+        &self,
+        _ctx: Arc<BridgeContext>,
+        ephemeral: EphemeralEnvelope,
+    ) -> Result<()> {
         self.user.on_ephemeral(self.ctx.clone(), ephemeral).await
     }
 
