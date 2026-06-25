@@ -164,14 +164,15 @@ impl WechatApp {
 
                 if body.get("errcode").and_then(|v| v.as_i64()).unwrap_or(0) != 0 {
                     return Err(BridgeError::App(format!(
-                        "WeChat token returned an error: {body}"
+                        "WeChat token returned an error: {}",
+                        redact_sensitive_url_values(body.to_string())
                     )));
                 }
                 let token = body
                     .get("access_token")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_owned())
-                    .ok_or_else(|| BridgeError::App(format!("WeChat token is missing: {body}")))?;
+                    .ok_or_else(|| BridgeError::App("WeChat access_token is missing".to_owned()))?;
                 let ttl = body
                     .get("expires_in")
                     .and_then(|v| v.as_u64())
@@ -239,7 +240,8 @@ impl MessageBridge for WechatApp {
 
         if body.get("errcode").and_then(|v| v.as_i64()).unwrap_or(0) != 0 {
             return Err(BridgeError::App(format!(
-                "WeChat send returned an error: {body}"
+                "WeChat send returned an error: {}",
+                redact_sensitive_url_values(body.to_string())
             )));
         }
         // WeChat APIs often return no standalone message id; msgid is used when present.

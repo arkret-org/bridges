@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use cokret_bridge_messaging::runtime::cache::TokenCache;
-use cokret_bridge_messaging::runtime::{BridgeError, Result};
+use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
 use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
@@ -67,11 +67,17 @@ impl DingTalkApp {
                     .send()
                     .await
                     .map_err(|e| {
-                        BridgeError::App(format!("DingTalk access_token request failed: {e}"))
+                        BridgeError::App(format!(
+                            "DingTalk access_token request failed: {}",
+                            redact_sensitive_url_values(e.to_string())
+                        ))
                     })?;
 
                 let value: Value = resp.json().await.map_err(|e| {
-                    BridgeError::App(format!("DingTalk access_token response parse failed: {e}"))
+                    BridgeError::App(format!(
+                        "DingTalk access_token response parse failed: {}",
+                        redact_sensitive_url_values(e.to_string())
+                    ))
                 })?;
 
                 let token = value
@@ -79,7 +85,7 @@ impl DingTalkApp {
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_owned())
                     .ok_or_else(|| {
-                        BridgeError::App(format!("DingTalk access_token is missing: {value}"))
+                        BridgeError::App("DingTalk accessToken is missing".to_owned())
                     })?;
                 let ttl = value
                     .get("expireIn")
@@ -122,20 +128,28 @@ impl MessageBridge for DingTalkApp {
             .json(&body)
             .send()
             .await
-            .map_err(|e| BridgeError::App(format!("DingTalk send failed: {e}")))?;
+            .map_err(|e| {
+                BridgeError::App(format!(
+                    "DingTalk send failed: {}",
+                    redact_sensitive_url_values(e.to_string())
+                ))
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let detail = resp.text().await.unwrap_or_default();
             return Err(BridgeError::App(format!(
-                "DingTalk send returned non-2xx: {status} {detail}"
+                "DingTalk send returned non-2xx: {status} {}",
+                redact_sensitive_url_values(detail)
             )));
         }
 
-        let value: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| BridgeError::App(format!("DingTalk send response parse failed: {e}")))?;
+        let value: serde_json::Value = resp.json().await.map_err(|e| {
+            BridgeError::App(format!(
+                "DingTalk send response parse failed: {}",
+                redact_sensitive_url_values(e.to_string())
+            ))
+        })?;
 
         // DingTalk returns processQueryKey as the message tracking identifier.
         // Return the empty string when absent rather than falling back to the

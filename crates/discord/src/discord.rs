@@ -114,8 +114,12 @@ impl EventHandler for Handler {
                 app_message_id: m.id.to_string(),
                 body: m.content.clone(),
             };
-            if let Err(e) = self.ctx.submit_app_message(inbound).await {
-                tracing::warn!(error = %e, "Discord → cokret submission failed");
+            if let Err(e) = self.ctx.submit_app_message(inbound.clone()).await {
+                let retriable = e.is_retriable();
+                tracing::warn!(error = %e, retriable, "Discord → cokret submission failed");
+                self.ctx
+                    .report_inbound_bridge_error(&inbound, &e, retriable)
+                    .await;
             }
         }
 

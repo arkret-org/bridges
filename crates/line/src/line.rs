@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::runtime::{BridgeError, Result};
+use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
 use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
@@ -63,13 +63,19 @@ impl MessageBridge for LineApp {
             .json(&body)
             .send()
             .await
-            .map_err(|e| BridgeError::App(format!("LINE send failed: {e}")))?;
+            .map_err(|e| {
+                BridgeError::App(format!(
+                    "LINE send failed: {}",
+                    redact_sensitive_url_values(e.to_string())
+                ))
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let detail = resp.text().await.unwrap_or_default();
             return Err(BridgeError::App(format!(
-                "LINE send returned non-2xx: {status} {detail}"
+                "LINE send returned non-2xx: {status} {}",
+                redact_sensitive_url_values(detail)
             )));
         }
 

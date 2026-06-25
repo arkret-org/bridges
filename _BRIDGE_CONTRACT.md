@@ -102,7 +102,8 @@ messenger=9113, teams=9114。
 ## 不要做
 
 - 只有跨桥共享能力才放入 `cokret-bridge-runtime` / `cokret-bridge-messaging`;
-  单桥协议细节留在各自 adapter。
+  单桥协议细节留在各自 adapter。确需下沉到共享层的改动 / 待办登记到
+  [`_bridges_todos.md`](_bridges_todos.md)。
 - 各 crate 位于 `crates/<短名>`(去掉 `cokret-bridge-` 前缀;包名仍 `cokret-bridge-*`);
   workspace `members = ["crates/*"]` 自动纳入,无需手改根 `Cargo.toml`。
 - 不要引入未缓存的专有 SDK(feishu-sdk/dingtalk-sdk 等);一律用 `reqwest`。

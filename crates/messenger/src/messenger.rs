@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::runtime::{BridgeError, Result};
+use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
 use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
@@ -73,17 +73,24 @@ impl MessageBridge for MessengerApp {
             .json(&payload)
             .send()
             .await
-            .map_err(|e| BridgeError::App(format!("Messenger send request failed: {e}")))?;
+            .map_err(|e| {
+                BridgeError::App(format!(
+                    "Messenger send request failed: {}",
+                    redact_sensitive_url_values(e.to_string())
+                ))
+            })?;
 
         let status = resp.status();
         let value: serde_json::Value = resp.json().await.map_err(|e| {
             BridgeError::App(format!(
-                "Messenger response parse failed (status={status}): {e}"
+                "Messenger response parse failed (status={status}): {}",
+                redact_sensitive_url_values(e.to_string())
             ))
         })?;
         if !status.is_success() {
             return Err(BridgeError::App(format!(
-                "Messenger send failed status={status}: {value}"
+                "Messenger send failed status={status}: {}",
+                redact_sensitive_url_values(value.to_string())
             )));
         }
 

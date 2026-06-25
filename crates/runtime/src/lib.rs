@@ -36,6 +36,7 @@ mod config;
 mod error;
 pub mod idempotency;
 pub mod logging;
+pub mod metrics;
 pub mod queue;
 
 #[cfg(feature = "db")]
@@ -56,6 +57,7 @@ pub use config::{ChannelRealmMappingConfig, Config};
 #[cfg(feature = "db")]
 pub use db::{DbEventDedupStore, DbTransactionIdempotencyStore};
 pub use error::{BridgeError, Result, redact_sensitive_url_values};
+pub use metrics::{MessageDirection, record_bridge_message};
 pub use idempotency::{
     DedupVerdict, EventDedupStore, MemoryEventDedupStore, MemoryTransactionIdempotencyStore,
     TransactionClaim, TransactionIdempotencyStore, TransactionReplayKey,

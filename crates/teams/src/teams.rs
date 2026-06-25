@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use cokret_bridge_messaging::runtime::cache::TokenCache;
-use cokret_bridge_messaging::runtime::{BridgeError, Result};
+use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
 use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
@@ -71,19 +71,27 @@ impl TeamsApp {
                     .form(&params)
                     .send()
                     .await
-                    .map_err(|e| BridgeError::App(format!("Teams token request failed: {e}")))?
+                    .map_err(|e| {
+                        BridgeError::App(format!(
+                            "Teams token request failed: {}",
+                            redact_sensitive_url_values(e.to_string())
+                        ))
+                    })?
                     .json()
                     .await
-                    .map_err(|e| BridgeError::App(format!("Teams token parse failed: {e}")))?;
+                    .map_err(|e| {
+                        BridgeError::App(format!(
+                            "Teams token parse failed: {}",
+                            redact_sensitive_url_values(e.to_string())
+                        ))
+                    })?;
 
                 let token = resp
                     .get("access_token")
                     .and_then(Value::as_str)
                     .map(str::to_owned)
                     .ok_or_else(|| {
-                        BridgeError::App(format!(
-                            "Teams token response has no access_token: {resp}"
-                        ))
+                        BridgeError::App("Teams token response has no access_token".to_owned())
                     })?;
                 let ttl = resp
                     .get("expires_in")
@@ -126,21 +134,29 @@ impl MessageBridge for TeamsApp {
             .json(&activity)
             .send()
             .await
-            .map_err(|e| BridgeError::App(format!("Teams send request failed: {e}")))?;
+            .map_err(|e| {
+                BridgeError::App(format!(
+                    "Teams send request failed: {}",
+                    redact_sensitive_url_values(e.to_string())
+                ))
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             return Err(BridgeError::App(format!(
-                "Teams send failed ({status}): {text}"
+                "Teams send failed ({status}): {}",
+                redact_sensitive_url_values(text)
             )));
         }
 
         // Bot Framework returns { "id": "<activityId>" }.
-        let out: Value = resp
-            .json()
-            .await
-            .map_err(|e| BridgeError::App(format!("Teams send response parse failed: {e}")))?;
+        let out: Value = resp.json().await.map_err(|e| {
+            BridgeError::App(format!(
+                "Teams send response parse failed: {}",
+                redact_sensitive_url_values(e.to_string())
+            ))
+        })?;
         let id = out
             .get("id")
             .and_then(Value::as_str)

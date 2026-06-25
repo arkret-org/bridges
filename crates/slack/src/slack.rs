@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::runtime::{BridgeError, Result};
+use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle,
@@ -49,17 +49,24 @@ impl SlackApp {
             .send()
             .await
             .map_err(|e| {
-                BridgeError::App(format!("Slack apps.connections.open request failed: {e}"))
+                BridgeError::App(format!(
+                    "Slack apps.connections.open request failed: {}",
+                    redact_sensitive_url_values(e.to_string())
+                ))
             })?
             .json()
             .await
             .map_err(|e| {
-                BridgeError::App(format!("Slack apps.connections.open parse failed: {e}"))
+                BridgeError::App(format!(
+                    "Slack apps.connections.open parse failed: {}",
+                    redact_sensitive_url_values(e.to_string())
+                ))
             })?;
 
         if resp.get("ok").and_then(Value::as_bool) != Some(true) {
             return Err(BridgeError::App(format!(
-                "Slack apps.connections.open returned an error: {resp}"
+                "Slack apps.connections.open returned an error: {}",
+                redact_sensitive_url_values(resp.to_string())
             )));
         }
         resp.get("url")
@@ -251,14 +258,25 @@ impl MessageBridge for SlackApp {
             .json(&payload)
             .send()
             .await
-            .map_err(|e| BridgeError::App(format!("Slack chat.postMessage request failed: {e}")))?
+            .map_err(|e| {
+                BridgeError::App(format!(
+                    "Slack chat.postMessage request failed: {}",
+                    redact_sensitive_url_values(e.to_string())
+                ))
+            })?
             .json()
             .await
-            .map_err(|e| BridgeError::App(format!("Slack chat.postMessage parse failed: {e}")))?;
+            .map_err(|e| {
+                BridgeError::App(format!(
+                    "Slack chat.postMessage parse failed: {}",
+                    redact_sensitive_url_values(e.to_string())
+                ))
+            })?;
 
         if resp.get("ok").and_then(Value::as_bool) != Some(true) {
             return Err(BridgeError::App(format!(
-                "Slack chat.postMessage returned an error: {resp}"
+                "Slack chat.postMessage returned an error: {}",
+                redact_sensitive_url_values(resp.to_string())
             )));
         }
         // The returned ts serves as the app-side message identifier.

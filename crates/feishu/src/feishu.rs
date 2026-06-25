@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use cokret_bridge_messaging::runtime::cache::TokenCache;
-use cokret_bridge_messaging::runtime::{BridgeError, Result};
+use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
 use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
@@ -79,23 +79,33 @@ impl FeishuApp {
                     }))
                     .send()
                     .await
-                    .map_err(|e| BridgeError::App(format!("Feishu token request failed: {e}")))?;
+                    .map_err(|e| {
+                        BridgeError::App(format!(
+                            "Feishu token request failed: {}",
+                            redact_sensitive_url_values(e.to_string())
+                        ))
+                    })?;
 
-                let body: Value = resp
-                    .json()
-                    .await
-                    .map_err(|e| BridgeError::App(format!("Feishu token parse failed: {e}")))?;
+                let body: Value = resp.json().await.map_err(|e| {
+                    BridgeError::App(format!(
+                        "Feishu token parse failed: {}",
+                        redact_sensitive_url_values(e.to_string())
+                    ))
+                })?;
 
                 if body.get("code").and_then(|v| v.as_i64()) != Some(0) {
                     return Err(BridgeError::App(format!(
-                        "Feishu token returned an error: {body}"
+                        "Feishu token returned an error: {}",
+                        redact_sensitive_url_values(body.to_string())
                     )));
                 }
                 let token = body
                     .get("tenant_access_token")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_owned())
-                    .ok_or_else(|| BridgeError::App(format!("Feishu token is missing: {body}")))?;
+                    .ok_or_else(|| {
+                        BridgeError::App("Feishu tenant_access_token is missing".to_owned())
+                    })?;
                 let ttl = body
                     .get("expire")
                     .and_then(|v| v.as_u64())
@@ -138,16 +148,24 @@ impl MessageBridge for FeishuApp {
             }))
             .send()
             .await
-            .map_err(|e| BridgeError::App(format!("Feishu send failed: {e}")))?;
+            .map_err(|e| {
+                BridgeError::App(format!(
+                    "Feishu send failed: {}",
+                    redact_sensitive_url_values(e.to_string())
+                ))
+            })?;
 
-        let body: Value = resp
-            .json()
-            .await
-            .map_err(|e| BridgeError::App(format!("Feishu send response parse failed: {e}")))?;
+        let body: Value = resp.json().await.map_err(|e| {
+            BridgeError::App(format!(
+                "Feishu send response parse failed: {}",
+                redact_sensitive_url_values(e.to_string())
+            ))
+        })?;
 
         if body.get("code").and_then(|v| v.as_i64()) != Some(0) {
             return Err(BridgeError::App(format!(
-                "Feishu send returned an error: {body}"
+                "Feishu send returned an error: {}",
+                redact_sensitive_url_values(body.to_string())
             )));
         }
         let message_id = body

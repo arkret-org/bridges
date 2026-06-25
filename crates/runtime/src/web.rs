@@ -152,6 +152,10 @@ fn prometheus_handle() -> std::result::Result<&'static PrometheusHandle, String>
             "cokret_bridge_applet_transactions_total",
             "Applet transaction request count, labelled by result."
         );
+        describe_counter!(
+            crate::metrics::BRIDGE_MESSAGES_METRIC,
+            "App<->cokret bridged message count, labelled by bridge, direction (inbound/outbound/inbound_media) and result (ok/error)."
+        );
         Ok(handle)
     }) {
         Ok(handle) => Ok(handle),

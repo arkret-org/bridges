@@ -35,4 +35,18 @@ cargo run -p cokret-bridge-slack -- --config config.yaml
 - 需在 Slack 应用后台开启 Socket Mode,并订阅 `message.channels` 等事件。
 - 入站只转发普通文本消息;含 `subtype` 或 `bot_id` 的消息(编辑、bot 回声等)被忽略以防回环。
 
+### 信任边界(Socket Mode 不逐 envelope 验签)
+
+与 webhook 桥(Feishu/WeChat/LINE 等逐请求做 HMAC/签名校验)不同,Slack Socket Mode
+**不对每条 envelope 单独签名**,这是平台设计:每个入站 envelope 的真实性来自这条持久
+WebSocket 连接本身——
+
+- 连接由 `app_token`(`xapp-`,机密)经 `apps.connections.open` 换取一次性 wss URL 建立;
+  握手即对端点鉴权,只有持有有效 `app_token` 才能拿到连接。
+- 链路由 **TLS**(`wss://`)保护,提供机密性与完整性,第三方无法注入或篡改 envelope。
+
+因此该桥的入站信任根是 **`app_token` + TLS 通道**,而非逐 envelope 的应用层签名。
+请将 `app_token`/`bot_token` 当作机密妥善保管(勿入库、勿落日志);出站错误信息已经过
+URL 脱敏。
+
 契约与共享层约束见仓库根目录 [`_BRIDGE_CONTRACT.md`](../../_BRIDGE_CONTRACT.md)。

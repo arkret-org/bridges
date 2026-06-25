@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use cokret_bridge_messaging::runtime::cache::TokenCache;
-use cokret_bridge_messaging::runtime::{BridgeError, Result};
+use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
 use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
@@ -134,23 +134,30 @@ async fn fetch_service_account_token(
         ])
         .send()
         .await
-        .map_err(|e| BridgeError::App(format!("Google token request failed: {e}")))?;
+        .map_err(|e| {
+            BridgeError::App(format!(
+                "Google token request failed: {}",
+                redact_sensitive_url_values(e.to_string())
+            ))
+        })?;
     let status = resp.status();
     let body: Value = resp.json().await.map_err(|e| {
-        BridgeError::App(format!("Google token parse failed (status={status}): {e}"))
+        BridgeError::App(format!(
+            "Google token parse failed (status={status}): {}",
+            redact_sensitive_url_values(e.to_string())
+        ))
     })?;
     if !status.is_success() {
         return Err(BridgeError::App(format!(
-            "Google token exchange failed status={status}: {body}"
+            "Google token exchange failed status={status}: {}",
+            redact_sensitive_url_values(body.to_string())
         )));
     }
     let token = body
         .get("access_token")
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            BridgeError::App(format!(
-                "Google token response missing access_token: {body}"
-            ))
+            BridgeError::App("Google token response missing access_token".to_owned())
         })?
         .to_owned();
     let ttl = body
@@ -185,17 +192,24 @@ impl MessageBridge for GoogleChatApp {
             .json(&payload)
             .send()
             .await
-            .map_err(|e| BridgeError::App(format!("Google Chat send request failed: {e}")))?;
+            .map_err(|e| {
+                BridgeError::App(format!(
+                    "Google Chat send request failed: {}",
+                    redact_sensitive_url_values(e.to_string())
+                ))
+            })?;
 
         let status = resp.status();
         let value: serde_json::Value = resp.json().await.map_err(|e| {
             BridgeError::App(format!(
-                "Google Chat response parse failed (status={status}): {e}"
+                "Google Chat response parse failed (status={status}): {}",
+                redact_sensitive_url_values(e.to_string())
             ))
         })?;
         if !status.is_success() {
             return Err(BridgeError::App(format!(
-                "Google Chat send failed status={status}: {value}"
+                "Google Chat send failed status={status}: {}",
+                redact_sensitive_url_values(value.to_string())
             )));
         }
 

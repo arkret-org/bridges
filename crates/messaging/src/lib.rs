@@ -29,7 +29,9 @@ pub use calendar::{
 use cokret::{AppletBridgeErrorBuilder, AppletBridgeErrorVisibility, Did, Event, RealmId};
 pub use cokret_bridge_runtime as runtime;
 use cokret_bridge_runtime::app::{BridgeApp, BridgeContext};
-use cokret_bridge_runtime::{BridgeError, Result, redact_sensitive_url_values};
+use cokret_bridge_runtime::{
+    BridgeError, MessageDirection, Result, record_bridge_message, redact_sensitive_url_values,
+};
 pub use content::{
     extract_attachment, extract_plain_body, extract_strand_id, media_content_block,
     text_content_block,
@@ -163,6 +165,54 @@ impl MessageContext {
             edge.service_did().clone(),
             failed_ref,
             "inbound_submit_failed",
+            bridge_error_code(error),
+            retriable,
+            AppletBridgeErrorVisibility::RealmAdmins,
+        )
+        .with_external_ref(external_ref);
+        edge.submit_bridge_error(&realm, builder).await?;
+        Ok(())
+    }
+
+    /// Emit a `ck.applet.bridge_error` Event for a failed outbound (cokret → app)
+    /// delivery so the failure is durable and visible to realm admins, mirroring
+    /// the inbound path ([`MessageContext::report_inbound_bridge_error`]). The
+    /// failed cokret `event_id` is the `failed_transaction_ref`; `external_ref`
+    /// binds only the target external location (no message body). Best-effort: a
+    /// failure to emit must not mask the original delivery failure.
+    pub async fn report_outbound_bridge_error(
+        &self,
+        realm_id: &str,
+        app_channel: &str,
+        failed_event_id: &str,
+        error: &BridgeError,
+        retriable: bool,
+    ) {
+        if let Err(emit_err) = self
+            .emit_outbound_bridge_error(realm_id, app_channel, failed_event_id, error, retriable)
+            .await
+        {
+            tracing::warn!(error = %emit_err, "failed to emit outbound ck.applet.bridge_error event");
+        }
+    }
+
+    async fn emit_outbound_bridge_error(
+        &self,
+        realm_id: &str,
+        app_channel: &str,
+        failed_event_id: &str,
+        error: &BridgeError,
+        retriable: bool,
+    ) -> Result<()> {
+        let edge = &self.inner.edge;
+        let realm = RealmId::new(realm_id.to_owned())?;
+        let external_ref = portal_location_ref(&self.inner.config, app_channel);
+        let builder = AppletBridgeErrorBuilder::new(
+            realm.clone(),
+            edge.applet_id().to_owned(),
+            edge.service_did().clone(),
+            failed_event_id.to_owned(),
+            "outbound_deliver_failed",
             bridge_error_code(error),
             retriable,
             AppletBridgeErrorVisibility::RealmAdmins,
@@ -311,10 +361,23 @@ impl MessageContext {
             .await
     }
 
+    /// The metrics `bridge` label for this context (the configured bridge id).
+    fn metrics_bridge_label(&self) -> &str {
+        &self.inner.config.bridge.bridge_id
+    }
+
+    /// Record the outcome of one bridged message flow for `/metrics`.
+    fn record_message_metric(&self, direction: MessageDirection, result: &Result<impl Sized>) {
+        let label = if result.is_ok() { "ok" } else { "error" };
+        record_bridge_message(self.metrics_bridge_label(), direction, label);
+    }
+
     /// Submit an inbound text message as a `ck.message.create` event.
     pub async fn submit_app_message(&self, msg: InboundAppMessage) -> Result<String> {
         let content = text_content_block(&msg.body)?;
-        self.submit_content(&msg, content, Vec::new()).await
+        let result = self.submit_content(&msg, content, Vec::new()).await;
+        self.record_message_metric(MessageDirection::Inbound, &result);
+        result
     }
 
     /// Submit an inbound media message. The `attachment` must already reference a
@@ -329,8 +392,11 @@ impl MessageContext {
             attachment.caption = msg.body.clone();
         }
         let content = media_content_block(&attachment)?;
-        self.submit_content(&msg, content, vec![attachment.blob_ref.clone()])
-            .await
+        let result = self
+            .submit_content(&msg, content, vec![attachment.blob_ref.clone()])
+            .await;
+        self.record_message_metric(MessageDirection::InboundMedia, &result);
+        result
     }
 
     /// Submit an inbound app-side explicit delete/recall as a Cokret message
@@ -736,7 +802,45 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
             reply_to: None,
             attachment,
         };
-        let app_ref = self.user.send_to_app(self.ctx.clone(), out).await?;
+        let app_ref = match self.user.send_to_app(self.ctx.clone(), out).await {
+            Ok(app_ref) => {
+                record_bridge_message(
+                    &self.ctx.core().config.bridge.bridge_id,
+                    MessageDirection::Outbound,
+                    "ok",
+                );
+                app_ref
+            }
+            Err(error) => {
+                let retriable = error.is_retriable();
+                record_bridge_message(
+                    &self.ctx.core().config.bridge.bridge_id,
+                    MessageDirection::Outbound,
+                    "error",
+                );
+                tracing::warn!(
+                    %error,
+                    bridge = self.name(),
+                    retriable,
+                    realm = %realm_id,
+                    app_channel = %channel,
+                    "cokret → app delivery failed"
+                );
+                // Durable audit, symmetric with the inbound path. Best-effort.
+                self.ctx
+                    .report_outbound_bridge_error(
+                        &realm_id,
+                        &channel,
+                        &event_id,
+                        &error,
+                        retriable,
+                    )
+                    .await;
+                // Propagate so the runtime's inbound consumer applies its retry /
+                // dead-letter policy for retriable failures.
+                return Err(error);
+            }
+        };
         let mapping_channel_key = message_mapping_channel_key(&self.ctx.core().config, &channel);
         let app_message_id = normalized_external_id(&app_ref.app_message_id);
         if app_message_id.is_empty() {

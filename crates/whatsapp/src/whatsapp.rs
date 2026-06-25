@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::runtime::{BridgeError, Result};
+use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
 use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
@@ -86,20 +86,28 @@ impl MessageBridge for WhatsAppApp {
             .json(&body)
             .send()
             .await
-            .map_err(|e| BridgeError::App(format!("WhatsApp send failed: {e}")))?;
+            .map_err(|e| {
+                BridgeError::App(format!(
+                    "WhatsApp send failed: {}",
+                    redact_sensitive_url_values(e.to_string())
+                ))
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let detail = resp.text().await.unwrap_or_default();
             return Err(BridgeError::App(format!(
-                "WhatsApp send returned non-2xx: {status} {detail}"
+                "WhatsApp send returned non-2xx: {status} {}",
+                redact_sensitive_url_values(detail)
             )));
         }
 
-        let value: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| BridgeError::App(format!("WhatsApp send response parse failed: {e}")))?;
+        let value: serde_json::Value = resp.json().await.map_err(|e| {
+            BridgeError::App(format!(
+                "WhatsApp send response parse failed: {}",
+                redact_sensitive_url_values(e.to_string())
+            ))
+        })?;
 
         // Return messages[0].id as the app-side message identifier. Return the
         // empty string when absent rather than falling back to the recipient
@@ -283,14 +291,24 @@ async fn forward_whatsapp_media(
         .bearer_auth(token)
         .send()
         .await
-        .map_err(|e| BridgeError::App(format!("WhatsApp media lookup failed: {e}")))?
+        .map_err(|e| {
+            BridgeError::App(format!(
+                "WhatsApp media lookup failed: {}",
+                redact_sensitive_url_values(e.to_string())
+            ))
+        })?
         .json()
         .await
-        .map_err(|e| BridgeError::App(format!("WhatsApp media lookup parse failed: {e}")))?;
+        .map_err(|e| {
+            BridgeError::App(format!(
+                "WhatsApp media lookup parse failed: {}",
+                redact_sensitive_url_values(e.to_string())
+            ))
+        })?;
     let url = meta
         .get("url")
         .and_then(Value::as_str)
-        .ok_or_else(|| BridgeError::App(format!("WhatsApp media has no url: {meta}")))?;
+        .ok_or_else(|| BridgeError::App("WhatsApp media response has no url".to_owned()))?;
     let resolved_mime = mime
         .or_else(|| {
             meta.get("mime_type")
