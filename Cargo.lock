@@ -969,6 +969,7 @@ name = "cokret-keystore"
 version = "0.3.0"
 dependencies = [
  "cokret-core",
+ "tracing",
 ]
 
 [[package]]

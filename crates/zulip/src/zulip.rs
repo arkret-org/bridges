@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::runtime::{BridgeError, Result};
+use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle,
@@ -51,17 +51,32 @@ impl ZulipApp {
             .form(&[("event_types", "[\"message\"]")])
             .send()
             .await
-            .map_err(|e| BridgeError::App(format!("Zulip register request failed: {e}")))?;
+            .map_err(|e| {
+                BridgeError::App(format!(
+                    "Zulip register request failed: {}",
+                    redact_sensitive_url_values(e.to_string())
+                ))
+            })?;
 
         let body: Value = resp
             .json()
             .await
-            .map_err(|e| BridgeError::App(format!("Zulip register parse failed: {e}")))?;
+            .map_err(|e| {
+                BridgeError::App(format!(
+                    "Zulip register parse failed: {}",
+                    redact_sensitive_url_values(e.to_string())
+                ))
+            })?;
 
         let queue_id = body
             .get("queue_id")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| BridgeError::App(format!("Zulip register has no queue_id: {body}")))?
+            .ok_or_else(|| {
+                BridgeError::App(format!(
+                    "Zulip register has no queue_id: {}",
+                    redact_sensitive_url_values(body.to_string())
+                ))
+            })?
             .to_owned();
         let last_event_id = body
             .get("last_event_id")
@@ -244,16 +259,27 @@ impl MessageBridge for ZulipApp {
             .form(&form)
             .send()
             .await
-            .map_err(|e| BridgeError::App(format!("Zulip send failed: {e}")))?;
+            .map_err(|e| {
+                BridgeError::App(format!(
+                    "Zulip send failed: {}",
+                    redact_sensitive_url_values(e.to_string())
+                ))
+            })?;
 
         let payload: Value = resp
             .json()
             .await
-            .map_err(|e| BridgeError::App(format!("Zulip send response parse failed: {e}")))?;
+            .map_err(|e| {
+                BridgeError::App(format!(
+                    "Zulip send response parse failed: {}",
+                    redact_sensitive_url_values(e.to_string())
+                ))
+            })?;
 
         if payload.get("result").and_then(|v| v.as_str()) != Some("success") {
             return Err(BridgeError::App(format!(
-                "Zulip send returned an error: {payload}"
+                "Zulip send returned an error: {}",
+                redact_sensitive_url_values(payload.to_string())
             )));
         }
         let id = payload

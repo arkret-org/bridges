@@ -36,6 +36,11 @@ const APPLET_TRANSACTION_OPERATION_ID: &str = "ck.edge.applet.command.transactio
 const APPLET_TRANSACTION_DIRECTION: &str = "node_to_applet";
 const APPLET_TRANSACTION_SIGNATURE_MAX_LIFETIME_SECS: i64 = 300;
 const APPLET_TRANSACTION_SIGNATURE_MAX_CLOCK_SKEW_SECS: i64 = 30;
+/// Upper bound on the inbound edge `transactions` body, mirroring the webhook
+/// surface's `MAX_WEBHOOK_BODY_BYTES` (1 MiB). Without it the body is buffered
+/// into memory in full *before* signature verification, an unauthenticated
+/// memory-pressure vector on any deployment that exposes this surface.
+const MAX_APPLET_TRANSACTION_BODY_BYTES: usize = 1024 * 1024;
 const SOURCE_SERVICE_DID_HEADER: &str = "source-service-did";
 const DESTINATION_SERVICE_DID_HEADER: &str = "destination-service-did";
 
@@ -256,7 +261,20 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
 
     let headers = collect_headers(req);
     let body_bytes = match req.payload().await {
-        Ok(bytes) => bytes.to_vec(),
+        Ok(bytes) if bytes.len() <= MAX_APPLET_TRANSACTION_BODY_BYTES => bytes.to_vec(),
+        Ok(bytes) => {
+            record_applet_transaction("payload_too_large");
+            applet_error(
+                res,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "payload_too_large",
+                format!(
+                    "transaction body is {} bytes; limit is {MAX_APPLET_TRANSACTION_BODY_BYTES} bytes",
+                    bytes.len()
+                ),
+            );
+            return;
+        }
         Err(err) => {
             record_applet_transaction("bad_request");
             bad_request(res, format!("failed to read request body: {err}"));
