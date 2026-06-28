@@ -91,6 +91,12 @@ pub trait MessageBridge: Send + Sync + 'static {
   handler 内**对每条投递做来源验签**,再构造 `InboundAppMessage` 调 `webhook::submit(ctx, ..)`。
   参考 `messaging::webhook` 的 HMAC/JWKS helper。接入握手回显(GET `challenge`/`echostr`、
   `hub.verify_token`)只用于订阅注册,不得替代后续 POST 投递验签。
+  如果平台原生签名覆盖 raw body 但不携带 timestamp/nonce(如 Meta/LINE 类 HMAC),handler 还
+  MUST 使用平台 message id / delivery id / 等价稳定事件 id 做 bounded replay/dedupe；缺少稳定
+  id 的投递不得进入 `submit_app_message`。如果平台原生签名不覆盖 raw body(如钉钉 outgoing
+  robot),桥必须要求可信 ingress 额外注入覆盖 `timestamp + "\n" + raw_body` 的
+  `x-cokret-signature-256`(或同等 body HMAC)并在未配置时 fail closed;不得把只覆盖 app secret
+  或 handshake 的平台签名宣称为 body-bound 来源验签。
   关键是**编译通过、出入站链路真实可读**;来源验签未补齐者 MUST 明确标 TODO,不得宣称"已验签"。
 
 ## 端口分配(避免冲突,写进各自 sample 配置)
