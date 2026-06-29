@@ -164,11 +164,19 @@ impl MessageBridge for DingTalkApp {
         Ok(AppMessageRef { app_message_id })
     }
 
+    fn expects_webhook_inbound(&self) -> bool {
+        true
+    }
+
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
         let app_secret = self.app_secret.clone();
         let body_hmac_secret = self.webhook_body_hmac_secret.clone();
+        // BRG-SEC-002: `dingtalk_body_signature_ok` uses `unix_timestamp_is_fresh`
+        // (|now-ts| <= window), so the acceptance window spans 2*window
+        // (past+future). The replay TTL must cover that whole window or a captured
+        // body+signature could be replayed in the off-window gap.
         let replay_window =
-            Arc::new(webhook::ReplayWindow::with_ttl(DINGTALK_BODY_SIGNATURE_WINDOW));
+            Arc::new(webhook::ReplayWindow::with_ttl(2 * DINGTALK_BODY_SIGNATURE_WINDOW));
         Some(
             salvo::Router::with_path("webhooks/dingtalk")
                 .hoop(affix_state::inject(DingTalkWebhookState {
@@ -258,10 +266,13 @@ async fn dingtalk_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
             return;
         }
     };
-    if let Some(challenge) = body.get("challenge").and_then(Value::as_str) {
-        webhook::ok_json(res, json!({ "challenge": challenge }));
-        return;
-    }
+    // BRG-REL-002: enforce the injected body HMAC (which actually covers the raw
+    // body) BEFORE any handling — including the URL-verification challenge echo.
+    // The vendor `sign` header verified above only covers `timestamp\napp_secret`
+    // and does not bind the body, so letting a `challenge` field short-circuit
+    // ahead of this guard would echo attacker-controlled content authenticated
+    // only by a body-blind signature. The contract requires the body HMAC to
+    // gate the entire inbound surface; fail closed when it is missing.
     if state.body_hmac_secret.trim().is_empty() {
         webhook::unauthorized(res, "DingTalk body HMAC secret not configured");
         return;
@@ -286,6 +297,11 @@ async fn dingtalk_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
         .check_and_record(format!("{body_timestamp}\u{1f}{body_signature}"))
     {
         webhook::unauthorized(res, "DingTalk callback replay");
+        return;
+    }
+    // The challenge echo now runs only after the body HMAC + replay guards pass.
+    if let Some(challenge) = body.get("challenge").and_then(Value::as_str) {
+        webhook::ok_json(res, json!({ "challenge": challenge }));
         return;
     }
 

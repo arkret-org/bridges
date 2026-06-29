@@ -3,8 +3,8 @@
 
 use cokret::http_client::ClientRequestOptions;
 use cokret::{
-    AppletId, Did, GhostActorProvisionOutcome, GhostActorProvisionRequestBody, ObjectCreatePayload,
-    RealmId, StrandCreateObject, StrandId, StrandTrackConfig,
+    AppletId, Did, EventId, GhostActorProvisionOutcome, GhostActorProvisionRequestBody, Hlc,
+    ObjectCreatePayload, RealmId, StrandCreateObject, StrandId, StrandTrackConfig,
 };
 use cokret_bridge_runtime::{BridgeError, Result};
 use serde_json::{Value, json};
@@ -313,7 +313,11 @@ pub(crate) async fn find_existing_portal_strand(
 ) -> Result<Option<String>> {
     let mut cursor: Option<String> = None;
     // (hlc, event_id, strand_id) — keep the earliest in effective order.
-    let mut earliest: Option<(String, String, String)> = None;
+    // BRG-REL-003: compare the *typed* `Hlc`/`EventId` (whose `Ord` parses the
+    // HLC into (physical_ms, logical, node_id)) rather than a lexicographic
+    // `to_string()` comparison, so the §10.1 "earliest effective" tie-break is
+    // the authoritative HLC order regardless of the string encoding.
+    let mut earliest: Option<(Hlc, EventId, String)> = None;
     for _ in 0..PORTAL_STRAND_SCAN_MAX_PAGES {
         let page = edge
             .client()
@@ -338,11 +342,14 @@ pub(crate) async fn find_existing_portal_strand(
             let Some(strand_id) = object.get("id").and_then(Value::as_str) else {
                 continue;
             };
-            let key = (event.hlc.to_string(), event.event_id.to_string());
             if earliest.as_ref().is_none_or(|(hlc, event_id, _)| {
-                (key.0.as_str(), key.1.as_str()) < (hlc.as_str(), event_id.as_str())
+                (&event.hlc, &event.event_id) < (hlc, event_id)
             }) {
-                earliest = Some((key.0, key.1, strand_id.to_owned()));
+                earliest = Some((
+                    event.hlc.clone(),
+                    event.event_id.clone(),
+                    strand_id.to_owned(),
+                ));
             }
         }
         if page.events.is_empty() {

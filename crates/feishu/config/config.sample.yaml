@@ -13,14 +13,14 @@ bridge:
 
 cokret:
   server_url: "http://localhost:8008"
-  service_did: "did:web:feishu-bridge.example"
+  service_did: "did:webvh:feishu-bridge.example"
   applet_id: "ck:applet:00000000-0000-7000-8000-0000000000d4"
   access_token: "CHANGE_ME_COKRET_ACCESS_TOKEN"
   signing_key_seed_hex: "0000000000000000000000000000000000000000000000000000000000000000"
   verification_method_id: "#key-1"
-  trusted_server_did: "did:web:cokret-server.example"
+  trusted_server_did: "did:webvh:cokret-server.example"
   trusted_verification_methods:
-    - verification_method: "did:web:cokret-server.example#key-1"
+    - verification_method: "did:webvh:cokret-server.example#key-1"
       public_key:
         encoding: "ed25519_multibase"
         value: "zCHANGE_ME_SERVER_ED25519_PUBLIC_KEY"

@@ -224,6 +224,10 @@ impl MessageBridge for GoogleChatApp {
         })
     }
 
+    fn expects_webhook_inbound(&self) -> bool {
+        true
+    }
+
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
         Some(
             salvo::Router::with_path("webhooks/googlechat")

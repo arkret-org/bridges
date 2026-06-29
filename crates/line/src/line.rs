@@ -4,6 +4,7 @@
 //! - Outbound (cokret → LINE): [`MessageBridge::send_to_app`] uses `ctx.http` (reqwest) to POST `https://api.line.me/v2/bot/message/push`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
@@ -93,19 +94,38 @@ impl MessageBridge for LineApp {
         Ok(AppMessageRef { app_message_id })
     }
 
+    fn expects_webhook_inbound(&self) -> bool {
+        true
+    }
+
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
         Some(
             salvo::Router::with_path("webhooks/line")
-                .hoop(affix_state::inject(LineWebhookState { app: self, ctx }))
+                .hoop(affix_state::inject(LineWebhookState {
+                    app: self,
+                    ctx,
+                    replay: Arc::new(webhook::ReplayWindow::with_ttl(LINE_REPLAY_TTL)),
+                }))
                 .post(line_delivery),
         )
     }
 }
 
+/// In-handler bounded replay window for LINE. The LINE signature
+/// (`HMAC-SHA256(channel_secret, raw_body)`) covers the body but carries no
+/// timestamp/nonce, so a captured `(body, signature)` pair would otherwise
+/// verify forever; the bridge contract (G-4) mandates a bounded replay/dedupe
+/// guard keyed on the stable platform message id. The TTL covers LINE's
+/// redelivery window with margin.
+const LINE_REPLAY_TTL: Duration = Duration::from_secs(10 * 60);
+
 #[derive(Clone)]
 struct LineWebhookState {
     app: Arc<LineApp>,
     ctx: Arc<MessageContext>,
+    /// Bounded replay guard keyed on the platform `message.id`; a captured,
+    /// validly signed event is accepted at most once inside the window.
+    replay: Arc<webhook::ReplayWindow>,
 }
 
 #[handler]
@@ -163,6 +183,14 @@ async fn line_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response)
             tracing::warn!("LINE message event missing message id; skipping");
             continue;
         };
+        // Bounded replay/dedupe (BRG-SEC-001 / contract G-4): the LINE signature
+        // does not bind a timestamp, so a captured event would replay forever.
+        // Drop any event whose stable message id was already accepted inside the
+        // window before it reaches the submit/media pipeline.
+        if !state.replay.check_and_record(format!("line:{message_id}")) {
+            tracing::debug!(message_id = %message_id, "LINE event replayed; skipping");
+            continue;
+        }
         let msg_type = webhook::str_at(event, "/message/type").unwrap_or_default();
 
         if msg_type == "text" {

@@ -6,6 +6,7 @@
 //!   `https://graph.facebook.com/v20.0/{phone_number_id}/messages`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
@@ -126,20 +127,39 @@ impl MessageBridge for WhatsAppApp {
         Ok(AppMessageRef { app_message_id })
     }
 
+    fn expects_webhook_inbound(&self) -> bool {
+        true
+    }
+
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
         Some(
             salvo::Router::with_path("webhooks/whatsapp")
-                .hoop(affix_state::inject(WhatsAppWebhookState { app: self, ctx }))
+                .hoop(affix_state::inject(WhatsAppWebhookState {
+                    app: self,
+                    ctx,
+                    replay: Arc::new(webhook::ReplayWindow::with_ttl(WHATSAPP_REPLAY_TTL)),
+                }))
                 .get(whatsapp_verify)
                 .post(whatsapp_delivery),
         )
     }
 }
 
+/// In-handler bounded replay window for WhatsApp. The Meta signature
+/// (`HMAC-SHA256(app_secret, raw_body)`) covers the body but carries no
+/// timestamp/nonce, so a captured `(body, signature)` pair would otherwise
+/// verify forever; the bridge contract (G-4) mandates a bounded replay/dedupe
+/// guard keyed on the stable platform message id. The TTL covers Meta's
+/// redelivery window with margin.
+const WHATSAPP_REPLAY_TTL: Duration = Duration::from_secs(10 * 60);
+
 #[derive(Clone)]
 struct WhatsAppWebhookState {
     app: Arc<WhatsAppApp>,
     ctx: Arc<MessageContext>,
+    /// Bounded replay guard keyed on the platform `message.id`; a captured,
+    /// validly signed event is accepted at most once inside the window.
+    replay: Arc<webhook::ReplayWindow>,
 }
 
 #[handler]
@@ -189,6 +209,14 @@ async fn whatsapp_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
                     tracing::warn!("WhatsApp message missing id; skipping");
                     continue;
                 };
+                // Bounded replay/dedupe (BRG-SEC-001 / contract G-4): the Meta
+                // signature does not bind a timestamp, so a captured event would
+                // replay forever. Drop any event whose stable message id was
+                // already accepted inside the window before submit/media.
+                if !state.replay.check_and_record(format!("whatsapp:{message_id}")) {
+                    tracing::debug!(message_id = %message_id, "WhatsApp event replayed; skipping");
+                    continue;
+                }
 
                 if let Some(text) = webhook::str_at(message, "/text/body") {
                     let outcome = webhook::submit(

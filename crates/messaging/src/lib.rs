@@ -773,6 +773,17 @@ pub trait MessageBridge: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Whether this bridge's inbound surface is the salvo `webhook_router`. When
+    /// true, the runtime treats a `None` from [`Self::webhook_router`] (e.g. a
+    /// required body-signature key is missing) as a fatal misconfiguration and
+    /// fails fast at startup, rather than running a "healthy" process that can
+    /// never receive any inbound message (BRG-REL-001). Gateway / long-poll
+    /// bridges (which override `run` and expose no public webhook plane) leave
+    /// this `false`.
+    fn expects_webhook_inbound(&self) -> bool {
+        false
+    }
+
     fn webhook_router(self: Arc<Self>, _ctx: Arc<MessageContext>) -> Option<salvo::Router> {
         None
     }
@@ -949,6 +960,10 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
         ephemeral: EphemeralEnvelope,
     ) -> Result<()> {
         self.user.on_ephemeral(self.ctx.clone(), ephemeral).await
+    }
+
+    fn expects_webhook_inbound(&self) -> bool {
+        self.user.expects_webhook_inbound()
     }
 
     fn webhook_router(self: Arc<Self>, _ctx: Arc<BridgeContext>) -> Option<salvo::Router> {

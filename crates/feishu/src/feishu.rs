@@ -154,6 +154,10 @@ impl MessageBridge for FeishuApp {
         })
     }
 
+    fn expects_webhook_inbound(&self) -> bool {
+        true
+    }
+
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
         // Fail closed: without an Encrypt Key, Feishu sends neither an encrypted
         // body nor the `X-Lark-Signature` over each delivery, so there is no
@@ -185,7 +189,12 @@ impl MessageBridge for FeishuApp {
                     verification_token,
                     encrypt_key,
                     encrypt_aes_key,
-                    replay: Arc::new(webhook::ReplayWindow::with_ttl(FEISHU_DELIVERY_MAX_SKEW)),
+                    // BRG-SEC-002: `unix_timestamp_is_fresh` accepts |now-ts| <=
+                    // skew, so the freshness window spans 2*skew (past+future).
+                    // The replay TTL must cover that full window or a captured
+                    // delivery could be replayed in the off-window gap. Keep the
+                    // guard alive for the entire acceptance window.
+                    replay: Arc::new(webhook::ReplayWindow::with_ttl(2 * FEISHU_DELIVERY_MAX_SKEW)),
                 }))
                 .post(feishu_delivery),
         )

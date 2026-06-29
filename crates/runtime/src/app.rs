@@ -178,6 +178,15 @@ pub trait BridgeApp: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Whether this bridge's inbound surface is the salvo `webhook_router`. When
+    /// true, [`crate::run_bridge`] fails fast at startup if `webhook_router`
+    /// returns `None` (e.g. a required body-signature key is missing), instead
+    /// of silently running a process with no inbound plane (BRG-REL-001).
+    /// Gateway / long-poll bridges leave this `false`.
+    fn expects_webhook_inbound(&self) -> bool {
+        false
+    }
+
     /// Optional: webhook routes mounted on the core salvo service to receive
     /// app-initiated callbacks. Defaults to `None`.
     fn webhook_router(self: Arc<Self>, _ctx: Arc<BridgeContext>) -> Option<salvo::Router> {

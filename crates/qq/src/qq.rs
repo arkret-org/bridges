@@ -5,6 +5,7 @@
 //!   `send_msg` (or the official `/channels/{id}/messages`).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
@@ -104,6 +105,10 @@ impl MessageBridge for QqApp {
         })
     }
 
+    fn expects_webhook_inbound(&self) -> bool {
+        true
+    }
+
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
         let signing_secret = self.signing_secret.clone();
         Some(
@@ -111,16 +116,27 @@ impl MessageBridge for QqApp {
                 .hoop(affix_state::inject(QqWebhookState {
                     ctx,
                     signing_secret,
+                    replay: Arc::new(webhook::ReplayWindow::with_ttl(QQ_REPLAY_TTL)),
                 }))
                 .post(qq_delivery),
         )
     }
 }
 
+/// In-handler bounded replay window for QQ (OneBot). The OneBot signature
+/// (`HMAC-SHA1(signing_secret, raw_body)`) covers the body but carries no
+/// timestamp/nonce, so a captured `(body, signature)` pair would otherwise
+/// verify forever; the bridge contract (G-4) mandates a bounded replay/dedupe
+/// guard keyed on the stable platform message id.
+const QQ_REPLAY_TTL: Duration = Duration::from_secs(10 * 60);
+
 #[derive(Clone)]
 struct QqWebhookState {
     ctx: Arc<MessageContext>,
     signing_secret: String,
+    /// Bounded replay guard keyed on the platform `message_id`; a captured,
+    /// validly signed event is accepted at most once inside the window.
+    replay: Arc<webhook::ReplayWindow>,
 }
 
 #[handler]
@@ -181,6 +197,14 @@ async fn qq_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
         webhook::bad_request(res, "QQ message_id missing");
         return;
     };
+    // Bounded replay/dedupe (BRG-SEC-001 / contract G-4): the OneBot signature
+    // does not bind a timestamp, so a captured event would replay forever. Drop
+    // any event whose stable `message_id` was already accepted in the window.
+    if !state.replay.check_and_record(format!("qq:{message_id}")) {
+        // Replayed event already accepted in the window; ack idempotently.
+        webhook::ok_json(res, json!({ "ok": true }));
+        return;
+    }
     let outcome = webhook::submit(
         state.ctx.clone(),
         "qq",

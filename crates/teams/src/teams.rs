@@ -165,6 +165,10 @@ impl MessageBridge for TeamsApp {
         Ok(AppMessageRef { app_message_id: id })
     }
 
+    fn expects_webhook_inbound(&self) -> bool {
+        true
+    }
+
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
         let state = TeamsWebhookState {
             ctx,

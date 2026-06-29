@@ -51,6 +51,14 @@ pub trait MessageBridge: Send + Sync + 'static {
 `bridge_main` 经 serde 反序列化成每桥自定义的强类型 `AppConfig`(缺字段由 serde 按字段名报错)。
 错误统一用 `BridgeError::App(String)`。
 
+> **能力就绪、尚未接线(BRG-HYG-001):** 三条删除 / ephemeral 链路在共享层(messaging)
+> 已**完整实现并有单测**,但目前**没有任何适配器接线**,运行时不会真实触达:
+> (a) 入站删除 `submit_app_delete`(app→cokret 删除)无桥构造 `InboundAppDelete`;
+> (b) 出站删除 `redact_in_app`(cokret→app 删除转发)在所有桥都是默认 no-op;
+> (c) `on_ephemeral`(typing/presence/receipts 转发)在所有桥都是默认 no-op。
+> 阻碍点与接线计划见 [`_bridges_todos.md`](_bridges_todos.md)(`redact_in_app` 需把回调签名扩成
+> 带 `app_channel` 的共享 trait 变更,触及全部桥)。读者勿误以为删除 / typing 已经过桥生效。
+
 ### Provenance 与回环防护(裁决记录)
 
 - spec 现行裁决(applet-integration §8、event-envelope.schema.json):桥接事件的

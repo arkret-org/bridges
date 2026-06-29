@@ -5,6 +5,7 @@
 //!   (Bearer page_access_token).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
@@ -116,12 +117,17 @@ impl MessageBridge for MessengerApp {
         })
     }
 
+    fn expects_webhook_inbound(&self) -> bool {
+        true
+    }
+
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
         Some(
             salvo::Router::with_path("webhooks/messenger")
                 .hoop(affix_state::inject(MessengerWebhookState {
                     app: self,
                     ctx,
+                    replay: Arc::new(webhook::ReplayWindow::with_ttl(MESSENGER_REPLAY_TTL)),
                 }))
                 .get(messenger_verify)
                 .post(messenger_delivery),
@@ -129,10 +135,21 @@ impl MessageBridge for MessengerApp {
     }
 }
 
+/// In-handler bounded replay window for Messenger. The Meta signature
+/// (`HMAC-SHA256(app_secret, raw_body)`) covers the body but carries no
+/// timestamp/nonce, so a captured `(body, signature)` pair would otherwise
+/// verify forever; the bridge contract (G-4) mandates a bounded replay/dedupe
+/// guard keyed on the stable platform message id. The TTL covers Meta's
+/// redelivery window with margin.
+const MESSENGER_REPLAY_TTL: Duration = Duration::from_secs(10 * 60);
+
 #[derive(Clone)]
 struct MessengerWebhookState {
     app: Arc<MessengerApp>,
     ctx: Arc<MessageContext>,
+    /// Bounded replay guard keyed on the platform `message.mid`; a captured,
+    /// validly signed event is accepted at most once inside the window.
+    replay: Arc<webhook::ReplayWindow>,
 }
 
 #[handler]
@@ -159,6 +176,20 @@ async fn messenger_delivery(req: &mut Request, depot: &mut Depot, res: &mut Resp
     // batch; inbound dedup keeps the replay idempotent.
     let mut retry = false;
     for inbound in messenger_inbound_messages(&body) {
+        // Bounded replay/dedupe (BRG-SEC-001 / contract G-4): the Meta signature
+        // does not bind a timestamp, so a captured event would replay forever.
+        // Drop any event whose stable `message.mid` was already accepted inside
+        // the window before it reaches submit.
+        if !state
+            .replay
+            .check_and_record(format!("messenger:{}", inbound.app_message_id))
+        {
+            tracing::debug!(
+                message_id = %inbound.app_message_id,
+                "Messenger event replayed; skipping"
+            );
+            continue;
+        }
         let outcome = webhook::submit(state.ctx.clone(), "messenger", inbound).await;
         retry |= outcome == webhook::SubmitOutcome::Retry;
     }

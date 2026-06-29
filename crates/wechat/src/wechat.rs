@@ -224,10 +224,18 @@ impl MessageBridge for WechatApp {
         })
     }
 
+    fn expects_webhook_inbound(&self) -> bool {
+        true
+    }
+
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
         let webhook_token = self.webhook_token.clone();
+        // BRG-SEC-002: `unix_timestamp_is_fresh` accepts |now-ts| <= window, so
+        // the acceptance window spans 2*window (past+future). The replay TTL
+        // must cover the whole window or a captured delivery could be replayed in
+        // the off-window gap.
         let replay_window = Arc::new(webhook::ReplayWindow::with_ttl(Duration::from_secs(
-            WECHAT_TIMESTAMP_WINDOW_SECS as u64,
+            2 * WECHAT_TIMESTAMP_WINDOW_SECS as u64,
         )));
         Some(
             salvo::Router::with_path("webhooks/wechat")

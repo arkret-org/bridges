@@ -57,6 +57,11 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `cokret-bridge-
   `protocol/tenant/external_user_id` 生成并写入 `user_mappings`;proof 使用该 Ghost DID 的
   configured key fragment,避免写侧退回 bridge service actor。纯 HTTP 桥的入站经各自
   `MessageBridge::webhook_router` 挂到 web 服务,平台来源验签在 handler 解析 JSON 前完成。
+  部分桥(WeChat / Feishu / DingTalk / iMessage / QQ / LINE 等)的入站还需要 body-bound
+  验签材料(EncodingAESKey / Encrypt Key / 注入式 HMAC secret / signing secret);缺失时入站面
+  **fail-closed**:WeChat 整类 POST 投递被拒(仅 GET 握手可用),Feishu 直接不挂载 webhook 路由,
+  且声明 webhook 入站面的桥若 `webhook_router` 因此返回 `None` 会在**启动期 fail-fast**(不会降级为
+  无入站面的“健康”进程)。配齐 access token 不等于入站可用,还须配齐这些 body 验签材料。
 - **映射 / 解析**:频道↔realm、消息↔event、用户↔actor 持久化于 diesel(sqlite/postgres/mysql);
   反查驱动 applet `resolve_actor`/`resolve_realm`(ghost/portal 读侧解析)。用户↔actor 映射
   同时参与 app→cokret 写侧署名。

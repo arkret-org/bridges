@@ -121,6 +121,19 @@ where
     let web = {
         let ctx = ctx.clone();
         let extra = app.clone().webhook_router(ctx.clone());
+        // Fail fast (BRG-REL-001): a bridge whose inbound surface is the webhook
+        // router MUST mount it. If the router is `None` (e.g. a required
+        // body-signature key such as Feishu `encrypt_key` is missing) we refuse
+        // to start rather than run a "healthy" process with no inbound plane,
+        // which would silently drop every inbound message.
+        if app.expects_webhook_inbound() && extra.is_none() {
+            return Err(BridgeError::Config(format!(
+                "bridge `{}` declares a webhook inbound surface but webhook_router \
+                 returned None; a required inbound credential (e.g. body-signature \
+                 key) is likely missing — refusing to start with no inbound plane",
+                config.bridge.bridge_id
+            )));
+        }
         tokio::spawn(async move { web::serve(ctx, extra).await })
     };
 
