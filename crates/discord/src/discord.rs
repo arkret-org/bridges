@@ -10,7 +10,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cokret_bridge_messaging::runtime::{BridgeError, Result};
 use cokret_bridge_messaging::{
-    AppMessageRef, Attachment, InboundAppMessage, MessageBridge, MessageContext,
+    AppMessageRef, Attachment, DEFAULT_MEDIA_MIME, InboundAppMessage, MessageBridge, MessageContext,
     OutboundAppMessage, SenderRenderStyle,
 };
 use serenity::all::{ChannelId, CreateAttachment, CreateMessage, GatewayIntents, Http, Message};
@@ -115,11 +115,7 @@ impl EventHandler for Handler {
                 body: m.content.clone(),
             };
             if let Err(e) = self.ctx.submit_app_message(inbound.clone()).await {
-                let retriable = e.is_retriable();
-                tracing::warn!(error = %e, retriable, "Discord → cokret submission failed");
-                self.ctx
-                    .report_inbound_bridge_error(&inbound, &e, retriable)
-                    .await;
+                self.ctx.report_inbound_failure("discord", &inbound, &e).await;
             }
         }
 
@@ -151,7 +147,7 @@ impl Handler {
         let mime = att
             .content_type
             .clone()
-            .unwrap_or_else(|| "application/octet-stream".to_owned());
+            .unwrap_or_else(|| DEFAULT_MEDIA_MIME.to_owned());
         let blob_ref = self.ctx.upload_blob(&media.bytes, &mime).await?;
 
         let attachment = Attachment {

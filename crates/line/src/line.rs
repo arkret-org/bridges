@@ -10,7 +10,7 @@ use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url
 use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
-    AppMessageRef, Attachment, InboundAppMessage, MessageBridge, MessageContext,
+    AppMessageRef, Attachment, DEFAULT_MEDIA_MIME, InboundAppMessage, MessageBridge, MessageContext,
     OutboundAppMessage, SenderRenderStyle, webhook,
 };
 use serde_json::{Value, json};
@@ -227,7 +227,7 @@ async fn forward_line_media(
         .await?;
     let mime = media
         .content_type
-        .unwrap_or_else(|| "application/octet-stream".to_owned());
+        .unwrap_or_else(|| DEFAULT_MEDIA_MIME.to_owned());
     let blob_ref = state.ctx.upload_blob(&media.bytes, &mime).await?;
 
     let attachment = Attachment {

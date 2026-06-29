@@ -44,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
                     .to_owned(),
             ));
         }
-        WechatApp::from_config(
+        WechatApp::new(
             app.corp_id,
             app.corp_secret,
             app.agent_id,

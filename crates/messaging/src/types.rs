@@ -151,3 +151,15 @@ pub struct DownloadedMedia {
 }
 
 pub const MAX_EXTERNAL_MEDIA_BYTES: usize = 32 * 1024 * 1024;
+
+/// Default Meta Graph API version used by the WhatsApp and Messenger bridges
+/// when `config.app.graph_api_version` is not set. Meta deprecates versions on a
+/// rolling quarterly cadence, so this is configurable per bridge; the shared
+/// default keeps the two Meta bridges on the same version.
+pub const DEFAULT_GRAPH_API_VERSION: &str = "v20.0";
+
+/// Default media MIME used when an inbound attachment carries no declared
+/// content type. Shared across the media-capable bridges so the fallback (and
+/// any future content-sniffing) lives in one place rather than being a bare
+/// literal in each adapter.
+pub const DEFAULT_MEDIA_MIME: &str = "application/octet-stream";

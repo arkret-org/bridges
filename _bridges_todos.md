@@ -18,4 +18,22 @@
 
 ## Todo(尚未落地的共享层待办)
 
-- (空)
+- **(messaging) 日历桥接接入点未补**(BRG-HYG-001,2026-06-29 登记):`calendar.rs` 的
+  日历事件 / RSVP 映射守卫(`bridge_calendar_schedule_fields` / `bridge_rsvp_payload` /
+  `CALENDAR_EVENT_PROFILE`)已实现并有单测,但 `MessageContext` 上**已补一个最小提交入口
+  `submit_calendar_event`**(走映射守卫 → `ck.object.create` 形态留待协议确认),仍**无任何
+  adapter 接通**(无桥把外部日历事件喂进来)。待办:确认日历事件的权威 payload/operation 形态后,
+  补至少一个桥(如有原生日历事件的平台)的接入示例。
+
+- **(messaging) 入站删除 `submit_app_delete` 无 adapter 接通**(BRG-HYG-002,2026-06-29 登记):
+  共享层链路完整且有单测,但没有桥构造 `InboundAppDelete` 调用它。阻碍点:
+  (a) 多数平台的删除 gateway 事件(如 Discord `message_delete`)**不带执行删除的 actor**,而
+  `submit_app_delete` 需要 `app_user` 做 ghost 映射;(b) 需要桥订阅删除事件 intent。待办:为有
+  完整删除事件(含 actor)的平台接一个示范桥;若平台不带 actor,需先定 ghost 归属规则。
+
+- **(messaging) 出站删除 `redact_in_app` / `on_ephemeral` 全默认 no-op**(BRG-HYG-003,
+  2026-06-29 登记):驱动链路(`on_cokret_event` 收 `ck.message.redact` → 反查 app_message_id →
+  调 `redact_in_app`)已就绪,但无桥 override。阻碍点:`redact_in_app(ctx, app_message_id)`
+  只传 app 消息 id,而多数平台的删除 API(如 Discord `delete_message`)还需要 **channel id**,
+  当前回调签名不带。待办:把 `redact_in_app` 的回调签名扩成带 `(app_channel, app_message_id)`
+  (共享层 trait 签名变更,触及全部桥),再示范接一个桥;`on_ephemeral` 同理按需 override。

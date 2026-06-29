@@ -167,10 +167,8 @@ impl MessageBridge for DingTalkApp {
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
         let app_secret = self.app_secret.clone();
         let body_hmac_secret = self.webhook_body_hmac_secret.clone();
-        let replay_window = Arc::new(webhook::ReplayWindow::new(
-            DINGTALK_BODY_SIGNATURE_WINDOW,
-            8192,
-        ));
+        let replay_window =
+            Arc::new(webhook::ReplayWindow::with_ttl(DINGTALK_BODY_SIGNATURE_WINDOW));
         Some(
             salvo::Router::with_path("webhooks/dingtalk")
                 .hoop(affix_state::inject(DingTalkWebhookState {

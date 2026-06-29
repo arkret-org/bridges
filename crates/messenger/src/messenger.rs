@@ -16,9 +16,6 @@ use cokret_bridge_messaging::{
 };
 use serde_json::{Value, json};
 
-/// Graph API send endpoint.
-const SEND_API: &str = "https://graph.facebook.com/v20.0/me/messages";
-
 /// Messenger bridge adapter.
 pub struct MessengerApp {
     /// Page access token (Bearer auth, used for sending).
@@ -31,6 +28,10 @@ pub struct MessengerApp {
     /// Meta app secret used to verify the `X-Hub-Signature-256` of each POST
     /// delivery (HMAC-SHA256 over the raw request body).
     app_secret: String,
+    /// Meta Graph API version segment (e.g. `v20.0`), configurable so an
+    /// operator can roll to a newer version without a code release. Mirrors the
+    /// WhatsApp bridge (version no longer inlined in the endpoint literal).
+    graph_api_version: String,
 }
 
 impl MessengerApp {
@@ -38,12 +39,22 @@ impl MessengerApp {
         page_access_token: impl Into<String>,
         verify_token: impl Into<String>,
         app_secret: impl Into<String>,
+        graph_api_version: impl Into<String>,
     ) -> Self {
         Self {
             page_access_token: page_access_token.into(),
             verify_token: verify_token.into(),
             app_secret: app_secret.into(),
+            graph_api_version: graph_api_version.into(),
         }
+    }
+
+    /// The Graph API send endpoint for the configured version.
+    fn send_api(&self) -> String {
+        format!(
+            "https://graph.facebook.com/{}/me/messages",
+            self.graph_api_version
+        )
     }
 }
 
@@ -68,7 +79,7 @@ impl MessageBridge for MessengerApp {
 
         let resp = ctx
             .http
-            .post(SEND_API)
+            .post(self.send_api())
             .bearer_auth(&self.page_access_token)
             .json(&payload)
             .send()

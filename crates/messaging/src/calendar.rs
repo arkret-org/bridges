@@ -3,6 +3,14 @@
 //! Calendar events are Cokret Strand profile fields plus `ck.rsvp.set`; this
 //! module intentionally rejects provider-specific preservation/downgrade fields
 //! instead of smuggling them into Strand metadata or message content.
+//!
+//! Status (BRG-HYG-001): these mapping guards are **shared-capability ready and
+//! unit-tested, but no adapter is wired to them yet** — no bridge feeds external
+//! calendar events through `bridge_calendar_schedule_fields` /
+//! `bridge_rsvp_payload`, and `MessageContext` exposes no `submit_calendar_*`
+//! entry point. This is a deliberately latent capability tracked in
+//! `_bridges_todos.md`; do not treat calendar bridging as available until an
+//! adapter and a submit entry point land.
 
 use std::fmt;
 

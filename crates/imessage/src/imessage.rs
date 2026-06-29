@@ -109,7 +109,7 @@ impl MessageBridge for IMessageApp {
 
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
         let secret = self.webhook_secret.clone();
-        let replay = Arc::new(webhook::ReplayWindow::new(IMESSAGE_DELIVERY_MAX_SKEW, 8192));
+        let replay = Arc::new(webhook::ReplayWindow::with_ttl(IMESSAGE_DELIVERY_MAX_SKEW));
         Some(
             salvo::Router::with_path("webhooks/imessage")
                 .hoop(affix_state::inject(IMessageWebhookState {

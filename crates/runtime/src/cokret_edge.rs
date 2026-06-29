@@ -189,9 +189,36 @@ impl CokretEdge {
     ) -> Result<Self> {
         let base = url::Url::parse(&config.cokret.server_url)
             .map_err(|e| BridgeError::Config(format!("server_url: {e}")))?;
+        // Outbound transport policy (spec §7, sync/api-conventions §11.2): the
+        // bridge actively connects out to this address, so require TLS. A plain
+        // `http://` server_url would carry the bearer access token and signed
+        // events in cleartext. Loopback over http is the one operator-controlled
+        // dev exception. Fail closed otherwise.
+        if base.scheme() != "https" && !host_is_loopback(base.host_str()) {
+            return Err(BridgeError::Config(format!(
+                "cokret.server_url must use https (got scheme `{}`); only loopback may use http",
+                base.scheme()
+            )));
+        }
         let client = Client::builder(base)
             .auth(Auth::Bearer(config.cokret.access_token.clone()))
             .build()?;
+
+        // The default applet namespaces and ghost actor ids derive from the
+        // service DID by appending a `:ghost:*` suffix (applet-integration §3.4).
+        // That suffix form is only well-defined for the path-structured methods
+        // (`did:webvh` per the global rule, `did:web` per the spec example), so
+        // fail closed at startup for any other method rather than later minting a
+        // malformed ghost DID.
+        match service_did.method() {
+            "webvh" | "web" => {}
+            other => {
+                return Err(BridgeError::Config(format!(
+                    "service DID method `{other}` does not support `:ghost:` suffix derivation; \
+                     a bridge service DID must be did:webvh (or did:web)"
+                )));
+            }
+        }
 
         let applet_id = AppletId::new(config.cokret.applet_id.clone())?;
         let hlc_device_id = config.bridge.bridge_id.clone();
@@ -259,7 +286,37 @@ impl CokretEdge {
 
     /// Build and sign an event emitted by this bridge's service actor.
     pub fn mint_event(&self, kind: &str, realm_id: &RealmId, content: Value) -> Result<Event> {
-        self.mint_event_as_inner(self.service_did.clone(), kind, realm_id, content)
+        let mut event = self.build_service_event(kind, realm_id, content)?;
+        self.sign_as_service(&mut event)?;
+        Ok(event)
+    }
+
+    /// Build an unsigned service-actor event. Callers that set signed-envelope
+    /// fields (`external_ref`, `created_at`, …) before submitting do so on the
+    /// returned event and then call [`Self::sign_as_service`] exactly once,
+    /// avoiding a discarded first signature.
+    pub fn mint_event_unsigned(
+        &self,
+        kind: &str,
+        realm_id: &RealmId,
+        content: Value,
+    ) -> Result<Event> {
+        self.build_service_event(kind, realm_id, content)
+    }
+
+    /// Build an unsigned event authored by the service actor (seq + HLC
+    /// allocated, no proof).
+    fn build_service_event(&self, kind: &str, realm_id: &RealmId, content: Value) -> Result<Event> {
+        let seq = self.seq.alloc()?;
+        let hlc = self.next_hlc(realm_id)?;
+        Ok(Event::new(
+            kind,
+            realm_id.clone(),
+            self.service_did.clone(),
+            seq,
+            hlc,
+            content,
+        )?)
     }
 
     /// Build and sign an event attributed to `actor` and executed by this
@@ -277,6 +334,23 @@ impl CokretEdge {
         content: Value,
         authorization_ref: &str,
     ) -> Result<Event> {
+        let mut event = self.build_delegated_event(actor, kind, realm_id, content, authorization_ref)?;
+        self.sign_as_service(&mut event)?;
+        Ok(event)
+    }
+
+    /// Build an unsigned delegated-actor event (provenance fields set, no proof
+    /// yet). Callers that still need to set signed-envelope fields
+    /// (`external_ref`, `redacts`, `created_at`) do so before a single
+    /// [`Self::sign_as_service`], avoiding a discarded first signature.
+    fn build_delegated_event(
+        &self,
+        actor: &cokret::Did,
+        kind: &str,
+        realm_id: &RealmId,
+        content: Value,
+        authorization_ref: &str,
+    ) -> Result<Event> {
         let authorization_ref = validate_authorization_ref(authorization_ref)?;
         let seq = self.seq.alloc()?;
         let hlc = self.next_hlc(realm_id)?;
@@ -284,34 +358,21 @@ impl CokretEdge {
         event.executed_by = Some(self.service_did.clone());
         event.authorization_ref = Some(authorization_ref);
         event.applet_id = Some(self.applet_id.clone());
-        let verification_method = self.verification_method_for_actor(&self.service_did)?;
-        sign_event(
-            &mut event,
-            &self.signer,
-            &verification_method,
-            SignEventOptions::new(),
-        )?;
         Ok(event)
     }
 
-    fn mint_event_as_inner(
-        &self,
-        actor: Did,
-        kind: &str,
-        realm_id: &RealmId,
-        content: Value,
-    ) -> Result<Event> {
-        let seq = self.seq.alloc()?;
-        let hlc = self.next_hlc(realm_id)?;
-        let mut event = Event::new(kind, realm_id.clone(), actor, seq, hlc, content)?;
-        let verification_method = self.verification_method_for_actor(&event.actor_id)?;
+    /// Sign `event` with the service key over the current canonical envelope.
+    /// Used after all signed-envelope fields are in place so the event is signed
+    /// exactly once.
+    fn sign_as_service(&self, event: &mut Event) -> Result<()> {
+        let verification_method = self.verification_method_for_actor(&self.service_did)?;
         sign_event(
-            &mut event,
+            event,
             &self.signer,
             &verification_method,
             SignEventOptions::new(),
         )?;
-        Ok(event)
+        Ok(())
     }
 
     fn verification_method_for_actor(&self, actor: &Did) -> Result<String> {
@@ -347,14 +408,7 @@ impl CokretEdge {
     /// current canonical envelope.
     pub fn resign_event(&self, event: &mut Event) -> Result<()> {
         event.proofs.clear();
-        let verification_method = self.verification_method_for_actor(&self.service_did)?;
-        sign_event(
-            event,
-            &self.signer,
-            &verification_method,
-            SignEventOptions::new(),
-        )?;
-        Ok(())
+        self.sign_as_service(event)
     }
 
     /// Outbound convenience with bridge provenance and an explicit delegated
@@ -373,9 +427,11 @@ impl CokretEdge {
         authorization_ref: &str,
     ) -> Result<String> {
         let realm = RealmId::new(realm_id.to_owned())?;
-        let mut event = self.mint_event_as(actor, kind, &realm, content, authorization_ref)?;
+        // Set the signed-envelope `external_ref` before the single signature so
+        // the proof covers it (no discarded first sign).
+        let mut event = self.build_delegated_event(actor, kind, &realm, content, authorization_ref)?;
         event.external_ref = Some(external_ref);
-        self.resign_event(&mut event)?;
+        self.sign_as_service(&mut event)?;
         self.submit_event(&event).await
     }
 
@@ -392,7 +448,9 @@ impl CokretEdge {
         authorization_ref: &str,
     ) -> Result<String> {
         let realm = RealmId::new(realm_id.to_owned())?;
-        let mut event = self.mint_event_as(
+        // Set `redacts` + `external_ref` before the single signature so the proof
+        // covers them (no discarded first sign).
+        let mut event = self.build_delegated_event(
             actor,
             "ck.message.redact",
             &realm,
@@ -401,7 +459,7 @@ impl CokretEdge {
         )?;
         event.redacts = Some(EventId::new(target_event_id.to_owned())?);
         event.external_ref = Some(external_ref);
-        self.resign_event(&mut event)?;
+        self.sign_as_service(&mut event)?;
         self.submit_event(&event).await
     }
 
@@ -688,6 +746,21 @@ impl BridgeAppletHandler {
         patterns
             .iter()
             .any(|pattern| glob_suffix_match(pattern, realm_id))
+    }
+}
+
+/// Whether a URL host is a loopback address (the only operator-controlled
+/// exception to the https requirement on `cokret.server_url`, for local dev).
+fn host_is_loopback(host: Option<&str>) -> bool {
+    match host {
+        Some(host) => {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .map(|ip| ip.is_loopback())
+                    .unwrap_or(false)
+        }
+        None => false,
     }
 }
 

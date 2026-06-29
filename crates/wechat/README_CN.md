@@ -34,7 +34,7 @@ cargo run -p cokret-bridge-wechat -- --config config.yaml
 - `app.webhook_token`:微信回调 Token,必填;GET/POST 均校验 plaintext `signature`。
 - `database.url`:`sqlite://...` / `postgres://...` / `mysql://...`(对应 feature)。
 
-## 不确定点(TODO)
+## 待完善(TODO)
 
 - 入站回调 webhook 已接入(`webhook_router`,含 echostr 与 plaintext `signature` 校验;
   加密(安全)模式亦已实现:`msg_signature` 校验 + AES-256-CBC 解密 + receiveid 绑定,企业微信入站强制启用)。

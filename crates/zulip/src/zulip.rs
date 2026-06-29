@@ -15,9 +15,72 @@ use async_trait::async_trait;
 use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
-    SenderRenderStyle,
+    SenderRenderStyle, send_json_expect,
 };
 use serde_json::Value;
+
+/// Zulip REST success flag: top-level `result == "success"`.
+fn zulip_result_ok(payload: &Value) -> bool {
+    payload.get("result").and_then(Value::as_str) == Some("success")
+}
+
+/// Base delay for the long-poll failure backoff.
+const ZULIP_BACKOFF_BASE: std::time::Duration = std::time::Duration::from_secs(2);
+/// Ceiling for the long-poll failure backoff.
+const ZULIP_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(60);
+/// Consecutive long-poll failures after which the event queue is re-registered
+/// (a persistently malformed/erroring queue is most likely stale or gone).
+const ZULIP_REREGISTER_AFTER_FAILURES: u32 = 5;
+
+/// Cheap process-local jitter source. No `rand` dependency is pulled in just to
+/// de-correlate reconnect storms; the sub-second clock nanos are entropy enough
+/// for spreading retries across instances.
+fn jitter_fraction() -> f64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    f64::from(nanos) / f64::from(u32::MAX)
+}
+
+/// Exponential backoff (`base * 2^attempt`, capped at `max`) with up to ±25%
+/// jitter so multiple instances that disconnect together do not reconnect in
+/// lockstep (thundering herd).
+fn backoff_with_jitter(
+    attempt: u32,
+    base: std::time::Duration,
+    max: std::time::Duration,
+) -> std::time::Duration {
+    let exponent = attempt.min(16);
+    let scaled = base.saturating_mul(1u32 << exponent).min(max);
+    // Spread within [0.75, 1.25) of the scaled delay.
+    let factor = 0.75 + jitter_fraction() * 0.5;
+    scaled.mul_f64(factor)
+}
+
+/// Record one long-poll failure, sleep an exponential+jittered backoff, and
+/// report whether the caller should break the inner loop to re-register the
+/// event queue (once consecutive failures reach the threshold).
+async fn zulip_poll_backoff(failures: &mut u32, context: &str, detail: &str) -> bool {
+    *failures = failures.saturating_add(1);
+    if *failures >= ZULIP_REREGISTER_AFTER_FAILURES {
+        tracing::warn!(
+            failures = *failures,
+            detail,
+            "{context}; re-registering the event queue"
+        );
+        return true;
+    }
+    let delay = backoff_with_jitter(*failures - 1, ZULIP_BACKOFF_BASE, ZULIP_BACKOFF_MAX);
+    tracing::warn!(
+        failures = *failures,
+        delay_ms = delay.as_millis() as u64,
+        detail,
+        "{context}; backing off"
+    );
+    tokio::time::sleep(delay).await;
+    false
+}
 
 /// Zulip bridge adapter.
 pub struct ZulipApp {
@@ -94,17 +157,27 @@ impl MessageBridge for ZulipApp {
 
     async fn run(self: Arc<Self>, ctx: Arc<MessageContext>) -> Result<()> {
         let events_url = format!("{}/api/v1/events", self.site);
+        let mut register_attempt: u32 = 0;
         loop {
             let (queue_id, mut last_event_id) = match self.register(&ctx).await {
                 Ok(queue) => queue,
                 Err(e) => {
-                    tracing::warn!(error = %e, "Zulip queue registration failed, retrying");
-                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    let delay =
+                        backoff_with_jitter(register_attempt, ZULIP_BACKOFF_BASE, ZULIP_BACKOFF_MAX);
+                    register_attempt = register_attempt.saturating_add(1);
+                    tracing::warn!(error = %e, delay_ms = delay.as_millis() as u64, "Zulip queue registration failed, retrying");
+                    tokio::time::sleep(delay).await;
                     continue;
                 }
             };
+            register_attempt = 0;
             tracing::info!(queue = %queue_id, "Zulip event queue registered, starting long-polling");
 
+            // Consecutive long-poll failures (request/parse error or a malformed
+            // response with no `events` array). Drives an exponential+jittered
+            // backoff and forces a re-register after a threshold, instead of
+            // spinning at a fixed 1s cadence forever.
+            let mut poll_failures: u32 = 0;
             loop {
                 // Long-polling: dont_block=false -> the server blocks until a new event arrives or
                 // it times out.
@@ -123,14 +196,16 @@ impl MessageBridge for ZulipApp {
                     Ok(r) => match r.json().await {
                         Ok(b) => b,
                         Err(e) => {
-                            tracing::warn!(error = %e, "Zulip events parse failed, retrying later");
-                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            if zulip_poll_backoff(&mut poll_failures, "Zulip events parse failed", &e.to_string()).await {
+                                break;
+                            }
                             continue;
                         }
                     },
                     Err(e) => {
-                        tracing::warn!(error = %e, "Zulip events request failed, retrying later");
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        if zulip_poll_backoff(&mut poll_failures, "Zulip events request failed", &e.to_string()).await {
+                            break;
+                        }
                         continue;
                     }
                 };
@@ -143,9 +218,16 @@ impl MessageBridge for ZulipApp {
                 }
 
                 let Some(events) = body.get("events").and_then(|v| v.as_array()) else {
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    // Malformed response (no events array, not a known error code).
+                    // Back off and re-register after the threshold rather than
+                    // spinning at a fixed cadence against a broken queue.
+                    if zulip_poll_backoff(&mut poll_failures, "Zulip events response malformed", "missing events array").await {
+                        break;
+                    }
                     continue;
                 };
+                // A well-formed poll resets the failure backoff.
+                poll_failures = 0;
 
                 let mut retry_poll = false;
                 for ev in events {
@@ -206,11 +288,7 @@ impl MessageBridge for ZulipApp {
                             }
                         }
                         Err(e) => {
-                            let retriable = e.is_retriable();
-                            tracing::warn!(error = %e, retriable, "Zulip -> cokret submit failed");
-                            ctx.report_inbound_bridge_error(&inbound, &e, retriable)
-                                .await;
-                            if retriable {
+                            if ctx.report_inbound_failure("zulip", &inbound, &e).await {
                                 retry_poll = true;
                                 break;
                             }
@@ -252,36 +330,12 @@ impl MessageBridge for ZulipApp {
         }
         form.push(("content", body));
 
-        let resp = ctx
+        let request = ctx
             .http
             .post(&url)
             .basic_auth(&self.bot_email, Some(&self.api_key))
-            .form(&form)
-            .send()
-            .await
-            .map_err(|e| {
-                BridgeError::App(format!(
-                    "Zulip send failed: {}",
-                    redact_sensitive_url_values(e.to_string())
-                ))
-            })?;
-
-        let payload: Value = resp
-            .json()
-            .await
-            .map_err(|e| {
-                BridgeError::App(format!(
-                    "Zulip send response parse failed: {}",
-                    redact_sensitive_url_values(e.to_string())
-                ))
-            })?;
-
-        if payload.get("result").and_then(|v| v.as_str()) != Some("success") {
-            return Err(BridgeError::App(format!(
-                "Zulip send returned an error: {}",
-                redact_sensitive_url_values(payload.to_string())
-            )));
-        }
+            .form(&form);
+        let payload = send_json_expect(request, "Zulip send", zulip_result_ok).await?;
         let id = payload
             .get("id")
             .and_then(|v| v.as_i64())

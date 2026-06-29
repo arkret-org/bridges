@@ -50,15 +50,35 @@ fn requested_ghost_actor_id_for_user(
             "inbound app_user is required for ghost actor mapping".into(),
         ));
     }
+    // The default ghost derivation appends a `:ghost:u<...>` suffix to the
+    // service DID (applet-integration §3.4). That suffix form is only
+    // well-defined for path-structured DID methods (`did:web` per the spec
+    // example, `did:webvh` per the global did:webvh-only rule); for other methods
+    // (e.g. `did:key`) the bare suffix would not be a valid actor DID. Assert the
+    // method before deriving so a misconfigured service DID fails closed here
+    // rather than producing a malformed ghost id.
+    let service_did = Did::new(config.cokret.service_did.clone())?;
+    assert_ghost_suffix_method(&service_did)?;
     let material =
         [protocol, tenant, external_user_id].join(&MESSAGE_MAPPING_KEY_SEPARATOR.to_string());
     let encoded = cokret::base64url_encode(material.as_bytes());
-    let did = format!(
-        "{}:ghost:u{encoded}",
-        config.cokret.service_did.trim_end_matches(':')
-    );
+    let did = format!("{}:ghost:u{encoded}", service_did.as_str().trim_end_matches(':'));
     Did::new(did.clone())?;
     Ok(did)
+}
+
+/// Assert that `service_did`'s method supports the `:ghost:*` suffix derivation
+/// used for default applet namespaces and ghost actor ids. Only the
+/// path-structured methods are valid: `did:webvh` (the only method the global
+/// rule permits) and `did:web` (the applet-integration §3.4 example form).
+pub(crate) fn assert_ghost_suffix_method(service_did: &Did) -> Result<()> {
+    match service_did.method() {
+        "webvh" | "web" => Ok(()),
+        other => Err(BridgeError::Config(format!(
+            "service DID method `{other}` does not support `:ghost:` suffix derivation; \
+             a bridge service DID must be did:webvh (or did:web)"
+        ))),
+    }
 }
 
 /// The spec-registered ghost provision binding: `ck.self.applet.ghost.command.provision`
@@ -361,10 +381,11 @@ pub(crate) async fn create_portal_strand(
     let payload = ObjectCreatePayload::new(strand)
         .to_value()
         .map_err(|e| BridgeError::App(e.to_string()))?;
-    let mut event = edge.mint_event("ck.strand.create", &realm, payload)?;
-    // strand_create_payload semantic validation requires object.created_by ==
-    // actor_id (both are the service DID here) and object.created_at == the
-    // envelope created_at.
+    // Build unsigned, set the signed-envelope fields, then sign once (no
+    // discarded first signature). strand_create_payload semantic validation
+    // requires object.created_by == actor_id (both are the service DID here) and
+    // object.created_at == the envelope created_at.
+    let mut event = edge.mint_event_unsigned("ck.strand.create", &realm, payload)?;
     event.created_at = strand_created_at;
     event.external_ref = Some(location.clone());
     edge.resign_event(&mut event)?;

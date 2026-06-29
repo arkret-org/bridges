@@ -14,9 +14,14 @@ use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
-    SenderRenderStyle, webhook,
+    SenderRenderStyle, send_json_expect, webhook,
 };
 use serde_json::{Value, json};
+
+/// Feishu / Lark API success flag: top-level `code == 0`.
+fn feishu_code_ok(body: &Value) -> bool {
+    body.get("code").and_then(Value::as_i64) == Some(0)
+}
 
 const FEISHU_BASE: &str = "https://open.feishu.cn/open-apis";
 /// Fallback validity (seconds) when the API omits `expire`.
@@ -25,11 +30,6 @@ const FEISHU_TOKEN_FALLBACK_SECS: u64 = 7000;
 /// Deliveries whose timestamp is outside this skew (past or future) are rejected,
 /// bounding the replay window the source signature alone cannot close.
 const FEISHU_DELIVERY_MAX_SKEW: Duration = Duration::from_secs(300);
-/// Capacity of the in-memory replay guard. Each accepted delivery records its
-/// `timestamp:nonce:signature` so a captured request cannot be re-played inside
-/// the freshness window.
-const FEISHU_REPLAY_CAPACITY: usize = 8192;
-
 /// Feishu bridge adapter.
 pub struct FeishuApp {
     app_id: String,
@@ -137,37 +137,12 @@ impl MessageBridge for FeishuApp {
         // For Feishu text messages, content is a "JSON string".
         let content = json!({ "text": text }).to_string();
 
-        let resp = ctx
-            .http
-            .post(&url)
-            .bearer_auth(&token)
-            .json(&json!({
-                "receive_id": receive_id,
-                "msg_type": "text",
-                "content": content,
-            }))
-            .send()
-            .await
-            .map_err(|e| {
-                BridgeError::App(format!(
-                    "Feishu send failed: {}",
-                    redact_sensitive_url_values(e.to_string())
-                ))
-            })?;
-
-        let body: Value = resp.json().await.map_err(|e| {
-            BridgeError::App(format!(
-                "Feishu send response parse failed: {}",
-                redact_sensitive_url_values(e.to_string())
-            ))
-        })?;
-
-        if body.get("code").and_then(|v| v.as_i64()) != Some(0) {
-            return Err(BridgeError::App(format!(
-                "Feishu send returned an error: {}",
-                redact_sensitive_url_values(body.to_string())
-            )));
-        }
+        let request = ctx.http.post(&url).bearer_auth(&token).json(&json!({
+            "receive_id": receive_id,
+            "msg_type": "text",
+            "content": content,
+        }));
+        let body = send_json_expect(request, "Feishu send", feishu_code_ok).await?;
         let message_id = body
             .get("data")
             .and_then(|d| d.get("message_id"))
@@ -210,10 +185,7 @@ impl MessageBridge for FeishuApp {
                     verification_token,
                     encrypt_key,
                     encrypt_aes_key,
-                    replay: Arc::new(webhook::ReplayWindow::new(
-                        FEISHU_DELIVERY_MAX_SKEW,
-                        FEISHU_REPLAY_CAPACITY,
-                    )),
+                    replay: Arc::new(webhook::ReplayWindow::with_ttl(FEISHU_DELIVERY_MAX_SKEW)),
                 }))
                 .post(feishu_delivery),
         )

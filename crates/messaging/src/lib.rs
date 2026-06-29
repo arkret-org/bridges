@@ -49,9 +49,9 @@ use serde_json::{Value, json};
 use store::MessageResolver;
 pub use store::{ChannelRealmMapping, MessageMapping, MessageStore, UserMapping};
 pub use types::{
-    AppDeleteOutcome, AppDeleteReason, AppMessageRef, Attachment, DownloadedMedia,
-    InboundAppDelete, InboundAppMessage, MAX_EXTERNAL_MEDIA_BYTES, OutboundAppMessage,
-    SenderRenderStyle,
+    AppDeleteOutcome, AppDeleteReason, AppMessageRef, Attachment, DEFAULT_GRAPH_API_VERSION,
+    DEFAULT_MEDIA_MIME, DownloadedMedia, InboundAppDelete, InboundAppMessage,
+    MAX_EXTERNAL_MEDIA_BYTES, OutboundAppMessage, SenderRenderStyle,
 };
 
 // Not a `ck.`-prefixed id: the `ck.` namespace is reserved for spec-registered
@@ -173,6 +173,26 @@ impl MessageContext {
         .with_external_ref(external_ref);
         edge.submit_bridge_error(&realm, builder).await?;
         Ok(())
+    }
+
+    /// Collapse the three-step inbound-failure audit shared by the gateway /
+    /// long-poll bridges (Discord, Telegram, Slack, Zulip): classify retriability,
+    /// `warn!`-log the failure with a bridge label, and best-effort emit a durable
+    /// `ck.applet.bridge_error`. Returns whether the failure is retriable so each
+    /// adapter can signal its own upstream in the bridge-specific way (teloxide
+    /// `RequestError::Io`, Slack ack suppression, Zulip poll break). The pure
+    /// webhook bridges reuse the equivalent collapse inside [`webhook::submit`].
+    pub async fn report_inbound_failure(
+        &self,
+        label: &str,
+        inbound: &InboundAppMessage,
+        error: &BridgeError,
+    ) -> bool {
+        let retriable = error.is_retriable();
+        tracing::warn!(%error, bridge = label, retriable, "inbound bridge submission failed");
+        self.report_inbound_bridge_error(inbound, error, retriable)
+            .await;
+        retriable
     }
 
     /// Emit a `ck.applet.bridge_error` Event for a failed outbound (cokret → app)
@@ -403,6 +423,12 @@ impl MessageContext {
     /// Submit an inbound app-side explicit delete/recall as a Cokret message
     /// redaction. Expiry, retention and bridge-drop signals are not redactions
     /// and are returned as ignored outcomes without minting protocol events.
+    ///
+    /// Status (BRG-HYG-002): this inbound-delete link is complete and unit-tested
+    /// but **no adapter constructs an [`InboundAppDelete`] yet**. Wiring it needs
+    /// a platform delete event that carries the *deleting actor* (required here
+    /// for ghost mapping) and the relevant intent subscription; tracked in
+    /// `_bridges_todos.md`.
     pub async fn submit_app_delete(&self, delete: InboundAppDelete) -> Result<AppDeleteOutcome> {
         if delete.reason.redaction_reason().is_none() {
             return Ok(AppDeleteOutcome::Ignored {
@@ -662,6 +688,43 @@ impl MessageContext {
     }
 }
 
+/// Send an outbound vendor API request, parse the JSON response, apply the
+/// vendor-specific success predicate, and wrap every failure as
+/// `BridgeError::App` with the message sensitive-value-redacted.
+///
+/// This collapses the `send → .json::<Value>() → success check → redacted error`
+/// skeleton shared by the HTTP outbound bridges (Slack `ok==true`, Feishu/WeChat
+/// `code/errcode==0`, Zulip `result=="success"`, …). The per-bridge differences
+/// — the success flag key and the path the caller reads the message id from —
+/// stay with the caller: `is_success` expresses the success rule, and the caller
+/// extracts the id from the returned [`Value`]. `label` names the call for error
+/// messages (e.g. `"Slack chat.postMessage"`).
+pub async fn send_json_expect(
+    request: reqwest::RequestBuilder,
+    label: &str,
+    is_success: impl Fn(&Value) -> bool,
+) -> Result<Value> {
+    let response = request.send().await.map_err(|e| {
+        BridgeError::App(format!(
+            "{label} request failed: {}",
+            redact_sensitive_url_values(e.to_string())
+        ))
+    })?;
+    let body: Value = response.json().await.map_err(|e| {
+        BridgeError::App(format!(
+            "{label} response parse failed: {}",
+            redact_sensitive_url_values(e.to_string())
+        ))
+    })?;
+    if !is_success(&body) {
+        return Err(BridgeError::App(format!(
+            "{label} returned an error: {}",
+            redact_sensitive_url_values(body.to_string())
+        )));
+    }
+    Ok(body)
+}
+
 #[async_trait]
 pub trait MessageBridge: Send + Sync + 'static {
     fn name(&self) -> &str;
@@ -682,6 +745,15 @@ pub trait MessageBridge: Send + Sync + 'static {
         msg: OutboundAppMessage,
     ) -> Result<AppMessageRef>;
 
+    /// Forward a Cokret message redaction as an app-side deletion. The driver
+    /// (`on_cokret_event`) already resolves the target `app_message_id` and
+    /// invokes this; the default is a no-op.
+    ///
+    /// Status (BRG-HYG-003): **no adapter overrides this yet** — outbound delete
+    /// forwarding is dark on every bridge. Wiring it properly needs the callback
+    /// to also carry the `app_channel` (most platform delete APIs, e.g. Discord
+    /// `delete_message`, key on channel + message id), which is a shared trait
+    /// signature change; tracked in `_bridges_todos.md`.
     async fn redact_in_app(&self, _ctx: Arc<MessageContext>, _app_message_id: &str) -> Result<()> {
         Ok(())
     }
@@ -689,6 +761,10 @@ pub trait MessageBridge: Send + Sync + 'static {
     /// Handle an ephemeral signal (typing/presence/receipts/call-signal) pushed
     /// alongside events, as the SDK [`EphemeralEnvelope`] wire type; defaults to
     /// a no-op.
+    ///
+    /// Status (BRG-HYG-003): **no adapter overrides this yet** — ephemeral
+    /// forwarding is dark on every bridge; override per platform as needed.
+    /// Tracked in `_bridges_todos.md`.
     async fn on_ephemeral(
         &self,
         _ctx: Arc<MessageContext>,

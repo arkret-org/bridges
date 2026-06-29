@@ -35,7 +35,7 @@ cargo run -p cokret-bridge-feishu -- --config config.yaml
   明文回调无逐次来源签名,违反 bridge 合约,故 `encrypt_key` 留空时 webhook 路由**不挂载**(fail closed)。
 - `database.url`:`sqlite://...` / `postgres://...` / `mysql://...`(对应 feature)。
 
-## 不确定点(TODO)
+## 待完善(TODO)
 
 - 入站事件订阅 webhook 已接入(`webhook_router`,含每条投递强制 `X-Lark-Signature` 验签、
   时间戳新鲜度、重放窗口、challenge 校验与事件分发)。

@@ -34,7 +34,7 @@ cargo run -p cokret-bridge-teams -- --config config.yaml
 - `app.inbound_jwt`:Teams webhook Bearer JWT 验签配置(`issuer`/`audience`/`jwks_url`)。
 - `database.url`:`sqlite://...` / `postgres://...` / `mysql://...`(对应 feature)。
 
-## 不确定点 / TODO
+## 待完善(TODO)
 
 - `service_url` 实际值随会话由 Bot Framework 下发,出站前应以入站 Activity 携带的
   serviceUrl 为准;当前实现要求显式配置。

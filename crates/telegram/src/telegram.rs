@@ -10,7 +10,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
 use cokret_bridge_messaging::{
-    AppMessageRef, Attachment, InboundAppMessage, MessageBridge, MessageContext,
+    AppMessageRef, Attachment, DEFAULT_MEDIA_MIME, InboundAppMessage, MessageBridge, MessageContext,
     OutboundAppMessage, SenderRenderStyle,
 };
 use teloxide::prelude::*;
@@ -19,13 +19,16 @@ use teloxide::types::{ChatId, FileId, InputFile};
 /// Telegram bridge adapter.
 pub struct TelegramApp {
     token: String,
+    /// A single `Bot` (which owns a reqwest client) cached for reuse across the
+    /// receive loop and every outbound send, rather than rebuilt per message.
+    bot: Bot,
 }
 
 impl TelegramApp {
     pub fn new(token: impl Into<String>) -> Self {
-        Self {
-            token: token.into(),
-        }
+        let token = token.into();
+        let bot = Bot::new(&token);
+        Self { token, bot }
     }
 }
 
@@ -36,7 +39,7 @@ impl MessageBridge for TelegramApp {
     }
 
     async fn run(self: Arc<Self>, ctx: Arc<MessageContext>) -> Result<()> {
-        let bot = Bot::new(&self.token);
+        let bot = self.bot.clone();
         let token = self.token.clone();
 
         // teloxide long-polling receive loop; submit text and media to the core.
@@ -44,6 +47,16 @@ impl MessageBridge for TelegramApp {
             let ctx = ctx.clone();
             let token = token.clone();
             async move {
+                // Defense-in-depth loop guard, aligning with the other gateway
+                // bridges (Discord `author.bot`, Slack `bot_id`, Zulip
+                // `sender_email`): skip messages authored by any bot, including
+                // this bot's own echoes. Telegram's privacy mode usually hides
+                // these, but a group with privacy off (or multiple bots) can
+                // surface them. The authoritative loop guard remains in the
+                // shared layer (`on_cokret_event`).
+                if msg.from.as_ref().map(|u| u.is_bot).unwrap_or(false) {
+                    return respond(());
+                }
                 let channel = msg.chat.id.0.to_string();
                 let user = msg
                     .from
@@ -58,14 +71,10 @@ impl MessageBridge for TelegramApp {
                         app_message_id: msg.id.0.to_string(),
                         body: text.to_owned(),
                     };
-                    if let Err(e) = ctx.submit_app_message(inbound.clone()).await {
-                        let retriable = e.is_retriable();
-                        tracing::warn!(error = %e, retriable, "Telegram → cokret submission failed");
-                        ctx.report_inbound_bridge_error(&inbound, &e, retriable)
-                            .await;
-                        if retriable {
-                            return telegram_retry_error("Telegram text submit retriable failure");
-                        }
+                    if let Err(e) = ctx.submit_app_message(inbound.clone()).await
+                        && ctx.report_inbound_failure("telegram", &inbound, &e).await
+                    {
+                        return telegram_retry_error("Telegram text submit retriable failure");
                     }
                 }
 
@@ -75,17 +84,13 @@ impl MessageBridge for TelegramApp {
                     )
                     .await
                 {
-                    let retriable = e.is_retriable();
-                    tracing::warn!(error = %e, retriable, "Telegram media bridging failed");
                     let inbound = InboundAppMessage {
                         app_channel: channel.clone(),
                         app_user: user.clone(),
                         app_message_id: msg.id.0.to_string(),
                         body: msg.caption().unwrap_or_default().to_owned(),
                     };
-                    ctx.report_inbound_bridge_error(&inbound, &e, retriable)
-                        .await;
-                    if retriable {
+                    if ctx.report_inbound_failure("telegram", &inbound, &e).await {
                         return telegram_retry_error("Telegram media submit retriable failure");
                     }
                 }
@@ -104,7 +109,7 @@ impl MessageBridge for TelegramApp {
         msg: OutboundAppMessage,
     ) -> Result<AppMessageRef> {
         let chat = parse_telegram_chat_id(&msg.app_channel)?;
-        let bot = Bot::new(&self.token);
+        let bot = &self.bot;
         let body = msg.rendered_body(SenderRenderStyle::Plain);
 
         // With an attachment: download the cokret blob and send it as a document.
@@ -193,7 +198,7 @@ async fn forward_media(
     let media = ctx
         .download_external_media(&url, None, &["api.telegram.org"])
         .await?;
-    let mime = mime.unwrap_or_else(|| "application/octet-stream".to_owned());
+    let mime = mime.unwrap_or_else(|| DEFAULT_MEDIA_MIME.to_owned());
     let blob_ref = ctx.upload_blob(&media.bytes, &mime).await?;
 
     let caption = msg.caption().unwrap_or_default().to_owned();

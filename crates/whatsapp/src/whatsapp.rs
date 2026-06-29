@@ -12,13 +12,10 @@ use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url
 use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
-    AppMessageRef, Attachment, InboundAppMessage, MessageBridge, MessageContext,
+    AppMessageRef, Attachment, DEFAULT_MEDIA_MIME, InboundAppMessage, MessageBridge, MessageContext,
     OutboundAppMessage, SenderRenderStyle, webhook,
 };
 use serde_json::{Value, json};
-
-/// Graph API version.
-const GRAPH_API_VERSION: &str = "v20.0";
 
 /// WhatsApp bridge adapter.
 pub struct WhatsAppApp {
@@ -31,6 +28,9 @@ pub struct WhatsAppApp {
     /// Meta app secret used to verify the `X-Hub-Signature-256` of each POST
     /// delivery (HMAC-SHA256 over the raw request body).
     app_secret: String,
+    /// Meta Graph API version segment (e.g. `v20.0`), configurable so an
+    /// operator can roll to a newer version without a code release.
+    graph_api_version: String,
 }
 
 impl WhatsAppApp {
@@ -39,12 +39,14 @@ impl WhatsAppApp {
         access_token: impl Into<String>,
         verify_token: impl Into<String>,
         app_secret: impl Into<String>,
+        graph_api_version: impl Into<String>,
     ) -> Self {
         Self {
             phone_number_id: phone_number_id.into(),
             access_token: access_token.into(),
             verify_token: verify_token.into(),
             app_secret: app_secret.into(),
+            graph_api_version: graph_api_version.into(),
         }
     }
 }
@@ -61,8 +63,8 @@ impl MessageBridge for WhatsAppApp {
         msg: OutboundAppMessage,
     ) -> Result<AppMessageRef> {
         let url = format!(
-            "https://graph.facebook.com/{GRAPH_API_VERSION}/{}/messages",
-            self.phone_number_id
+            "https://graph.facebook.com/{}/{}/messages",
+            self.graph_api_version, self.phone_number_id
         );
 
         let text = msg.rendered_body(SenderRenderStyle::Plain);
@@ -283,7 +285,10 @@ async fn forward_whatsapp_media(
 ) -> Result<()> {
     let token = &state.app.access_token;
     // 1) Resolve the (short-lived) media URL.
-    let meta_url = format!("https://graph.facebook.com/{GRAPH_API_VERSION}/{media_id}");
+    let meta_url = format!(
+        "https://graph.facebook.com/{}/{media_id}",
+        state.app.graph_api_version
+    );
     let meta: Value = state
         .ctx
         .http
@@ -315,7 +320,7 @@ async fn forward_whatsapp_media(
                 .and_then(Value::as_str)
                 .map(str::to_owned)
         })
-        .unwrap_or_else(|| "application/octet-stream".to_owned());
+        .unwrap_or_else(|| DEFAULT_MEDIA_MIME.to_owned());
 
     // 2) Download the bytes (also Bearer-authenticated).
     let media = state

@@ -990,11 +990,13 @@ dependencies = [
  "chrono",
  "cokret-core",
  "ed25519-dalek",
+ "rand_core 0.6.4",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "subtle",
  "thiserror 2.0.18",
+ "url",
 ]
 
 [[package]]
@@ -3111,6 +3113,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2474bd2e5029e7ccb6abb2ba48cf2383a333851dedf495901544281590c7da7f"
 dependencies = [
  "memchr",
+ "serde",
 ]
 
 [[package]]

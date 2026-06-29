@@ -18,11 +18,14 @@ use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
-    SenderRenderStyle, webhook,
+    SenderRenderStyle, send_json_expect, webhook,
 };
-use quick_xml::Reader;
-use quick_xml::events::Event as XmlEvent;
 use serde_json::{Value, json};
+
+/// WeChat API success flag: top-level `errcode == 0` (absent treated as 0).
+fn wechat_errcode_ok(body: &Value) -> bool {
+    body.get("errcode").and_then(Value::as_i64).unwrap_or(0) == 0
+}
 
 const WECHAT_OFFICIAL_BASE: &str = "https://api.weixin.qq.com/cgi-bin";
 const WECHAT_WORK_BASE: &str = "https://qyapi.weixin.qq.com/cgi-bin";
@@ -69,27 +72,12 @@ impl WechatAesKey {
 }
 
 impl WechatApp {
-    fn new(
-        cred_id: impl Into<String>,
-        cred_secret: impl Into<String>,
-        agent_id: Option<i64>,
-        webhook_token: impl Into<String>,
-        aes_key: Option<WechatAesKey>,
-    ) -> Self {
-        Self {
-            cred_id: cred_id.into(),
-            cred_secret: cred_secret.into(),
-            agent_id,
-            webhook_token: webhook_token.into(),
-            aes_key,
-            token_cache: TokenCache::new(),
-        }
-    }
-
-    /// Build the adapter from raw config strings, decoding the optional
-    /// EncodingAESKey. Returns an error when an EncodingAESKey is configured but
-    /// malformed (fail closed rather than silently dropping safe mode).
-    pub fn from_config(
+    /// Build the adapter, decoding the optional EncodingAESKey. Returns an error
+    /// when an EncodingAESKey is configured but malformed (fail closed rather
+    /// than silently dropping safe mode). This is the single, fallible
+    /// constructor (`new(...) -> Result<Self>`), keeping the bridge constructor
+    /// convention uniform with the other adapters' `new`.
+    pub fn new(
         cred_id: impl Into<String>,
         cred_secret: impl Into<String>,
         agent_id: Option<i64>,
@@ -108,13 +96,14 @@ impl WechatApp {
             })?),
             None => None,
         };
-        Ok(Self::new(
-            cred_id,
-            cred_secret,
+        Ok(Self {
+            cred_id: cred_id.into(),
+            cred_secret: cred_secret.into(),
             agent_id,
-            webhook_token,
+            webhook_token: webhook_token.into(),
             aes_key,
-        ))
+            token_cache: TokenCache::new(),
+        })
     }
 
     fn mode(&self) -> WechatMode {
@@ -218,32 +207,12 @@ impl MessageBridge for WechatApp {
             ),
         };
 
-        let resp = ctx
-            .http
-            .post(&url)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| {
-                BridgeError::App(format!(
-                    "WeChat send failed: {}",
-                    redact_sensitive_url_values(e.to_string())
-                ))
-            })?;
-
-        let body: Value = resp.json().await.map_err(|e| {
-            BridgeError::App(format!(
-                "WeChat send response parse failed: {}",
-                redact_sensitive_url_values(e.to_string())
-            ))
-        })?;
-
-        if body.get("errcode").and_then(|v| v.as_i64()).unwrap_or(0) != 0 {
-            return Err(BridgeError::App(format!(
-                "WeChat send returned an error: {}",
-                redact_sensitive_url_values(body.to_string())
-            )));
-        }
+        let body = send_json_expect(
+            ctx.http.post(&url).json(&payload),
+            "WeChat send",
+            wechat_errcode_ok,
+        )
+        .await?;
         // WeChat APIs often return no standalone message id; msgid is used when present.
         let message_id = body
             .get("msgid")
@@ -257,10 +226,9 @@ impl MessageBridge for WechatApp {
 
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
         let webhook_token = self.webhook_token.clone();
-        let replay_window = Arc::new(webhook::ReplayWindow::new(
-            Duration::from_secs(WECHAT_TIMESTAMP_WINDOW_SECS as u64),
-            8192,
-        ));
+        let replay_window = Arc::new(webhook::ReplayWindow::with_ttl(Duration::from_secs(
+            WECHAT_TIMESTAMP_WINDOW_SECS as u64,
+        )));
         Some(
             salvo::Router::with_path("webhooks/wechat")
                 .hoop(affix_state::inject(WechatWebhookState {
@@ -577,55 +545,31 @@ async fn wechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respons
     }
 }
 
-#[derive(Default)]
+/// The subset of a WeChat callback `<xml>` envelope this bridge reads. Both the
+/// outer safe-mode envelope (only `<Encrypt>` populated) and the inner decrypted
+/// message map to this one shape. `quick_xml::de` transparently handles text and
+/// `<![CDATA[..]]>` element bodies, so there is no Text/CData branching, and
+/// `#[serde(default)]` makes every field optional (absent elements stay `None`).
+#[derive(Default, serde::Deserialize)]
+#[serde(rename = "xml", default)]
 struct WechatXmlFields {
+    #[serde(rename = "FromUserName")]
     from_user: Option<String>,
+    #[serde(rename = "MsgType")]
     msg_type: Option<String>,
+    #[serde(rename = "Content")]
     content: Option<String>,
+    #[serde(rename = "MsgId")]
     msg_id: Option<String>,
+    #[serde(rename = "Encrypt")]
     encrypt: Option<String>,
 }
 
+/// Deserialize a WeChat callback XML envelope into [`WechatXmlFields`]. Malformed
+/// XML yields an all-`None` envelope (fields the callers already treat as absent),
+/// matching the previous fail-soft parsing.
 fn parse_wechat_xml(xml: &str) -> WechatXmlFields {
-    let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
-    let mut current = String::new();
-    let mut fields = WechatXmlFields::default();
-
-    loop {
-        match reader.read_event() {
-            Ok(XmlEvent::Start(e)) => {
-                current = String::from_utf8_lossy(e.name().as_ref()).to_string();
-            }
-            Ok(XmlEvent::Text(e)) => {
-                let value = e.decode().map(|v| v.into_owned()).unwrap_or_default();
-                match current.as_str() {
-                    "FromUserName" => fields.from_user = Some(value),
-                    "MsgType" => fields.msg_type = Some(value),
-                    "Content" => fields.content = Some(value),
-                    "MsgId" => fields.msg_id = Some(value),
-                    "Encrypt" => fields.encrypt = Some(value),
-                    _ => {}
-                }
-            }
-            Ok(XmlEvent::CData(e)) => {
-                let value = e.decode().map(|v| v.into_owned()).unwrap_or_default();
-                match current.as_str() {
-                    "FromUserName" => fields.from_user = Some(value),
-                    "MsgType" => fields.msg_type = Some(value),
-                    "Content" => fields.content = Some(value),
-                    "MsgId" => fields.msg_id = Some(value),
-                    "Encrypt" => fields.encrypt = Some(value),
-                    _ => {}
-                }
-            }
-            Ok(XmlEvent::Eof) => break,
-            Ok(_) => {}
-            Err(_) => break,
-        }
-    }
-
-    fields
+    quick_xml::de::from_str(xml).unwrap_or_default()
 }
 
 #[cfg(test)]

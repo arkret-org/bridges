@@ -75,7 +75,8 @@ pub trait MessageBridge: Send + Sync + 'static {
 3. `src/<app>.rs`:实现 `MessageBridge`。
 4. `config/config.sample.yaml`:含 `bridge`/`cokret`/`database`/`logging`/`app` 段
    (照抄 discord,改 bridge_id、端口、app 段)。
-5. `README_CN.md`:照 discord 风格。
+5. `README_CN.md`:照 discord 风格。残留待办 / 不确定项小节统一用标题
+   `## 待完善(TODO)`(勿用「不确定点(TODO)」「不确定点 / TODO」等变体)。
 
 ## 适配器实现指引
 

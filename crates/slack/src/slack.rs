@@ -12,10 +12,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
+use cokret_bridge_messaging::runtime::{BridgeError, Result};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
-    SenderRenderStyle,
+    SenderRenderStyle, send_json_expect,
 };
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -23,6 +23,29 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 const APPS_CONNECTIONS_OPEN: &str = "https://slack.com/api/apps.connections.open";
 const CHAT_POST_MESSAGE: &str = "https://slack.com/api/chat.postMessage";
+
+/// Idle read window before the socket-mode loop probes the connection with a
+/// keep-alive Ping. Slack pings clients roughly every ~30s; this is longer so a
+/// healthy connection never trips it, while a wedged (TCP half-open) connection
+/// is detected within two windows instead of blocking forever.
+const SOCKET_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Base reconnect delay after a failed connect / URL fetch.
+const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
+/// Base delay after a clean disconnect before reconnecting.
+const DISCONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Apply ±25% process-local jitter to a reconnect delay so a fleet of bridges
+/// that drop together does not reconnect in lockstep (thundering herd). No
+/// `rand` dependency: sub-second clock nanos are entropy enough for spreading.
+fn jittered(base: std::time::Duration) -> std::time::Duration {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let factor = 0.75 + (f64::from(nanos) / f64::from(u32::MAX)) * 0.5;
+    base.mul_f64(factor)
+}
 
 /// Slack bridge adapter.
 pub struct SlackApp {
@@ -42,33 +65,12 @@ impl SlackApp {
 
     /// Call `apps.connections.open` to obtain a one-time socket mode wss URL.
     async fn open_socket_url(&self, ctx: &MessageContext) -> Result<String> {
-        let resp: Value = ctx
-            .http
-            .post(APPS_CONNECTIONS_OPEN)
-            .bearer_auth(&self.app_token)
-            .send()
-            .await
-            .map_err(|e| {
-                BridgeError::App(format!(
-                    "Slack apps.connections.open request failed: {}",
-                    redact_sensitive_url_values(e.to_string())
-                ))
-            })?
-            .json()
-            .await
-            .map_err(|e| {
-                BridgeError::App(format!(
-                    "Slack apps.connections.open parse failed: {}",
-                    redact_sensitive_url_values(e.to_string())
-                ))
-            })?;
-
-        if resp.get("ok").and_then(Value::as_bool) != Some(true) {
-            return Err(BridgeError::App(format!(
-                "Slack apps.connections.open returned an error: {}",
-                redact_sensitive_url_values(resp.to_string())
-            )));
-        }
+        let resp = send_json_expect(
+            ctx.http.post(APPS_CONNECTIONS_OPEN).bearer_auth(&self.app_token),
+            "Slack apps.connections.open",
+            slack_ok,
+        )
+        .await?;
         resp.get("url")
             .and_then(Value::as_str)
             .map(str::to_owned)
@@ -86,14 +88,16 @@ impl SlackApp {
             return true;
         };
         if let Err(e) = ctx.submit_app_message(inbound.clone()).await {
-            let retriable = e.is_retriable();
-            tracing::warn!(error = %e, retriable, "Slack → cokret submission failed");
-            ctx.report_inbound_bridge_error(&inbound, &e, retriable)
-                .await;
+            let retriable = ctx.report_inbound_failure("slack", &inbound, &e).await;
             return !retriable;
         }
         true
     }
+}
+
+/// Slack Web API success flag: top-level `ok == true`.
+fn slack_ok(resp: &Value) -> bool {
+    resp.get("ok").and_then(Value::as_bool) == Some(true)
 }
 
 fn slack_inbound_message(event: &Value) -> Option<InboundAppMessage> {
@@ -182,8 +186,8 @@ impl MessageBridge for SlackApp {
             let url = match self.open_socket_url(&ctx).await {
                 Ok(u) => u,
                 Err(e) => {
-                    tracing::warn!(error = %e, "failed to fetch Slack socket URL, retrying in 30s");
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    tracing::warn!(error = %e, "failed to fetch Slack socket URL, retrying");
+                    tokio::time::sleep(jittered(RECONNECT_BACKOFF)).await;
                     continue;
                 }
             };
@@ -191,22 +195,47 @@ impl MessageBridge for SlackApp {
             let (ws, _) = match tokio_tungstenite::connect_async(&url).await {
                 Ok(pair) => pair,
                 Err(e) => {
-                    tracing::warn!(error = %e, "Slack socket connection failed, retrying in 30s");
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    tracing::warn!(error = %e, "Slack socket connection failed, retrying");
+                    tokio::time::sleep(jittered(RECONNECT_BACKOFF)).await;
                     continue;
                 }
             };
             tracing::info!("Slack socket mode connected");
 
             let (mut write, mut read) = ws.split();
-            while let Some(frame) = read.next().await {
-                let frame = match frame {
-                    Ok(f) => f,
-                    Err(e) => {
+            // Half-open detection: bound each read with a timeout. On the first
+            // idle window send a keep-alive Ping; a second consecutive idle
+            // window with no frame at all (the Pong never came) means the TCP
+            // connection is wedged, so reconnect instead of blocking forever.
+            let mut awaiting_pong = false;
+            loop {
+                let frame = match tokio::time::timeout(SOCKET_READ_TIMEOUT, read.next()).await {
+                    Ok(Some(Ok(frame))) => frame,
+                    Ok(Some(Err(e))) => {
                         tracing::warn!(error = %e, "Slack socket read error, reconnecting");
                         break;
                     }
+                    Ok(None) => {
+                        tracing::warn!("Slack socket stream ended, reconnecting");
+                        break;
+                    }
+                    Err(_) => {
+                        if awaiting_pong {
+                            tracing::warn!(
+                                "Slack socket idle past heartbeat with no response, reconnecting"
+                            );
+                            break;
+                        }
+                        awaiting_pong = true;
+                        if let Err(e) = write.send(WsMessage::Ping(Vec::<u8>::new().into())).await {
+                            tracing::warn!(error = %e, "Slack socket ping failed, reconnecting");
+                            break;
+                        }
+                        continue;
+                    }
                 };
+                // Any inbound frame proves the connection is live.
+                awaiting_pong = false;
                 let WsMessage::Text(txt) = frame else {
                     continue;
                 };
@@ -236,8 +265,8 @@ impl MessageBridge for SlackApp {
                 }
             }
 
-            tracing::warn!("Slack socket disconnected, reconnecting in 5s");
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tracing::warn!("Slack socket disconnected, reconnecting shortly");
+            tokio::time::sleep(jittered(DISCONNECT_BACKOFF)).await;
         }
     }
 
@@ -251,34 +280,12 @@ impl MessageBridge for SlackApp {
             "channel": msg.app_channel,
             "text": body,
         });
-        let resp: Value = ctx
-            .http
-            .post(CHAT_POST_MESSAGE)
-            .bearer_auth(&self.bot_token)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| {
-                BridgeError::App(format!(
-                    "Slack chat.postMessage request failed: {}",
-                    redact_sensitive_url_values(e.to_string())
-                ))
-            })?
-            .json()
-            .await
-            .map_err(|e| {
-                BridgeError::App(format!(
-                    "Slack chat.postMessage parse failed: {}",
-                    redact_sensitive_url_values(e.to_string())
-                ))
-            })?;
-
-        if resp.get("ok").and_then(Value::as_bool) != Some(true) {
-            return Err(BridgeError::App(format!(
-                "Slack chat.postMessage returned an error: {}",
-                redact_sensitive_url_values(resp.to_string())
-            )));
-        }
+        let resp = send_json_expect(
+            ctx.http.post(CHAT_POST_MESSAGE).bearer_auth(&self.bot_token).json(&payload),
+            "Slack chat.postMessage",
+            slack_ok,
+        )
+        .await?;
         // The returned ts serves as the app-side message identifier.
         let ts = resp
             .get("ts")

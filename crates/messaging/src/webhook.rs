@@ -29,6 +29,11 @@ type HmacSha1 = Hmac<Sha1>;
 pub const MAX_WEBHOOK_BODY_BYTES: usize = 1024 * 1024;
 const JWT_JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
 
+/// Default bounded capacity for a webhook [`ReplayWindow`]. Sized so the guard
+/// holds well more than a freshness window's worth of deliveries before it has
+/// to evict; shared so each webhook bridge does not re-derive the magic number.
+pub const DEFAULT_REPLAY_CAPACITY: usize = 8192;
+
 /// Constant-time byte-slice equality. Use for all signature/secret comparisons
 /// to avoid leaking match position through early-exit timing.
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -90,6 +95,12 @@ impl ReplayWindow {
             capacity: capacity.max(1),
             inner: StdMutex::new(ReplayWindowInner::default()),
         }
+    }
+
+    /// Build a replay window with the shared [`DEFAULT_REPLAY_CAPACITY`]. Use
+    /// this from webhook bridges so the capacity is defined in one place.
+    pub fn with_ttl(ttl: Duration) -> Self {
+        Self::new(ttl, DEFAULT_REPLAY_CAPACITY)
     }
 
     /// Returns true when the key is fresh and records it; false means replay.
@@ -581,11 +592,7 @@ pub async fn submit(
     match ctx.submit_app_message(inbound.clone()).await {
         Ok(_) => SubmitOutcome::Accepted,
         Err(error) => {
-            let retriable = error.is_retriable();
-            tracing::warn!(%error, bridge = label, retriable, "webhook submission failed");
-            ctx.report_inbound_bridge_error(&inbound, &error, retriable)
-                .await;
-            if retriable {
+            if ctx.report_inbound_failure(label, &inbound, &error).await {
                 SubmitOutcome::Retry
             } else {
                 SubmitOutcome::Accepted
