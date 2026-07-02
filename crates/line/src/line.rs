@@ -11,8 +11,8 @@ use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url
 use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
-    AppMessageRef, Attachment, DEFAULT_MEDIA_MIME, InboundAppMessage, MessageBridge, MessageContext,
-    OutboundAppMessage, SenderRenderStyle, webhook,
+    AppMessageRef, Attachment, DEFAULT_MEDIA_MIME, InboundAppMessage, MessageBridge,
+    MessageContext, OutboundAppMessage, SenderRenderStyle, webhook,
 };
 use serde_json::{Value, json};
 
@@ -99,6 +99,9 @@ impl MessageBridge for LineApp {
     }
 
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
+        if self.channel_secret.trim().is_empty() {
+            return None;
+        }
         Some(
             salvo::Router::with_path("webhooks/line")
                 .hoop(affix_state::inject(LineWebhookState {
@@ -185,9 +188,10 @@ async fn line_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response)
         };
         // Bounded replay/dedupe (BRG-SEC-001 / contract G-4): the LINE signature
         // does not bind a timestamp, so a captured event would replay forever.
-        // Drop any event whose stable message id was already accepted inside the
-        // window before it reaches the submit/media pipeline.
-        if !state.replay.check_and_record(format!("line:{message_id}")) {
+        // Record only after submit/media is accepted so transient failures can
+        // be recovered by LINE redelivery.
+        let replay_key = format!("line:{message_id}");
+        if state.replay.contains(&replay_key) {
             tracing::debug!(message_id = %message_id, "LINE event replayed; skipping");
             continue;
         }
@@ -203,11 +207,14 @@ async fn line_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response)
                 InboundAppMessage {
                     app_channel: channel,
                     app_user: user,
-                    app_message_id: message_id,
+                    app_message_id: message_id.clone(),
                     body: text.to_owned(),
                 },
             )
             .await;
+            if outcome == webhook::SubmitOutcome::Accepted {
+                state.replay.check_and_record(replay_key);
+            }
             retry |= outcome == webhook::SubmitOutcome::Retry;
             continue;
         }
@@ -224,6 +231,15 @@ async fn line_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response)
                 forward_line_media(state, &channel, &user, &message_id, &content_id, filename).await
             {
                 tracing::warn!(error = %e, "LINE media bridging failed");
+                let inbound = InboundAppMessage {
+                    app_channel: channel.clone(),
+                    app_user: user.clone(),
+                    app_message_id: message_id.clone(),
+                    body: String::new(),
+                };
+                retry |= state.ctx.report_inbound_failure("line", &inbound, &e).await;
+            } else {
+                state.replay.check_and_record(replay_key);
             }
         }
     }

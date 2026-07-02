@@ -10,8 +10,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cokret_bridge_messaging::runtime::{BridgeError, Result};
 use cokret_bridge_messaging::{
-    AppMessageRef, Attachment, DEFAULT_MEDIA_MIME, InboundAppMessage, MessageBridge, MessageContext,
-    OutboundAppMessage, SenderRenderStyle,
+    AppMessageRef, Attachment, DEFAULT_MEDIA_MIME, InboundAppMessage, MessageBridge,
+    MessageContext, OutboundAppMessage, SenderRenderStyle,
 };
 use serenity::all::{ChannelId, CreateAttachment, CreateMessage, GatewayIntents, Http, Message};
 use serenity::client::{Context as SerenityContext, EventHandler};
@@ -115,7 +115,9 @@ impl EventHandler for Handler {
                 body: m.content.clone(),
             };
             if let Err(e) = self.ctx.submit_app_message(inbound.clone()).await {
-                self.ctx.report_inbound_failure("discord", &inbound, &e).await;
+                self.ctx
+                    .report_inbound_failure("discord", &inbound, &e)
+                    .await;
             }
         }
 
@@ -124,6 +126,15 @@ impl EventHandler for Handler {
         for att in &m.attachments {
             if let Err(e) = self.forward_attachment(&channel, &user, att).await {
                 tracing::warn!(error = %e, url = %att.url, "Discord attachment bridging failed");
+                let inbound = InboundAppMessage {
+                    app_channel: channel.clone(),
+                    app_user: user.clone(),
+                    app_message_id: att.id.to_string(),
+                    body: String::new(),
+                };
+                self.ctx
+                    .report_inbound_failure("discord", &inbound, &e)
+                    .await;
             }
         }
     }

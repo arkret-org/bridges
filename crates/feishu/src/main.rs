@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use crate::feishu::FeishuApp;
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct AppConfig {
     app_id: String,
     app_secret: String,

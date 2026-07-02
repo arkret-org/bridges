@@ -113,11 +113,16 @@ impl MessageBridge for IMessageApp {
 
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
         let secret = self.webhook_secret.clone();
+        if secret.trim().is_empty() {
+            return None;
+        }
         // BRG-SEC-002: `unix_timestamp_is_fresh` accepts |now-ts| <= skew, so the
         // acceptance window spans 2*skew (past+future). The replay TTL must cover
         // that full window or a captured delivery could be replayed in the
         // off-window gap.
-        let replay = Arc::new(webhook::ReplayWindow::with_ttl(2 * IMESSAGE_DELIVERY_MAX_SKEW));
+        let replay = Arc::new(webhook::ReplayWindow::with_ttl(
+            2 * IMESSAGE_DELIVERY_MAX_SKEW,
+        ));
         Some(
             salvo::Router::with_path("webhooks/imessage")
                 .hoop(affix_state::inject(IMessageWebhookState {

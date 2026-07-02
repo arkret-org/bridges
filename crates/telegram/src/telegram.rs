@@ -10,8 +10,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
 use cokret_bridge_messaging::{
-    AppMessageRef, Attachment, DEFAULT_MEDIA_MIME, InboundAppMessage, MessageBridge, MessageContext,
-    OutboundAppMessage, SenderRenderStyle,
+    AppMessageRef, Attachment, DEFAULT_MEDIA_MIME, InboundAppMessage, MessageBridge,
+    MessageContext, OutboundAppMessage, SenderRenderStyle,
 };
 use teloxide::prelude::*;
 use teloxide::types::{ChatId, FileId, InputFile};

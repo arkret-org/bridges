@@ -33,6 +33,12 @@ logging:
   level: "info"
   format: "pretty"
 
+# Static app-channel to Realm mappings applied at startup. Inbound messages fail
+# closed unless their app channel is mapped to a Realm.
+# mappings:
+#   - app_channel: "CHANGE_ME_APP_CHANNEL"
+#     realm_id: "ck:realm:01904100-0000-7000-8000-000000000001"
+#     alias: "main"
 # QQ 适配器专属(OneBot HTTP API)
 app:
   # OneBot 实现(如 go-cqhttp / NapCat / Lagrange)的 HTTP API 基址。

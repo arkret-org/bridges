@@ -194,7 +194,9 @@ impl MessageBridge for FeishuApp {
                     // The replay TTL must cover that full window or a captured
                     // delivery could be replayed in the off-window gap. Keep the
                     // guard alive for the entire acceptance window.
-                    replay: Arc::new(webhook::ReplayWindow::with_ttl(2 * FEISHU_DELIVERY_MAX_SKEW)),
+                    replay: Arc::new(webhook::ReplayWindow::with_ttl(
+                        2 * FEISHU_DELIVERY_MAX_SKEW,
+                    )),
                 }))
                 .post(feishu_delivery),
         )

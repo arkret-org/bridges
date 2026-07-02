@@ -53,33 +53,34 @@ impl MessageBridge for QqApp {
         ctx: Arc<MessageContext>,
         msg: OutboundAppMessage,
     ) -> Result<AppMessageRef> {
-        // OneBot v11 send_msg: app_channel is the QQ group number.
-        let group_id: i64 = msg.app_channel.parse().map_err(|_| {
-            BridgeError::App(format!("invalid QQ group number: {}", msg.app_channel))
-        })?;
+        let target = qq_target_from_app_channel(&msg.app_channel)?;
 
         let url = format!("{}/send_msg", self.onebot_url.trim_end_matches('/'));
         let body = msg.rendered_body(SenderRenderStyle::Plain);
-        let payload = json!({
-            "message_type": "group",
-            "group_id": group_id,
-            "message": body,
-        });
+        let payload = match target {
+            QqTarget::Group(group_id) => json!({
+                "message_type": "group",
+                "group_id": group_id,
+                "message": body,
+            }),
+            QqTarget::Private(user_id) => json!({
+                "message_type": "private",
+                "user_id": user_id,
+                "message": body,
+            }),
+        };
 
         let mut req = ctx.http.post(&url).json(&payload);
         if let Some(token) = &self.access_token {
             req = req.bearer_auth(token);
         }
 
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| {
-                BridgeError::App(format!(
-                    "QQ send request failed: {}",
-                    redact_sensitive_url_values(e.to_string())
-                ))
-            })?;
+        let resp = req.send().await.map_err(|e| {
+            BridgeError::App(format!(
+                "QQ send request failed: {}",
+                redact_sensitive_url_values(e.to_string())
+            ))
+        })?;
         let status = resp.status();
         let value: serde_json::Value = resp.json().await.map_err(|e| {
             BridgeError::App(format!(
@@ -111,6 +112,9 @@ impl MessageBridge for QqApp {
 
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
         let signing_secret = self.signing_secret.clone();
+        if signing_secret.trim().is_empty() {
+            return None;
+        }
         Some(
             salvo::Router::with_path("webhooks/qq")
                 .hoop(affix_state::inject(QqWebhookState {
@@ -129,6 +133,25 @@ impl MessageBridge for QqApp {
 /// verify forever; the bridge contract (G-4) mandates a bounded replay/dedupe
 /// guard keyed on the stable platform message id.
 const QQ_REPLAY_TTL: Duration = Duration::from_secs(10 * 60);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QqTarget {
+    Group(i64),
+    Private(i64),
+}
+
+fn qq_target_from_app_channel(app_channel: &str) -> Result<QqTarget> {
+    if let Some(user) = app_channel.strip_prefix("private/") {
+        let user_id = user
+            .parse()
+            .map_err(|_| BridgeError::App(format!("invalid QQ private user id: {app_channel}")))?;
+        return Ok(QqTarget::Private(user_id));
+    }
+    let group_id = app_channel
+        .parse()
+        .map_err(|_| BridgeError::App(format!("invalid QQ group number: {app_channel}")))?;
+    Ok(QqTarget::Group(group_id))
+}
 
 #[derive(Clone)]
 struct QqWebhookState {
@@ -198,9 +221,11 @@ async fn qq_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
         return;
     };
     // Bounded replay/dedupe (BRG-SEC-001 / contract G-4): the OneBot signature
-    // does not bind a timestamp, so a captured event would replay forever. Drop
-    // any event whose stable `message_id` was already accepted in the window.
-    if !state.replay.check_and_record(format!("qq:{message_id}")) {
+    // does not bind a timestamp, so a captured event would replay forever.
+    // Record only after submit is accepted so transient failures can be
+    // recovered by platform redelivery.
+    let replay_key = format!("qq:{message_id}");
+    if state.replay.contains(&replay_key) {
         // Replayed event already accepted in the window; ack idempotently.
         webhook::ok_json(res, json!({ "ok": true }));
         return;
@@ -211,11 +236,14 @@ async fn qq_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
         InboundAppMessage {
             app_channel: channel,
             app_user: user,
-            app_message_id: message_id,
+            app_message_id: message_id.clone(),
             body: text,
         },
     )
     .await;
+    if outcome == webhook::SubmitOutcome::Accepted {
+        state.replay.check_and_record(replay_key);
+    }
     webhook::respond_submit(res, outcome);
 }
 
@@ -237,6 +265,19 @@ fn json_id_string(value: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_channel_parses_group_and_private_targets() {
+        assert_eq!(
+            qq_target_from_app_channel("12345").unwrap(),
+            QqTarget::Group(12345)
+        );
+        assert_eq!(
+            qq_target_from_app_channel("private/67890").unwrap(),
+            QqTarget::Private(67890)
+        );
+        assert!(qq_target_from_app_channel("private/not-a-number").is_err());
+    }
 
     #[test]
     fn json_id_string_accepts_string_and_integer_ids() {

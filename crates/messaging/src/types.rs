@@ -105,7 +105,7 @@ pub struct OutboundAppMessage {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SenderRenderStyle {
     Plain,
-    MarkdownItalic,
+    SingleAsterisk,
     MarkdownBold,
 }
 
@@ -113,7 +113,7 @@ impl OutboundAppMessage {
     pub fn rendered_body(&self, style: SenderRenderStyle) -> String {
         match style {
             SenderRenderStyle::Plain => format!("{}: {}", self.sender_display, self.body),
-            SenderRenderStyle::MarkdownItalic => {
+            SenderRenderStyle::SingleAsterisk => {
                 format!("*{}*: {}", self.sender_display, self.body)
             }
             SenderRenderStyle::MarkdownBold => {

@@ -19,12 +19,12 @@
 
 ## Todo(尚未落地的共享层待办)
 
-- **(messaging) 日历桥接接入点未补**(BRG-HYG-001,2026-06-29 登记):`calendar.rs` 的
+- **(messaging) 日历桥接接入点未补**(BRG-HYG-004,2026-06-29 登记):`calendar.rs` 的
   日历事件 / RSVP 映射守卫(`bridge_calendar_schedule_fields` / `bridge_rsvp_payload` /
-  `CALENDAR_EVENT_PROFILE`)已实现并有单测,但 `MessageContext` 上**已补一个最小提交入口
-  `submit_calendar_event`**(走映射守卫 → `ck.object.create` 形态留待协议确认),仍**无任何
-  adapter 接通**(无桥把外部日历事件喂进来)。待办:确认日历事件的权威 payload/operation 形态后,
-  补至少一个桥(如有原生日历事件的平台)的接入示例。
+  `CALENDAR_EVENT_PROFILE`)已实现并有单测,但 `MessageContext` 上**尚未提供最小提交入口
+  `submit_calendar_event`**;因此目前也**无任何 adapter 接通**(无桥把外部日历事件喂进来)。
+  待办:确认日历事件的权威 payload/operation 形态后,先补共享层提交入口,再补至少一个桥
+  (如有原生日历事件的平台)的接入示例。
 
 - **(messaging) 入站删除 `submit_app_delete` 无 adapter 接通**(BRG-HYG-002,2026-06-29 登记):
   共享层链路完整且有单测,但没有桥构造 `InboundAppDelete` 调用它。阻碍点:

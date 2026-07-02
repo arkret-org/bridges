@@ -103,6 +103,22 @@ impl ReplayWindow {
         Self::new(ttl, DEFAULT_REPLAY_CAPACITY)
     }
 
+    /// Returns true when the key is already present in the unexpired replay
+    /// window. Does not record the key.
+    pub fn contains(&self, key: &str) -> bool {
+        if key.trim().is_empty() {
+            return false;
+        }
+
+        let now = Instant::now();
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner.purge_expired(now, self.ttl);
+        inner.entries.contains_key(key)
+    }
+
     /// Returns true when the key is fresh and records it; false means replay.
     pub fn check_and_record(&self, key: impl Into<String>) -> bool {
         let key = key.into();
@@ -670,6 +686,14 @@ mod tests {
         assert!(window.check_and_record("b"));
         assert!(window.check_and_record("c"));
         assert!(window.check_and_record("a"));
+    }
+
+    #[test]
+    fn replay_window_contains_does_not_record() {
+        let window = ReplayWindow::new(Duration::from_secs(60), 2);
+        assert!(!window.contains("a"));
+        assert!(window.check_and_record("a"));
+        assert!(window.contains("a"));
     }
 
     #[test]

@@ -8,7 +8,7 @@ use serde::Deserialize;
 use crate::qq::QqApp;
 
 /// OneBot onboarding configuration.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct AppConfig {
     /// OneBot HTTP API base URL.
     onebot_url: String,

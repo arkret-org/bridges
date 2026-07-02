@@ -122,6 +122,9 @@ impl MessageBridge for MessengerApp {
     }
 
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
+        if self.verify_token.trim().is_empty() || self.app_secret.trim().is_empty() {
+            return None;
+        }
         Some(
             salvo::Router::with_path("webhooks/messenger")
                 .hoop(affix_state::inject(MessengerWebhookState {
@@ -178,12 +181,10 @@ async fn messenger_delivery(req: &mut Request, depot: &mut Depot, res: &mut Resp
     for inbound in messenger_inbound_messages(&body) {
         // Bounded replay/dedupe (BRG-SEC-001 / contract G-4): the Meta signature
         // does not bind a timestamp, so a captured event would replay forever.
-        // Drop any event whose stable `message.mid` was already accepted inside
-        // the window before it reaches submit.
-        if !state
-            .replay
-            .check_and_record(format!("messenger:{}", inbound.app_message_id))
-        {
+        // Record only after submit is accepted so transient failures can be
+        // recovered by Meta redelivery.
+        let replay_key = format!("messenger:{}", inbound.app_message_id);
+        if state.replay.contains(&replay_key) {
             tracing::debug!(
                 message_id = %inbound.app_message_id,
                 "Messenger event replayed; skipping"
@@ -191,6 +192,9 @@ async fn messenger_delivery(req: &mut Request, depot: &mut Depot, res: &mut Resp
             continue;
         }
         let outcome = webhook::submit(state.ctx.clone(), "messenger", inbound).await;
+        if outcome == webhook::SubmitOutcome::Accepted {
+            state.replay.check_and_record(replay_key);
+        }
         retry |= outcome == webhook::SubmitOutcome::Retry;
     }
     if retry {
@@ -214,6 +218,13 @@ fn messenger_inbound_messages(body: &Value) -> Vec<InboundAppMessage> {
             .into_iter()
             .flatten()
         {
+            if event
+                .pointer("/message/is_echo")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                continue;
+            }
             let Some(text) = webhook::str_at(event, "/message/text") else {
                 continue;
             };
@@ -265,6 +276,20 @@ mod tests {
                 ]
             }]
         });
+        assert!(messenger_inbound_messages(&body).is_empty());
+    }
+
+    #[test]
+    fn messenger_inbound_messages_skips_echo_events() {
+        let body = json!({
+            "entry": [{
+                "messaging": [{
+                    "sender": {"id": "PAGE_ID"},
+                    "message": {"mid": "m_echo", "text": "sent by the page", "is_echo": true}
+                }]
+            }]
+        });
+
         assert!(messenger_inbound_messages(&body).is_empty());
     }
 }

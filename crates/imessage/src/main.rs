@@ -8,11 +8,11 @@ use serde::Deserialize;
 use crate::imessage::IMessageApp;
 
 /// iMessage is sent/received via HTTP gateways such as BlueBubbles / AirMessage.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct AppConfig {
     gateway_url: String,
     password: Option<String>,
-    /// Optional shared secret guarding the inbound `/webhooks/imessage` endpoint.
+    /// Required shared secret guarding the inbound `/webhooks/imessage` endpoint.
     webhook_secret: String,
 }
 

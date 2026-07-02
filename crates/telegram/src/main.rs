@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use crate::telegram::TelegramApp;
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct AppConfig {
     /// Telegram bot token used by the teloxide long-polling client.
     bot_token: String,

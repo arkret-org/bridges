@@ -33,6 +33,12 @@ logging:
   level: "info"
   format: "pretty"
 
+# Static app-channel to Realm mappings applied at startup. Inbound messages fail
+# closed unless their app channel is mapped to a Realm.
+# mappings:
+#   - app_channel: "CHANGE_ME_APP_CHANNEL"
+#     realm_id: "ck:realm:01904100-0000-7000-8000-000000000001"
+#     alias: "main"
 # 微信适配器专属
 # 当前仅支持公众号明文回调:填 app_id / app_secret,不要设置 agent_id。
 # 企业微信回调强制加密 safe mode,在 AES 解密支持落地前启动期会拒绝 agent_id。

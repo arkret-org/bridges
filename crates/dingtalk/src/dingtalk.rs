@@ -171,12 +171,16 @@ impl MessageBridge for DingTalkApp {
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
         let app_secret = self.app_secret.clone();
         let body_hmac_secret = self.webhook_body_hmac_secret.clone();
+        if app_secret.trim().is_empty() || body_hmac_secret.trim().is_empty() {
+            return None;
+        }
         // BRG-SEC-002: `dingtalk_body_signature_ok` uses `unix_timestamp_is_fresh`
         // (|now-ts| <= window), so the acceptance window spans 2*window
         // (past+future). The replay TTL must cover that whole window or a captured
         // body+signature could be replayed in the off-window gap.
-        let replay_window =
-            Arc::new(webhook::ReplayWindow::with_ttl(2 * DINGTALK_BODY_SIGNATURE_WINDOW));
+        let replay_window = Arc::new(webhook::ReplayWindow::with_ttl(
+            2 * DINGTALK_BODY_SIGNATURE_WINDOW,
+        ));
         Some(
             salvo::Router::with_path("webhooks/dingtalk")
                 .hoop(affix_state::inject(DingTalkWebhookState {

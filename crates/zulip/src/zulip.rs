@@ -121,15 +121,12 @@ impl ZulipApp {
                 ))
             })?;
 
-        let body: Value = resp
-            .json()
-            .await
-            .map_err(|e| {
-                BridgeError::App(format!(
-                    "Zulip register parse failed: {}",
-                    redact_sensitive_url_values(e.to_string())
-                ))
-            })?;
+        let body: Value = resp.json().await.map_err(|e| {
+            BridgeError::App(format!(
+                "Zulip register parse failed: {}",
+                redact_sensitive_url_values(e.to_string())
+            ))
+        })?;
 
         let queue_id = body
             .get("queue_id")
@@ -162,8 +159,11 @@ impl MessageBridge for ZulipApp {
             let (queue_id, mut last_event_id) = match self.register(&ctx).await {
                 Ok(queue) => queue,
                 Err(e) => {
-                    let delay =
-                        backoff_with_jitter(register_attempt, ZULIP_BACKOFF_BASE, ZULIP_BACKOFF_MAX);
+                    let delay = backoff_with_jitter(
+                        register_attempt,
+                        ZULIP_BACKOFF_BASE,
+                        ZULIP_BACKOFF_MAX,
+                    );
                     register_attempt = register_attempt.saturating_add(1);
                     tracing::warn!(error = %e, delay_ms = delay.as_millis() as u64, "Zulip queue registration failed, retrying");
                     tokio::time::sleep(delay).await;
@@ -196,14 +196,26 @@ impl MessageBridge for ZulipApp {
                     Ok(r) => match r.json().await {
                         Ok(b) => b,
                         Err(e) => {
-                            if zulip_poll_backoff(&mut poll_failures, "Zulip events parse failed", &e.to_string()).await {
+                            if zulip_poll_backoff(
+                                &mut poll_failures,
+                                "Zulip events parse failed",
+                                &e.to_string(),
+                            )
+                            .await
+                            {
                                 break;
                             }
                             continue;
                         }
                     },
                     Err(e) => {
-                        if zulip_poll_backoff(&mut poll_failures, "Zulip events request failed", &e.to_string()).await {
+                        if zulip_poll_backoff(
+                            &mut poll_failures,
+                            "Zulip events request failed",
+                            &e.to_string(),
+                        )
+                        .await
+                        {
                             break;
                         }
                         continue;
@@ -221,7 +233,13 @@ impl MessageBridge for ZulipApp {
                     // Malformed response (no events array, not a known error code).
                     // Back off and re-register after the threshold rather than
                     // spinning at a fixed cadence against a broken queue.
-                    if zulip_poll_backoff(&mut poll_failures, "Zulip events response malformed", "missing events array").await {
+                    if zulip_poll_backoff(
+                        &mut poll_failures,
+                        "Zulip events response malformed",
+                        "missing events array",
+                    )
+                    .await
+                    {
                         break;
                     }
                     continue;

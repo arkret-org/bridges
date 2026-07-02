@@ -11,7 +11,7 @@ use serde::Deserialize;
 use crate::teams::TeamsApp;
 
 /// Bot Framework application credentials.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct AppConfig {
     app_id: String,
     app_password: String,

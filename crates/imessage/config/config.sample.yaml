@@ -33,6 +33,12 @@ logging:
   level: "info"
   format: "pretty"
 
+# Static app-channel to Realm mappings applied at startup. Inbound messages fail
+# closed unless their app channel is mapped to a Realm.
+# mappings:
+#   - app_channel: "CHANGE_ME_APP_CHANNEL"
+#     realm_id: "ck:realm:01904100-0000-7000-8000-000000000001"
+#     alias: "main"
 # iMessage 适配器专属(BlueBubbles / AirMessage HTTP 网关)
 app:
   # 网关基址。BlueBubbles 默认 http://127.0.0.1:1234。

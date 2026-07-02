@@ -30,7 +30,7 @@ const ASSERTION_TTL_SECS: u64 = 3600;
 
 /// A Google service-account JSON key (the relevant subset) used to mint
 /// JWT-bearer assertions for the OAuth2 token endpoint.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct ServiceAccountKey {
     pub client_email: String,
     pub private_key: String,
@@ -156,9 +156,7 @@ async fn fetch_service_account_token(
     let token = body
         .get("access_token")
         .and_then(Value::as_str)
-        .ok_or_else(|| {
-            BridgeError::App("Google token response missing access_token".to_owned())
-        })?
+        .ok_or_else(|| BridgeError::App("Google token response missing access_token".to_owned()))?
         .to_owned();
     let ttl = body
         .get("expires_in")

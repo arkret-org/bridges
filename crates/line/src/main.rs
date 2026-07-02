@@ -8,7 +8,7 @@ use serde::Deserialize;
 use crate::line::LineApp;
 
 /// LINE Messaging API credentials.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct AppConfig {
     /// Used to push messages (Bearer).
     channel_access_token: String,

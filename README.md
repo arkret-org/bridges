@@ -86,6 +86,7 @@ cargo run -p cokret-bridge-discord -- --config config.yaml
 配置文件使用 YAML。
 所有桥都必须显式建立 app channel 到 Realm 的映射；没有 channel-realm mapping 的入站消息会直接失败,
 不再回退到默认 Realm。
+推荐在配置文件的 `mappings` 段声明静态映射；各桥 `config.sample.yaml` 均包含注释样例,启动时会自动 upsert。
 
 三个信任面绑在**两个独立监听**上,默认即隔离,不再仅靠反代 path 规则:
 

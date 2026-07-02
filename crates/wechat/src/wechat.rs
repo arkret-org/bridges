@@ -230,6 +230,9 @@ impl MessageBridge for WechatApp {
 
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
         let webhook_token = self.webhook_token.clone();
+        if webhook_token.trim().is_empty() {
+            return None;
+        }
         // BRG-SEC-002: `unix_timestamp_is_fresh` accepts |now-ts| <= window, so
         // the acceptance window spans 2*window (past+future). The replay TTL
         // must cover the whole window or a captured delivery could be replayed in

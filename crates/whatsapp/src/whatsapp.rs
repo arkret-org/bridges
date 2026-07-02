@@ -13,8 +13,8 @@ use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url
 use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
-    AppMessageRef, Attachment, DEFAULT_MEDIA_MIME, InboundAppMessage, MessageBridge, MessageContext,
-    OutboundAppMessage, SenderRenderStyle, webhook,
+    AppMessageRef, Attachment, DEFAULT_MEDIA_MIME, InboundAppMessage, MessageBridge,
+    MessageContext, OutboundAppMessage, SenderRenderStyle, webhook,
 };
 use serde_json::{Value, json};
 
@@ -132,6 +132,9 @@ impl MessageBridge for WhatsAppApp {
     }
 
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
+        if self.verify_token.trim().is_empty() || self.app_secret.trim().is_empty() {
+            return None;
+        }
         Some(
             salvo::Router::with_path("webhooks/whatsapp")
                 .hoop(affix_state::inject(WhatsAppWebhookState {
@@ -211,9 +214,10 @@ async fn whatsapp_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
                 };
                 // Bounded replay/dedupe (BRG-SEC-001 / contract G-4): the Meta
                 // signature does not bind a timestamp, so a captured event would
-                // replay forever. Drop any event whose stable message id was
-                // already accepted inside the window before submit/media.
-                if !state.replay.check_and_record(format!("whatsapp:{message_id}")) {
+                // replay forever. Record only after submit/media is accepted so
+                // a transient failure can be recovered by platform redelivery.
+                let replay_key = format!("whatsapp:{message_id}");
+                if state.replay.contains(&replay_key) {
                     tracing::debug!(message_id = %message_id, "WhatsApp event replayed; skipping");
                     continue;
                 }
@@ -225,11 +229,14 @@ async fn whatsapp_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
                         InboundAppMessage {
                             app_channel: from.clone(),
                             app_user: from,
-                            app_message_id: message_id,
+                            app_message_id: message_id.clone(),
                             body: text.to_owned(),
                         },
                     )
                     .await;
+                    if outcome == webhook::SubmitOutcome::Accepted {
+                        state.replay.check_and_record(replay_key);
+                    }
                     retry |= outcome == webhook::SubmitOutcome::Retry;
                     continue;
                 }
@@ -240,6 +247,18 @@ async fn whatsapp_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
                             .await
                 {
                     tracing::warn!(error = %e, "WhatsApp media bridging failed");
+                    let inbound = InboundAppMessage {
+                        app_channel: from.clone(),
+                        app_user: from.clone(),
+                        app_message_id: message_id.clone(),
+                        body: String::new(),
+                    };
+                    retry |= state
+                        .ctx
+                        .report_inbound_failure("whatsapp", &inbound, &e)
+                        .await;
+                } else if whatsapp_media_ref(message).is_some() {
+                    state.replay.check_and_record(replay_key);
                 }
             }
         }

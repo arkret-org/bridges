@@ -2,14 +2,13 @@
 
 mod whatsapp;
 
-use cokret_bridge_messaging::DEFAULT_GRAPH_API_VERSION;
-use cokret_bridge_messaging::bridge_main;
+use cokret_bridge_messaging::{DEFAULT_GRAPH_API_VERSION, bridge_main};
 use serde::Deserialize;
 
 use crate::whatsapp::WhatsAppApp;
 
 /// WhatsApp Cloud API credentials.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct AppConfig {
     /// Sender phone number ID (outbound URL path segment).
     phone_number_id: String,

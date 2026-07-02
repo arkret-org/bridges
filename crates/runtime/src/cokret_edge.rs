@@ -334,7 +334,8 @@ impl CokretEdge {
         content: Value,
         authorization_ref: &str,
     ) -> Result<Event> {
-        let mut event = self.build_delegated_event(actor, kind, realm_id, content, authorization_ref)?;
+        let mut event =
+            self.build_delegated_event(actor, kind, realm_id, content, authorization_ref)?;
         self.sign_as_service(&mut event)?;
         Ok(event)
     }
@@ -429,7 +430,8 @@ impl CokretEdge {
         let realm = RealmId::new(realm_id.to_owned())?;
         // Set the signed-envelope `external_ref` before the single signature so
         // the proof covers it (no discarded first sign).
-        let mut event = self.build_delegated_event(actor, kind, &realm, content, authorization_ref)?;
+        let mut event =
+            self.build_delegated_event(actor, kind, &realm, content, authorization_ref)?;
         event.external_ref = Some(external_ref);
         self.sign_as_service(&mut event)?;
         self.submit_event(&event).await
@@ -624,7 +626,7 @@ pub struct BridgeAppletHandler {
 
 #[cfg(any(feature = "web", test))]
 /// Advisory per-transaction event ceiling published in `describe.limits`.
-const EVENT_DEDUP_CAPACITY: usize = 8192;
+const DESCRIBE_MAX_EVENTS_PER_TRANSACTION: usize = 8192;
 
 #[cfg(any(feature = "web", test))]
 fn default_applet_namespaces(bridge_id: &str, service_did: &Did) -> Value {
@@ -648,7 +650,7 @@ fn default_applet_namespaces(bridge_id: &str, service_did: &Did) -> Value {
 #[cfg(any(feature = "web", test))]
 fn default_applet_limits() -> Value {
     json!({
-        "max_events_per_transaction": EVENT_DEDUP_CAPACITY,
+        "max_events_per_transaction": DESCRIBE_MAX_EVENTS_PER_TRANSACTION,
         "receive_events": true,
         "receive_ephemeral": true,
         "rate_limited": true,

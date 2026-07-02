@@ -10,7 +10,7 @@ use crate::dingtalk::DingTalkApp;
 /// DingTalk enterprise internal app credentials: `app_key`/`app_secret` are
 /// used to obtain an access_token; `robot_code` identifies the robot. The
 /// optional inbound body HMAC secret is required to accept message deliveries.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct AppConfig {
     app_key: String,
     app_secret: String,

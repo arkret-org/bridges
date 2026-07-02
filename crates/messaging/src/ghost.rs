@@ -3,8 +3,9 @@
 
 use cokret::http_client::ClientRequestOptions;
 use cokret::{
-    AppletId, Did, EventId, GhostActorProvisionOutcome, GhostActorProvisionRequestBody, Hlc,
-    ObjectCreatePayload, RealmId, StrandCreateObject, StrandId, StrandTrackConfig,
+    AppletBridgeErrorClass, AppletId, Did, EventId, GhostActorProvisionOutcome,
+    GhostActorProvisionRequestBody, Hlc, ObjectCreatePayload, RealmId, StrandCreateObject,
+    StrandId, StrandTrackConfig,
 };
 use cokret_bridge_runtime::{BridgeError, Result};
 use serde_json::{Value, json};
@@ -17,6 +18,16 @@ use crate::{
 
 pub(crate) fn normalized_external_id(value: &str) -> String {
     value.trim().to_owned()
+}
+
+pub(crate) fn external_id_object_ref_digest(value: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let normalized = normalized_external_id(value);
+    format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(normalized.as_bytes()))
+    )
 }
 
 pub(crate) fn bridge_protocol(config: &runtime::Config) -> String {
@@ -62,7 +73,10 @@ fn requested_ghost_actor_id_for_user(
     let material =
         [protocol, tenant, external_user_id].join(&MESSAGE_MAPPING_KEY_SEPARATOR.to_string());
     let encoded = cokret::base64url_encode(material.as_bytes());
-    let did = format!("{}:ghost:u{encoded}", service_did.as_str().trim_end_matches(':'));
+    let did = format!(
+        "{}:ghost:u{encoded}",
+        service_did.as_str().trim_end_matches(':')
+    );
     Did::new(did.clone())?;
     Ok(did)
 }
@@ -213,6 +227,17 @@ pub(crate) fn bridge_error_code(error: &BridgeError) -> &'static str {
     }
 }
 
+pub(crate) fn bridge_error_class(error: &BridgeError) -> AppletBridgeErrorClass {
+    match error {
+        BridgeError::Config(_) => AppletBridgeErrorClass::Policy,
+        BridgeError::App(_) => AppletBridgeErrorClass::Schema,
+        BridgeError::Cokret(_)
+        | BridgeError::Database(_)
+        | BridgeError::Runtime(_)
+        | BridgeError::Other(_) => AppletBridgeErrorClass::ExternalNetwork,
+    }
+}
+
 pub(crate) fn message_mapping_channel_key(config: &runtime::Config, app_channel: &str) -> String {
     [
         bridge_protocol(config),
@@ -342,9 +367,10 @@ pub(crate) async fn find_existing_portal_strand(
             let Some(strand_id) = object.get("id").and_then(Value::as_str) else {
                 continue;
             };
-            if earliest.as_ref().is_none_or(|(hlc, event_id, _)| {
-                (&event.hlc, &event.event_id) < (hlc, event_id)
-            }) {
+            if earliest
+                .as_ref()
+                .is_none_or(|(hlc, event_id, _)| (&event.hlc, &event.event_id) < (hlc, event_id))
+            {
                 earliest = Some((
                     event.hlc.clone(),
                     event.event_id.clone(),

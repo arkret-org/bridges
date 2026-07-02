@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 use crate::googlechat::{GoogleChatApp, GoogleChatAuth, ServiceAccountKey};
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct AppConfig {
     /// Service account key (auto-refreshing); preferred over `token`.
     service_account_json: Option<ServiceAccountKey>,

@@ -11,7 +11,7 @@ use crate::wechat::WechatApp;
 /// WeChat Work uses `corp_id`/`corp_secret`; Official Accounts use
 /// `app_id`/`app_secret`. Both spellings are accepted (serde aliases) and
 /// passed to the adapter as a unified "credential id"/secret.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct AppConfig {
     #[serde(alias = "app_id")]
     corp_id: String,

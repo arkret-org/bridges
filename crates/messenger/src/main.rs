@@ -2,14 +2,13 @@
 
 mod messenger;
 
-use cokret_bridge_messaging::DEFAULT_GRAPH_API_VERSION;
-use cokret_bridge_messaging::bridge_main;
+use cokret_bridge_messaging::{DEFAULT_GRAPH_API_VERSION, bridge_main};
 use serde::Deserialize;
 
 use crate::messenger::MessengerApp;
 
 /// Facebook Messenger credentials.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct AppConfig {
     /// Page access token used for sending (Bearer).
     page_access_token: String,

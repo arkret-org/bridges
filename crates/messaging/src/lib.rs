@@ -39,10 +39,10 @@ pub use content::{
 };
 use futures::StreamExt;
 use ghost::{
-    bridge_error_code, bridge_protocol, bridge_tenant, create_portal_strand,
-    external_ref_for_delete, external_ref_for_message, find_existing_portal_strand, host_allowed,
-    message_mapping_channel_key, normalized_external_id, portal_location_ref,
-    provision_ghost_actor, require_nonempty_ref,
+    bridge_error_class, bridge_error_code, bridge_protocol, bridge_tenant, create_portal_strand,
+    external_id_object_ref_digest, external_ref_for_delete, external_ref_for_message,
+    find_existing_portal_strand, host_allowed, message_mapping_channel_key, normalized_external_id,
+    portal_location_ref, provision_ghost_actor, require_nonempty_ref,
 };
 pub use runtime::salvo;
 use serde_json::{Value, json};
@@ -158,14 +158,14 @@ impl MessageContext {
         let realm = RealmId::new(realm_id.to_owned())?;
         // `failed_transaction_ref` points at the source external event, never the
         // body. external_ref carries only network coordinates (no plaintext).
-        let failed_ref = normalized_external_id(&msg.app_message_id);
+        let failed_ref = external_id_object_ref_digest(&msg.app_message_id);
         let external_ref = portal_location_ref(&self.inner.config, &msg.app_channel);
         let builder = AppletBridgeErrorBuilder::new(
             realm.clone(),
             edge.applet_id().to_owned(),
             edge.service_did().clone(),
             failed_ref,
-            "inbound_submit_failed",
+            bridge_error_class(error),
             bridge_error_code(error),
             retriable,
             AppletBridgeErrorVisibility::RealmAdmins,
@@ -233,7 +233,7 @@ impl MessageContext {
             edge.applet_id().to_owned(),
             edge.service_did().clone(),
             failed_event_id.to_owned(),
-            "outbound_deliver_failed",
+            bridge_error_class(error),
             bridge_error_code(error),
             retriable,
             AppletBridgeErrorVisibility::RealmAdmins,
@@ -921,13 +921,7 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
                 );
                 // Durable audit, symmetric with the inbound path. Best-effort.
                 self.ctx
-                    .report_outbound_bridge_error(
-                        &realm_id,
-                        &channel,
-                        &event_id,
-                        &error,
-                        retriable,
-                    )
+                    .report_outbound_bridge_error(&realm_id, &channel, &event_id, &error, retriable)
                     .await;
                 // Propagate so the runtime's inbound consumer applies its retry /
                 // dead-letter policy for retriable failures.

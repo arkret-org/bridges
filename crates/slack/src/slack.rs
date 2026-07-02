@@ -66,7 +66,9 @@ impl SlackApp {
     /// Call `apps.connections.open` to obtain a one-time socket mode wss URL.
     async fn open_socket_url(&self, ctx: &MessageContext) -> Result<String> {
         let resp = send_json_expect(
-            ctx.http.post(APPS_CONNECTIONS_OPEN).bearer_auth(&self.app_token),
+            ctx.http
+                .post(APPS_CONNECTIONS_OPEN)
+                .bearer_auth(&self.app_token),
             "Slack apps.connections.open",
             slack_ok,
         )
@@ -275,13 +277,16 @@ impl MessageBridge for SlackApp {
         ctx: Arc<MessageContext>,
         msg: OutboundAppMessage,
     ) -> Result<AppMessageRef> {
-        let body = msg.rendered_body(SenderRenderStyle::MarkdownItalic);
+        let body = msg.rendered_body(SenderRenderStyle::SingleAsterisk);
         let payload = json!({
             "channel": msg.app_channel,
             "text": body,
         });
         let resp = send_json_expect(
-            ctx.http.post(CHAT_POST_MESSAGE).bearer_auth(&self.bot_token).json(&payload),
+            ctx.http
+                .post(CHAT_POST_MESSAGE)
+                .bearer_auth(&self.bot_token)
+                .json(&payload),
             "Slack chat.postMessage",
             slack_ok,
         )
