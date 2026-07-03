@@ -102,6 +102,23 @@ pub trait EventDedupStore: Send + Sync + 'static {
     fn check_and_record(&self, event_id: &str, fingerprint: i64) -> Result<DedupVerdict>;
 }
 
+/// Persistence contract for the public-webhook replay guard (bridge contract
+/// G-4: any inbound verification scheme without a per-body nonce MUST hold a
+/// bounded replay/dedupe window).
+///
+/// Keys are only recorded for deliveries that already passed source
+/// verification, so the table growth is bounded by legitimate traffic plus the
+/// TTL cleanup. The store is durable and shared, so the guard holds across
+/// restarts and across horizontally scaled replicas (unlike the former
+/// process-local window).
+pub trait ReplayGuardStore: Send + Sync + 'static {
+    /// Whether `key` is present and unexpired. Does not record the key.
+    fn contains(&self, key: &str) -> Result<bool>;
+    /// Record `key` with `ttl_secs` retention. Returns `true` when the key was
+    /// fresh (recorded now); `false` means it was already present (replay).
+    fn check_and_record(&self, key: &str, ttl_secs: i64) -> Result<bool>;
+}
+
 /// In-memory [`TransactionIdempotencyStore`] (tests / hosts without a DB).
 pub struct MemoryTransactionIdempotencyStore {
     ttl: Duration,
@@ -273,7 +290,7 @@ mod tests {
     use super::*;
 
     fn replay_key(idempotency_key: &str) -> TransactionReplayKey<'_> {
-        replay_key_to("did:web:bridge.example", idempotency_key)
+        replay_key_to("did:webvh:bridge.example", idempotency_key)
     }
 
     fn replay_key_to<'a>(
@@ -283,7 +300,7 @@ mod tests {
         TransactionReplayKey {
             operation_id: "ck.edge.applet.command.transaction",
             direction: "node_to_applet",
-            source_service_did: "did:web:server.example",
+            source_service_did: "did:webvh:server.example",
             destination_service_did,
             idempotency_key,
         }
@@ -393,7 +410,7 @@ mod tests {
         ));
         assert!(matches!(
             cache.claim(
-                &replay_key_to("did:web:other-bridge.example", "idem-3"),
+                &replay_key_to("did:webvh:other-bridge.example", "idem-3"),
                 "hash-a",
                 "anchor-b"
             ),

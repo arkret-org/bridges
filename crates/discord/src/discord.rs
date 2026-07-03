@@ -10,8 +10,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cokret_bridge_messaging::runtime::{BridgeError, Result};
 use cokret_bridge_messaging::{
-    AppMessageRef, Attachment, DEFAULT_MEDIA_MIME, InboundAppMessage, MessageBridge,
-    MessageContext, OutboundAppMessage, SenderRenderStyle,
+    AppMessageRef, ExternalMediaRequest, InboundAppMessage, MessageBridge, MessageContext,
+    OutboundAppMessage, SenderRenderStyle,
 };
 use serenity::all::{ChannelId, CreateAttachment, CreateMessage, GatewayIntents, Http, Message};
 use serenity::client::{Context as SerenityContext, EventHandler};
@@ -121,20 +121,12 @@ impl EventHandler for Handler {
             }
         }
 
-        // Forward each attachment: download from the Discord CDN, upload to the
-        // cokret blob store, then submit a media message.
+        // Forward each attachment through the shared media skeleton (download
+        // from the Discord CDN → blob upload → media message). The forwarder
+        // already runs the inbound failure audit on error.
         for att in &m.attachments {
             if let Err(e) = self.forward_attachment(&channel, &user, att).await {
                 tracing::warn!(error = %e, url = %att.url, "Discord attachment bridging failed");
-                let inbound = InboundAppMessage {
-                    app_channel: channel.clone(),
-                    app_user: user.clone(),
-                    app_message_id: att.id.to_string(),
-                    body: String::new(),
-                };
-                self.ctx
-                    .report_inbound_failure("discord", &inbound, &e)
-                    .await;
             }
         }
     }
@@ -146,28 +138,7 @@ impl Handler {
         channel: &str,
         user: &str,
         att: &serenity::all::Attachment,
-    ) -> Result<()> {
-        let media = self
-            .ctx
-            .download_external_media(
-                &att.url,
-                None,
-                &["cdn.discordapp.com", "media.discordapp.net"],
-            )
-            .await?;
-        let mime = att
-            .content_type
-            .clone()
-            .unwrap_or_else(|| DEFAULT_MEDIA_MIME.to_owned());
-        let blob_ref = self.ctx.upload_blob(&media.bytes, &mime).await?;
-
-        let attachment = Attachment {
-            blob_ref,
-            media_type: Some(mime),
-            filename: Some(att.filename.clone()),
-            size: Some(att.size as u64),
-            caption: String::new(),
-        };
+    ) -> Result<String> {
         // Use the attachment id as the app message id so it maps distinctly from
         // the text message.
         let inbound = InboundAppMessage {
@@ -176,8 +147,19 @@ impl Handler {
             app_message_id: att.id.to_string(),
             body: String::new(),
         };
-        self.ctx.submit_media_message(inbound, attachment).await?;
-        Ok(())
+        self.ctx
+            .forward_external_media(
+                "discord",
+                inbound,
+                ExternalMediaRequest {
+                    url: &att.url,
+                    bearer_token: None,
+                    allowed_hosts: &["cdn.discordapp.com", "media.discordapp.net"],
+                    mime_hint: att.content_type.clone(),
+                    filename: Some(att.filename.clone()),
+                },
+            )
+            .await
     }
 }
 

@@ -34,6 +34,18 @@ cargo run -p cokret-bridge-teams -- --config config.yaml
 - `app.inbound_jwt`:Teams webhook Bearer JWT 验签配置(`issuer`/`audience`/`jwks_url`)。
 - `database.url`:`sqlite://...` / `postgres://...` / `mysql://...`(对应 feature)。
 
+## 安全注意(平台固有限制)
+
+- **Bearer JWT 不绑定请求体**:Bot Framework 的入站验证模型是 per-request Bearer JWT,
+  签名只覆盖 token 自身、不覆盖 POST body。与 HMAC-over-body 桥(Meta/LINE 类)相比,
+  一枚被捕获的有效 JWT 可在其有效期(约 1 小时)内伪造任意入站 Activity。桥侧缓解:
+  1. token 的 `serviceUrl` claim **必须存在**且必须与 Activity 的 `serviceUrl` 一致,
+     缺失即拒(fail closed);
+  2. 以 Activity `id` 建持久重放/去重窗(契约 G-4 扩展面,TTL 覆盖 token 生命期,
+     重启/多副本下依然生效)。
+- **日志卫生是硬前提**:上述模型依赖 `Authorization` 头永不落日志、永不被中间层
+  (TLS 终止代理、访问日志、APM)记录。反代与日志管道必须显式剥离/遮蔽该头。
+
 ## 待完善(TODO)
 
 - `service_url` 实际值随会话由 Bot Framework 下发,出站前应以入站 Activity 携带的

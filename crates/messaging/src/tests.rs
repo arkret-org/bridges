@@ -4,7 +4,7 @@ use crate::content::{
     build_message_create_payload, extract_attachment, extract_plain_body, extract_strand_id,
     media_content_block, media_content_kind, text_content_block,
 };
-use crate::ghost::location_matches;
+use crate::ghost::{assert_ghost_suffix_method, location_matches};
 use crate::types::{AppDeleteOutcome, AppDeleteReason, Attachment};
 use crate::{
     CALENDAR_EVENT_PROFILE, CalendarMapError, EXTERNAL_REF_SCHEMA, PORTAL_STRAND_TRACK,
@@ -12,6 +12,21 @@ use crate::{
 };
 
 const STRAND_ID: &str = "ck:strand:01904100-0000-7000-8000-000000000001";
+
+#[test]
+fn ghost_suffix_method_is_webvh_only() {
+    use cokret::Did;
+
+    // Workspace-wide rule: bridge service identities are did:webvh only.
+    let webvh = Did::new("did:webvh:bridge.example").unwrap();
+    assert!(assert_ghost_suffix_method(&webvh).is_ok());
+    // Negative fixtures: did:web (not an accepted alias) and did:key (no
+    // path-structured suffix form) are both rejected fail-closed.
+    let web = Did::new("did:web:bridge.example").unwrap();
+    assert!(assert_ghost_suffix_method(&web).is_err());
+    let key = Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap();
+    assert!(assert_ghost_suffix_method(&key).is_err());
+}
 
 fn media_attachment() -> Attachment {
     Attachment {
@@ -224,7 +239,7 @@ fn calendar_schedule_rejects_attendees_and_downgrade_fields() {
         "end": "2026-07-01T11:00:00Z",
         "timezone": "UTC",
         "all_day": false,
-        "attendees": [{"actor_id": "did:web:alice.example"}]
+        "attendees": [{"actor_id": "did:webvh:alice.example"}]
     }))
     .unwrap_err();
     assert_eq!(

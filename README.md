@@ -102,6 +102,17 @@ cargo run -p cokret-bridge-discord -- --config config.yaml
 进一步限制为仅可信 Cokret server 访问,并对 `/metrics` 做内网或认证访问控制。若需把 admin/edge
 面也对外(如 cokret server 在另一网段),显式设置 `admin_bind` 即可,但应自行收敛网络层暴露面。
 
+公网 webhook 面**默认启用每源 IP 速率限制**(`bridge.webhook_rate_limit`,默认
+`enabled: true`、`max_requests: 600`、`window_secs: 60`,即每 IP 持续 10 rps),用于无反代
+裸跑时的基本抗泛洪;阈值刻意宽松,正常单租户回调远达不到。注意:部分平台的**重投风暴**
+(如 Meta 对 5xx 的批量重投)可能从少量回调 IP 集中打来,若观察到被限,应按平台回调 IP 段
+放宽 `max_requests` 或置 `enabled: false` 改由反代限流。
+
+**重放守卫与 vendor token 缓存均持久化于桥数据库**(`webhook_replay_guard` / `token_cache`
+表):重启后 TTL 内的捕获报文无法重放,且同一桥的多副本共享同一守卫与同一 vendor access token
+(WeChat 类"取新令旧失效"平台在多副本下因此可用)。水平扩展多副本时,各副本必须指向同一
+`database.url`(共享 postgres/mysql;sqlite 仅适合单副本)。
+
 ## 容器发布
 
 仓库提供一个统一的多阶段 `Dockerfile`,通过 `BRIDGE_BIN` 选择要打包的桥二进制。由于 workspace

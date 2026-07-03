@@ -87,7 +87,7 @@ pub struct BridgeContext {
     /// The set of cokret event kinds this bridge actually consumes on the inbound
     /// (cokret → app) path, declared by a higher layer (e.g. messaging declares
     /// `ck.message.create` + `ck.message.redact`). The applet handler rejects any
-    /// pushed event whose kind is not in this set as `capability_unsupported`
+    /// pushed event whose kind is not in this set as `capability_denied`
     /// (applet-integration §7/§13 capability enforcement). `None` (the generic
     /// default) is permissive: a bridge that has not declared a kind set accepts
     /// every kind, preserving prior behaviour for non-messaging bridges.

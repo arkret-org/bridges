@@ -9,12 +9,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use cokret_bridge_messaging::runtime::cache::TokenCache;
-use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
+use cokret_bridge_messaging::runtime::{BridgeError, Result};
 use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
-    SenderRenderStyle, webhook,
+    SenderRenderStyle, send_json_expect_status, webhook,
 };
 use serde_json::{Value, json};
 
@@ -41,44 +41,34 @@ impl DingTalkApp {
         app_secret: impl Into<String>,
         robot_code: impl Into<String>,
         webhook_body_hmac_secret: impl Into<String>,
+        token_cache: TokenCache,
     ) -> Self {
         Self {
             app_key: app_key.into(),
             app_secret: app_secret.into(),
             robot_code: robot_code.into(),
             webhook_body_hmac_secret: webhook_body_hmac_secret.into(),
-            token_cache: TokenCache::new(),
+            token_cache,
         }
     }
 
-    /// Returns an access_token, served from the cache until it nears the
-    /// vendor-reported expiry, then re-fetched via AppKey/AppSecret.
+    /// Returns an access_token, served from the shared persistent cache until
+    /// it nears the vendor-reported expiry, then re-fetched via
+    /// AppKey/AppSecret.
     async fn access_token(&self, ctx: &Arc<MessageContext>) -> Result<String> {
         self.token_cache
             .get_or_try_refresh(|| async {
                 // DingTalk's new API for obtaining an access_token.
-                let resp = ctx
-                    .http
-                    .post("https://api.dingtalk.com/v1.0/oauth2/accessToken")
-                    .json(&json!({
-                        "appKey": self.app_key,
-                        "appSecret": self.app_secret,
-                    }))
-                    .send()
-                    .await
-                    .map_err(|e| {
-                        BridgeError::App(format!(
-                            "DingTalk access_token request failed: {}",
-                            redact_sensitive_url_values(e.to_string())
-                        ))
-                    })?;
-
-                let value: Value = resp.json().await.map_err(|e| {
-                    BridgeError::App(format!(
-                        "DingTalk access_token response parse failed: {}",
-                        redact_sensitive_url_values(e.to_string())
-                    ))
-                })?;
+                let value = send_json_expect_status(
+                    ctx.http
+                        .post("https://api.dingtalk.com/v1.0/oauth2/accessToken")
+                        .json(&json!({
+                            "appKey": self.app_key,
+                            "appSecret": self.app_secret,
+                        })),
+                    "DingTalk access_token",
+                )
+                .await?;
 
                 let token = value
                     .get("accessToken")
@@ -121,35 +111,14 @@ impl MessageBridge for DingTalkApp {
             "msgParam": json!({ "content": text }).to_string(),
         });
 
-        let resp = ctx
-            .http
-            .post("https://api.dingtalk.com/v1.0/robot/groupMessages/send")
-            .header("x-acs-dingtalk-access-token", access_token)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                BridgeError::App(format!(
-                    "DingTalk send failed: {}",
-                    redact_sensitive_url_values(e.to_string())
-                ))
-            })?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let detail = resp.text().await.unwrap_or_default();
-            return Err(BridgeError::App(format!(
-                "DingTalk send returned non-2xx: {status} {}",
-                redact_sensitive_url_values(detail)
-            )));
-        }
-
-        let value: serde_json::Value = resp.json().await.map_err(|e| {
-            BridgeError::App(format!(
-                "DingTalk send response parse failed: {}",
-                redact_sensitive_url_values(e.to_string())
-            ))
-        })?;
+        let value = send_json_expect_status(
+            ctx.http
+                .post("https://api.dingtalk.com/v1.0/robot/groupMessages/send")
+                .header("x-acs-dingtalk-access-token", access_token)
+                .json(&body),
+            "DingTalk send",
+        )
+        .await?;
 
         // DingTalk returns processQueryKey as the message tracking identifier.
         // Return the empty string when absent rather than falling back to the
@@ -178,9 +147,7 @@ impl MessageBridge for DingTalkApp {
         // (|now-ts| <= window), so the acceptance window spans 2*window
         // (past+future). The replay TTL must cover that whole window or a captured
         // body+signature could be replayed in the off-window gap.
-        let replay_window = Arc::new(webhook::ReplayWindow::with_ttl(
-            2 * DINGTALK_BODY_SIGNATURE_WINDOW,
-        ));
+        let replay_window = ctx.replay_window(2 * DINGTALK_BODY_SIGNATURE_WINDOW);
         Some(
             salvo::Router::with_path("webhooks/dingtalk")
                 .hoop(affix_state::inject(DingTalkWebhookState {

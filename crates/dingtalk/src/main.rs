@@ -20,12 +20,13 @@ struct AppConfig {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    bridge_main("cokret <-> DingTalk bridge", |app: AppConfig, _ctx| {
+    bridge_main("cokret <-> DingTalk bridge", |app: AppConfig, ctx| {
         Ok(DingTalkApp::new(
             app.app_key,
             app.app_secret,
             app.robot_code,
             app.webhook_body_hmac_secret,
+            ctx.token_cache("dingtalk_access_token"),
         ))
     })
     .await

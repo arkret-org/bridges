@@ -9,12 +9,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
+use cokret_bridge_messaging::runtime::{BridgeError, Result};
 use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
-    AppMessageRef, Attachment, DEFAULT_MEDIA_MIME, InboundAppMessage, MessageBridge,
-    MessageContext, OutboundAppMessage, SenderRenderStyle, webhook,
+    AppMessageRef, ExternalMediaRequest, InboundAppMessage, MessageBridge, MessageContext,
+    OutboundAppMessage, SenderRenderStyle, send_json_expect_status, webhook,
 };
 use serde_json::{Value, json};
 
@@ -82,35 +82,11 @@ impl MessageBridge for WhatsAppApp {
             },
         });
 
-        let resp = ctx
-            .http
-            .post(&url)
-            .bearer_auth(&self.access_token)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                BridgeError::App(format!(
-                    "WhatsApp send failed: {}",
-                    redact_sensitive_url_values(e.to_string())
-                ))
-            })?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let detail = resp.text().await.unwrap_or_default();
-            return Err(BridgeError::App(format!(
-                "WhatsApp send returned non-2xx: {status} {}",
-                redact_sensitive_url_values(detail)
-            )));
-        }
-
-        let value: serde_json::Value = resp.json().await.map_err(|e| {
-            BridgeError::App(format!(
-                "WhatsApp send response parse failed: {}",
-                redact_sensitive_url_values(e.to_string())
-            ))
-        })?;
+        let value = send_json_expect_status(
+            ctx.http.post(&url).bearer_auth(&self.access_token).json(&body),
+            "WhatsApp send",
+        )
+        .await?;
 
         // Return messages[0].id as the app-side message identifier. Return the
         // empty string when absent rather than falling back to the recipient
@@ -135,12 +111,13 @@ impl MessageBridge for WhatsAppApp {
         if self.verify_token.trim().is_empty() || self.app_secret.trim().is_empty() {
             return None;
         }
+        let replay = ctx.replay_window(WHATSAPP_REPLAY_TTL);
         Some(
             salvo::Router::with_path("webhooks/whatsapp")
                 .hoop(affix_state::inject(WhatsAppWebhookState {
                     app: self,
                     ctx,
-                    replay: Arc::new(webhook::ReplayWindow::with_ttl(WHATSAPP_REPLAY_TTL)),
+                    replay,
                 }))
                 .get(whatsapp_verify)
                 .post(whatsapp_delivery),
@@ -241,24 +218,20 @@ async fn whatsapp_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
                     continue;
                 }
 
-                if let Some((media_id, mime, filename)) = whatsapp_media_ref(message)
-                    && let Err(e) =
-                        forward_whatsapp_media(state, &from, &message_id, &media_id, mime, filename)
-                            .await
-                {
-                    tracing::warn!(error = %e, "WhatsApp media bridging failed");
-                    let inbound = InboundAppMessage {
-                        app_channel: from.clone(),
-                        app_user: from.clone(),
-                        app_message_id: message_id.clone(),
-                        body: String::new(),
-                    };
-                    retry |= state
-                        .ctx
-                        .report_inbound_failure("whatsapp", &inbound, &e)
-                        .await;
-                } else if whatsapp_media_ref(message).is_some() {
-                    state.replay.check_and_record(replay_key);
+                if let Some((media_id, mime, filename)) = whatsapp_media_ref(message) {
+                    match forward_whatsapp_media(state, &from, &message_id, &media_id, mime, filename)
+                        .await
+                    {
+                        Ok(_) => {
+                            state.replay.check_and_record(replay_key);
+                        }
+                        // The shared media forwarder already ran the inbound
+                        // failure audit; only translate retriability here.
+                        Err(e) => {
+                            tracing::warn!(error = %e, "WhatsApp media bridging failed");
+                            retry |= e.is_retriable();
+                        }
+                    }
                 }
             }
         }
@@ -319,9 +292,9 @@ mod tests {
     }
 }
 
-/// Resolve a WhatsApp media id to its download URL, fetch the bytes (Bearer
-/// auth on both calls), upload to the cokret blob store, and submit a media
-/// message.
+/// Resolve a WhatsApp media id to its download URL (platform-specific step),
+/// then hand off to the shared [`MessageContext::forward_external_media`]
+/// skeleton (download → blob upload → media message + failure audit).
 async fn forward_whatsapp_media(
     state: &WhatsAppWebhookState,
     from: &str,
@@ -329,75 +302,66 @@ async fn forward_whatsapp_media(
     media_id: &str,
     mime: Option<String>,
     filename: Option<String>,
-) -> Result<()> {
+) -> Result<String> {
     let token = &state.app.access_token;
-    // 1) Resolve the (short-lived) media URL.
-    let meta_url = format!(
-        "https://graph.facebook.com/{}/{media_id}",
-        state.app.graph_api_version
-    );
-    let meta: Value = state
-        .ctx
-        .http
-        .get(&meta_url)
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|e| {
-            BridgeError::App(format!(
-                "WhatsApp media lookup failed: {}",
-                redact_sensitive_url_values(e.to_string())
-            ))
-        })?
-        .json()
-        .await
-        .map_err(|e| {
-            BridgeError::App(format!(
-                "WhatsApp media lookup parse failed: {}",
-                redact_sensitive_url_values(e.to_string())
-            ))
-        })?;
-    let url = meta
-        .get("url")
-        .and_then(Value::as_str)
-        .ok_or_else(|| BridgeError::App("WhatsApp media response has no url".to_owned()))?;
-    let resolved_mime = mime
-        .or_else(|| {
-            meta.get("mime_type")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .unwrap_or_else(|| DEFAULT_MEDIA_MIME.to_owned());
-
-    // 2) Download the bytes (also Bearer-authenticated).
-    let media = state
-        .ctx
-        .download_external_media(
-            url,
-            Some(token),
-            &[
-                "lookaside.fbsbx.com",
-                "lookaside.facebook.com",
-                "graph.facebook.com",
-                "mmg.whatsapp.net",
-            ],
-        )
-        .await?;
-    let blob_ref = state.ctx.upload_blob(&media.bytes, &resolved_mime).await?;
-
-    let attachment = Attachment {
-        blob_ref,
-        media_type: Some(resolved_mime),
-        filename,
-        size: Some(media.bytes.len() as u64),
-        caption: String::new(),
-    };
     let inbound = InboundAppMessage {
         app_channel: from.to_owned(),
         app_user: from.to_owned(),
         app_message_id: message_id.to_owned(),
         body: String::new(),
     };
-    state.ctx.submit_media_message(inbound, attachment).await?;
-    Ok(())
+    // Platform-specific: resolve the (short-lived) media URL. A lookup failure
+    // gets the same inbound-failure audit the shared forwarder applies.
+    let meta_url = format!(
+        "https://graph.facebook.com/{}/{media_id}",
+        state.app.graph_api_version
+    );
+    let meta = match send_json_expect_status(
+        state.ctx.http.get(&meta_url).bearer_auth(token),
+        "WhatsApp media lookup",
+    )
+    .await
+    {
+        Ok(meta) => meta,
+        Err(e) => {
+            state
+                .ctx
+                .report_inbound_failure("whatsapp", &inbound, &e)
+                .await;
+            return Err(e);
+        }
+    };
+    let Some(url) = meta.get("url").and_then(Value::as_str) else {
+        let e = BridgeError::App("WhatsApp media response has no url".to_owned());
+        state
+            .ctx
+            .report_inbound_failure("whatsapp", &inbound, &e)
+            .await;
+        return Err(e);
+    };
+    let mime_hint = mime.or_else(|| {
+        meta.get("mime_type")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    });
+
+    state
+        .ctx
+        .forward_external_media(
+            "whatsapp",
+            inbound,
+            ExternalMediaRequest {
+                url,
+                bearer_token: Some(token),
+                allowed_hosts: &[
+                    "lookaside.fbsbx.com",
+                    "lookaside.facebook.com",
+                    "graph.facebook.com",
+                    "mmg.whatsapp.net",
+                ],
+                mime_hint,
+                filename,
+            },
+        )
+        .await
 }

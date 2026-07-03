@@ -30,7 +30,7 @@ struct AppConfig {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    bridge_main("cokret <-> WeChat bridge", |app: AppConfig, _ctx| {
+    bridge_main("cokret <-> WeChat bridge", |app: AppConfig, ctx| {
         let has_safe_mode = app
             .encoding_aes_key
             .as_ref()
@@ -50,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
             app.agent_id,
             app.webhook_token,
             app.encoding_aes_key,
+            ctx.token_cache("wechat_access_token"),
         )
     })
     .await

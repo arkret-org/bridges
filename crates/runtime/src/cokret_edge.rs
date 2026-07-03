@@ -206,16 +206,16 @@ impl CokretEdge {
 
         // The default applet namespaces and ghost actor ids derive from the
         // service DID by appending a `:ghost:*` suffix (applet-integration §3.4).
-        // That suffix form is only well-defined for the path-structured methods
-        // (`did:webvh` per the global rule, `did:web` per the spec example), so
-        // fail closed at startup for any other method rather than later minting a
-        // malformed ghost DID.
+        // Only `did:webvh` is accepted: the workspace-wide rule (and the §3.4
+        // examples) mandate webvh-only service identities, so fail closed at
+        // startup for any other method (including `did:web`) rather than later
+        // minting a ghost DID under a non-verifiable-history identity.
         match service_did.method() {
-            "webvh" | "web" => {}
+            "webvh" => {}
             other => {
                 return Err(BridgeError::Config(format!(
-                    "service DID method `{other}` does not support `:ghost:` suffix derivation; \
-                     a bridge service DID must be did:webvh (or did:web)"
+                    "service DID method `{other}` is not allowed; \
+                     a bridge service DID must be did:webvh"
                 )));
             }
         }
@@ -306,17 +306,27 @@ impl CokretEdge {
 
     /// Build an unsigned event authored by the service actor (seq + HLC
     /// allocated, no proof).
+    ///
+    /// applet-integration §8 requires every Applet-originated write Event to
+    /// carry the top-level `applet_id` in the signed envelope, including
+    /// service-actor self-signed events (portal strand creation, audit
+    /// events), so it is stamped here. Whether `authorization_ref` applies to
+    /// service-actor self-signed events (vs. delegated ghost events, where it
+    /// references the durable authorization) is not spelled out by §8; it is
+    /// intentionally left unset pending a spec clarification.
     fn build_service_event(&self, kind: &str, realm_id: &RealmId, content: Value) -> Result<Event> {
         let seq = self.seq.alloc()?;
         let hlc = self.next_hlc(realm_id)?;
-        Ok(Event::new(
+        let mut event = Event::new(
             kind,
             realm_id.clone(),
             self.service_did.clone(),
             seq,
             hlc,
             content,
-        )?)
+        )?;
+        event.applet_id = Some(self.applet_id.clone());
+        Ok(event)
     }
 
     /// Build and sign an event attributed to `actor` and executed by this
@@ -479,6 +489,10 @@ impl CokretEdge {
         let seq = self.seq.alloc()?;
         let hlc = self.next_hlc(realm_id)?;
         let mut event = builder.build(seq, hlc)?;
+        // applet-integration §8: the signed envelope of every Applet-originated
+        // write Event MUST carry the top-level `applet_id`; the builder only
+        // binds it inside the content, so stamp it before the single signature.
+        event.applet_id = Some(self.applet_id.clone());
         // The builder produced an unsigned event; sign it with the service key
         // over the current canonical envelope.
         self.resign_event(&mut event)?;
@@ -611,7 +625,7 @@ pub struct BridgeAppletHandler {
     resolver: Option<Arc<dyn AppletResolver>>,
     /// Event kinds this bridge consumes on the inbound path. `None` ⇒ permissive
     /// (accept all). When `Some`, a pushed event whose kind is not listed is
-    /// rejected as `capability_unsupported` (applet-integration §7/§13).
+    /// rejected as `capability_denied` (applet-integration §7/§13).
     handled_event_kinds: Option<Vec<String>>,
     /// Durable single-event-level dedup store (applet-integration §7.3; the
     /// runtime path injects [`crate::db::DbEventDedupStore`]).
@@ -620,7 +634,7 @@ pub struct BridgeAppletHandler {
     /// source service DID's HTTP message signature and every pushed Event proof
     /// on the inbound `POST /_cokret/edge/applet/transactions` path
     /// (applet-integration §7.3). Scoped to the methods this bridge accepts for
-    /// inbound pushes (did:key / did:web / did:webvh, fail-closed).
+    /// inbound pushes (did:key / did:webvh, fail-closed).
     source_did_resolver: Arc<dyn DidResolver + Send + Sync>,
 }
 
@@ -804,7 +818,7 @@ impl cokret::AppletHandler for BridgeAppletHandler {
 
     fn handle_transaction(
         &self,
-        _idempotency_key: Option<&str>,
+        _idempotency_key: &str,
         req: AppletTransactionRequestBody,
     ) -> cokret::Result<AppletTransactionOutcome> {
         let mut rejected: Vec<Value> = Vec::new();
@@ -841,7 +855,7 @@ impl cokret::AppletHandler for BridgeAppletHandler {
                 );
                 rejected.push(serde_json::json!({
                     "event_id": event_id,
-                    "reason_code": "namespace_mismatch",
+                    "reason_code": "applet_namespace_mismatch",
                 }));
                 continue;
             }
@@ -859,7 +873,7 @@ impl cokret::AppletHandler for BridgeAppletHandler {
                 );
                 rejected.push(serde_json::json!({
                     "event_id": event_id,
-                    "reason_code": "capability_unsupported",
+                    "reason_code": "capability_denied",
                 }));
                 continue;
             }
@@ -1095,7 +1109,7 @@ mod tests {
     #[test]
     fn event_fingerprint_ignores_unsigned_and_proofs() {
         let realm = RealmId::new("ck:realm:01904100-0000-7000-8000-668e2181b41d").unwrap();
-        let actor = Did::new("did:web:alice.example").unwrap();
+        let actor = Did::new("did:webvh:alice.example").unwrap();
         let hlc = Hlc::new("01970e589d21-0001-a13f9c2e").unwrap();
         let mut first = Event::new(
             "ck.message.create",
@@ -1133,7 +1147,7 @@ mod tests {
         cokret::Proof {
             kind: "detached_jws".to_owned(),
             alg: "EdDSA".to_owned(),
-            verification_method: "did:web:alice.example#key-1".to_owned(),
+            verification_method: "did:webvh:alice.example#key-1".to_owned(),
             event_digest: cokret::Hash::new(
                 "sha256:0000000000000000000000000000000000000000000000000000000000000000",
             )

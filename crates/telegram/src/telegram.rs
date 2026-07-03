@@ -10,8 +10,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
 use cokret_bridge_messaging::{
-    AppMessageRef, Attachment, DEFAULT_MEDIA_MIME, InboundAppMessage, MessageBridge,
-    MessageContext, OutboundAppMessage, SenderRenderStyle,
+    AppMessageRef, ExternalMediaRequest, InboundAppMessage, MessageBridge, MessageContext,
+    OutboundAppMessage, SenderRenderStyle,
 };
 use teloxide::prelude::*;
 use teloxide::types::{ChatId, FileId, InputFile};
@@ -84,13 +84,9 @@ impl MessageBridge for TelegramApp {
                     )
                     .await
                 {
-                    let inbound = InboundAppMessage {
-                        app_channel: channel.clone(),
-                        app_user: user.clone(),
-                        app_message_id: msg.id.0.to_string(),
-                        body: msg.caption().unwrap_or_default().to_owned(),
-                    };
-                    if ctx.report_inbound_failure("telegram", &inbound, &e).await {
+                    // The media forwarder already ran the inbound failure
+                    // audit; only translate retriability here.
+                    if e.is_retriable() {
                         return telegram_retry_error("Telegram media submit retriable failure");
                     }
                 }
@@ -174,8 +170,10 @@ fn telegram_media(msg: &Message) -> Option<(FileId, Option<String>, Option<Strin
     None
 }
 
-/// Download Telegram media via `get_file` + the file download endpoint, upload
-/// it to the cokret blob store, and submit a media message.
+/// Resolve the Telegram file download URL via `get_file` (platform-specific
+/// step), then hand off to the shared
+/// [`MessageContext::forward_external_media`] skeleton (download → blob upload
+/// → media message + failure audit).
 #[allow(clippy::too_many_arguments)]
 async fn forward_media(
     bot: &Bot,
@@ -187,36 +185,41 @@ async fn forward_media(
     file_id: FileId,
     filename: Option<String>,
     mime: Option<String>,
-) -> Result<()> {
-    let file = bot.get_file(file_id).await.map_err(|e| {
-        BridgeError::App(format!(
-            "Telegram get_file failed: {}",
-            redact_sensitive_url_values(e.to_string())
-        ))
-    })?;
-    let url = telegram_file_download_url(token, &file.path);
-    let media = ctx
-        .download_external_media(&url, None, &["api.telegram.org"])
-        .await?;
-    let mime = mime.unwrap_or_else(|| DEFAULT_MEDIA_MIME.to_owned());
-    let blob_ref = ctx.upload_blob(&media.bytes, &mime).await?;
-
+) -> Result<String> {
     let caption = msg.caption().unwrap_or_default().to_owned();
-    let attachment = Attachment {
-        blob_ref,
-        media_type: Some(mime),
-        filename,
-        size: Some(media.bytes.len() as u64),
-        caption: caption.clone(),
-    };
     let inbound = InboundAppMessage {
         app_channel: channel.to_owned(),
         app_user: user.to_owned(),
         app_message_id: msg.id.0.to_string(),
+        // The caption becomes the media message body/attachment caption.
         body: caption,
     };
-    ctx.submit_media_message(inbound, attachment).await?;
-    Ok(())
+    let file = match bot.get_file(file_id).await {
+        Ok(file) => file,
+        Err(e) => {
+            let e = BridgeError::App(format!(
+                "Telegram get_file failed: {}",
+                redact_sensitive_url_values(e.to_string())
+            ));
+            // Platform-specific pre-step failures get the same inbound-failure
+            // audit the shared forwarder applies.
+            ctx.report_inbound_failure("telegram", &inbound, &e).await;
+            return Err(e);
+        }
+    };
+    let url = telegram_file_download_url(token, &file.path);
+    ctx.forward_external_media(
+        "telegram",
+        inbound,
+        ExternalMediaRequest {
+            url: &url,
+            bearer_token: None,
+            allowed_hosts: &["api.telegram.org"],
+            mime_hint: mime,
+            filename,
+        },
+    )
+    .await
 }
 
 fn telegram_file_download_url(token: &str, file_path: &str) -> String {

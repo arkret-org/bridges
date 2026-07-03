@@ -32,6 +32,7 @@ async fn main() -> anyhow::Result<()> {
                 app.app_password,
                 app.service_url,
                 Arc::new(JwtVerifier::new(app.inbound_jwt, ctx.http.clone())),
+                ctx.token_cache("teams_botframework_token"),
             ))
         },
     )

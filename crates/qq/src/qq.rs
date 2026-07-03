@@ -8,12 +8,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
+use cokret_bridge_messaging::runtime::{BridgeError, Result};
 use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
-    SenderRenderStyle, webhook,
+    SenderRenderStyle, send_json_expect_status, webhook,
 };
 use serde_json::{Value, json};
 
@@ -75,25 +75,7 @@ impl MessageBridge for QqApp {
             req = req.bearer_auth(token);
         }
 
-        let resp = req.send().await.map_err(|e| {
-            BridgeError::App(format!(
-                "QQ send request failed: {}",
-                redact_sensitive_url_values(e.to_string())
-            ))
-        })?;
-        let status = resp.status();
-        let value: serde_json::Value = resp.json().await.map_err(|e| {
-            BridgeError::App(format!(
-                "QQ response parse failed (status={status}): {}",
-                redact_sensitive_url_values(e.to_string())
-            ))
-        })?;
-        if !status.is_success() {
-            return Err(BridgeError::App(format!(
-                "QQ send failed status={status}: {}",
-                redact_sensitive_url_values(value.to_string())
-            )));
-        }
+        let value = send_json_expect_status(req, "QQ send").await?;
 
         // OneBot send_msg returns data.message_id on success.
         let message_id = value
@@ -115,12 +97,13 @@ impl MessageBridge for QqApp {
         if signing_secret.trim().is_empty() {
             return None;
         }
+        let replay = ctx.replay_window(QQ_REPLAY_TTL);
         Some(
             salvo::Router::with_path("webhooks/qq")
                 .hoop(affix_state::inject(QqWebhookState {
                     ctx,
                     signing_secret,
-                    replay: Arc::new(webhook::ReplayWindow::with_ttl(QQ_REPLAY_TTL)),
+                    replay,
                 }))
                 .post(qq_delivery),
         )

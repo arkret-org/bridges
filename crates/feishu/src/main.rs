@@ -23,12 +23,13 @@ struct AppConfig {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    bridge_main("cokret <-> Feishu bridge", |app: AppConfig, _ctx| {
+    bridge_main("cokret <-> Feishu bridge", |app: AppConfig, ctx| {
         Ok(FeishuApp::new(
             app.app_id,
             app.app_secret,
             app.verification_token,
             app.encrypt_key,
+            ctx.token_cache("feishu_tenant_access_token"),
         ))
     })
     .await

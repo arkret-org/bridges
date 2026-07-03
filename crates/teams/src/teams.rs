@@ -11,12 +11,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use cokret_bridge_messaging::runtime::cache::TokenCache;
-use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
+use cokret_bridge_messaging::runtime::{BridgeError, Result};
 use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
-    SenderRenderStyle, webhook,
+    SenderRenderStyle, send_json_expect_status, webhook,
 };
 use serde_json::{Value, json};
 
@@ -41,13 +41,14 @@ impl TeamsApp {
         app_password: impl Into<String>,
         service_url: impl Into<String>,
         inbound_jwt: Arc<webhook::JwtVerifier>,
+        token_cache: TokenCache,
     ) -> Self {
         Self {
             app_id: app_id.into(),
             app_password: app_password.into(),
             service_url: service_url.into(),
             inbound_jwt,
-            token_cache: TokenCache::new(),
+            token_cache,
         }
     }
 
@@ -65,26 +66,9 @@ impl TeamsApp {
                     ("client_secret", self.app_password.as_str()),
                     ("scope", "https://api.botframework.com/.default"),
                 ];
-                let resp: Value = ctx
-                    .http
-                    .post(TOKEN_URL)
-                    .form(&params)
-                    .send()
-                    .await
-                    .map_err(|e| {
-                        BridgeError::App(format!(
-                            "Teams token request failed: {}",
-                            redact_sensitive_url_values(e.to_string())
-                        ))
-                    })?
-                    .json()
-                    .await
-                    .map_err(|e| {
-                        BridgeError::App(format!(
-                            "Teams token parse failed: {}",
-                            redact_sensitive_url_values(e.to_string())
-                        ))
-                    })?;
+                let resp =
+                    send_json_expect_status(ctx.http.post(TOKEN_URL).form(&params), "Teams token")
+                        .await?;
 
                 let token = resp
                     .get("access_token")
@@ -127,36 +111,13 @@ impl MessageBridge for TeamsApp {
             "text": body,
         });
 
-        let resp = ctx
-            .http
-            .post(&url)
-            .bearer_auth(&token)
-            .json(&activity)
-            .send()
-            .await
-            .map_err(|e| {
-                BridgeError::App(format!(
-                    "Teams send request failed: {}",
-                    redact_sensitive_url_values(e.to_string())
-                ))
-            })?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(BridgeError::App(format!(
-                "Teams send failed ({status}): {}",
-                redact_sensitive_url_values(text)
-            )));
-        }
+        let out = send_json_expect_status(
+            ctx.http.post(&url).bearer_auth(&token).json(&activity),
+            "Teams send",
+        )
+        .await?;
 
         // Bot Framework returns { "id": "<activityId>" }.
-        let out: Value = resp.json().await.map_err(|e| {
-            BridgeError::App(format!(
-                "Teams send response parse failed: {}",
-                redact_sensitive_url_values(e.to_string())
-            ))
-        })?;
         let id = out
             .get("id")
             .and_then(Value::as_str)
@@ -170,9 +131,11 @@ impl MessageBridge for TeamsApp {
     }
 
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
+        let replay = ctx.replay_window(TEAMS_REPLAY_TTL);
         let state = TeamsWebhookState {
             ctx,
             inbound_jwt: self.inbound_jwt.clone(),
+            replay,
         };
         Some(
             salvo::Router::new()
@@ -190,10 +153,20 @@ impl MessageBridge for TeamsApp {
     }
 }
 
+/// Replay/dedupe TTL keyed on the Bot Framework activity `id` (contract G-4,
+/// extended to every verification scheme without a per-body nonce): the Bearer
+/// JWT does not bind the request body, so a captured request could otherwise
+/// be replayed verbatim for the whole token lifetime (~1h). The TTL covers
+/// that lifetime with margin.
+const TEAMS_REPLAY_TTL: Duration = Duration::from_secs(2 * 60 * 60);
+
 #[derive(Clone)]
 struct TeamsWebhookState {
     ctx: Arc<MessageContext>,
     inbound_jwt: Arc<webhook::JwtVerifier>,
+    /// Durable replay guard keyed on the activity id; a captured, validly
+    /// authenticated delivery is accepted at most once inside the window.
+    replay: Arc<webhook::ReplayWindow>,
 }
 
 #[handler]
@@ -217,18 +190,23 @@ async fn teams_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response
     let Some(body) = webhook::json_body(req, res).await else {
         return;
     };
-    // Bot Framework auth: the token's `serviceUrl` claim, when present, MUST match
-    // the activity's serviceUrl. This blocks a stolen-but-valid token from being
-    // replayed against a forged activity routed to a different service URL.
-    if let Some(token_service_url) = claims.get("serviceUrl").and_then(Value::as_str) {
-        let activity_service_url = body.get("serviceUrl").and_then(Value::as_str);
-        if activity_service_url != Some(token_service_url) {
-            webhook::unauthorized(
-                res,
-                "Teams activity serviceUrl does not match the JWT claim",
-            );
-            return;
-        }
+    // Bot Framework auth: the token's `serviceUrl` claim MUST be present and
+    // MUST match the activity's serviceUrl. Bot Framework normally issues
+    // service tokens with this claim; a token without it cannot be bound to
+    // the activity, so it is rejected (fail closed) — accepting it would let a
+    // stolen-but-valid token be replayed against a forged activity routed to a
+    // different service URL.
+    let Some(token_service_url) = claims.get("serviceUrl").and_then(Value::as_str) else {
+        webhook::unauthorized(res, "Teams JWT is missing the serviceUrl claim");
+        return;
+    };
+    let activity_service_url = body.get("serviceUrl").and_then(Value::as_str);
+    if activity_service_url != Some(token_service_url) {
+        webhook::unauthorized(
+            res,
+            "Teams activity serviceUrl does not match the JWT claim",
+        );
+        return;
     }
     let inbound = match teams_inbound_activity(&body) {
         Ok(Some(inbound)) => inbound,
@@ -241,7 +219,20 @@ async fn teams_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response
             return;
         }
     };
+    // Replay/dedupe on the stable activity id (contract G-4): the JWT does not
+    // bind the body, so a captured request replays verbatim inside the token
+    // lifetime without this guard. Record only after the submit is accepted so
+    // a transient failure stays recoverable by platform redelivery.
+    let replay_key = format!("teams:{}", inbound.app_message_id);
+    if state.replay.contains(&replay_key) {
+        tracing::debug!(activity_id = %inbound.app_message_id, "Teams activity replayed; skipping");
+        webhook::ok_json(res, json!({ "ok": true }));
+        return;
+    }
     let outcome = webhook::submit(state.ctx.clone(), "teams", inbound).await;
+    if outcome == webhook::SubmitOutcome::Accepted {
+        state.replay.check_and_record(replay_key);
+    }
     webhook::respond_submit(res, outcome);
 }
 

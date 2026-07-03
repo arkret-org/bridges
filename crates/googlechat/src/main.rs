@@ -37,6 +37,7 @@ async fn main() -> anyhow::Result<()> {
         Ok(GoogleChatApp::new(
             auth,
             Arc::new(JwtVerifier::new(app.inbound_jwt, ctx.http.clone())),
+            ctx.token_cache("googlechat_chat_api_token"),
         ))
     })
     .await

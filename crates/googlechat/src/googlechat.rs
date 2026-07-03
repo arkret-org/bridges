@@ -8,12 +8,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use cokret_bridge_messaging::runtime::cache::TokenCache;
-use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
+use cokret_bridge_messaging::runtime::{BridgeError, Result};
 use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
-    SenderRenderStyle, webhook,
+    SenderRenderStyle, send_json_expect_status, webhook,
 };
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
@@ -79,10 +79,14 @@ struct JwtBearerClaims<'a> {
 }
 
 impl GoogleChatApp {
-    pub fn new(auth: GoogleChatAuth, inbound_jwt: Arc<webhook::JwtVerifier>) -> Self {
+    pub fn new(
+        auth: GoogleChatAuth,
+        inbound_jwt: Arc<webhook::JwtVerifier>,
+        token_cache: TokenCache,
+    ) -> Self {
         Self {
             auth,
-            token_cache: TokenCache::new(),
+            token_cache,
             inbound_jwt,
         }
     }
@@ -125,34 +129,14 @@ async fn fetch_service_account_token(
     let assertion = jsonwebtoken::encode(&Header::new(Algorithm::RS256), &claims, &encoding_key)
         .map_err(|e| BridgeError::App(format!("Google JWT assertion signing failed: {e}")))?;
 
-    let resp = ctx
-        .http
-        .post(&key.token_uri)
-        .form(&[
+    let body = send_json_expect_status(
+        ctx.http.post(&key.token_uri).form(&[
             ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
             ("assertion", &assertion),
-        ])
-        .send()
-        .await
-        .map_err(|e| {
-            BridgeError::App(format!(
-                "Google token request failed: {}",
-                redact_sensitive_url_values(e.to_string())
-            ))
-        })?;
-    let status = resp.status();
-    let body: Value = resp.json().await.map_err(|e| {
-        BridgeError::App(format!(
-            "Google token parse failed (status={status}): {}",
-            redact_sensitive_url_values(e.to_string())
-        ))
-    })?;
-    if !status.is_success() {
-        return Err(BridgeError::App(format!(
-            "Google token exchange failed status={status}: {}",
-            redact_sensitive_url_values(body.to_string())
-        )));
-    }
+        ]),
+        "Google token exchange",
+    )
+    .await?;
     let token = body
         .get("access_token")
         .and_then(Value::as_str)
@@ -183,33 +167,11 @@ impl MessageBridge for GoogleChatApp {
         let payload = json!({ "text": body });
 
         let token = self.bearer_token(&ctx).await?;
-        let resp = ctx
-            .http
-            .post(&url)
-            .bearer_auth(token)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| {
-                BridgeError::App(format!(
-                    "Google Chat send request failed: {}",
-                    redact_sensitive_url_values(e.to_string())
-                ))
-            })?;
-
-        let status = resp.status();
-        let value: serde_json::Value = resp.json().await.map_err(|e| {
-            BridgeError::App(format!(
-                "Google Chat response parse failed (status={status}): {}",
-                redact_sensitive_url_values(e.to_string())
-            ))
-        })?;
-        if !status.is_success() {
-            return Err(BridgeError::App(format!(
-                "Google Chat send failed status={status}: {}",
-                redact_sensitive_url_values(value.to_string())
-            )));
-        }
+        let value = send_json_expect_status(
+            ctx.http.post(&url).bearer_auth(token).json(&payload),
+            "Google Chat send",
+        )
+        .await?;
 
         // The message resource name returned on success looks like spaces/AAA/messages/BBB.CCC.
         let message_id = value
@@ -227,21 +189,34 @@ impl MessageBridge for GoogleChatApp {
     }
 
     fn webhook_router(self: Arc<Self>, ctx: Arc<MessageContext>) -> Option<salvo::Router> {
+        let replay = ctx.replay_window(GOOGLECHAT_REPLAY_TTL);
         Some(
             salvo::Router::with_path("webhooks/googlechat")
                 .hoop(affix_state::inject(GoogleChatWebhookState {
                     ctx,
                     inbound_jwt: self.inbound_jwt.clone(),
+                    replay,
                 }))
                 .post(googlechat_delivery),
         )
     }
 }
 
+/// Replay/dedupe TTL keyed on the Chat `message.name` (contract G-4, extended
+/// to every verification scheme without a per-body nonce): the Bearer JWT does
+/// not bind the request body, so a captured request could otherwise be
+/// replayed verbatim for the whole token lifetime (~1h). The TTL covers that
+/// lifetime with margin.
+const GOOGLECHAT_REPLAY_TTL: Duration = Duration::from_secs(2 * 60 * 60);
+
 #[derive(Clone)]
 struct GoogleChatWebhookState {
     ctx: Arc<MessageContext>,
     inbound_jwt: Arc<webhook::JwtVerifier>,
+    /// Durable replay guard keyed on the message resource name; a captured,
+    /// validly authenticated delivery is accepted at most once inside the
+    /// window.
+    replay: Arc<webhook::ReplayWindow>,
 }
 
 #[handler]
@@ -279,6 +254,17 @@ async fn googlechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Res
         webhook::bad_request(res, "Google Chat message name missing");
         return;
     };
+    // Replay/dedupe on the stable message resource name (contract G-4): the
+    // JWT does not bind the body, so a captured request replays verbatim
+    // inside the token lifetime without this guard. Record only after the
+    // submit is accepted so a transient failure stays recoverable by platform
+    // redelivery.
+    let replay_key = format!("googlechat:{message_id}");
+    if state.replay.contains(&replay_key) {
+        tracing::debug!(message_name = %message_id, "Google Chat message replayed; skipping");
+        webhook::ok_json(res, json!({ "ok": true }));
+        return;
+    }
     let outcome = webhook::submit(
         state.ctx.clone(),
         "googlechat",
@@ -290,5 +276,8 @@ async fn googlechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Res
         },
     )
     .await;
+    if outcome == webhook::SubmitOutcome::Accepted {
+        state.replay.check_and_record(replay_key);
+    }
     webhook::respond_submit(res, outcome);
 }

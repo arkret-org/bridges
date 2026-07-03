@@ -11,8 +11,8 @@ use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url
 use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
-    AppMessageRef, Attachment, DEFAULT_MEDIA_MIME, InboundAppMessage, MessageBridge,
-    MessageContext, OutboundAppMessage, SenderRenderStyle, webhook,
+    AppMessageRef, ExternalMediaRequest, InboundAppMessage, MessageBridge, MessageContext,
+    OutboundAppMessage, SenderRenderStyle, webhook,
 };
 use serde_json::{Value, json};
 
@@ -102,12 +102,13 @@ impl MessageBridge for LineApp {
         if self.channel_secret.trim().is_empty() {
             return None;
         }
+        let replay = ctx.replay_window(LINE_REPLAY_TTL);
         Some(
             salvo::Router::with_path("webhooks/line")
                 .hoop(affix_state::inject(LineWebhookState {
                     app: self,
                     ctx,
-                    replay: Arc::new(webhook::ReplayWindow::with_ttl(LINE_REPLAY_TTL)),
+                    replay,
                 }))
                 .post(line_delivery),
         )
@@ -227,19 +228,18 @@ async fn line_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response)
                 continue;
             };
             let filename = webhook::string_at(event, "/message/fileName");
-            if let Err(e) =
-                forward_line_media(state, &channel, &user, &message_id, &content_id, filename).await
+            match forward_line_media(state, &channel, &user, &message_id, &content_id, filename)
+                .await
             {
-                tracing::warn!(error = %e, "LINE media bridging failed");
-                let inbound = InboundAppMessage {
-                    app_channel: channel.clone(),
-                    app_user: user.clone(),
-                    app_message_id: message_id.clone(),
-                    body: String::new(),
-                };
-                retry |= state.ctx.report_inbound_failure("line", &inbound, &e).await;
-            } else {
-                state.replay.check_and_record(replay_key);
+                Ok(_) => {
+                    state.replay.check_and_record(replay_key);
+                }
+                // The shared media forwarder already ran the inbound failure
+                // audit; only translate retriability here.
+                Err(e) => {
+                    tracing::warn!(error = %e, "LINE media bridging failed");
+                    retry |= e.is_retriable();
+                }
             }
         }
     }
@@ -251,7 +251,9 @@ async fn line_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response)
 }
 
 /// Download LINE message content (image/video/audio/file) from the content
-/// endpoint, upload it to the cokret blob store, and submit a media message.
+/// endpoint via the shared [`MessageContext::forward_external_media`] skeleton
+/// (download → blob upload → media message + failure audit); only the LINE
+/// content-endpoint URL and credentials are platform-specific here.
 async fn forward_line_media(
     state: &LineWebhookState,
     channel: &str,
@@ -259,36 +261,28 @@ async fn forward_line_media(
     message_id: &str,
     content_id: &str,
     filename: Option<String>,
-) -> Result<()> {
+) -> Result<String> {
     let url = format!("https://api-data.line.me/v2/bot/message/{content_id}/content");
-    let media = state
-        .ctx
-        .download_external_media(
-            &url,
-            Some(&state.app.channel_access_token),
-            &["api-data.line.me"],
-        )
-        .await?;
-    let mime = media
-        .content_type
-        .unwrap_or_else(|| DEFAULT_MEDIA_MIME.to_owned());
-    let blob_ref = state.ctx.upload_blob(&media.bytes, &mime).await?;
-
-    let attachment = Attachment {
-        blob_ref,
-        media_type: Some(mime),
-        filename,
-        size: Some(media.bytes.len() as u64),
-        caption: String::new(),
-    };
     let inbound = InboundAppMessage {
         app_channel: channel.to_owned(),
         app_user: user.to_owned(),
         app_message_id: message_id.to_owned(),
         body: String::new(),
     };
-    state.ctx.submit_media_message(inbound, attachment).await?;
-    Ok(())
+    state
+        .ctx
+        .forward_external_media(
+            "line",
+            inbound,
+            ExternalMediaRequest {
+                url: &url,
+                bearer_token: Some(&state.app.channel_access_token),
+                allowed_hosts: &["api-data.line.me"],
+                mime_hint: None,
+                filename,
+            },
+        )
+        .await
 }
 
 fn verify_line_signature(secret: &str, payload: &[u8], signature: &str) -> bool {

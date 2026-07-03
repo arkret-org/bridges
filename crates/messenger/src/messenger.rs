@@ -8,12 +8,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
+use cokret_bridge_messaging::runtime::Result;
 use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
-    SenderRenderStyle, webhook,
+    SenderRenderStyle, send_json_expect_status, webhook,
 };
 use serde_json::{Value, json};
 
@@ -78,33 +78,14 @@ impl MessageBridge for MessengerApp {
             "message": { "text": body },
         });
 
-        let resp = ctx
-            .http
-            .post(self.send_api())
-            .bearer_auth(&self.page_access_token)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| {
-                BridgeError::App(format!(
-                    "Messenger send request failed: {}",
-                    redact_sensitive_url_values(e.to_string())
-                ))
-            })?;
-
-        let status = resp.status();
-        let value: serde_json::Value = resp.json().await.map_err(|e| {
-            BridgeError::App(format!(
-                "Messenger response parse failed (status={status}): {}",
-                redact_sensitive_url_values(e.to_string())
-            ))
-        })?;
-        if !status.is_success() {
-            return Err(BridgeError::App(format!(
-                "Messenger send failed status={status}: {}",
-                redact_sensitive_url_values(value.to_string())
-            )));
-        }
+        let value = send_json_expect_status(
+            ctx.http
+                .post(self.send_api())
+                .bearer_auth(&self.page_access_token)
+                .json(&payload),
+            "Messenger send",
+        )
+        .await?;
 
         // The Graph API returns message_id on success.
         let message_id = value
@@ -125,12 +106,13 @@ impl MessageBridge for MessengerApp {
         if self.verify_token.trim().is_empty() || self.app_secret.trim().is_empty() {
             return None;
         }
+        let replay = ctx.replay_window(MESSENGER_REPLAY_TTL);
         Some(
             salvo::Router::with_path("webhooks/messenger")
                 .hoop(affix_state::inject(MessengerWebhookState {
                     app: self,
                     ctx,
-                    replay: Arc::new(webhook::ReplayWindow::with_ttl(MESSENGER_REPLAY_TTL)),
+                    replay,
                 }))
                 .get(messenger_verify)
                 .post(messenger_delivery),

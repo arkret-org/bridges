@@ -54,13 +54,14 @@ impl FeishuApp {
         app_secret: impl Into<String>,
         verification_token: impl Into<String>,
         encrypt_key: Option<String>,
+        token_cache: TokenCache,
     ) -> Self {
         Self {
             app_id: app_id.into(),
             app_secret: app_secret.into(),
             verification_token: verification_token.into(),
             encrypt_key: encrypt_key.filter(|k| !k.is_empty()),
-            token_cache: TokenCache::new(),
+            token_cache,
         }
     }
 
@@ -182,6 +183,7 @@ impl MessageBridge for FeishuApp {
         let verification_token = self.verification_token.clone();
         // Derive the AES-256 key once: key = SHA256(encrypt_key).
         let encrypt_aes_key = webhook::sha256_bytes(encrypt_key.as_bytes());
+        let replay = ctx.replay_window(2 * FEISHU_DELIVERY_MAX_SKEW);
         Some(
             salvo::Router::with_path("webhooks/feishu")
                 .hoop(affix_state::inject(FeishuWebhookState {
@@ -194,9 +196,7 @@ impl MessageBridge for FeishuApp {
                     // The replay TTL must cover that full window or a captured
                     // delivery could be replayed in the off-window gap. Keep the
                     // guard alive for the entire acceptance window.
-                    replay: Arc::new(webhook::ReplayWindow::with_ttl(
-                        2 * FEISHU_DELIVERY_MAX_SKEW,
-                    )),
+                    replay,
                 }))
                 .post(feishu_delivery),
         )
@@ -498,9 +498,24 @@ mod tests {
 
     #[test]
     fn replay_guard_rejects_second_identical_delivery() {
+        use cokret_bridge_messaging::runtime::db::{
+            DatabaseManager, DbReplayGuardStore, MIGRATIONS,
+        };
+
         // The handler keys the replay guard on `timestamp:nonce:signature`. A
         // captured (validly signed) delivery must be accepted at most once.
-        let window = webhook::ReplayWindow::new(Duration::from_secs(300), 16);
+        let db = Arc::new(
+            DatabaseManager::connect(&cokret_bridge_messaging::runtime::DatabaseConfig {
+                url: "sqlite://:memory:".to_owned(),
+                pool_size: 1,
+            })
+            .unwrap(),
+        );
+        db.run_migrations(MIGRATIONS).unwrap();
+        let window = webhook::ReplayWindow::new(
+            Arc::new(DbReplayGuardStore::new(db)),
+            Duration::from_secs(300),
+        );
         let key = "1700000000:nonce-xyz:deadbeef";
         assert!(window.check_and_record(key));
         assert!(!window.check_and_record(key));

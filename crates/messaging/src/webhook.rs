@@ -1,7 +1,6 @@
 //! Small helpers for adapter-owned Salvo webhook handlers.
 
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aes::{Aes128, Aes256};
@@ -21,6 +20,8 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use tokio::sync::RwLock;
 
+use cokret_bridge_runtime::ReplayGuardStore;
+
 use crate::{InboundAppMessage, MessageContext};
 
 type HmacSha256 = Hmac<Sha256>;
@@ -28,11 +29,6 @@ type HmacSha1 = Hmac<Sha1>;
 
 pub const MAX_WEBHOOK_BODY_BYTES: usize = 1024 * 1024;
 const JWT_JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
-
-/// Default bounded capacity for a webhook [`ReplayWindow`]. Sized so the guard
-/// holds well more than a freshness window's worth of deliveries before it has
-/// to evict; shared so each webhook bridge does not re-derive the magic number.
-pub const DEFAULT_REPLAY_CAPACITY: usize = 8192;
 
 /// Constant-time byte-slice equality. Use for all signature/secret comparisons
 /// to avoid leaking match position through early-exit timing.
@@ -72,100 +68,59 @@ pub fn unix_timestamp_millis_is_fresh(timestamp: &str, max_skew: Duration) -> bo
     (now_ms - ts).unsigned_abs() <= max_skew_ms
 }
 
-/// Bounded in-memory replay guard for webhook schemes whose vendor signature
-/// does not cover a unique request body token. The key should contain the
-/// vendor timestamp plus signature material that must be accepted at most once
-/// during the source's freshness window.
+/// Durable replay guard for webhook schemes whose vendor verification does not
+/// cover a unique per-body token. The key should contain the stable platform
+/// message/delivery id (or timestamp + signature material) that must be
+/// accepted at most once during the source's freshness window.
+///
+/// Backed by a shared [`ReplayGuardStore`] (bridge database), so the guard
+/// holds across restarts and across horizontally scaled replicas — a captured
+/// delivery cannot be replayed against a freshly restarted or sibling replica
+/// inside the TTL. Keys are only recorded for deliveries that already passed
+/// source verification, bounding table growth to legitimate traffic. Build via
+/// [`MessageContext::replay_window`](crate::MessageContext::replay_window).
 pub struct ReplayWindow {
-    ttl: Duration,
-    capacity: usize,
-    inner: StdMutex<ReplayWindowInner>,
-}
-
-#[derive(Default)]
-struct ReplayWindowInner {
-    entries: HashMap<String, Instant>,
-    order: VecDeque<(String, Instant)>,
+    store: Arc<dyn ReplayGuardStore>,
+    ttl_secs: i64,
 }
 
 impl ReplayWindow {
-    pub fn new(ttl: Duration, capacity: usize) -> Self {
+    pub fn new(store: Arc<dyn ReplayGuardStore>, ttl: Duration) -> Self {
         Self {
-            ttl,
-            capacity: capacity.max(1),
-            inner: StdMutex::new(ReplayWindowInner::default()),
+            store,
+            ttl_secs: ttl.as_secs().clamp(1, i64::MAX as u64) as i64,
         }
     }
 
-    /// Build a replay window with the shared [`DEFAULT_REPLAY_CAPACITY`]. Use
-    /// this from webhook bridges so the capacity is defined in one place.
-    pub fn with_ttl(ttl: Duration) -> Self {
-        Self::new(ttl, DEFAULT_REPLAY_CAPACITY)
-    }
-
     /// Returns true when the key is already present in the unexpired replay
-    /// window. Does not record the key.
+    /// window. Does not record the key. A store failure fails closed (treated
+    /// as a replay) so a database outage cannot open the replay window.
     pub fn contains(&self, key: &str) -> bool {
         if key.trim().is_empty() {
             return false;
         }
-
-        let now = Instant::now();
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        inner.purge_expired(now, self.ttl);
-        inner.entries.contains_key(key)
+        match self.store.contains(key) {
+            Ok(seen) => seen,
+            Err(err) => {
+                tracing::warn!(error = %err, "replay guard probe failed; failing closed");
+                true
+            }
+        }
     }
 
     /// Returns true when the key is fresh and records it; false means replay.
+    /// A store failure fails closed (the delivery is treated as a replay).
     pub fn check_and_record(&self, key: impl Into<String>) -> bool {
         let key = key.into();
         if key.trim().is_empty() {
             return false;
         }
-
-        let now = Instant::now();
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        inner.purge_expired(now, self.ttl);
-        if inner.entries.contains_key(&key) {
-            return false;
-        }
-        while inner.entries.len() >= self.capacity {
-            inner.evict_oldest();
-        }
-        inner.entries.insert(key.clone(), now);
-        inner.order.push_back((key, now));
-        true
-    }
-}
-
-impl ReplayWindowInner {
-    fn purge_expired(&mut self, now: Instant, ttl: Duration) {
-        while let Some((key, seen_at)) = self.order.front() {
-            if *seen_at + ttl > now {
-                break;
+        match self.store.check_and_record(&key, self.ttl_secs) {
+            Ok(fresh) => fresh,
+            Err(err) => {
+                tracing::warn!(error = %err, "replay guard record failed; failing closed");
+                false
             }
-            let key = key.clone();
-            let seen_at = *seen_at;
-            self.order.pop_front();
-            if self.entries.get(&key).copied() == Some(seen_at) {
-                self.entries.remove(&key);
-            }
-        }
-    }
-
-    fn evict_oldest(&mut self) {
-        if let Some((key, seen_at)) = self.order.pop_front() {
-            if self.entries.get(&key).copied() == Some(seen_at) {
-                self.entries.remove(&key);
-            }
-        } else {
-            self.entries.clear();
         }
     }
 }
@@ -678,19 +633,36 @@ mod tests {
         assert!(constant_time_eq(b"", b""));
     }
 
+    #[cfg(feature = "sqlite")]
+    fn memory_replay_window(ttl: Duration) -> ReplayWindow {
+        use cokret_bridge_runtime::db::{DatabaseManager, DbReplayGuardStore, MIGRATIONS};
+
+        let db = Arc::new(
+            DatabaseManager::connect(&cokret_bridge_runtime::DatabaseConfig {
+                url: "sqlite://:memory:".to_owned(),
+                pool_size: 1,
+            })
+            .unwrap(),
+        );
+        db.run_migrations(MIGRATIONS).unwrap();
+        ReplayWindow::new(Arc::new(DbReplayGuardStore::new(db)), ttl)
+    }
+
+    #[cfg(feature = "sqlite")]
     #[test]
-    fn replay_window_rejects_duplicate_until_evicted() {
-        let window = ReplayWindow::new(Duration::from_secs(60), 2);
+    fn replay_window_rejects_duplicate() {
+        let window = memory_replay_window(Duration::from_secs(60));
         assert!(window.check_and_record("a"));
         assert!(!window.check_and_record("a"));
         assert!(window.check_and_record("b"));
-        assert!(window.check_and_record("c"));
-        assert!(window.check_and_record("a"));
+        // Empty keys are never accepted.
+        assert!(!window.check_and_record("  "));
     }
 
+    #[cfg(feature = "sqlite")]
     #[test]
     fn replay_window_contains_does_not_record() {
-        let window = ReplayWindow::new(Duration::from_secs(60), 2);
+        let window = memory_replay_window(Duration::from_secs(60));
         assert!(!window.contains("a"));
         assert!(window.check_and_record("a"));
         assert!(window.contains("a"));

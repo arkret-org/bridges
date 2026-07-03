@@ -8,12 +8,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
+use cokret_bridge_messaging::runtime::Result;
 use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
-    SenderRenderStyle, webhook,
+    SenderRenderStyle, send_json_expect_status, webhook,
 };
 use serde_json::{Value, json};
 
@@ -69,31 +69,12 @@ impl MessageBridge for IMessageApp {
             "method": "apple-script",
         });
 
-        let resp = ctx
-            .http
-            .post(&url)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| {
-                BridgeError::App(format!(
-                    "iMessage gateway send request failed: {}",
-                    redact_sensitive_url_values(e.to_string())
-                ))
-            })?;
-
-        let status = resp.status();
-        let value: serde_json::Value = resp.json().await.map_err(|e| {
-            BridgeError::App(format!(
-                "iMessage gateway response parse failed (status={status}): {}",
-                redact_sensitive_url_values(e.to_string())
-            ))
-        })?;
-        if !status.is_success() {
-            return Err(BridgeError::App(format!(
-                "iMessage gateway send failed status={status}: {value}"
-            )));
-        }
+        // The shared helper redacts sensitive URL values (the BlueBubbles
+        // `?guid=<password>` may be echoed in error bodies) and truncates the
+        // error body (BRG-DRY-01; the old hand-rolled branch here leaked the
+        // unredacted body).
+        let value = send_json_expect_status(ctx.http.post(&url).json(&payload), "iMessage gateway send")
+            .await?;
 
         // BlueBubbles returns data.guid as the message identifier on success.
         let message_id = value
@@ -120,9 +101,7 @@ impl MessageBridge for IMessageApp {
         // acceptance window spans 2*skew (past+future). The replay TTL must cover
         // that full window or a captured delivery could be replayed in the
         // off-window gap.
-        let replay = Arc::new(webhook::ReplayWindow::with_ttl(
-            2 * IMESSAGE_DELIVERY_MAX_SKEW,
-        ));
+        let replay = ctx.replay_window(2 * IMESSAGE_DELIVERY_MAX_SKEW);
         Some(
             salvo::Router::with_path("webhooks/imessage")
                 .hoop(affix_state::inject(IMessageWebhookState {

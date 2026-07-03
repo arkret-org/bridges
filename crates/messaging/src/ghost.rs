@@ -62,12 +62,11 @@ fn requested_ghost_actor_id_for_user(
         ));
     }
     // The default ghost derivation appends a `:ghost:u<...>` suffix to the
-    // service DID (applet-integration §3.4). That suffix form is only
-    // well-defined for path-structured DID methods (`did:web` per the spec
-    // example, `did:webvh` per the global did:webvh-only rule); for other methods
-    // (e.g. `did:key`) the bare suffix would not be a valid actor DID. Assert the
-    // method before deriving so a misconfigured service DID fails closed here
-    // rather than producing a malformed ghost id.
+    // service DID (applet-integration §3.4). Only `did:webvh` is accepted per
+    // the workspace-wide webvh-only rule; for other methods (e.g. `did:key`)
+    // the bare suffix would not even be a valid actor DID. Assert the method
+    // before deriving so a misconfigured service DID fails closed here rather
+    // than producing a malformed ghost id.
     let service_did = Did::new(config.cokret.service_did.clone())?;
     assert_ghost_suffix_method(&service_did)?;
     let material =
@@ -82,15 +81,15 @@ fn requested_ghost_actor_id_for_user(
 }
 
 /// Assert that `service_did`'s method supports the `:ghost:*` suffix derivation
-/// used for default applet namespaces and ghost actor ids. Only the
-/// path-structured methods are valid: `did:webvh` (the only method the global
-/// rule permits) and `did:web` (the applet-integration §3.4 example form).
+/// used for default applet namespaces and ghost actor ids. Only `did:webvh` is
+/// valid (workspace-wide webvh-only rule; the applet-integration §3.4 examples
+/// are webvh as well).
 pub(crate) fn assert_ghost_suffix_method(service_did: &Did) -> Result<()> {
     match service_did.method() {
-        "webvh" | "web" => Ok(()),
+        "webvh" => Ok(()),
         other => Err(BridgeError::Config(format!(
-            "service DID method `{other}` does not support `:ghost:` suffix derivation; \
-             a bridge service DID must be did:webvh (or did:web)"
+            "service DID method `{other}` is not allowed; \
+             a bridge service DID must be did:webvh"
         ))),
     }
 }

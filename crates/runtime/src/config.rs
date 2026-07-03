@@ -80,6 +80,49 @@ pub struct BridgeConfig {
     /// app-side deletions (see `MessageAdapter::on_cokret_event`).
     #[serde(default)]
     pub disable_deletion_forwarding: bool,
+    /// Per-source-IP rate limiting on the public webhook plane. Enabled by
+    /// default with a deliberately generous quota; disable or widen it when a
+    /// fronting reverse proxy already rate-limits, or when a platform's
+    /// redelivery storms arrive from few source IPs.
+    #[serde(default)]
+    pub webhook_rate_limit: WebhookRateLimitConfig,
+}
+
+/// Per-source-IP rate limit settings for the public webhook plane.
+#[derive(Clone, Debug, Deserialize)]
+pub struct WebhookRateLimitConfig {
+    /// Master switch; `true` by default ("isolated by default" extends to
+    /// "rate-limited by default").
+    #[serde(default = "default_rate_limit_enabled")]
+    pub enabled: bool,
+    /// Requests allowed per source IP per window. The default (600/min, i.e. a
+    /// sustained 10 rps per IP) is far above any legitimate per-tenant webhook
+    /// rate while still bounding a single-source flood.
+    #[serde(default = "default_rate_limit_requests")]
+    pub max_requests: usize,
+    /// Window length in seconds.
+    #[serde(default = "default_rate_limit_window_secs")]
+    pub window_secs: u16,
+}
+
+impl Default for WebhookRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_rate_limit_enabled(),
+            max_requests: default_rate_limit_requests(),
+            window_secs: default_rate_limit_window_secs(),
+        }
+    }
+}
+
+fn default_rate_limit_enabled() -> bool {
+    true
+}
+fn default_rate_limit_requests() -> usize {
+    600
+}
+fn default_rate_limit_window_secs() -> u16 {
+    60
 }
 
 impl BridgeConfig {

@@ -26,3 +26,12 @@ CREATE TABLE IF NOT EXISTS event_dedup (
 CREATE TABLE IF NOT EXISTS bridge_state (
     state_key VARCHAR(191) PRIMARY KEY,
     state_value BIGINT NOT NULL);
+
+CREATE TABLE IF NOT EXISTS webhook_replay_guard (
+    replay_key VARCHAR(191) PRIMARY KEY,
+    expires_at BIGINT NOT NULL);
+
+CREATE TABLE IF NOT EXISTS token_cache (
+    cache_key VARCHAR(191) PRIMARY KEY,
+    token_value TEXT NOT NULL,
+    expires_at BIGINT NOT NULL);

@@ -21,6 +21,7 @@ mod types;
 pub mod webhook;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 pub use calendar::{
@@ -30,8 +31,10 @@ use cokret::models::EphemeralEnvelope;
 use cokret::{AppletBridgeErrorBuilder, AppletBridgeErrorVisibility, Did, Event, RealmId};
 pub use cokret_bridge_runtime as runtime;
 use cokret_bridge_runtime::app::{BridgeApp, BridgeContext};
+use cokret_bridge_runtime::db::{DbReplayGuardStore, DbTokenStore};
 use cokret_bridge_runtime::{
-    BridgeError, MessageDirection, Result, record_bridge_message, redact_sensitive_url_values,
+    BridgeError, MessageDirection, ReplayGuardStore, Result, TokenCache, TokenStore,
+    record_bridge_message, redact_sensitive_url_values,
 };
 pub use content::{
     extract_attachment, extract_plain_body, extract_strand_id, media_content_block,
@@ -94,13 +97,29 @@ pub(crate) fn redaction_payload_for_app_delete(
 pub struct MessageContext {
     inner: Arc<BridgeContext>,
     store: Arc<MessageStore>,
+    /// Shared durable store backing every [`webhook::ReplayWindow`] this bridge
+    /// builds (bridge contract G-4 replay guards survive restarts and are
+    /// shared across replicas).
+    replay_guard: Arc<dyn ReplayGuardStore>,
+    /// Shared durable store backing every [`TokenCache`] this bridge builds
+    /// (one live vendor token across replicas).
+    token_store: Arc<dyn TokenStore>,
     pub http: reqwest::Client,
 }
 
 impl MessageContext {
     fn new(inner: Arc<BridgeContext>, store: Arc<MessageStore>) -> Self {
         let http = inner.http.clone();
-        Self { inner, store, http }
+        let replay_guard: Arc<dyn ReplayGuardStore> =
+            Arc::new(DbReplayGuardStore::new(inner.db.clone()));
+        let token_store: Arc<dyn TokenStore> = Arc::new(DbTokenStore::new(inner.db.clone()));
+        Self {
+            inner,
+            store,
+            replay_guard,
+            token_store,
+            http,
+        }
     }
 
     pub fn store(&self) -> &MessageStore {
@@ -109,6 +128,20 @@ impl MessageContext {
 
     pub fn core(&self) -> &Arc<BridgeContext> {
         &self.inner
+    }
+
+    /// Build a durable webhook replay window (bridge contract G-4) with the
+    /// given acceptance TTL, backed by the shared bridge database so the guard
+    /// holds across restarts and horizontally scaled replicas.
+    pub fn replay_window(&self, ttl: Duration) -> Arc<webhook::ReplayWindow> {
+        Arc::new(webhook::ReplayWindow::new(self.replay_guard.clone(), ttl))
+    }
+
+    /// Build a persistent vendor access-token cache under `cache_key` (unique
+    /// per purpose, e.g. `wechat_access_token`), backed by the shared bridge
+    /// database so all replicas observe the most recently fetched token.
+    pub fn token_cache(&self, cache_key: &str) -> TokenCache {
+        TokenCache::new(self.token_store.clone(), cache_key)
     }
 
     /// Emit a `ck.applet.bridge_error` Event for a failed inbound (app → cokret)
@@ -327,6 +360,55 @@ impl MessageContext {
             bytes,
             content_type,
         })
+    }
+
+    /// Forward one piece of inbound external media into cokret with the shared
+    /// skeleton: download (https + host allowlist + byte cap) → MIME fallback
+    /// (`mime_hint` → download `Content-Type` → [`DEFAULT_MEDIA_MIME`]) → blob
+    /// upload → [`Attachment`] assembly → [`Self::submit_media_message`].
+    ///
+    /// On any step failing, the shared inbound-failure audit
+    /// ([`Self::report_inbound_failure`]: warn log + best-effort durable
+    /// `ck.applet.bridge_error`) has already run before the `Err` is returned —
+    /// callers only translate `err.is_retriable()` into their platform's retry
+    /// signal. Bridges keep only the platform-specific "resolve the download
+    /// URL / credentials" step (BRG-DRY-02).
+    pub async fn forward_external_media(
+        &self,
+        label: &str,
+        inbound: InboundAppMessage,
+        request: ExternalMediaRequest<'_>,
+    ) -> Result<String> {
+        let result = self.forward_external_media_inner(&inbound, request).await;
+        if let Err(err) = &result {
+            self.report_inbound_failure(label, &inbound, err).await;
+        }
+        result
+    }
+
+    async fn forward_external_media_inner(
+        &self,
+        inbound: &InboundAppMessage,
+        request: ExternalMediaRequest<'_>,
+    ) -> Result<String> {
+        let media = self
+            .download_external_media(request.url, request.bearer_token, request.allowed_hosts)
+            .await?;
+        let mime = request
+            .mime_hint
+            .or(media.content_type)
+            .unwrap_or_else(|| DEFAULT_MEDIA_MIME.to_owned());
+        let blob_ref = self.upload_blob(&media.bytes, &mime).await?;
+        let attachment = Attachment {
+            blob_ref,
+            media_type: Some(mime),
+            filename: request.filename,
+            size: Some(media.bytes.len() as u64),
+            // Left empty: `submit_media_message` fills the caption from the
+            // inbound body when the platform delivered one.
+            caption: String::new(),
+        };
+        self.submit_media_message(inbound.clone(), attachment).await
     }
 
     /// Resolve the portal strand for an app channel following the §10.1
@@ -688,6 +770,22 @@ impl MessageContext {
     }
 }
 
+/// Where to fetch external media and how to describe it; see
+/// [`MessageContext::forward_external_media`].
+pub struct ExternalMediaRequest<'a> {
+    /// The https download URL.
+    pub url: &'a str,
+    /// Optional bearer token sent with the download request.
+    pub bearer_token: Option<&'a str>,
+    /// Host allowlist enforced on the download URL.
+    pub allowed_hosts: &'a [&'a str],
+    /// Platform-declared MIME type; preferred over the download response's
+    /// `Content-Type` when present.
+    pub mime_hint: Option<String>,
+    /// Attachment filename, when the platform provides one.
+    pub filename: Option<String>,
+}
+
 /// Send an outbound vendor API request, parse the JSON response, apply the
 /// vendor-specific success predicate, and wrap every failure as
 /// `BridgeError::App` with the message sensitive-value-redacted.
@@ -722,6 +820,51 @@ pub async fn send_json_expect(
             redact_sensitive_url_values(body.to_string())
         )));
     }
+    Ok(body)
+}
+
+/// Character cap applied to vendor error bodies quoted into error messages, so
+/// a large (or hostile) error response cannot bloat logs or audit events.
+const ERROR_BODY_SNIPPET_MAX_CHARS: usize = 2048;
+
+/// Send an outbound vendor API request whose success signal is the **HTTP
+/// status** (as opposed to a flag inside the JSON body — that family uses
+/// [`send_json_expect`]), and return the parsed JSON response body.
+///
+/// One shared order for the whole family (BRG-DRY-01): send → check status —
+/// on failure read the error body as text (works for non-JSON vendor errors),
+/// truncate and redact it — then parse JSON only on success. `label` names the
+/// call for error messages (e.g. `"WhatsApp send"`).
+pub async fn send_json_expect_status(
+    request: reqwest::RequestBuilder,
+    label: &str,
+) -> Result<Value> {
+    let response = request.send().await.map_err(|e| {
+        BridgeError::App(format!(
+            "{label} request failed: {}",
+            redact_sensitive_url_values(e.to_string())
+        ))
+    })?;
+    let status = response.status();
+    if !status.is_success() {
+        let detail: String = response
+            .text()
+            .await
+            .unwrap_or_default()
+            .chars()
+            .take(ERROR_BODY_SNIPPET_MAX_CHARS)
+            .collect();
+        return Err(BridgeError::App(format!(
+            "{label} failed status={status}: {}",
+            redact_sensitive_url_values(detail)
+        )));
+    }
+    let body: Value = response.json().await.map_err(|e| {
+        BridgeError::App(format!(
+            "{label} response parse failed (status={status}): {}",
+            redact_sensitive_url_values(e.to_string())
+        ))
+    })?;
     Ok(body)
 }
 
@@ -986,7 +1129,7 @@ where
             store: store.clone(),
         }));
         // Declare the inbound event kinds this messaging bridge consumes so the
-        // applet handler rejects anything else as `capability_unsupported`
+        // applet handler rejects anything else as `capability_denied`
         // (BRG-01-009). `MessageAdapter::on_cokret_event` handles exactly these.
         core_ctx.set_handled_event_kinds(BRIDGE_HANDLED_EVENT_KINDS);
         let ctx = Arc::new(MessageContext::new(core_ctx, store));

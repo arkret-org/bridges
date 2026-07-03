@@ -99,7 +99,31 @@ pub async fn serve(ctx: Arc<BridgeContext>, extra: Option<Router>) -> Result<()>
     // Bot Framework `/api/messages`). This is the only plane that must face the
     // external platform callbacks, so it binds `0.0.0.0` by default.
     if let Some(app_routes) = extra {
-        let webhook_router = Router::new().push(app_routes);
+        // Default-on per-source-IP rate limiting (BRG-SOTA-01 posture: the
+        // "isolated by default" dual-listener design extends to "rate-limited
+        // by default"). The quota is deliberately generous so platform
+        // redelivery storms are not clipped; operators can widen/disable it
+        // via `bridge.webhook_rate_limit`.
+        let rate_limit = &ctx.config.bridge.webhook_rate_limit;
+        let webhook_router = if rate_limit.enabled {
+            use salvo::rate_limiter::{
+                BasicQuota, FixedGuard, MokaStore, RateLimiter, RemoteIpIssuer,
+            };
+            tracing::info!(
+                max_requests = rate_limit.max_requests,
+                window_secs = rate_limit.window_secs,
+                "webhook plane per-IP rate limit enabled"
+            );
+            let limiter = RateLimiter::new(
+                FixedGuard::default(),
+                MokaStore::default(),
+                RemoteIpIssuer,
+                BasicQuota::set_seconds(rate_limit.max_requests, rate_limit.window_secs as i64),
+            );
+            Router::new().hoop(limiter).push(app_routes)
+        } else {
+            Router::new().push(app_routes)
+        };
         let webhook_addr = ctx.config.bridge.webhook_addr();
         tracing::info!(addr = %webhook_addr, "webhook plane listening (public platform callbacks)");
         let webhook_acceptor = TcpListener::new(webhook_addr).bind().await;
@@ -409,10 +433,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         return;
     }
 
-    match state
-        .handler
-        .handle_transaction(Some(&idempotency_key), body)
-    {
+    match state.handler.handle_transaction(&idempotency_key, body) {
         Ok(response) => {
             if let Err(err) = state.idempotency.record(
                 &replay,
@@ -736,11 +757,10 @@ fn verify_transaction_events(
 
 fn build_event_proof_resolver() -> Result<CompositeDidResolver> {
     let policy = ResolverPolicy {
-        allowed_methods: vec![
-            "did:key:".to_owned(),
-            "did:web:".to_owned(),
-            "did:webvh:".to_owned(),
-        ],
+        // Workspace-wide rule: actor/service identities are did:webvh only
+        // (did:web is not an accepted alias). did:key stays for bare
+        // verification-method keys.
+        allowed_methods: vec!["did:key:".to_owned(), "did:webvh:".to_owned()],
         fail_mode: ResolverFailMode::FailClosed,
         ..ResolverPolicy::default()
     };
@@ -1007,16 +1027,16 @@ mod tests {
         let key = cokret::ed25519_pubkey_to_did_key_multibase(&[7u8; 32]);
 
         let mut full = BTreeMap::new();
-        full.insert("did:web:server.example#key-1".to_owned(), key.clone());
+        full.insert("did:webvh:server.example#key-1".to_owned(), key.clone());
         assert_eq!(
-            verification_method_value(&full, "did:web:server.example#key-1"),
+            verification_method_value(&full, "did:webvh:server.example#key-1"),
             Some(key.as_str())
         );
 
         let mut fragment = BTreeMap::new();
         fragment.insert("#key-1".to_owned(), key.clone());
         assert_eq!(
-            verification_method_value(&fragment, "did:web:server.example#key-1"),
+            verification_method_value(&fragment, "did:webvh:server.example#key-1"),
             Some(key.as_str())
         );
 
@@ -1028,10 +1048,10 @@ mod tests {
             Some(key.as_str())
         );
 
-        let mut mismatched_web = BTreeMap::new();
-        mismatched_web.insert("unexpected-key-id".to_owned(), key);
+        let mut mismatched_webvh = BTreeMap::new();
+        mismatched_webvh.insert("unexpected-key-id".to_owned(), key);
         assert_eq!(
-            verification_method_value(&mismatched_web, "did:web:server.example#key-1"),
+            verification_method_value(&mismatched_webvh, "did:webvh:server.example#key-1"),
             None
         );
     }

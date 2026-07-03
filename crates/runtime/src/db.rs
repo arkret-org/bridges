@@ -14,11 +14,12 @@ use diesel::prelude::*;
 use diesel::r2d2::{ConnectionManager, Pool, PooledConnection};
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 
+use crate::cache::{PersistedToken, TokenStore};
 use crate::config::DatabaseConfig;
 use crate::error::{BridgeError, Result};
 use crate::idempotency::{
     DedupVerdict, EventDedupStore, IDEMPOTENCY_TTL_SECS, PENDING_TAKEOVER_GRACE_SECS,
-    TransactionClaim, TransactionIdempotencyStore, TransactionReplayKey,
+    ReplayGuardStore, TransactionClaim, TransactionIdempotencyStore, TransactionReplayKey,
 };
 
 /// Embedded migrations for the runtime-owned tables (`transaction_idempotency`,
@@ -125,6 +126,26 @@ mod idempotency_schema {
         event_dedup (event_id) {
             event_id -> Text,
             fingerprint -> BigInt,
+            expires_at -> BigInt,
+        }
+    }
+
+    diesel::table! {
+        /// Public-webhook replay guard window (bridge contract G-4): one row per
+        /// accepted replay key, TTL-cleaned via `expires_at`.
+        webhook_replay_guard (replay_key) {
+            replay_key -> Text,
+            expires_at -> BigInt,
+        }
+    }
+
+    diesel::table! {
+        /// Vendor OAuth access-token cache, shared across replicas so
+        /// "fetching a new token invalidates the old one" platforms (WeChat)
+        /// stay consistent under horizontal scaling.
+        token_cache (cache_key) {
+            cache_key -> Text,
+            token_value -> Text,
             expires_at -> BigInt,
         }
     }
@@ -396,6 +417,122 @@ impl EventDedupStore for DbEventDedupStore {
     }
 }
 
+/// Diesel-backed [`ReplayGuardStore`]: persists webhook replay keys so the
+/// bounded replay/dedupe guard (bridge contract G-4) survives restarts and is
+/// shared across horizontally scaled replicas.
+pub struct DbReplayGuardStore {
+    db: Arc<DatabaseManager>,
+}
+
+impl DbReplayGuardStore {
+    /// Build the store. The `webhook_replay_guard` table is created by the
+    /// runtime migrations, which [`crate::run_bridge`] applies at startup (via
+    /// [`crate::DbSeqStore::new`]); standalone hosts and tests must run
+    /// [`MIGRATIONS`] themselves.
+    pub fn new(db: Arc<DatabaseManager>) -> Self {
+        Self { db }
+    }
+}
+
+impl ReplayGuardStore for DbReplayGuardStore {
+    fn contains(&self, key: &str) -> Result<bool> {
+        use idempotency_schema::webhook_replay_guard::dsl;
+
+        let mut conn = self.db.conn()?;
+        let now = now_ts();
+        diesel::delete(dsl::webhook_replay_guard.filter(dsl::expires_at.le(now)))
+            .execute(&mut conn)?;
+        let seen = dsl::webhook_replay_guard
+            .filter(dsl::replay_key.eq(key))
+            .select(dsl::replay_key)
+            .first::<String>(&mut conn)
+            .optional()?;
+        Ok(seen.is_some())
+    }
+
+    fn check_and_record(&self, key: &str, ttl_secs: i64) -> Result<bool> {
+        use idempotency_schema::webhook_replay_guard::dsl;
+
+        let mut conn = self.db.conn()?;
+        let now = now_ts();
+        diesel::delete(dsl::webhook_replay_guard.filter(dsl::expires_at.le(now)))
+            .execute(&mut conn)?;
+        let inserted = diesel::insert_into(dsl::webhook_replay_guard)
+            .values((
+                dsl::replay_key.eq(key),
+                dsl::expires_at.eq(now + ttl_secs),
+            ))
+            .execute(&mut conn);
+        match inserted {
+            Ok(_) => Ok(true),
+            // A concurrent writer (another replica) won the insert race, or the
+            // key is already present: either way this delivery is a replay.
+            Err(diesel::result::Error::DatabaseError(
+                diesel::result::DatabaseErrorKind::UniqueViolation,
+                _,
+            )) => Ok(false),
+            Err(err) => Err(err.into()),
+        }
+    }
+}
+
+/// Diesel-backed [`TokenStore`]: persists vendor access tokens so replicas of
+/// the same bridge share one token (required by "new token invalidates the old
+/// one" vendors such as WeChat) and a restart does not force a refetch.
+pub struct DbTokenStore {
+    db: Arc<DatabaseManager>,
+}
+
+impl DbTokenStore {
+    /// Build the store. The `token_cache` table is created by the runtime
+    /// migrations, which [`crate::run_bridge`] applies at startup (via
+    /// [`crate::DbSeqStore::new`]); standalone hosts and tests must run
+    /// [`MIGRATIONS`] themselves.
+    pub fn new(db: Arc<DatabaseManager>) -> Self {
+        Self { db }
+    }
+}
+
+impl TokenStore for DbTokenStore {
+    fn load(&self, key: &str) -> Result<Option<PersistedToken>> {
+        use idempotency_schema::token_cache::dsl;
+
+        let mut conn = self.db.conn()?;
+        let row = dsl::token_cache
+            .filter(dsl::cache_key.eq(key))
+            .select((dsl::token_value, dsl::expires_at))
+            .first::<(String, i64)>(&mut conn)
+            .optional()?;
+        Ok(row.map(|(value, expires_at)| PersistedToken { value, expires_at }))
+    }
+
+    fn store(&self, key: &str, token: &str, expires_at: i64) -> Result<()> {
+        use idempotency_schema::token_cache::dsl;
+
+        let mut conn = self.db.conn()?;
+        // Backend-agnostic upsert: delete + insert, last write wins (matching
+        // the vendor semantics where the newest fetched token is the live one).
+        // A lost insert race means a concurrent refresh already stored a newer
+        // token, which is exactly the value the next read should observe.
+        diesel::delete(dsl::token_cache.filter(dsl::cache_key.eq(key))).execute(&mut conn)?;
+        let inserted = diesel::insert_into(dsl::token_cache)
+            .values((
+                dsl::cache_key.eq(key),
+                dsl::token_value.eq(token),
+                dsl::expires_at.eq(expires_at),
+            ))
+            .execute(&mut conn);
+        match inserted {
+            Ok(_) => Ok(()),
+            Err(diesel::result::Error::DatabaseError(
+                diesel::result::DatabaseErrorKind::UniqueViolation,
+                _,
+            )) => Ok(()),
+            Err(err) => Err(err.into()),
+        }
+    }
+}
+
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
@@ -411,7 +548,7 @@ mod tests {
     }
 
     fn replay_key(idempotency_key: &str) -> TransactionReplayKey<'_> {
-        replay_key_to("did:web:bridge.example", idempotency_key)
+        replay_key_to("did:webvh:bridge.example", idempotency_key)
     }
 
     fn replay_key_to<'a>(
@@ -421,7 +558,7 @@ mod tests {
         TransactionReplayKey {
             operation_id: "ck.edge.applet.command.transaction",
             direction: "node_to_applet",
-            source_service_did: "did:web:server.example",
+            source_service_did: "did:webvh:server.example",
             destination_service_did,
             idempotency_key,
         }
@@ -486,12 +623,40 @@ mod tests {
         ));
         assert!(matches!(
             store.claim(
-                &replay_key_to("did:web:other-bridge.example", "idem-3"),
+                &replay_key_to("did:webvh:other-bridge.example", "idem-3"),
                 "hash-a",
                 "anchor-b"
             ),
             Ok(TransactionClaim::Claimed)
         ));
+    }
+
+    #[test]
+    fn db_replay_guard_rejects_duplicate_and_expires() {
+        let db = memory_db();
+        db.run_migrations(MIGRATIONS).unwrap();
+        let store = DbReplayGuardStore::new(db);
+        assert!(!store.contains("k1").unwrap());
+        assert!(store.check_and_record("k1", 600).unwrap());
+        assert!(store.contains("k1").unwrap());
+        assert!(!store.check_and_record("k1", 600).unwrap());
+        // An already-expired row is purged on the next probe.
+        assert!(store.check_and_record("k2", -1).unwrap());
+        assert!(!store.contains("k2").unwrap());
+        assert!(store.check_and_record("k2", 600).unwrap());
+    }
+
+    #[test]
+    fn db_token_store_last_write_wins() {
+        let db = memory_db();
+        db.run_migrations(MIGRATIONS).unwrap();
+        let store = DbTokenStore::new(db);
+        assert!(store.load("wechat_access_token").unwrap().is_none());
+        store.store("wechat_access_token", "tok-1", 100).unwrap();
+        store.store("wechat_access_token", "tok-2", 200).unwrap();
+        let token = store.load("wechat_access_token").unwrap().unwrap();
+        assert_eq!(token.value, "tok-2");
+        assert_eq!(token.expires_at, 200);
     }
 
     #[test]
