@@ -83,7 +83,10 @@ impl MessageBridge for WhatsAppApp {
         });
 
         let value = send_json_expect_status(
-            ctx.http.post(&url).bearer_auth(&self.access_token).json(&body),
+            ctx.http
+                .post(&url)
+                .bearer_auth(&self.access_token)
+                .json(&body),
             "WhatsApp send",
         )
         .await?;
@@ -219,8 +222,15 @@ async fn whatsapp_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
                 }
 
                 if let Some((media_id, mime, filename)) = whatsapp_media_ref(message) {
-                    match forward_whatsapp_media(state, &from, &message_id, &media_id, mime, filename)
-                        .await
+                    match forward_whatsapp_media(
+                        state,
+                        &from,
+                        &message_id,
+                        &media_id,
+                        mime,
+                        filename,
+                    )
+                    .await
                     {
                         Ok(_) => {
                             state.replay.check_and_record(replay_key);

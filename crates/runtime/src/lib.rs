@@ -50,11 +50,11 @@ use std::sync::Arc;
 pub use app::{AppletResolver, ResolvedActor, ResolvedRealm};
 #[cfg(feature = "runtime")]
 pub use app::{BridgeApp, BridgeContext};
+pub use cache::{PersistedToken, TokenCache, TokenStore};
 #[cfg(feature = "db")]
 pub use cokret_edge::DbSeqStore;
 pub use cokret_edge::{CokretEdge, SeqAllocator, SeqStore};
 pub use config::{ChannelRealmMappingConfig, Config, DatabaseConfig, WebhookRateLimitConfig};
-pub use cache::{PersistedToken, TokenCache, TokenStore};
 #[cfg(feature = "db")]
 pub use db::{DbEventDedupStore, DbReplayGuardStore, DbTokenStore, DbTransactionIdempotencyStore};
 pub use error::{BridgeError, Result, redact_sensitive_url_values};

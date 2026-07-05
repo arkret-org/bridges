@@ -73,8 +73,9 @@ impl MessageBridge for IMessageApp {
         // `?guid=<password>` may be echoed in error bodies) and truncates the
         // error body (BRG-DRY-01; the old hand-rolled branch here leaked the
         // unredacted body).
-        let value = send_json_expect_status(ctx.http.post(&url).json(&payload), "iMessage gateway send")
-            .await?;
+        let value =
+            send_json_expect_status(ctx.http.post(&url).json(&payload), "iMessage gateway send")
+                .await?;
 
         // BlueBubbles returns data.guid as the message identifier on success.
         let message_id = value

@@ -238,9 +238,8 @@ impl MessageBridge for WechatApp {
         // the acceptance window spans 2*window (past+future). The replay TTL
         // must cover the whole window or a captured delivery could be replayed in
         // the off-window gap.
-        let replay_window = ctx.replay_window(Duration::from_secs(
-            2 * WECHAT_TIMESTAMP_WINDOW_SECS as u64,
-        ));
+        let replay_window =
+            ctx.replay_window(Duration::from_secs(2 * WECHAT_TIMESTAMP_WINDOW_SECS as u64));
         Some(
             salvo::Router::with_path("webhooks/wechat")
                 .hoop(affix_state::inject(WechatWebhookState {

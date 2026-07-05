@@ -458,10 +458,7 @@ impl ReplayGuardStore for DbReplayGuardStore {
         diesel::delete(dsl::webhook_replay_guard.filter(dsl::expires_at.le(now)))
             .execute(&mut conn)?;
         let inserted = diesel::insert_into(dsl::webhook_replay_guard)
-            .values((
-                dsl::replay_key.eq(key),
-                dsl::expires_at.eq(now + ttl_secs),
-            ))
+            .values((dsl::replay_key.eq(key), dsl::expires_at.eq(now + ttl_secs)))
             .execute(&mut conn);
         match inserted {
             Ok(_) => Ok(true),

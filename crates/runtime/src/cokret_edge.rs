@@ -19,12 +19,12 @@ use std::sync::Arc;
 #[cfg(any(feature = "web", test))]
 use cokret::DidResolver;
 use cokret::http_client::{Auth, Client};
+use cokret::models::EphemeralEnvelope;
 #[cfg(any(feature = "web", test))]
 use cokret::models::{
-    AppletActorView, AppletDescription, AppletPingOutcome, AppletProtocolMetadata,
-    AppletRealmView, AppletTransactionOutcome, AppletTransactionRequestBody,
+    AppletActorView, AppletDescription, AppletPingOutcome, AppletProtocolMetadata, AppletRealmView,
+    AppletTransactionOutcome, AppletTransactionRequestBody,
 };
-use cokret::models::EphemeralEnvelope;
 #[cfg(any(feature = "web", test))]
 use cokret::signatures::EventProofBuilder;
 use cokret::signatures::{SignEventOptions, sign_event};
