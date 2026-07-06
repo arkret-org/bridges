@@ -139,7 +139,7 @@ struct MessengerWebhookState {
 
 #[handler]
 async fn messenger_verify(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let Ok(state) = depot.obtain::<MessengerWebhookState>() else {
+    let Ok(state) = depot.get_typed::<MessengerWebhookState>() else {
         webhook::bad_request(res, "webhook state missing");
         return;
     };
@@ -148,7 +148,7 @@ async fn messenger_verify(req: &mut Request, depot: &mut Depot, res: &mut Respon
 
 #[handler]
 async fn messenger_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let Ok(state) = depot.obtain::<MessengerWebhookState>() else {
+    let Ok(state) = depot.get_typed::<MessengerWebhookState>() else {
         webhook::bad_request(res, "webhook state missing");
         return;
     };

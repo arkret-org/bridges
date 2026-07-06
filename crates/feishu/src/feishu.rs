@@ -252,7 +252,7 @@ fn feishu_decrypt(aes_key: &[u8; 32], encrypt_b64: &str) -> Option<Value> {
 
 #[handler]
 async fn feishu_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let Ok(state) = depot.obtain::<FeishuWebhookState>() else {
+    let Ok(state) = depot.get_typed::<FeishuWebhookState>() else {
         webhook::bad_request(res, "webhook state missing");
         return;
     };

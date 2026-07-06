@@ -524,7 +524,7 @@ async fn applet_third_party_unsupported(req: &mut Request, depot: &mut Depot, re
 }
 
 fn applet_state<'a>(depot: &'a Depot, res: &mut Response) -> Option<&'a AppletWebState> {
-    match depot.obtain::<AppletWebState>() {
+    match depot.get_typed::<AppletWebState>() {
         Ok(state) => Some(state),
         Err(_) => {
             internal_error(res, "applet web state missing");

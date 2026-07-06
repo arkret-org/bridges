@@ -126,7 +126,7 @@ struct IMessageWebhookState {
 
 #[handler]
 async fn imessage_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let Ok(state) = depot.obtain::<IMessageWebhookState>() else {
+    let Ok(state) = depot.get_typed::<IMessageWebhookState>() else {
         webhook::bad_request(res, "webhook state missing");
         return;
     };

@@ -147,7 +147,7 @@ struct WhatsAppWebhookState {
 
 #[handler]
 async fn whatsapp_verify(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let Ok(state) = depot.obtain::<WhatsAppWebhookState>() else {
+    let Ok(state) = depot.get_typed::<WhatsAppWebhookState>() else {
         webhook::bad_request(res, "webhook state missing");
         return;
     };
@@ -156,7 +156,7 @@ async fn whatsapp_verify(req: &mut Request, depot: &mut Depot, res: &mut Respons
 
 #[handler]
 async fn whatsapp_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let Ok(state) = depot.obtain::<WhatsAppWebhookState>() else {
+    let Ok(state) = depot.get_typed::<WhatsAppWebhookState>() else {
         webhook::bad_request(res, "webhook state missing");
         return;
     };

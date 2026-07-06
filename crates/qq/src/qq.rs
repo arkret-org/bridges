@@ -147,7 +147,7 @@ struct QqWebhookState {
 
 #[handler]
 async fn qq_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let Ok(state) = depot.obtain::<QqWebhookState>() else {
+    let Ok(state) = depot.get_typed::<QqWebhookState>() else {
         webhook::bad_request(res, "webhook state missing");
         return;
     };

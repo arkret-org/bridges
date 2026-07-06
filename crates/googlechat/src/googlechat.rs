@@ -221,7 +221,7 @@ struct GoogleChatWebhookState {
 
 #[handler]
 async fn googlechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let Ok(state) = depot.obtain::<GoogleChatWebhookState>() else {
+    let Ok(state) = depot.get_typed::<GoogleChatWebhookState>() else {
         webhook::bad_request(res, "webhook state missing");
         return;
     };

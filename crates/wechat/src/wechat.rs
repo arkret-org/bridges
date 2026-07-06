@@ -405,7 +405,7 @@ fn wechat_msg_signature_input(req: &Request) -> WechatSignatureInput {
 
 #[handler]
 async fn wechat_verify(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let Ok(state) = depot.obtain::<WechatWebhookState>() else {
+    let Ok(state) = depot.get_typed::<WechatWebhookState>() else {
         webhook::bad_request(res, "webhook state missing");
         return;
     };
@@ -445,7 +445,7 @@ async fn wechat_verify(req: &mut Request, depot: &mut Depot, res: &mut Response)
 
 #[handler]
 async fn wechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let Ok(state) = depot.obtain::<WechatWebhookState>() else {
+    let Ok(state) = depot.get_typed::<WechatWebhookState>() else {
         webhook::bad_request(res, "webhook state missing");
         return;
     };

@@ -134,7 +134,7 @@ struct LineWebhookState {
 
 #[handler]
 async fn line_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let Ok(state) = depot.obtain::<LineWebhookState>() else {
+    let Ok(state) = depot.get_typed::<LineWebhookState>() else {
         webhook::bad_request(res, "webhook state missing");
         return;
     };

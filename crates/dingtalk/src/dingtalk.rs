@@ -211,7 +211,7 @@ fn dingtalk_body_signature_ok(secret: &str, timestamp: &str, raw: &[u8], signatu
 
 #[handler]
 async fn dingtalk_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let Ok(state) = depot.obtain::<DingTalkWebhookState>() else {
+    let Ok(state) = depot.get_typed::<DingTalkWebhookState>() else {
         webhook::bad_request(res, "webhook state missing");
         return;
     };
