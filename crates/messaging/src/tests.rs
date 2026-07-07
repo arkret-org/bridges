@@ -1,4 +1,9 @@
-use serde_json::json;
+use cokret::{
+    CalendarAttendee, CalendarEventFields, CalendarEventLocation, CalendarLocation,
+    CalendarRecurrence, Did, RecurrenceFrequency, RecurrenceWeekday, RsvpSetPayload, RsvpStatus,
+    StrandId,
+};
+use serde_json::{Value, json};
 
 use crate::content::{
     build_message_create_payload, extract_attachment, extract_plain_body, extract_strand_id,
@@ -214,24 +219,47 @@ fn encrypted_comment() -> serde_json::Value {
     })
 }
 
+fn rsvp_payload(
+    status: RsvpStatus,
+    occurrence: Option<&str>,
+    comment: Option<Value>,
+) -> RsvpSetPayload {
+    RsvpSetPayload {
+        event_ref: StrandId::new(STRAND_ID).unwrap(),
+        status,
+        occurrence: occurrence.map(ToOwned::to_owned),
+        comment,
+    }
+}
+
+fn calendar_fields() -> CalendarEventFields {
+    CalendarEventFields {
+        start: "2026-07-01T10:00:00Z".to_owned(),
+        end: "2026-07-01T11:00:00Z".to_owned(),
+        timezone: "America/New_York".to_owned(),
+        all_day: false,
+        recurrence: Some(CalendarRecurrence {
+            frequency: RecurrenceFrequency::Weekly,
+            interval: Some(1),
+            by_day: vec![RecurrenceWeekday::Mo],
+            count: None,
+            expires_at: None,
+        }),
+        location: Some(CalendarEventLocation::Plaintext(CalendarLocation {
+            title: Some("Planning area".to_owned()),
+            address: None,
+            geo_uri: None,
+            url: Some("https://example.test/meet".to_owned()),
+        })),
+        call_id: None,
+        attendees: Vec::new(),
+    }
+}
+
 #[test]
 fn calendar_schedule_maps_only_profile_subset() {
-    let schedule = bridge_calendar_schedule_fields(json!({
-        "start": "2026-07-01T10:00:00Z",
-        "end": "2026-07-01T11:00:00Z",
-        "timezone": "America/New_York",
-        "all_day": false,
-        "recurrence": {
-            "frequency": "WEEKLY",
-            "interval": 1,
-            "by_day": ["MO"]
-        },
-        "location": {
-            "title": "Planning area",
-            "url": "https://example.test/meet"
-        }
-    }))
-    .expect("calendar schedule");
+    let schedule =
+        serde_json::to_value(bridge_calendar_schedule_fields(calendar_fields()).unwrap()).unwrap();
     assert_eq!(CALENDAR_EVENT_PROFILE, "ck.profile.calendar_event.v1");
     assert_eq!(schedule["timezone"], "America/New_York");
     assert_eq!(schedule["recurrence"]["frequency"], "WEEKLY");
@@ -240,23 +268,25 @@ fn calendar_schedule_maps_only_profile_subset() {
 }
 
 #[test]
-fn calendar_schedule_rejects_attendees_and_downgrade_fields() {
-    let attendees = bridge_calendar_schedule_fields(json!({
-        "start": "2026-07-01T10:00:00Z",
-        "end": "2026-07-01T11:00:00Z",
-        "timezone": "UTC",
-        "all_day": false,
-        "attendees": [{"actor_id": "did:webvh:alice.example"}]
-    }))
-    .unwrap_err();
+fn calendar_schedule_rejects_attendees() {
+    let mut fields = calendar_fields();
+    fields.attendees.push(CalendarAttendee {
+        actor_id: Did::new("did:webvh:alice.example").unwrap(),
+        role: None,
+        display_name_snapshot: None,
+    });
+    let attendees = bridge_calendar_schedule_fields(fields).unwrap_err();
     assert_eq!(
         attendees,
         CalendarMapError::UnsupportedField {
             field: "attendees".to_owned()
         }
     );
+}
 
-    let downgrade = bridge_calendar_schedule_fields(json!({
+#[test]
+fn calendar_schedule_sdk_type_rejects_external_downgrade_fields() {
+    let downgrade = serde_json::from_value::<CalendarEventFields>(json!({
         "start": "2026-07-01",
         "end": "2026-07-01",
         "timezone": "UTC",
@@ -264,45 +294,43 @@ fn calendar_schedule_rejects_attendees_and_downgrade_fields() {
         "preserved_fields": {"provider_color": "blue"}
     }))
     .unwrap_err();
-    assert_eq!(downgrade.code(), "calendar_downgrade_field_forbidden");
+    assert!(downgrade.to_string().contains("preserved_fields"));
 }
 
 #[test]
 fn calendar_schedule_rejects_unknown_recurrence_shape() {
-    let err = bridge_calendar_schedule_fields(json!({
-        "start": "2026-07-01T10:00:00Z",
-        "end": "2026-07-01T11:00:00Z",
-        "timezone": "UTC",
-        "all_day": false,
-        "recurrence": {
-            "frequency": "WEEKLY",
-            "count": 2,
-            "expires_at": "2026-12-31T00:00:00Z"
-        }
-    }))
-    .unwrap_err();
+    let mut fields = calendar_fields();
+    fields.recurrence = Some(CalendarRecurrence {
+        frequency: RecurrenceFrequency::Weekly,
+        interval: None,
+        by_day: Vec::new(),
+        count: Some(2),
+        expires_at: Some("2026-12-31T00:00:00Z".to_owned()),
+    });
+    let err = bridge_calendar_schedule_fields(fields).unwrap_err();
     assert_eq!(err.code(), "calendar_payload_invalid");
 }
 
 #[test]
 fn calendar_rsvp_maps_encrypted_comment_only() {
-    let payload = bridge_rsvp_payload(json!({
-        "event_ref": STRAND_ID,
-        "status": "accepted",
-        "occurrence": null,
-        "comment": encrypted_comment()
-    }))
-    .expect("rsvp payload");
+    let payload = serde_json::to_value(
+        bridge_rsvp_payload(rsvp_payload(
+            RsvpStatus::Accepted,
+            None,
+            Some(encrypted_comment()),
+        ))
+        .expect("rsvp payload"),
+    )
+    .unwrap();
     assert_eq!(payload["event_ref"], STRAND_ID);
     assert_eq!(payload["status"], "accepted");
     assert!(payload["comment"].get("ciphertext").is_some());
 
-    let plaintext = bridge_rsvp_payload(json!({
-        "event_ref": STRAND_ID,
-        "status": "tentative",
-        "occurrence": "2026-07-01T10:00:00[America/New_York]",
-        "comment": "I might be late"
-    }))
+    let plaintext = bridge_rsvp_payload(rsvp_payload(
+        RsvpStatus::Tentative,
+        Some("2026-07-01T10:00:00[America/New_York]"),
+        Some(Value::String("I might be late".to_owned())),
+    ))
     .unwrap_err();
     assert_eq!(
         plaintext.code(),
@@ -311,18 +339,13 @@ fn calendar_rsvp_maps_encrypted_comment_only() {
 }
 
 #[test]
-fn calendar_rsvp_rejects_schedule_mutation_fields() {
-    let err = bridge_rsvp_payload(json!({
+fn calendar_rsvp_sdk_type_rejects_schedule_mutation_fields() {
+    let err = serde_json::from_value::<RsvpSetPayload>(json!({
         "event_ref": STRAND_ID,
         "status": "declined",
         "occurrence": null,
         "schedule": {"start": "2026-07-01T10:00:00Z"}
     }))
     .unwrap_err();
-    assert_eq!(
-        err,
-        CalendarMapError::UnsupportedField {
-            field: "schedule".to_owned()
-        }
-    );
+    assert!(err.to_string().contains("schedule"));
 }
