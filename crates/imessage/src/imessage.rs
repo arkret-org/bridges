@@ -162,6 +162,7 @@ async fn imessage_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
     if !state
         .replay
         .check_and_record(format!("{timestamp}\u{1f}{signature}"))
+        .await
     {
         webhook::unauthorized(res, "iMessage webhook replay");
         return;

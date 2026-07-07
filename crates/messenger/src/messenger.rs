@@ -166,7 +166,7 @@ async fn messenger_delivery(req: &mut Request, depot: &mut Depot, res: &mut Resp
         // Record only after submit is accepted so transient failures can be
         // recovered by Meta redelivery.
         let replay_key = format!("messenger:{}", inbound.app_message_id);
-        if state.replay.contains(&replay_key) {
+        if state.replay.contains(&replay_key).await {
             tracing::debug!(
                 message_id = %inbound.app_message_id,
                 "Messenger event replayed; skipping"
@@ -175,7 +175,7 @@ async fn messenger_delivery(req: &mut Request, depot: &mut Depot, res: &mut Resp
         }
         let outcome = webhook::submit(state.ctx.clone(), "messenger", inbound).await;
         if outcome == webhook::SubmitOutcome::Accepted {
-            state.replay.check_and_record(replay_key);
+            state.replay.check_and_record(replay_key).await;
         }
         retry |= outcome == webhook::SubmitOutcome::Retry;
     }

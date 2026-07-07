@@ -260,7 +260,7 @@ async fn googlechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Res
     // submit is accepted so a transient failure stays recoverable by platform
     // redelivery.
     let replay_key = format!("googlechat:{message_id}");
-    if state.replay.contains(&replay_key) {
+    if state.replay.contains(&replay_key).await {
         tracing::debug!(message_name = %message_id, "Google Chat message replayed; skipping");
         webhook::ok_json(res, json!({ "ok": true }));
         return;
@@ -277,7 +277,7 @@ async fn googlechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Res
     )
     .await;
     if outcome == webhook::SubmitOutcome::Accepted {
-        state.replay.check_and_record(replay_key);
+        state.replay.check_and_record(replay_key).await;
     }
     webhook::respond_submit(res, outcome);
 }

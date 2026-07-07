@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::error::Result;
+use crate::run_blocking;
 
 /// A persisted vendor access token: the value plus its absolute Unix-seconds
 /// expiry.
@@ -80,7 +81,9 @@ impl TokenCache {
     {
         let now = unix_now();
         let skew = self.refresh_skew.as_secs().min(i64::MAX as u64) as i64;
-        match self.store.load(&self.cache_key) {
+        let store = self.store.clone();
+        let cache_key = self.cache_key.clone();
+        match run_blocking(move || store.load(&cache_key)).await {
             Ok(Some(token)) if token.expires_at > now.saturating_add(skew) => {
                 return Ok(token.value);
             }
@@ -91,9 +94,13 @@ impl TokenCache {
         }
         let (value, ttl) = refresh().await?;
         let ttl_secs = ttl.as_secs().min(i64::MAX as u64) as i64;
-        if let Err(err) = self
-            .store
-            .store(&self.cache_key, &value, now.saturating_add(ttl_secs))
+        let store = self.store.clone();
+        let cache_key = self.cache_key.clone();
+        let stored_value = value.clone();
+        if let Err(err) = run_blocking(move || {
+            store.store(&cache_key, &stored_value, now.saturating_add(ttl_secs))
+        })
+        .await
         {
             tracing::warn!(error = %err, key = %self.cache_key, "token cache write failed; token not shared");
         }

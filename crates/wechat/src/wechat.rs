@@ -511,6 +511,7 @@ async fn wechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respons
     if !state
         .replay_window
         .check_and_record(wechat_replay_key(&sig_input))
+        .await
     {
         webhook::unauthorized(res, "WeChat callback replay");
         return;

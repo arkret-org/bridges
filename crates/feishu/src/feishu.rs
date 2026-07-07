@@ -314,6 +314,7 @@ async fn feishu_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respons
     if !state
         .replay
         .check_and_record(format!("{timestamp}:{nonce}:{signature}"))
+        .await
     {
         webhook::unauthorized(res, "Feishu delivery replayed");
         return;
@@ -496,8 +497,8 @@ mod tests {
         assert!(!webhook::unix_timestamp_is_fresh("", skew));
     }
 
-    #[test]
-    fn replay_guard_rejects_second_identical_delivery() {
+    #[tokio::test]
+    async fn replay_guard_rejects_second_identical_delivery() {
         use cokret_bridge_messaging::runtime::db::{
             DatabaseManager, DbReplayGuardStore, MIGRATIONS,
         };
@@ -517,7 +518,7 @@ mod tests {
             Duration::from_secs(300),
         );
         let key = "1700000000:nonce-xyz:deadbeef";
-        assert!(window.check_and_record(key));
-        assert!(!window.check_and_record(key));
+        assert!(window.check_and_record(key).await);
+        assert!(!window.check_and_record(key).await);
     }
 }

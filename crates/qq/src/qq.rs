@@ -208,7 +208,7 @@ async fn qq_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     // Record only after submit is accepted so transient failures can be
     // recovered by platform redelivery.
     let replay_key = format!("qq:{message_id}");
-    if state.replay.contains(&replay_key) {
+    if state.replay.contains(&replay_key).await {
         // Replayed event already accepted in the window; ack idempotently.
         webhook::ok_json(res, json!({ "ok": true }));
         return;
@@ -225,7 +225,7 @@ async fn qq_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     )
     .await;
     if outcome == webhook::SubmitOutcome::Accepted {
-        state.replay.check_and_record(replay_key);
+        state.replay.check_and_record(replay_key).await;
     }
     webhook::respond_submit(res, outcome);
 }

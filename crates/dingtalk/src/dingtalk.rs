@@ -266,6 +266,7 @@ async fn dingtalk_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
     if !state
         .replay_window
         .check_and_record(format!("{body_timestamp}\u{1f}{body_signature}"))
+        .await
     {
         webhook::unauthorized(res, "DingTalk callback replay");
         return;

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use cokret_bridge_runtime::app::{AppletResolver, ResolvedActor, ResolvedRealm};
 use cokret_bridge_runtime::db::DatabaseManager;
-use cokret_bridge_runtime::{BridgeError, Result};
+use cokret_bridge_runtime::{BridgeError, Result, run_blocking};
 use diesel::prelude::*;
 use diesel_migrations::{EmbeddedMigrations, embed_migrations};
 use serde_json::json;
@@ -325,6 +325,122 @@ impl MessageStore {
             .filter(dsl::cokret_realm_id.eq(key).or(dsl::portal_alias.eq(key)))
             .first::<ChannelRealmMapping>(&mut conn)
             .optional()?)
+    }
+}
+
+impl MessageStore {
+    pub async fn portal_for_channel_async(
+        self: Arc<Self>,
+        app_channel: String,
+    ) -> Result<Option<ChannelRealmMapping>> {
+        run_blocking(move || self.portal_for_channel(&app_channel)).await
+    }
+
+    pub async fn set_channel_portal_strand_async(
+        self: Arc<Self>,
+        app_channel: String,
+        strand_id: String,
+    ) -> Result<()> {
+        run_blocking(move || self.set_channel_portal_strand(&app_channel, &strand_id)).await
+    }
+
+    pub async fn channel_for_realm_async(
+        self: Arc<Self>,
+        realm_id: String,
+    ) -> Result<Option<ChannelRealmMapping>> {
+        run_blocking(move || self.channel_for_realm(&realm_id)).await
+    }
+
+    pub async fn record_message_async(
+        self: Arc<Self>,
+        app_channel: String,
+        app_message_id: String,
+        normalized_sender: String,
+        cokret_event_id: String,
+        realm_id: String,
+    ) -> Result<()> {
+        run_blocking(move || {
+            self.record_message(
+                &app_channel,
+                &app_message_id,
+                &normalized_sender,
+                &cokret_event_id,
+                &realm_id,
+            )
+        })
+        .await
+    }
+
+    pub async fn event_for_channel_message_async(
+        self: Arc<Self>,
+        app_channel: String,
+        app_message_id: String,
+        normalized_sender: String,
+    ) -> Result<Option<String>> {
+        run_blocking(move || {
+            self.event_for_channel_message(&app_channel, &app_message_id, &normalized_sender)
+        })
+        .await
+    }
+
+    pub async fn event_for_channel_message_target_async(
+        self: Arc<Self>,
+        app_channel: String,
+        app_message_id: String,
+    ) -> Result<Option<String>> {
+        run_blocking(move || self.event_for_channel_message_target(&app_channel, &app_message_id))
+            .await
+    }
+
+    pub async fn app_message_for_event_async(
+        self: Arc<Self>,
+        cokret_event_id: String,
+    ) -> Result<Option<String>> {
+        run_blocking(move || self.app_message_for_event(&cokret_event_id)).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_user_async(
+        self: Arc<Self>,
+        protocol: String,
+        tenant: String,
+        external_user_id: String,
+        actor_id: String,
+        profile_event_ref: String,
+        accountability_grant_ref: String,
+        authorization_ref: String,
+        display: Option<String>,
+    ) -> Result<()> {
+        run_blocking(move || {
+            self.upsert_user(
+                &protocol,
+                &tenant,
+                &external_user_id,
+                &actor_id,
+                &profile_event_ref,
+                &accountability_grant_ref,
+                &authorization_ref,
+                display.as_deref(),
+            )
+        })
+        .await
+    }
+
+    pub async fn ghost_actor_for_app_user_async(
+        self: Arc<Self>,
+        protocol: String,
+        tenant: String,
+        external_user_id: String,
+    ) -> Result<Option<UserMapping>> {
+        run_blocking(move || self.ghost_actor_for_app_user(&protocol, &tenant, &external_user_id))
+            .await
+    }
+
+    pub async fn user_by_actor_async(
+        self: Arc<Self>,
+        actor_id: String,
+    ) -> Result<Option<UserMapping>> {
+        run_blocking(move || self.user_by_actor(&actor_id)).await
     }
 }
 

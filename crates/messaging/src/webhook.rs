@@ -8,7 +8,7 @@ use base64::Engine as _;
 use cbc::Decryptor;
 use cbc::cipher::block_padding::Pkcs7;
 use cbc::cipher::{BlockDecryptMut, KeyIvInit};
-use cokret_bridge_runtime::ReplayGuardStore;
+use cokret_bridge_runtime::{ReplayGuardStore, run_blocking};
 use hmac::{Hmac, KeyInit, Mac};
 use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
@@ -94,11 +94,13 @@ impl ReplayWindow {
     /// Returns true when the key is already present in the unexpired replay
     /// window. Does not record the key. A store failure fails closed (treated
     /// as a replay) so a database outage cannot open the replay window.
-    pub fn contains(&self, key: &str) -> bool {
+    pub async fn contains(&self, key: &str) -> bool {
         if key.trim().is_empty() {
             return false;
         }
-        match self.store.contains(key) {
+        let store = self.store.clone();
+        let key = key.to_owned();
+        match run_blocking(move || store.contains(&key)).await {
             Ok(seen) => seen,
             Err(err) => {
                 tracing::warn!(error = %err, "replay guard probe failed; failing closed");
@@ -109,12 +111,14 @@ impl ReplayWindow {
 
     /// Returns true when the key is fresh and records it; false means replay.
     /// A store failure fails closed (the delivery is treated as a replay).
-    pub fn check_and_record(&self, key: impl Into<String>) -> bool {
+    pub async fn check_and_record(&self, key: impl Into<String>) -> bool {
         let key = key.into();
         if key.trim().is_empty() {
             return false;
         }
-        match self.store.check_and_record(&key, self.ttl_secs) {
+        let store = self.store.clone();
+        let ttl_secs = self.ttl_secs;
+        match run_blocking(move || store.check_and_record(&key, ttl_secs)).await {
             Ok(fresh) => fresh,
             Err(err) => {
                 tracing::warn!(error = %err, "replay guard record failed; failing closed");
@@ -648,23 +652,23 @@ mod tests {
     }
 
     #[cfg(feature = "sqlite")]
-    #[test]
-    fn replay_window_rejects_duplicate() {
+    #[tokio::test]
+    async fn replay_window_rejects_duplicate() {
         let window = memory_replay_window(Duration::from_secs(60));
-        assert!(window.check_and_record("a"));
-        assert!(!window.check_and_record("a"));
-        assert!(window.check_and_record("b"));
+        assert!(window.check_and_record("a").await);
+        assert!(!window.check_and_record("a").await);
+        assert!(window.check_and_record("b").await);
         // Empty keys are never accepted.
-        assert!(!window.check_and_record("  "));
+        assert!(!window.check_and_record("  ").await);
     }
 
     #[cfg(feature = "sqlite")]
-    #[test]
-    fn replay_window_contains_does_not_record() {
+    #[tokio::test]
+    async fn replay_window_contains_does_not_record() {
         let window = memory_replay_window(Duration::from_secs(60));
-        assert!(!window.contains("a"));
-        assert!(window.check_and_record("a"));
-        assert!(window.contains("a"));
+        assert!(!window.contains("a").await);
+        assert!(window.check_and_record("a").await);
+        assert!(window.contains("a").await);
     }
 
     #[test]

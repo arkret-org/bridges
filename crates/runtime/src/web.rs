@@ -6,7 +6,7 @@ use std::sync::{Arc, OnceLock};
 
 use ::metrics::{counter, describe_counter};
 use cokret::identity::{ResolverFailMode, ResolverPolicy};
-use cokret::models::AppletTransactionRequestBody;
+use cokret::models::{AppletTransactionOutcome, AppletTransactionRequestBody};
 use cokret::signatures::http_signature::{
     Component, HttpMessageVerificationError, SignatureInput, SignaturePolicyError,
     SignatureVerificationPolicy, parse_signature_input, public_key_from_bytes,
@@ -30,6 +30,7 @@ use crate::error::{BridgeError, Result};
 use crate::idempotency::{
     EventDedupStore, TransactionClaim, TransactionIdempotencyStore, TransactionReplayKey,
 };
+use crate::run_blocking;
 
 static PROMETHEUS_HANDLE: OnceLock<std::result::Result<PrometheusHandle, String>> = OnceLock::new();
 const APPLET_TRANSACTION_OPERATION_ID: &str = "ck.edge.applet.command.transaction";
@@ -43,6 +44,25 @@ const APPLET_TRANSACTION_SIGNATURE_MAX_CLOCK_SKEW_SECS: i64 = 30;
 const MAX_APPLET_TRANSACTION_BODY_BYTES: usize = 1024 * 1024;
 const SOURCE_SERVICE_DID_HEADER: &str = "source-service-did";
 const DESTINATION_SERVICE_DID_HEADER: &str = "destination-service-did";
+
+#[derive(Clone)]
+struct OwnedTransactionReplayKey {
+    source_service_did: String,
+    destination_service_did: String,
+    idempotency_key: String,
+}
+
+impl OwnedTransactionReplayKey {
+    fn as_replay(&self) -> TransactionReplayKey<'_> {
+        TransactionReplayKey {
+            operation_id: APPLET_TRANSACTION_OPERATION_ID,
+            direction: APPLET_TRANSACTION_DIRECTION,
+            source_service_did: &self.source_service_did,
+            destination_service_did: &self.destination_service_did,
+            idempotency_key: &self.idempotency_key,
+        }
+    }
+}
 
 /// Start the web service and run it blocking. `extra` is each app adapter's
 /// webhook routes (optional).
@@ -72,7 +92,7 @@ pub async fn serve(ctx: Arc<BridgeContext>, extra: Option<Router>) -> Result<()>
         dedup,
         ctx.handled_event_kinds(),
         event_proof_resolver.clone(),
-    ));
+    )?);
     let applet = applet_router(AppletWebState {
         handler,
         config: ctx.config.clone(),
@@ -202,6 +222,46 @@ struct AppletWebState {
     config: Arc<Config>,
     idempotency: Arc<dyn TransactionIdempotencyStore>,
     event_proof_resolver: Arc<CompositeDidResolver>,
+}
+
+async fn claim_transaction(
+    store: Arc<dyn TransactionIdempotencyStore>,
+    replay: OwnedTransactionReplayKey,
+    hash: String,
+    source_signature_anchor: String,
+) -> Result<TransactionClaim> {
+    run_blocking(move || {
+        let replay = replay.as_replay();
+        store.claim(&replay, &hash, &source_signature_anchor)
+    })
+    .await
+}
+
+async fn release_transaction_claim(
+    store: Arc<dyn TransactionIdempotencyStore>,
+    replay: OwnedTransactionReplayKey,
+    hash: String,
+    source_signature_anchor: String,
+) -> Result<()> {
+    run_blocking(move || {
+        let replay = replay.as_replay();
+        store.release(&replay, &hash, &source_signature_anchor)
+    })
+    .await
+}
+
+async fn record_transaction_outcome(
+    store: Arc<dyn TransactionIdempotencyStore>,
+    replay: OwnedTransactionReplayKey,
+    hash: String,
+    source_signature_anchor: String,
+    response: AppletTransactionOutcome,
+) -> Result<()> {
+    run_blocking(move || {
+        let replay = replay.as_replay();
+        store.record(&replay, &hash, &source_signature_anchor, &response)
+    })
+    .await
 }
 
 struct VerifiedAppletHttpRequest {
@@ -362,12 +422,10 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
     }
 
     let destination = verified.destination_service_did.clone();
-    let replay = TransactionReplayKey {
-        operation_id: APPLET_TRANSACTION_OPERATION_ID,
-        direction: APPLET_TRANSACTION_DIRECTION,
-        source_service_did: &source,
-        destination_service_did: &destination,
-        idempotency_key: &idempotency_key,
+    let replay = OwnedTransactionReplayKey {
+        source_service_did: source.clone(),
+        destination_service_did: destination,
+        idempotency_key: idempotency_key.clone(),
     };
     let source_signature_anchor =
         match build_source_signature_anchor(&verified, &request_hash, &idempotency_key) {
@@ -381,9 +439,13 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
 
     // §7.3: persist the idempotency claim before any side effect (the claim is
     // a durable `pending` record; the completed outcome replaces it below).
-    match state
-        .idempotency
-        .claim(&replay, &request_hash, &source_signature_anchor)
+    match claim_transaction(
+        state.idempotency.clone(),
+        replay.clone(),
+        request_hash.clone(),
+        source_signature_anchor.clone(),
+    )
+    .await
     {
         Ok(TransactionClaim::Duplicate(response)) => {
             record_applet_transaction("duplicate");
@@ -420,37 +482,81 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         }
     }
 
-    if let Err(err) = verify_transaction_events(state.event_proof_resolver.as_ref(), &body) {
-        if let Err(release_err) =
-            state
-                .idempotency
-                .release(&replay, &request_hash, &source_signature_anchor)
-        {
-            tracing::warn!(error = %release_err, "failed to release idempotency claim");
+    let event_proof_resolver = state.event_proof_resolver.clone();
+    let body_for_verification = body.clone();
+    let verification_result = run_blocking(move || {
+        Ok(verify_transaction_events(
+            event_proof_resolver.as_ref(),
+            &body_for_verification,
+        ))
+    })
+    .await;
+    match verification_result {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            if let Err(release_err) = release_transaction_claim(
+                state.idempotency.clone(),
+                replay.clone(),
+                request_hash.clone(),
+                source_signature_anchor.clone(),
+            )
+            .await
+            {
+                tracing::warn!(error = %release_err, "failed to release idempotency claim");
+            }
+            record_applet_transaction("unauthorized");
+            unauthorized(res, err);
+            return;
         }
-        record_applet_transaction("unauthorized");
-        unauthorized(res, err);
-        return;
+        Err(err) => {
+            if let Err(release_err) = release_transaction_claim(
+                state.idempotency.clone(),
+                replay.clone(),
+                request_hash.clone(),
+                source_signature_anchor.clone(),
+            )
+            .await
+            {
+                tracing::warn!(error = %release_err, "failed to release idempotency claim");
+            }
+            record_applet_transaction("internal_error");
+            internal_error(res, err.to_string());
+            return;
+        }
     }
 
-    match state.handler.handle_transaction(&idempotency_key, body) {
+    let handler = state.handler.clone();
+    let idempotency_key_for_handler = idempotency_key.clone();
+    match run_blocking(move || {
+        handler
+            .handle_transaction(&idempotency_key_for_handler, body)
+            .map_err(BridgeError::from)
+    })
+    .await
+    {
         Ok(response) => {
-            if let Err(err) = state.idempotency.record(
-                &replay,
-                &request_hash,
-                &source_signature_anchor,
-                &response,
-            ) {
+            if let Err(err) = record_transaction_outcome(
+                state.idempotency.clone(),
+                replay,
+                request_hash,
+                source_signature_anchor,
+                response.clone(),
+            )
+            .await
+            {
                 tracing::warn!(error = %err, "failed to record idempotency outcome");
             }
             record_applet_transaction("accepted");
             res.render(Json(response));
         }
         Err(err) => {
-            if let Err(release_err) =
-                state
-                    .idempotency
-                    .release(&replay, &request_hash, &source_signature_anchor)
+            if let Err(release_err) = release_transaction_claim(
+                state.idempotency.clone(),
+                replay,
+                request_hash,
+                source_signature_anchor,
+            )
+            .await
             {
                 tracing::warn!(error = %release_err, "failed to release idempotency claim");
             }
@@ -470,7 +576,8 @@ async fn applet_actor(req: &mut Request, depot: &mut Depot, res: &mut Response) 
         return;
     }
     let actor_id = req.param::<String>("actor_id").unwrap_or_default();
-    match state.handler.resolve_actor(&actor_id) {
+    let handler = state.handler.clone();
+    match run_blocking(move || handler.resolve_actor(&actor_id).map_err(BridgeError::from)).await {
         Ok(body) => res.render(Json(body)),
         Err(err) => internal_error(res, err.to_string()),
     }
@@ -486,7 +593,8 @@ async fn applet_realm(req: &mut Request, depot: &mut Depot, res: &mut Response) 
         return;
     }
     let realm = req.param::<String>("realm_id_or_alias").unwrap_or_default();
-    match state.handler.resolve_realm(&realm) {
+    let handler = state.handler.clone();
+    match run_blocking(move || handler.resolve_realm(&realm).map_err(BridgeError::from)).await {
         Ok(body) => res.render(Json(body)),
         Err(err) => internal_error(res, err.to_string()),
     }

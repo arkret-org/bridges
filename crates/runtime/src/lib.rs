@@ -30,6 +30,7 @@
 //!   behavior.
 
 pub mod app;
+pub mod blocking;
 pub mod cache;
 mod cokret_edge;
 mod config;
@@ -50,6 +51,7 @@ use std::sync::Arc;
 pub use app::{AppletResolver, ResolvedActor, ResolvedRealm};
 #[cfg(feature = "runtime")]
 pub use app::{BridgeApp, BridgeContext};
+pub use blocking::run_blocking;
 pub use cache::{PersistedToken, TokenCache, TokenStore};
 #[cfg(feature = "db")]
 pub use cokret_edge::DbSeqStore;

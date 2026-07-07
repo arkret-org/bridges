@@ -224,14 +224,14 @@ async fn teams_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response
     // lifetime without this guard. Record only after the submit is accepted so
     // a transient failure stays recoverable by platform redelivery.
     let replay_key = format!("teams:{}", inbound.app_message_id);
-    if state.replay.contains(&replay_key) {
+    if state.replay.contains(&replay_key).await {
         tracing::debug!(activity_id = %inbound.app_message_id, "Teams activity replayed; skipping");
         webhook::ok_json(res, json!({ "ok": true }));
         return;
     }
     let outcome = webhook::submit(state.ctx.clone(), "teams", inbound).await;
     if outcome == webhook::SubmitOutcome::Accepted {
-        state.replay.check_and_record(replay_key);
+        state.replay.check_and_record(replay_key).await;
     }
     webhook::respond_submit(res, outcome);
 }

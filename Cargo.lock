@@ -632,7 +632,7 @@ dependencies = [
  "rand_core 0.9.5",
  "regex",
  "reqwest 0.13.4",
- "salvo",
+ "salvo 0.93.0 (git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863)",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -747,7 +747,7 @@ dependencies = [
  "hmac 0.13.0",
  "jsonwebtoken",
  "reqwest 0.13.4",
- "salvo",
+ "salvo 0.93.0 (git+https://github.com/salvo-rs/salvo.git?branch=main)",
  "serde",
  "serde_json",
  "sha1 0.11.0",
@@ -797,7 +797,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "parking_lot",
  "reqwest 0.13.4",
- "salvo",
+ "salvo 0.93.0 (git+https://github.com/salvo-rs/salvo.git?branch=main)",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -906,8 +906,8 @@ dependencies = [
  "hex",
  "hmac 0.13.0",
  "regex",
- "salvo",
- "salvo-oapi",
+ "salvo 0.93.0 (git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863)",
+ "salvo-oapi 0.93.0 (git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863)",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -973,8 +973,8 @@ dependencies = [
  "getrandom 0.2.17",
  "getrandom 0.4.2",
  "hex",
- "salvo",
- "salvo-oapi",
+ "salvo 0.93.0 (git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863)",
+ "salvo-oapi 0.93.0 (git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863)",
  "serde",
  "sha2 0.11.0",
  "thiserror 2.0.18",
@@ -3728,11 +3728,20 @@ name = "salvo"
 version = "0.93.0"
 source = "git+https://github.com/salvo-rs/salvo.git?branch=main#d1365f0d0e8e0f35ed3a04fb2faec861881c9863"
 dependencies = [
- "salvo-oapi",
+ "salvo-oapi 0.93.0 (git+https://github.com/salvo-rs/salvo.git?branch=main)",
  "salvo-proxy",
  "salvo-rate-limiter",
- "salvo_core",
+ "salvo_core 0.93.0 (git+https://github.com/salvo-rs/salvo.git?branch=main)",
  "salvo_extra",
+]
+
+[[package]]
+name = "salvo"
+version = "0.93.0"
+source = "git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863#d1365f0d0e8e0f35ed3a04fb2faec861881c9863"
+dependencies = [
+ "salvo-oapi 0.93.0 (git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863)",
+ "salvo_core 0.93.0 (git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863)",
 ]
 
 [[package]]
@@ -3754,8 +3763,42 @@ dependencies = [
  "regex",
  "rust-embed",
  "rust_decimal",
- "salvo-oapi-macros",
- "salvo_core",
+ "salvo-oapi-macros 0.93.0 (git+https://github.com/salvo-rs/salvo.git?branch=main)",
+ "salvo_core 0.93.0 (git+https://github.com/salvo-rs/salvo.git?branch=main)",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "smallvec",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tracing",
+ "ulid",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "salvo-oapi"
+version = "0.93.0"
+source = "git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863#d1365f0d0e8e0f35ed3a04fb2faec861881c9863"
+dependencies = [
+ "anyhow",
+ "base64",
+ "bytes",
+ "chrono",
+ "compact_str",
+ "futures-util",
+ "http",
+ "indexmap 2.14.0",
+ "inventory",
+ "mime-infer",
+ "parking_lot",
+ "regex",
+ "rust-embed",
+ "rust_decimal",
+ "salvo-oapi-macros 0.93.0 (git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863)",
+ "salvo_core 0.93.0 (git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863)",
  "serde",
  "serde_json",
  "serde_norway",
@@ -3778,8 +3821,22 @@ dependencies = [
  "proc-macro2",
  "proc-macro2-diagnostics",
  "quote",
- "salvo-serde-util",
- "salvo_core",
+ "salvo-serde-util 0.93.0 (git+https://github.com/salvo-rs/salvo.git?branch=main)",
+ "salvo_core 0.93.0 (git+https://github.com/salvo-rs/salvo.git?branch=main)",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "salvo-oapi-macros"
+version = "0.93.0"
+source = "git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863#d1365f0d0e8e0f35ed3a04fb2faec861881c9863"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "proc-macro2-diagnostics",
+ "quote",
+ "salvo-serde-util 0.93.0 (git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863)",
+ "salvo_core 0.93.0 (git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863)",
  "syn 2.0.117",
 ]
 
@@ -3795,7 +3852,7 @@ dependencies = [
  "hyper-util",
  "percent-encoding",
  "reqwest 0.13.4",
- "salvo_core",
+ "salvo_core 0.93.0 (git+https://github.com/salvo-rs/salvo.git?branch=main)",
  "tokio",
  "tracing",
 ]
@@ -3806,7 +3863,7 @@ version = "0.93.0"
 source = "git+https://github.com/salvo-rs/salvo.git?branch=main#d1365f0d0e8e0f35ed3a04fb2faec861881c9863"
 dependencies = [
  "moka",
- "salvo_core",
+ "salvo_core 0.93.0 (git+https://github.com/salvo-rs/salvo.git?branch=main)",
  "serde",
  "time",
  "tokio",
@@ -3817,6 +3874,16 @@ dependencies = [
 name = "salvo-serde-util"
 version = "0.93.0"
 source = "git+https://github.com/salvo-rs/salvo.git?branch=main#d1365f0d0e8e0f35ed3a04fb2faec861881c9863"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "salvo-serde-util"
+version = "0.93.0"
+source = "git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863#d1365f0d0e8e0f35ed3a04fb2faec861881c9863"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3857,7 +3924,7 @@ dependencies = [
  "quinn",
  "rand 0.10.1",
  "regex",
- "salvo_macros",
+ "salvo_macros 0.93.0 (git+https://github.com/salvo-rs/salvo.git?branch=main)",
  "serde",
  "serde-xml-rs",
  "serde_json",
@@ -3874,6 +3941,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "salvo_core"
+version = "0.93.0"
+source = "git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863#d1365f0d0e8e0f35ed3a04fb2faec861881c9863"
+dependencies = [
+ "async-trait",
+ "base64",
+ "bytes",
+ "chardetng",
+ "content_inspector",
+ "cookie",
+ "enumflags2",
+ "form_urlencoded",
+ "futures-channel",
+ "futures-util",
+ "headers",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "indexmap 2.14.0",
+ "mime",
+ "mime-infer",
+ "multimap",
+ "multra",
+ "parking_lot",
+ "percent-encoding",
+ "pin-project",
+ "rand 0.10.1",
+ "regex",
+ "salvo_macros 0.93.0 (git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863)",
+ "serde",
+ "serde-xml-rs",
+ "serde_json",
+ "sync_wrapper",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "salvo_extra"
 version = "0.93.0"
 source = "git+https://github.com/salvo-rs/salvo.git?branch=main#d1365f0d0e8e0f35ed3a04fb2faec861881c9863"
@@ -3884,7 +3993,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "pin-project",
- "salvo_core",
+ "salvo_core 0.93.0 (git+https://github.com/salvo-rs/salvo.git?branch=main)",
  "serde",
  "serde_json",
  "tokio",
@@ -3902,7 +4011,19 @@ dependencies = [
  "proc-macro-crate",
  "proc-macro2",
  "quote",
- "salvo-serde-util",
+ "salvo-serde-util 0.93.0 (git+https://github.com/salvo-rs/salvo.git?branch=main)",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "salvo_macros"
+version = "0.93.0"
+source = "git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863#d1365f0d0e8e0f35ed3a04fb2faec861881c9863"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "salvo-serde-util 0.93.0 (git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863)",
  "syn 2.0.117",
 ]
 

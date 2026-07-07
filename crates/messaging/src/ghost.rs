@@ -473,7 +473,9 @@ pub(crate) async fn create_portal_strand(
     // discarded first signature). strand_create_payload semantic validation
     // requires object.created_by == actor_id (both are the service DID here) and
     // object.created_at == the envelope created_at.
-    let mut event = edge.mint_event_unsigned("ck.strand.create", &realm, payload)?;
+    let mut event = edge
+        .mint_event_unsigned_async("ck.strand.create", &realm, payload)
+        .await?;
     event.created_at = strand_created_at;
     event.external_ref = Some(location.clone());
     edge.resign_event(&mut event)?;

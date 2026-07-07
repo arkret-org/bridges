@@ -173,7 +173,12 @@ impl MessageContext {
     ) {
         // §16: no realm to bind to ⇒ nothing durable to emit. (Provisioning /
         // mapping-gap failures fall here; the caller already logged them.)
-        let realm_id = match self.store.portal_for_channel(&msg.app_channel) {
+        let realm_id = match self
+            .store
+            .clone()
+            .portal_for_channel_async(msg.app_channel.clone())
+            .await
+        {
             Ok(Some(row)) => row.cokret_realm_id,
             Ok(None) => return,
             Err(lookup_err) => {
@@ -439,7 +444,10 @@ impl MessageContext {
                 async move {
                     // §10.1 step 1: the persisted location ↔ (realm_id, strand_id)
                     // mapping.
-                    let row = store.portal_for_channel(&app_channel)?;
+                    let row = store
+                        .clone()
+                        .portal_for_channel_async(app_channel.clone())
+                        .await?;
                     let alias = row.as_ref().and_then(|row| row.portal_alias.clone());
                     if let Some(row) = row
                         && row.cokret_realm_id == realm_id
@@ -466,7 +474,9 @@ impl MessageContext {
                                 .await?
                             }
                         };
-                    store.set_channel_portal_strand(&app_channel, &strand_id)?;
+                    store
+                        .set_channel_portal_strand_async(app_channel, strand_id.clone())
+                        .await?;
                     Ok(strand_id)
                 }
             })
@@ -540,7 +550,9 @@ impl MessageContext {
         }
         let realm = self
             .store
-            .portal_for_channel(&delete.app_channel)?
+            .clone()
+            .portal_for_channel_async(delete.app_channel.clone())
+            .await?
             .map(|row| row.cokret_realm_id)
             .ok_or_else(|| {
                 BridgeError::App(format!(
@@ -562,10 +574,13 @@ impl MessageContext {
                 let realm_for_submit = realm.clone();
                 let delete = delete.clone();
                 async move {
-                    let Some(target_event_id) = store.event_for_channel_message_target(
-                        &mapping_channel_key,
-                        &external_target_event_id,
-                    )?
+                    let Some(target_event_id) = store
+                        .clone()
+                        .event_for_channel_message_target_async(
+                            mapping_channel_key.clone(),
+                            external_target_event_id.clone(),
+                        )
+                        .await?
                     else {
                         return Ok::<AppDeleteOutcome, BridgeError>(AppDeleteOutcome::Ignored {
                             reason_code: "app_delete_unmapped_target",
@@ -573,11 +588,15 @@ impl MessageContext {
                     };
                     let protocol = bridge_protocol(&config);
                     let tenant = bridge_tenant(&config);
-                    let mapping = match store.ghost_actor_for_app_user(
-                        &protocol,
-                        &tenant,
-                        &external_actor_id,
-                    )? {
+                    let mapping = match store
+                        .clone()
+                        .ghost_actor_for_app_user_async(
+                            protocol.clone(),
+                            tenant.clone(),
+                            external_actor_id.clone(),
+                        )
+                        .await?
+                    {
                         Some(mapping) => mapping,
                         None => {
                             let provisioned = provision_ghost_actor(
@@ -595,18 +614,27 @@ impl MessageContext {
                                 .display_name
                                 .as_deref()
                                 .or(Some(external_actor_id.as_str()));
-                            store.upsert_user(
-                                &protocol,
-                                &tenant,
-                                &external_actor_id,
-                                &actor_id,
-                                &provisioned.profile_event_ref,
-                                &provisioned.accountability_grant_ref,
-                                &provisioned.authorization_ref,
-                                display_name,
-                            )?;
                             store
-                                .ghost_actor_for_app_user(&protocol, &tenant, &external_actor_id)?
+                                .clone()
+                                .upsert_user_async(
+                                    protocol.clone(),
+                                    tenant.clone(),
+                                    external_actor_id.clone(),
+                                    actor_id,
+                                    provisioned.profile_event_ref.clone(),
+                                    provisioned.accountability_grant_ref.clone(),
+                                    provisioned.authorization_ref.clone(),
+                                    display_name.map(str::to_owned),
+                                )
+                                .await?;
+                            store
+                                .clone()
+                                .ghost_actor_for_app_user_async(
+                                    protocol.clone(),
+                                    tenant.clone(),
+                                    external_actor_id.clone(),
+                                )
+                                .await?
                                 .ok_or_else(|| {
                                     BridgeError::Database(
                                         "ghost actor provisioning row was not persisted".into(),
@@ -660,7 +688,9 @@ impl MessageContext {
 
         let realm = self
             .store
-            .portal_for_channel(&msg.app_channel)?
+            .clone()
+            .portal_for_channel_async(msg.app_channel.clone())
+            .await?
             .map(|row| row.cokret_realm_id)
             .ok_or_else(|| {
                 BridgeError::App(format!(
@@ -699,18 +729,26 @@ impl MessageContext {
                 let realm_for_submit = realm.clone();
                 let realm_for_record = realm.clone();
                 async move {
-                    if let Some(existing_event_id) = store.event_for_channel_message(
-                        &mapping_channel_key,
-                        &external_event_id,
-                        &external_user_id,
-                    )? {
+                    if let Some(existing_event_id) = store
+                        .clone()
+                        .event_for_channel_message_async(
+                            mapping_channel_key.clone(),
+                            external_event_id.clone(),
+                            external_user_id.clone(),
+                        )
+                        .await?
+                    {
                         return Ok::<String, BridgeError>(existing_event_id);
                     }
-                    let mapping = match store.ghost_actor_for_app_user(
-                        &protocol,
-                        &tenant,
-                        &external_user_id,
-                    )? {
+                    let mapping = match store
+                        .clone()
+                        .ghost_actor_for_app_user_async(
+                            protocol.clone(),
+                            tenant.clone(),
+                            external_user_id.clone(),
+                        )
+                        .await?
+                    {
                         Some(mapping) => mapping,
                         None => {
                             let provisioned = provision_ghost_actor(
@@ -728,18 +766,27 @@ impl MessageContext {
                                 .display_name
                                 .as_deref()
                                 .or(Some(external_user_id.as_str()));
-                            store.upsert_user(
-                                &protocol,
-                                &tenant,
-                                &external_user_id,
-                                &actor_id,
-                                &provisioned.profile_event_ref,
-                                &provisioned.accountability_grant_ref,
-                                &provisioned.authorization_ref,
-                                display_name,
-                            )?;
                             store
-                                .ghost_actor_for_app_user(&protocol, &tenant, &external_user_id)?
+                                .clone()
+                                .upsert_user_async(
+                                    protocol.clone(),
+                                    tenant.clone(),
+                                    external_user_id.clone(),
+                                    actor_id,
+                                    provisioned.profile_event_ref.clone(),
+                                    provisioned.accountability_grant_ref.clone(),
+                                    provisioned.authorization_ref.clone(),
+                                    display_name.map(str::to_owned),
+                                )
+                                .await?;
+                            store
+                                .clone()
+                                .ghost_actor_for_app_user_async(
+                                    protocol.clone(),
+                                    tenant.clone(),
+                                    external_user_id.clone(),
+                                )
+                                .await?
                                 .ok_or_else(|| {
                                     BridgeError::Database(
                                         "ghost actor provisioning row was not persisted".into(),
@@ -764,13 +811,15 @@ impl MessageContext {
                             &mapping.authorization_ref,
                         )
                         .await?;
-                    store.record_message(
-                        &mapping_channel_key,
-                        &external_event_id,
-                        &external_user_id,
-                        &event_id,
-                        &realm_for_record,
-                    )?;
+                    store
+                        .record_message_async(
+                            mapping_channel_key,
+                            external_event_id,
+                            external_user_id,
+                            event_id.clone(),
+                            realm_for_record,
+                        )
+                        .await?;
                     Ok::<String, BridgeError>(event_id)
                 }
             })
@@ -946,17 +995,20 @@ struct MessageAdapter<M: MessageBridge> {
     ctx: Arc<MessageContext>,
 }
 
-fn sender_display_for_event(store: &MessageStore, event: &Event) -> Result<String> {
-    let actor_id = event.actor_id.to_string();
-    let mut display = match store.user_by_actor(&actor_id)? {
+async fn sender_display_for_event(
+    store: Arc<MessageStore>,
+    actor_id: String,
+    executed_by: Option<String>,
+) -> Result<String> {
+    let mut display = match store.user_by_actor_async(actor_id.clone()).await? {
         Some(row) => row
             .display_name
             .filter(|name| !name.trim().is_empty())
             .unwrap_or(row.external_user_id),
-        None => actor_id,
+        None => actor_id.clone(),
     };
-    if let Some(executed_by) = event.executed_by.as_ref()
-        && executed_by != &event.actor_id
+    if let Some(executed_by) = executed_by
+        && executed_by != actor_id
     {
         display = format!("{display} via {executed_by}");
     }
@@ -985,7 +1037,12 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
             let Some(target) = event.redacts.as_ref() else {
                 return Ok(());
             };
-            let Some(app_message_id) = self.ctx.store.app_message_for_event(target.as_ref())?
+            let Some(app_message_id) = self
+                .ctx
+                .store
+                .clone()
+                .app_message_for_event_async(target.as_ref().to_owned())
+                .await?
             else {
                 return Ok(());
             };
@@ -1011,11 +1068,24 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
             return Ok(());
         }
         let event_id = event.event_id.to_string();
-        if self.ctx.store.app_message_for_event(&event_id)?.is_some() {
+        if self
+            .ctx
+            .store
+            .clone()
+            .app_message_for_event_async(event_id.clone())
+            .await?
+            .is_some()
+        {
             return Ok(());
         }
         let realm_id = event.realm_id.to_string();
-        let Some(channel_realm) = self.ctx.store.channel_for_realm(&realm_id)? else {
+        let Some(channel_realm) = self
+            .ctx
+            .store
+            .clone()
+            .channel_for_realm_async(realm_id.clone())
+            .await?
+        else {
             tracing::debug!(realm = %realm_id, "realm has no channel mapping, dropping");
             return Ok(());
         };
@@ -1039,7 +1109,12 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
         }
         let body = extract_plain_body(&event.content);
         let attachment = extract_attachment(&event.content);
-        let sender_display = sender_display_for_event(&self.ctx.store, &event)?;
+        let sender_display = sender_display_for_event(
+            self.ctx.store.clone(),
+            event.actor_id.to_string(),
+            event.executed_by.as_ref().map(ToString::to_string),
+        )
+        .await?;
         let out = OutboundAppMessage {
             app_channel: channel.clone(),
             sender_display,
@@ -1089,13 +1164,17 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
                 "adapter returned no app message id; outbound mapping not recorded"
             );
         } else {
-            self.ctx.store.record_message(
-                &mapping_channel_key,
-                &app_message_id,
-                event.actor_id.as_ref(),
-                event.event_id.as_ref(),
-                &realm_id,
-            )?;
+            self.ctx
+                .store
+                .clone()
+                .record_message_async(
+                    mapping_channel_key,
+                    app_message_id,
+                    event.actor_id.to_string(),
+                    event.event_id.to_string(),
+                    realm_id,
+                )
+                .await?;
         }
         Ok(())
     }

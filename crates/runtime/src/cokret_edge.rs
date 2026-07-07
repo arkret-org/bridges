@@ -99,7 +99,7 @@ pub trait SeqStore: Send + Sync + 'static {
 pub struct SeqAllocator {
     store: Arc<dyn SeqStore>,
     key: String,
-    state: Mutex<SeqWindow>,
+    state: Arc<Mutex<SeqWindow>>,
 }
 
 #[derive(Default)]
@@ -118,7 +118,7 @@ impl SeqAllocator {
         Self {
             store,
             key: key.into(),
-            state: Mutex::new(SeqWindow::default()),
+            state: Arc::new(Mutex::new(SeqWindow::default())),
         }
     }
 
@@ -134,6 +134,41 @@ impl SeqAllocator {
         let seq = win.next;
         win.next += 1;
         Ok(seq as u64)
+    }
+
+    /// Async-path allocation that moves the synchronous backing-store refill
+    /// onto Tokio's blocking pool. The hot path stays lock-only when the current
+    /// reserved window still has numbers.
+    pub async fn alloc_blocking(&self) -> Result<u64> {
+        if let Some(seq) = self.try_alloc_from_window() {
+            return Ok(seq);
+        }
+
+        let store = self.store.clone();
+        let key = self.key.clone();
+        let state = self.state.clone();
+        crate::run_blocking(move || {
+            let mut win = state.lock();
+            if win.next >= win.limit {
+                let reserved = store.reserve_block(&key, SEQ_RESERVE_BLOCK)?;
+                win.next = reserved - SEQ_RESERVE_BLOCK + 1;
+                win.limit = reserved + 1;
+            }
+            let seq = win.next;
+            win.next += 1;
+            Ok(seq as u64)
+        })
+        .await
+    }
+
+    fn try_alloc_from_window(&self) -> Option<u64> {
+        let mut win = self.state.try_lock()?;
+        if win.next >= win.limit {
+            return None;
+        }
+        let seq = win.next;
+        win.next += 1;
+        Some(seq as u64)
     }
 }
 
@@ -312,6 +347,23 @@ impl CokretEdge {
         self.build_service_event(kind, realm_id, content)
     }
 
+    /// Async variant of [`Self::mint_event_unsigned`] for runtime hot paths:
+    /// any backing-store refill for actor sequence numbers runs on the blocking
+    /// pool instead of a Tokio worker.
+    pub async fn mint_event_unsigned_async<T>(
+        &self,
+        kind: &str,
+        realm_id: &RealmId,
+        content: T,
+    ) -> Result<Event>
+    where
+        T: Serialize,
+    {
+        let content = spec_payload_value(content)?;
+        self.build_service_event_async(kind, realm_id, content)
+            .await
+    }
+
     /// Build an unsigned event authored by the service actor (seq + HLC
     /// allocated, no proof).
     ///
@@ -328,6 +380,26 @@ impl CokretEdge {
     {
         let content = spec_payload_value(content)?;
         let seq = self.seq.alloc()?;
+        let hlc = self.next_hlc(realm_id)?;
+        let mut event = Event::new(
+            kind,
+            realm_id.clone(),
+            self.service_did.clone(),
+            seq,
+            hlc,
+            content,
+        )?;
+        event.applet_id = Some(self.applet_id.clone());
+        Ok(event)
+    }
+
+    async fn build_service_event_async(
+        &self,
+        kind: &str,
+        realm_id: &RealmId,
+        content: Value,
+    ) -> Result<Event> {
+        let seq = self.seq.alloc_blocking().await?;
         let hlc = self.next_hlc(realm_id)?;
         let mut event = Event::new(
             kind,
@@ -383,6 +455,24 @@ impl CokretEdge {
         let authorization_ref = validate_authorization_ref(authorization_ref)?;
         let content = spec_payload_value(content)?;
         let seq = self.seq.alloc()?;
+        let hlc = self.next_hlc(realm_id)?;
+        let mut event = Event::new(kind, realm_id.clone(), actor.clone(), seq, hlc, content)?;
+        event.executed_by = Some(self.service_did.clone());
+        event.authorization_ref = Some(authorization_ref);
+        event.applet_id = Some(self.applet_id.clone());
+        Ok(event)
+    }
+
+    async fn build_delegated_event_async(
+        &self,
+        actor: &cokret::Did,
+        kind: &str,
+        realm_id: &RealmId,
+        content: Value,
+        authorization_ref: &str,
+    ) -> Result<Event> {
+        let authorization_ref = validate_authorization_ref(authorization_ref)?;
+        let seq = self.seq.alloc_blocking().await?;
         let hlc = self.next_hlc(realm_id)?;
         let mut event = Event::new(kind, realm_id.clone(), actor.clone(), seq, hlc, content)?;
         event.executed_by = Some(self.service_did.clone());
@@ -461,11 +551,14 @@ impl CokretEdge {
         E: Serialize,
     {
         let realm = RealmId::new(realm_id.to_owned())?;
+        let content = spec_payload_value(content)?;
+        let external_ref = spec_external_ref_value(external_ref)?;
         // Set the signed-envelope `external_ref` before the single signature so
         // the proof covers it (no discarded first sign).
-        let mut event =
-            self.build_delegated_event(actor, kind, &realm, content, authorization_ref)?;
-        event.external_ref = Some(spec_external_ref_value(external_ref)?);
+        let mut event = self
+            .build_delegated_event_async(actor, kind, &realm, content, authorization_ref)
+            .await?;
+        event.external_ref = Some(external_ref);
         self.sign_as_service(&mut event)?;
         self.submit_event(&event).await
     }
@@ -487,17 +580,21 @@ impl CokretEdge {
         E: Serialize,
     {
         let realm = RealmId::new(realm_id.to_owned())?;
+        let content = spec_payload_value(content)?;
+        let external_ref = spec_external_ref_value(external_ref)?;
         // Set `redacts` + `external_ref` before the single signature so the proof
         // covers them (no discarded first sign).
-        let mut event = self.build_delegated_event(
-            actor,
-            "ck.message.redact",
-            &realm,
-            content,
-            authorization_ref,
-        )?;
+        let mut event = self
+            .build_delegated_event_async(
+                actor,
+                "ck.message.redact",
+                &realm,
+                content,
+                authorization_ref,
+            )
+            .await?;
         event.redacts = Some(EventId::new(target_event_id.to_owned())?);
-        event.external_ref = Some(spec_external_ref_value(external_ref)?);
+        event.external_ref = Some(external_ref);
         self.sign_as_service(&mut event)?;
         self.submit_event(&event).await
     }
@@ -513,7 +610,7 @@ impl CokretEdge {
         realm_id: &RealmId,
         builder: cokret::AppletBridgeErrorBuilder,
     ) -> Result<String> {
-        let seq = self.seq.alloc()?;
+        let seq = self.seq.alloc_blocking().await?;
         let hlc = self.next_hlc(realm_id)?;
         let mut event = builder.build(seq, hlc)?;
         // applet-integration §8: the signed envelope of every Applet-originated
@@ -740,11 +837,11 @@ impl BridgeAppletHandler {
         dedup: Arc<dyn EventDedupStore>,
         handled_event_kinds: Option<Vec<String>>,
         source_did_resolver: Arc<dyn DidResolver + Send + Sync>,
-    ) -> Self {
+    ) -> Result<Self> {
         let bridge_id = edge.config.bridge.bridge_id.clone();
         let service_did = edge.service_did.clone();
         let verification_method_id = edge.config.cokret.verification_method_id.clone();
-        Self {
+        Ok(Self {
             applet_id: edge.config.cokret.applet_id.clone(),
             service_did: service_did.clone(),
             protocols: vec![bridge_id.clone()],
@@ -766,13 +863,15 @@ impl BridgeAppletHandler {
                 .applet_auth
                 .clone()
                 .unwrap_or_else(|| default_applet_auth(&service_did, &verification_method_id)),
-            inbound_tx: edge.inbound_sender().expect("inbound enabled"),
+            inbound_tx: edge.inbound_sender().ok_or_else(|| {
+                BridgeError::Config("applet handler requires an inbound-enabled edge".into())
+            })?,
             ephemeral_tx: edge.ephemeral_sender(),
             resolver,
             dedup,
             handled_event_kinds,
             source_did_resolver,
-        }
+        })
     }
 
     /// Whether this applet consumes `kind` on the inbound path. Permissive when

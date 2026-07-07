@@ -197,7 +197,7 @@ async fn whatsapp_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
                 // replay forever. Record only after submit/media is accepted so
                 // a transient failure can be recovered by platform redelivery.
                 let replay_key = format!("whatsapp:{message_id}");
-                if state.replay.contains(&replay_key) {
+                if state.replay.contains(&replay_key).await {
                     tracing::debug!(message_id = %message_id, "WhatsApp event replayed; skipping");
                     continue;
                 }
@@ -215,7 +215,7 @@ async fn whatsapp_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
                     )
                     .await;
                     if outcome == webhook::SubmitOutcome::Accepted {
-                        state.replay.check_and_record(replay_key);
+                        state.replay.check_and_record(replay_key).await;
                     }
                     retry |= outcome == webhook::SubmitOutcome::Retry;
                     continue;
@@ -233,7 +233,7 @@ async fn whatsapp_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
                     .await
                     {
                         Ok(_) => {
-                            state.replay.check_and_record(replay_key);
+                            state.replay.check_and_record(replay_key).await;
                         }
                         // The shared media forwarder already ran the inbound
                         // failure audit; only translate retriability here.
