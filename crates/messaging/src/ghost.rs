@@ -8,6 +8,7 @@ use cokret::{
     StrandId, StrandTrackConfig,
 };
 use cokret_bridge_runtime::{BridgeError, Result};
+use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::types::{InboundAppDelete, InboundAppMessage};
@@ -128,18 +129,65 @@ fn ghost_provision_idempotency_key(
     )
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct UserExternalRef {
+    protocol: String,
+    tenant: String,
+    external_user_id: String,
+    source: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct MessageExternalRef {
+    schema: &'static str,
+    protocol: String,
+    tenant: String,
+    external_channel: String,
+    external_event_id: String,
+    normalized_sender: String,
+    source: String,
+    app_channel: String,
+    app_user: String,
+    app_message_id: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DeleteExternalRef {
+    schema: &'static str,
+    protocol: String,
+    tenant: String,
+    external_channel: String,
+    external_target_event_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    external_event_id: Option<String>,
+    normalized_actor: String,
+    operation: &'static str,
+    reason: &'static str,
+    source: String,
+    app_channel: String,
+    app_message_id: String,
+}
+
 fn external_ref_for_user(
     config: &runtime::Config,
     protocol: &str,
     tenant: &str,
     external_user_id: &str,
-) -> Value {
-    json!({
-        "protocol": protocol,
-        "tenant": tenant,
-        "external_user_id": external_user_id,
-        "source": config.bridge.bridge_id.clone(),
-    })
+) -> UserExternalRef {
+    UserExternalRef {
+        protocol: protocol.to_owned(),
+        tenant: tenant.to_owned(),
+        external_user_id: external_user_id.to_owned(),
+        source: config.bridge.bridge_id.clone(),
+    }
+}
+
+fn external_ref_value<T>(external_ref: T) -> Result<Value>
+where
+    T: Serialize,
+{
+    serde_json::to_value(external_ref)
+        .map_err(|error| BridgeError::App(format!("external_ref serialization failed: {error}")))
 }
 
 pub(crate) async fn provision_ghost_actor(
@@ -165,7 +213,12 @@ pub(crate) async fn provision_ghost_actor(
         tenant,
         external_user_id,
         RealmId::new(realm_id.to_owned())?,
-        external_ref_for_user(config, protocol, tenant, external_user_id),
+        external_ref_value(external_ref_for_user(
+            config,
+            protocol,
+            tenant,
+            external_user_id,
+        ))?,
     );
     if let Some(display_name) = display_name {
         request = request.with_display_name(display_name);
@@ -246,25 +299,28 @@ pub(crate) fn message_mapping_channel_key(config: &runtime::Config, app_channel:
     .join(&MESSAGE_MAPPING_KEY_SEPARATOR.to_string())
 }
 
-pub(crate) fn external_ref_for_message(config: &runtime::Config, msg: &InboundAppMessage) -> Value {
+pub(crate) fn external_ref_for_message(
+    config: &runtime::Config,
+    msg: &InboundAppMessage,
+) -> MessageExternalRef {
     let protocol = bridge_protocol(config);
     let tenant = bridge_tenant(config);
     let external_channel = normalized_external_id(&msg.app_channel);
     let external_event_id = normalized_external_id(&msg.app_message_id);
     let normalized_sender = normalized_external_id(&msg.app_user);
 
-    json!({
-        "schema": EXTERNAL_REF_SCHEMA,
-        "protocol": protocol,
-        "tenant": tenant,
-        "external_channel": external_channel,
-        "external_event_id": external_event_id,
-        "normalized_sender": normalized_sender,
-        "source": config.bridge.bridge_id.clone(),
-        "app_channel": msg.app_channel.clone(),
-        "app_user": msg.app_user.clone(),
-        "app_message_id": msg.app_message_id.clone(),
-    })
+    MessageExternalRef {
+        schema: EXTERNAL_REF_SCHEMA,
+        protocol,
+        tenant,
+        external_channel,
+        external_event_id,
+        normalized_sender,
+        source: config.bridge.bridge_id.clone(),
+        app_channel: msg.app_channel.clone(),
+        app_user: msg.app_user.clone(),
+        app_message_id: msg.app_message_id.clone(),
+    }
 }
 
 /// External provenance for an app-side delete signal. This deliberately carries
@@ -272,7 +328,7 @@ pub(crate) fn external_ref_for_message(config: &runtime::Config, msg: &InboundAp
 pub(crate) fn external_ref_for_delete(
     config: &runtime::Config,
     delete: &InboundAppDelete,
-) -> Value {
+) -> DeleteExternalRef {
     let protocol = bridge_protocol(config);
     let tenant = bridge_tenant(config);
     let external_channel = normalized_external_id(&delete.app_channel);
@@ -284,20 +340,20 @@ pub(crate) fn external_ref_for_delete(
         .map(normalized_external_id)
         .filter(|value| !value.is_empty());
 
-    json!({
-        "schema": EXTERNAL_REF_SCHEMA,
-        "protocol": protocol,
-        "tenant": tenant,
-        "external_channel": external_channel,
-        "external_target_event_id": external_target_event_id,
-        "external_event_id": external_event_id,
-        "normalized_actor": normalized_actor,
-        "operation": "delete",
-        "reason": delete.reason.as_external_ref_reason(),
-        "source": config.bridge.bridge_id.clone(),
-        "app_channel": delete.app_channel.clone(),
-        "app_message_id": delete.app_message_id.clone(),
-    })
+    DeleteExternalRef {
+        schema: EXTERNAL_REF_SCHEMA,
+        protocol,
+        tenant,
+        external_channel,
+        external_target_event_id,
+        external_event_id,
+        normalized_actor,
+        operation: "delete",
+        reason: delete.reason.as_external_ref_reason(),
+        source: config.bridge.bridge_id.clone(),
+        app_channel: delete.app_channel.clone(),
+        app_message_id: delete.app_message_id.clone(),
+    }
 }
 
 /// The external location reference identifying one app channel, in the §10.1

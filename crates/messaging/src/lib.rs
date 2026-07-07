@@ -28,7 +28,9 @@ pub use calendar::{
     CALENDAR_EVENT_PROFILE, CalendarMapError, bridge_calendar_schedule_fields, bridge_rsvp_payload,
 };
 use cokret::models::EphemeralEnvelope;
-use cokret::{AppletBridgeErrorBuilder, AppletBridgeErrorVisibility, Did, Event, RealmId};
+use cokret::{
+    AppletBridgeErrorBuilder, AppletBridgeErrorVisibility, ContentBlock, Did, Event, RealmId,
+};
 pub use cokret_bridge_runtime as runtime;
 use cokret_bridge_runtime::app::{BridgeApp, BridgeContext};
 use cokret_bridge_runtime::db::{DbReplayGuardStore, DbTokenStore};
@@ -48,6 +50,7 @@ use ghost::{
     portal_location_ref, provision_ghost_actor, require_nonempty_ref,
 };
 pub use runtime::salvo;
+use serde::Serialize;
 use serde_json::{Value, json};
 use store::MessageResolver;
 pub use store::{ChannelRealmMapping, MessageMapping, MessageStore, UserMapping};
@@ -81,16 +84,22 @@ pub(crate) const PORTAL_STRAND_SCAN_PAGE_LIMIT: u32 = 200;
 /// realms; a fresh portal realm resolves in one page).
 pub(crate) const PORTAL_STRAND_SCAN_MAX_PAGES: usize = 25;
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct MessageRedactionPayload {
+    target_event_id: String,
+    reason: String,
+}
+
 pub(crate) fn redaction_payload_for_app_delete(
     target_event_id: &str,
     reason: AppDeleteReason,
-) -> Option<Value> {
-    reason.redaction_reason().map(|reason| {
-        json!({
-            "target_event_id": target_event_id,
-            "reason": reason,
+) -> Option<MessageRedactionPayload> {
+    reason
+        .redaction_reason()
+        .map(|reason| MessageRedactionPayload {
+            target_event_id: target_event_id.to_owned(),
+            reason: reason.to_owned(),
         })
-    })
 }
 
 /// Runtime context handed to a [`MessageBridge`].
@@ -639,7 +648,7 @@ impl MessageContext {
     async fn submit_content(
         &self,
         msg: &InboundAppMessage,
-        content: Value,
+        content: ContentBlock,
         blob_refs: Vec<String>,
     ) -> Result<String> {
         let external_event_id = normalized_external_id(&msg.app_message_id);
