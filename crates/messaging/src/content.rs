@@ -20,10 +20,8 @@ const MEDIA_CONTENT_KINDS: [&str; 4] = [
 
 /// Build the spec `content_block` for plain text
 /// (`zh/models/content-types.md` §4.1: `{ "kind": "ck.content.text", "body" }`).
-pub fn text_content_block(body: &str) -> Result<Value> {
-    ContentBlock::text(body)
-        .to_value()
-        .map_err(|e| BridgeError::App(e.to_string()))
+pub fn text_content_block(body: &str) -> Result<ContentBlock> {
+    Ok(ContentBlock::text(body))
 }
 
 /// Map a MIME type to the spec media content kind
@@ -42,7 +40,7 @@ pub(crate) fn media_content_kind(media_type: Option<&str>) -> &'static str {
 /// payload-level `blob_refs[]` listing is added by the submit path). Note the
 /// schema explicitly forbids the field name `size` — byte counts are
 /// `size_bytes`.
-pub fn media_content_block(att: &Attachment) -> Result<Value> {
+pub fn media_content_block(att: &Attachment) -> Result<ContentBlock> {
     let blob = BlobRef::new(att.blob_ref.clone())
         .map_err(|e| BridgeError::App(format!("invalid blob_ref: {e}")))?;
     let kind = media_content_kind(att.media_type.as_deref());
@@ -66,9 +64,7 @@ pub fn media_content_block(att: &Attachment) -> Result<Value> {
     if let Some(size) = att.size {
         block = block.with_field("size_bytes", json!(size));
     }
-    block
-        .to_value()
-        .map_err(|e| BridgeError::App(e.to_string()))
+    Ok(block)
 }
 
 /// Assemble the authoritative `ck.message.create` payload
@@ -77,15 +73,16 @@ pub fn media_content_block(att: &Attachment) -> Result<Value> {
 /// `blob_refs[]`).
 pub(crate) fn build_message_create_payload(
     strand_id: &str,
-    content: Value,
+    content: ContentBlock,
     blob_refs: Vec<String>,
-) -> Result<Value> {
+) -> Result<MessageCreatePayload> {
     let strand_id = StrandId::new(strand_id.to_owned())?;
+    let content = content
+        .to_value()
+        .map_err(|e| BridgeError::App(e.to_string()))?;
     let mut payload = MessageCreatePayload::with_content(strand_id, PORTAL_STRAND_TRACK, content);
     payload.blob_refs = blob_refs;
-    payload
-        .to_value()
-        .map_err(|e| BridgeError::App(e.to_string()))
+    Ok(payload)
 }
 
 /// Extract displayable plain text from a spec-shaped `ck.message.create`

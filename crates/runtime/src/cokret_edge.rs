@@ -30,6 +30,7 @@ use cokret::signatures::EventProofBuilder;
 use cokret::signatures::{SignEventOptions, sign_event};
 use cokret::{AppletId, Did, Ed25519MoveSigner, Event, EventId, Hlc, HlcGenerator, RealmId};
 use parking_lot::Mutex;
+use serde::Serialize;
 use serde_json::Value;
 #[cfg(any(feature = "web", test))]
 use serde_json::json;
@@ -286,7 +287,10 @@ impl CokretEdge {
     }
 
     /// Build and sign an event emitted by this bridge's service actor.
-    pub fn mint_event(&self, kind: &str, realm_id: &RealmId, content: Value) -> Result<Event> {
+    pub fn mint_event<T>(&self, kind: &str, realm_id: &RealmId, content: T) -> Result<Event>
+    where
+        T: Serialize,
+    {
         let mut event = self.build_service_event(kind, realm_id, content)?;
         self.sign_as_service(&mut event)?;
         Ok(event)
@@ -296,12 +300,15 @@ impl CokretEdge {
     /// fields (`external_ref`, `created_at`, …) before submitting do so on the
     /// returned event and then call [`Self::sign_as_service`] exactly once,
     /// avoiding a discarded first signature.
-    pub fn mint_event_unsigned(
+    pub fn mint_event_unsigned<T>(
         &self,
         kind: &str,
         realm_id: &RealmId,
-        content: Value,
-    ) -> Result<Event> {
+        content: T,
+    ) -> Result<Event>
+    where
+        T: Serialize,
+    {
         self.build_service_event(kind, realm_id, content)
     }
 
@@ -315,7 +322,11 @@ impl CokretEdge {
     /// service-actor self-signed events (vs. delegated ghost events, where it
     /// references the durable authorization) is not spelled out by §8; it is
     /// intentionally left unset pending a spec clarification.
-    fn build_service_event(&self, kind: &str, realm_id: &RealmId, content: Value) -> Result<Event> {
+    fn build_service_event<T>(&self, kind: &str, realm_id: &RealmId, content: T) -> Result<Event>
+    where
+        T: Serialize,
+    {
+        let content = spec_payload_value(content)?;
         let seq = self.seq.alloc()?;
         let hlc = self.next_hlc(realm_id)?;
         let mut event = Event::new(
@@ -337,14 +348,17 @@ impl CokretEdge {
     /// carries `executed_by = service_did` and `authorization_ref`, allowing the
     /// reducer to verify who actually signed while preserving the virtual
     /// actor as `actor_id`.
-    pub fn mint_event_as(
+    pub fn mint_event_as<T>(
         &self,
         actor: &cokret::Did,
         kind: &str,
         realm_id: &RealmId,
-        content: Value,
+        content: T,
         authorization_ref: &str,
-    ) -> Result<Event> {
+    ) -> Result<Event>
+    where
+        T: Serialize,
+    {
         let mut event =
             self.build_delegated_event(actor, kind, realm_id, content, authorization_ref)?;
         self.sign_as_service(&mut event)?;
@@ -355,15 +369,19 @@ impl CokretEdge {
     /// yet). Callers that still need to set signed-envelope fields
     /// (`external_ref`, `redacts`, `created_at`) do so before a single
     /// [`Self::sign_as_service`], avoiding a discarded first signature.
-    fn build_delegated_event(
+    fn build_delegated_event<T>(
         &self,
         actor: &cokret::Did,
         kind: &str,
         realm_id: &RealmId,
-        content: Value,
+        content: T,
         authorization_ref: &str,
-    ) -> Result<Event> {
+    ) -> Result<Event>
+    where
+        T: Serialize,
+    {
         let authorization_ref = validate_authorization_ref(authorization_ref)?;
+        let content = spec_payload_value(content)?;
         let seq = self.seq.alloc()?;
         let hlc = self.next_hlc(realm_id)?;
         let mut event = Event::new(kind, realm_id.clone(), actor.clone(), seq, hlc, content)?;
@@ -429,21 +447,25 @@ impl CokretEdge {
     ///
     /// applet-integration §8 requires the signed Event Envelope top-level
     /// `external_ref` for bridge-originated events.
-    pub async fn submit_with_external_ref_as(
+    pub async fn submit_with_external_ref_as<T, E>(
         &self,
         actor: &Did,
         realm_id: &str,
         kind: &str,
-        content: Value,
-        external_ref: Value,
+        content: T,
+        external_ref: E,
         authorization_ref: &str,
-    ) -> Result<String> {
+    ) -> Result<String>
+    where
+        T: Serialize,
+        E: Serialize,
+    {
         let realm = RealmId::new(realm_id.to_owned())?;
         // Set the signed-envelope `external_ref` before the single signature so
         // the proof covers it (no discarded first sign).
         let mut event =
             self.build_delegated_event(actor, kind, &realm, content, authorization_ref)?;
-        event.external_ref = Some(external_ref);
+        event.external_ref = Some(spec_external_ref_value(external_ref)?);
         self.sign_as_service(&mut event)?;
         self.submit_event(&event).await
     }
@@ -451,15 +473,19 @@ impl CokretEdge {
     /// Submit a message redaction attributed to a delegated app actor while
     /// setting the signed envelope `redacts` target. External app expiry or
     /// retention drops must be filtered by callers before reaching this helper.
-    pub async fn submit_redaction_with_external_ref_as(
+    pub async fn submit_redaction_with_external_ref_as<T, E>(
         &self,
         actor: &Did,
         realm_id: &str,
         target_event_id: &str,
-        content: Value,
-        external_ref: Value,
+        content: T,
+        external_ref: E,
         authorization_ref: &str,
-    ) -> Result<String> {
+    ) -> Result<String>
+    where
+        T: Serialize,
+        E: Serialize,
+    {
         let realm = RealmId::new(realm_id.to_owned())?;
         // Set `redacts` + `external_ref` before the single signature so the proof
         // covers them (no discarded first sign).
@@ -471,7 +497,7 @@ impl CokretEdge {
             authorization_ref,
         )?;
         event.redacts = Some(EventId::new(target_event_id.to_owned())?);
-        event.external_ref = Some(external_ref);
+        event.external_ref = Some(spec_external_ref_value(external_ref)?);
         self.sign_as_service(&mut event)?;
         self.submit_event(&event).await
     }
@@ -534,6 +560,24 @@ fn validate_authorization_ref(authorization_ref: &str) -> Result<String> {
         ));
     }
     Ok(authorization_ref.to_owned())
+}
+
+fn spec_payload_value<T>(content: T) -> Result<Value>
+where
+    T: Serialize,
+{
+    serde_json::to_value(content).map_err(|error| {
+        BridgeError::Cokret(format!("event payload serialization failed: {error}"))
+    })
+}
+
+fn spec_external_ref_value<T>(external_ref: T) -> Result<Value>
+where
+    T: Serialize,
+{
+    serde_json::to_value(external_ref).map_err(|error| {
+        BridgeError::Cokret(format!("event external_ref serialization failed: {error}"))
+    })
 }
 
 /// Diesel-backed [`SeqStore`]. Persists each key's high-water mark in a

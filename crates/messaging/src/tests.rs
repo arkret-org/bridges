@@ -41,7 +41,9 @@ fn media_attachment() -> Attachment {
 #[test]
 fn text_payload_matches_message_create_schema_shape() {
     let content = text_content_block("hello").unwrap();
-    let payload = build_message_create_payload(STRAND_ID, content, Vec::new()).unwrap();
+    let payload =
+        serde_json::to_value(build_message_create_payload(STRAND_ID, content, Vec::new()).unwrap())
+            .unwrap();
     assert_eq!(payload["strand_id"], STRAND_ID);
     assert_eq!(payload["track_name"], PORTAL_STRAND_TRACK);
     assert_eq!(payload["content"]["kind"], "ck.content.text");
@@ -56,8 +58,10 @@ fn text_payload_matches_message_create_schema_shape() {
 fn media_payload_uses_blob_refs_and_forbidden_field_names_are_absent() {
     let att = media_attachment();
     let content = media_content_block(&att).unwrap();
-    let payload =
-        build_message_create_payload(STRAND_ID, content, vec![att.blob_ref.clone()]).unwrap();
+    let payload = serde_json::to_value(
+        build_message_create_payload(STRAND_ID, content, vec![att.blob_ref.clone()]).unwrap(),
+    )
+    .unwrap();
     assert_eq!(payload["content"]["kind"], "ck.content.image");
     assert_eq!(payload["content"]["body"], "look at this");
     assert_eq!(payload["content"]["blob_ref"], att.blob_ref);
@@ -84,7 +88,7 @@ fn media_kind_follows_mime_category_and_file_requires_filename() {
     let mut att = media_attachment();
     att.media_type = Some("application/pdf".to_owned());
     att.filename = None;
-    let block = media_content_block(&att).unwrap();
+    let block = media_content_block(&att).unwrap().to_value().unwrap();
     // `filename` is MUST for ck.content.file even when upstream gave none.
     assert!(
         block["filename"]
@@ -97,8 +101,10 @@ fn media_kind_follows_mime_category_and_file_requires_filename() {
 fn extraction_reads_spec_shaped_payloads() {
     let att = media_attachment();
     let content = media_content_block(&att).unwrap();
-    let payload =
-        build_message_create_payload(STRAND_ID, content, vec![att.blob_ref.clone()]).unwrap();
+    let payload = serde_json::to_value(
+        build_message_create_payload(STRAND_ID, content, vec![att.blob_ref.clone()]).unwrap(),
+    )
+    .unwrap();
 
     assert_eq!(extract_plain_body(&payload), "look at this");
     assert_eq!(extract_strand_id(&payload), Some(STRAND_ID));
@@ -156,6 +162,7 @@ fn app_delete_recall_builds_message_redact_payload() {
     let target_event_id = "ck:event:01904100-0000-7000-8000-000000000123";
     let payload = redaction_payload_for_app_delete(target_event_id, AppDeleteReason::UserDeleted)
         .expect("redaction payload");
+    let payload = serde_json::to_value(payload).unwrap();
     assert_eq!(payload["target_event_id"], target_event_id);
     assert_eq!(payload["reason"], "external_user_delete");
     assert!(payload.get("message_id").is_none());
