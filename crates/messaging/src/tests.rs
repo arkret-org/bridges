@@ -166,6 +166,7 @@ fn location_match_requires_protocol_network_and_location() {
 fn app_delete_recall_builds_message_redact_payload() {
     let target_event_id = "ck:event:01904100-0000-7000-8000-000000000123";
     let payload = redaction_payload_for_app_delete(target_event_id, AppDeleteReason::UserDeleted)
+        .expect("redaction payload result")
         .expect("redaction payload");
     let payload = serde_json::to_value(payload).unwrap();
     assert_eq!(payload["target_event_id"], target_event_id);
@@ -180,7 +181,8 @@ fn app_delete_expiry_is_not_a_redaction() {
         redaction_payload_for_app_delete(
             "ck:event:01904100-0000-7000-8000-000000000123",
             AppDeleteReason::DisappearingExpiry,
-        ),
+        )
+        .expect("redaction payload result"),
         None
     );
     assert_eq!(

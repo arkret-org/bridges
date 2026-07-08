@@ -29,7 +29,8 @@ pub use calendar::{
 };
 use cokret::models::EphemeralEnvelope;
 use cokret::{
-    AppletBridgeErrorBuilder, AppletBridgeErrorVisibility, ContentBlock, Did, Event, RealmId,
+    AppletBridgeErrorBuilder, AppletBridgeErrorVisibility, ContentBlock, Did, Event, EventId,
+    MessageRedactPayload, RealmId,
 };
 pub use cokret_bridge_runtime as runtime;
 use cokret_bridge_runtime::app::{BridgeApp, BridgeContext};
@@ -50,7 +51,6 @@ use ghost::{
     portal_location_ref, provision_ghost_actor, require_nonempty_ref,
 };
 pub use runtime::salvo;
-use serde::Serialize;
 use serde_json::{Value, json};
 use store::MessageResolver;
 pub use store::{ChannelRealmMapping, MessageMapping, MessageStore, UserMapping};
@@ -84,22 +84,22 @@ pub(crate) const PORTAL_STRAND_SCAN_PAGE_LIMIT: u32 = 200;
 /// realms; a fresh portal realm resolves in one page).
 pub(crate) const PORTAL_STRAND_SCAN_MAX_PAGES: usize = 25;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) struct MessageRedactionPayload {
-    target_event_id: String,
-    reason: String,
-}
-
 pub(crate) fn redaction_payload_for_app_delete(
     target_event_id: &str,
     reason: AppDeleteReason,
-) -> Option<MessageRedactionPayload> {
-    reason
-        .redaction_reason()
-        .map(|reason| MessageRedactionPayload {
-            target_event_id: target_event_id.to_owned(),
-            reason: reason.to_owned(),
-        })
+) -> Result<Option<MessageRedactPayload>> {
+    let Some(reason) = reason.redaction_reason() else {
+        return Ok(None);
+    };
+    Ok(Some(MessageRedactPayload {
+        message_id: None,
+        target_ref: None,
+        event_id: None,
+        target_event_id: Some(EventId::new(target_event_id.to_owned())?),
+        track_name: None,
+        reason: Some(reason.to_owned()),
+        preserve: None,
+    }))
 }
 
 /// Runtime context handed to a [`MessageBridge`].
@@ -649,8 +649,9 @@ impl MessageContext {
                     )?;
                     require_nonempty_ref("authorization_ref", &mapping.authorization_ref)?;
                     let actor = Did::new(mapping.cokret_actor_id)?;
-                    let payload = redaction_payload_for_app_delete(&target_event_id, delete.reason)
-                        .expect("delete reason was checked before queue submission");
+                    let payload =
+                        redaction_payload_for_app_delete(&target_event_id, delete.reason)?
+                            .expect("delete reason was checked before queue submission");
                     let event_id = edge
                         .submit_redaction_with_external_ref_as(
                             &actor,
