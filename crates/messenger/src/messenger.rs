@@ -174,6 +174,21 @@ async fn messenger_delivery(req: &mut Request, depot: &mut Depot, res: &mut Resp
         .await;
         retry |= outcome == webhook::SubmitOutcome::Retry;
     }
+    for (channel, user, message_id, media_kind) in messenger_unsupported_media(&body) {
+        let replay_key = format!("messenger:media:{message_id}");
+        if state.replay.check_and_record(replay_key).await {
+            state
+                .ctx
+                .report_unsupported_inbound_media(
+                    "messenger",
+                    channel,
+                    user,
+                    message_id,
+                    media_kind,
+                )
+                .await;
+        }
+    }
     if retry {
         webhook::submission_retry(res);
     } else {
@@ -216,6 +231,45 @@ fn messenger_inbound_messages(body: &Value) -> Vec<InboundAppMessage> {
                 app_message_id: message_id,
                 body: text.to_owned(),
             });
+        }
+    }
+    out
+}
+
+fn messenger_unsupported_media(body: &Value) -> Vec<(String, String, String, &'static str)> {
+    let mut out = Vec::new();
+    for entry in body
+        .get("entry")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        for event in entry
+            .get("messaging")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if event
+                .pointer("/message/is_echo")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let has_attachments = event
+                .pointer("/message/attachments")
+                .and_then(Value::as_array)
+                .is_some_and(|attachments| !attachments.is_empty());
+            if !has_attachments {
+                continue;
+            }
+            let Some(message_id) = webhook::non_empty_string_at(event, "/message/mid") else {
+                tracing::warn!("Messenger media event missing message.mid; skipping audit");
+                continue;
+            };
+            let user = webhook::string_at(event, "/sender/id").unwrap_or_default();
+            out.push((user.clone(), user, message_id, "attachments"));
         }
     }
     out
@@ -268,5 +322,22 @@ mod tests {
         });
 
         assert!(messenger_inbound_messages(&body).is_empty());
+    }
+
+    #[test]
+    fn messenger_unsupported_media_extracts_attachment_events() {
+        let body = json!({
+            "entry": [{
+                "messaging": [{
+                    "sender": {"id": "PSID1"},
+                    "message": {"mid": "m_1", "attachments": [{"type": "image"}]}
+                }]
+            }]
+        });
+        let media = messenger_unsupported_media(&body);
+        assert_eq!(
+            media,
+            vec![("PSID1".into(), "PSID1".into(), "m_1".into(), "attachments")]
+        );
     }
 }

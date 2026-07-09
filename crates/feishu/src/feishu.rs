@@ -318,12 +318,10 @@ async fn feishu_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respons
     }
 
     let event = body.get("event").unwrap_or(&body);
-    if webhook::str_at(event, "/message/message_type") != Some("text") {
+    if event.get("message").is_none() {
         webhook::ok_json(res, json!({ "ok": true }));
         return;
     }
-    let content_raw = webhook::str_at(event, "/message/content").unwrap_or_default();
-    let text = webhook::body_text_from_json_string(content_raw, "text");
     let channel = webhook::string_at(event, "/message/chat_id").unwrap_or_default();
     let user = webhook::first_string_at(
         event,
@@ -338,6 +336,17 @@ async fn feishu_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respons
         webhook::bad_request(res, "Feishu message_id missing");
         return;
     };
+    let message_type = webhook::str_at(event, "/message/message_type").unwrap_or_default();
+    if message_type != "text" {
+        state
+            .ctx
+            .report_unsupported_inbound_media("feishu", channel, user, message_id, message_type)
+            .await;
+        webhook::ok_json(res, json!({ "ok": true }));
+        return;
+    }
+    let content_raw = webhook::str_at(event, "/message/content").unwrap_or_default();
+    let text = webhook::body_text_from_json_string(content_raw, "text");
     let outcome = webhook::submit(
         state.ctx.clone(),
         "feishu",

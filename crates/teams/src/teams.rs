@@ -203,6 +203,14 @@ async fn teams_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response
     let inbound = match teams_inbound_activity(&body) {
         Ok(Some(inbound)) => inbound,
         Ok(None) => {
+            if let Some((channel, user, message_id, media_kind)) = teams_unsupported_media(&body) {
+                state
+                    .ctx
+                    .report_unsupported_inbound_media(
+                        "teams", channel, user, message_id, media_kind,
+                    )
+                    .await;
+            }
             webhook::ok_json(res, json!({ "ok": true }));
             return;
         }
@@ -247,6 +255,30 @@ fn teams_inbound_activity(
     }))
 }
 
+fn teams_unsupported_media(body: &Value) -> Option<(String, String, String, &'static str)> {
+    if body.get("type").and_then(Value::as_str) != Some("message") {
+        return None;
+    }
+    let has_attachments = body
+        .get("attachments")
+        .and_then(Value::as_array)
+        .is_some_and(|attachments| !attachments.is_empty());
+    if !has_attachments
+        || !webhook::str_at(body, "/text")
+            .unwrap_or_default()
+            .is_empty()
+    {
+        return None;
+    }
+    let message_id = webhook::first_non_empty_string_at(body, &["/id", "/replyToId"])?;
+    Some((
+        webhook::string_at(body, "/conversation/id").unwrap_or_default(),
+        webhook::string_at(body, "/from/id").unwrap_or_default(),
+        message_id,
+        "attachments",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,6 +310,22 @@ mod tests {
         });
         let inbound = teams_inbound_activity(&body).unwrap().expect("message");
         assert_eq!(inbound.app_message_id, "reply-id");
+    }
+
+    #[test]
+    fn teams_unsupported_media_extracts_attachment_message() {
+        let body = json!({
+            "type": "message",
+            "id": "activity-id",
+            "conversation": {"id": "conversation-id"},
+            "from": {"id": "user-id"},
+            "attachments": [{"contentType": "image/png"}]
+        });
+        let media = teams_unsupported_media(&body).expect("unsupported media");
+        assert_eq!(media.0, "conversation-id");
+        assert_eq!(media.1, "user-id");
+        assert_eq!(media.2, "activity-id");
+        assert_eq!(media.3, "attachments");
     }
 
     #[test]

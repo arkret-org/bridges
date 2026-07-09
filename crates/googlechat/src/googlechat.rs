@@ -235,6 +235,20 @@ async fn googlechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Res
     }
     let message = body.get("message").unwrap_or(&body);
     let Some(text) = webhook::str_at(message, "/text") else {
+        if let Some((channel, user, message_id, media_kind)) =
+            googlechat_unsupported_media(&body, message)
+        {
+            state
+                .ctx
+                .report_unsupported_inbound_media(
+                    "googlechat",
+                    channel,
+                    user,
+                    message_id,
+                    media_kind,
+                )
+                .await;
+        }
         webhook::ok_json(res, json!({ "ok": true }));
         return;
     };
@@ -264,4 +278,49 @@ async fn googlechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Res
     )
     .await;
     webhook::respond_submit(res, outcome);
+}
+
+fn googlechat_unsupported_media(
+    body: &Value,
+    message: &Value,
+) -> Option<(String, String, String, &'static str)> {
+    let has_attachments = message
+        .get("attachment")
+        .and_then(Value::as_array)
+        .is_some_and(|attachments| !attachments.is_empty());
+    if !has_attachments {
+        return None;
+    }
+    Some((
+        webhook::first_string_at(message, &["/space/name", "/thread/name"])
+            .or_else(|| webhook::string_at(body, "/space/name"))
+            .unwrap_or_default(),
+        webhook::first_string_at(body, &["/user/name", "/sender/name"]).unwrap_or_default(),
+        webhook::non_empty_string_at(message, "/name")?,
+        "attachment",
+    ))
+}
+
+#[cfg(test)]
+mod media_tests {
+    use super::*;
+
+    #[test]
+    fn googlechat_unsupported_media_extracts_attachment_message() {
+        let body = json!({
+            "type": "MESSAGE",
+            "user": {"name": "users/123"},
+            "message": {
+                "name": "spaces/AAA/messages/BBB",
+                "space": {"name": "spaces/AAA"},
+                "attachment": [{"name": "attachments/1"}]
+            }
+        });
+        let message = body.get("message").unwrap();
+        let media = googlechat_unsupported_media(&body, message).expect("unsupported media");
+        assert_eq!(media.0, "spaces/AAA");
+        assert_eq!(media.1, "users/123");
+        assert_eq!(media.2, "spaces/AAA/messages/BBB");
+        assert_eq!(media.3, "attachment");
+    }
 }

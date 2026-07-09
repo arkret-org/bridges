@@ -178,6 +178,16 @@ async fn imessage_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
     let inbound = match imessage_inbound_message(&body) {
         Ok(Some(inbound)) => inbound,
         Ok(None) => {
+            if let Ok(Some((channel, user, message_id, media_kind))) =
+                imessage_unsupported_media(&body)
+            {
+                state
+                    .ctx
+                    .report_unsupported_inbound_media(
+                        "imessage", channel, user, message_id, media_kind,
+                    )
+                    .await;
+            }
             webhook::ok_json(res, json!({ "ok": true }));
             return;
         }
@@ -214,6 +224,10 @@ struct IMessageWebhookPayload {
     from: Option<String>,
     #[serde(default)]
     sender: Option<String>,
+    #[serde(default)]
+    attachment: Option<Value>,
+    #[serde(default)]
+    attachments: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -236,6 +250,10 @@ struct IMessageWebhookData {
     from: Option<String>,
     #[serde(default)]
     sender: Option<String>,
+    #[serde(default)]
+    attachment: Option<Value>,
+    #[serde(default)]
+    attachments: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -257,39 +275,41 @@ fn imessage_non_empty(value: Option<String>) -> Option<String> {
 }
 
 impl IMessageWebhookPayload {
-    fn into_inbound_message(self) -> std::result::Result<Option<InboundAppMessage>, &'static str> {
-        let data = self.data;
-        let text = data
+    fn text_body(&self) -> Option<String> {
+        self.data
             .as_ref()
             .and_then(|data| imessage_non_empty(data.text.clone()))
             .or_else(|| {
-                data.as_ref()
+                self.data
+                    .as_ref()
                     .and_then(|data| imessage_non_empty(data.message.clone()))
             })
             .or_else(|| imessage_non_empty(self.text.clone()))
-            .or_else(|| imessage_non_empty(self.message.clone()));
-        let Some(text) = text else {
-            return Ok(None);
-        };
-        let Some(message_id) = data
+            .or_else(|| imessage_non_empty(self.message.clone()))
+    }
+
+    fn message_id(&self) -> Option<String> {
+        self.data
             .as_ref()
             .and_then(|data| imessage_non_empty(data.guid.clone()))
             .or_else(|| imessage_non_empty(self.guid.clone()))
             .or_else(|| imessage_non_empty(self.id.clone()))
-        else {
-            return Err("iMessage message id missing");
-        };
-        let channel = data
+    }
+
+    fn app_channel(&self) -> String {
+        self.data
             .as_ref()
             .and_then(|data| imessage_non_empty(data.chat_guid_camel.clone()))
             .or_else(|| {
-                data.as_ref()
+                self.data
+                    .as_ref()
                     .and_then(|data| imessage_non_empty(data.chat_guid.clone()))
             })
             .or_else(|| imessage_non_empty(self.chat_guid_camel.clone()))
             .or_else(|| imessage_non_empty(self.chat_guid.clone()))
             .or_else(|| {
-                data.as_ref()
+                self.data
+                    .as_ref()
                     .and_then(|data| data.chat.as_ref())
                     .and_then(|chat| imessage_non_empty(chat.guid.clone()))
             })
@@ -298,8 +318,11 @@ impl IMessageWebhookPayload {
                     .as_ref()
                     .and_then(|chat| imessage_non_empty(chat.guid.clone()))
             })
-            .unwrap_or_default();
-        let user = data
+            .unwrap_or_default()
+    }
+
+    fn app_user(&self) -> String {
+        self.data
             .as_ref()
             .and_then(|data| data.handle.as_ref())
             .and_then(|handle| imessage_non_empty(handle.address.clone()))
@@ -309,19 +332,58 @@ impl IMessageWebhookPayload {
                     .and_then(|handle| imessage_non_empty(handle.address.clone()))
             })
             .or_else(|| {
-                data.as_ref()
+                self.data
+                    .as_ref()
                     .and_then(|data| imessage_non_empty(data.from.clone()))
             })
             .or_else(|| {
-                data.as_ref()
+                self.data
+                    .as_ref()
                     .and_then(|data| imessage_non_empty(data.sender.clone()))
             })
             .or_else(|| imessage_non_empty(self.from.clone()))
             .or_else(|| imessage_non_empty(self.sender.clone()))
-            .unwrap_or_default();
+            .unwrap_or_default()
+    }
+
+    fn has_attachment(&self) -> bool {
+        fn populated(value: Option<&Value>) -> bool {
+            match value {
+                Some(Value::Array(items)) => !items.is_empty(),
+                Some(Value::Null) | None => false,
+                Some(_) => true,
+            }
+        }
+
+        populated(self.attachment.as_ref())
+            || populated(self.attachments.as_ref())
+            || self.data.as_ref().is_some_and(|data| {
+                populated(data.attachment.as_ref()) || populated(data.attachments.as_ref())
+            })
+    }
+
+    fn unsupported_media_ref(&self) -> Option<(String, String, String, &'static str)> {
+        if self.text_body().is_some() || !self.has_attachment() {
+            return None;
+        }
+        Some((
+            self.app_channel(),
+            self.app_user(),
+            self.message_id()?,
+            "attachments",
+        ))
+    }
+
+    fn into_inbound_message(&self) -> std::result::Result<Option<InboundAppMessage>, &'static str> {
+        let Some(text) = self.text_body() else {
+            return Ok(None);
+        };
+        let Some(message_id) = self.message_id() else {
+            return Err("iMessage message id missing");
+        };
         Ok(Some(InboundAppMessage {
-            app_channel: channel,
-            app_user: user,
+            app_channel: self.app_channel(),
+            app_user: self.app_user(),
             app_message_id: message_id,
             body: text,
         }))
@@ -334,6 +396,16 @@ fn imessage_inbound_message(
     serde_json::from_value::<IMessageWebhookPayload>(body.clone())
         .map_err(|_| "invalid iMessage callback shape")?
         .into_inbound_message()
+}
+
+fn imessage_unsupported_media(
+    body: &Value,
+) -> std::result::Result<Option<(String, String, String, &'static str)>, &'static str> {
+    Ok(
+        serde_json::from_value::<IMessageWebhookPayload>(body.clone())
+            .map_err(|_| "invalid iMessage callback shape")?
+            .unsupported_media_ref(),
+    )
 }
 
 #[cfg(test)]
@@ -370,6 +442,25 @@ mod tests {
         assert_eq!(inbound.app_user, "alice");
         assert_eq!(inbound.app_message_id, "flat-id");
         assert_eq!(inbound.body, "hi");
+    }
+
+    #[test]
+    fn imessage_unsupported_media_extracts_attachment_shape() {
+        let body = json!({
+            "data": {
+                "guid": "msg-guid",
+                "chatGuid": "chat-guid",
+                "handle": {"address": "+15559876543"},
+                "attachments": [{"guid": "attachment-guid"}]
+            }
+        });
+        let media = imessage_unsupported_media(&body)
+            .unwrap()
+            .expect("unsupported media");
+        assert_eq!(media.0, "chat-guid");
+        assert_eq!(media.1, "+15559876543");
+        assert_eq!(media.2, "msg-guid");
+        assert_eq!(media.3, "attachments");
     }
 
     #[test]

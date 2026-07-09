@@ -259,6 +259,31 @@ impl MessageContext {
         retriable
     }
 
+    /// Record a deterministic inbound media rejection for adapters that have
+    /// not implemented a safe platform media download path yet. Long-poll
+    /// adapters may use the returned retriable classification; webhook adapters
+    /// can ignore it when they intentionally accept-with-audit.
+    pub async fn report_unsupported_inbound_media(
+        &self,
+        label: &str,
+        app_channel: impl Into<String>,
+        app_user: impl Into<String>,
+        app_message_id: impl Into<String>,
+        media_kind: impl AsRef<str>,
+    ) -> bool {
+        let inbound = InboundAppMessage {
+            app_channel: app_channel.into(),
+            app_user: app_user.into(),
+            app_message_id: app_message_id.into(),
+            body: String::new(),
+        };
+        let error = BridgeError::App(format!(
+            "{label} inbound media is not supported yet: {}",
+            media_kind.as_ref()
+        ));
+        self.report_inbound_failure(label, &inbound, &error).await
+    }
+
     /// Emit a `ck.applet.bridge_error` Event for a failed outbound (cokret → app)
     /// delivery so the failure is durable and visible to realm admins, mirroring
     /// the inbound path ([`MessageContext::report_inbound_bridge_error`]). The

@@ -234,6 +234,10 @@ struct DingTalkInboundPayload {
     message_id: Option<String>,
     #[serde(default, rename = "eventId")]
     event_id: Option<String>,
+    #[serde(default, rename = "msgtype")]
+    msg_type_lower: Option<String>,
+    #[serde(default, rename = "msgType")]
+    msg_type_camel: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -267,35 +271,64 @@ impl DingTalkMessageField {
 }
 
 impl DingTalkInboundPayload {
-    fn into_inbound_message(self) -> std::result::Result<Option<InboundAppMessage>, &'static str> {
-        let text = self
-            .text
+    fn text_body(&self) -> Option<String> {
+        self.text
             .as_ref()
             .and_then(DingTalkTextField::content)
             .or_else(|| non_empty_owned(self.content.clone()))
-            .or_else(|| self.message.as_ref().and_then(DingTalkMessageField::text));
+            .or_else(|| self.message.as_ref().and_then(DingTalkMessageField::text))
+    }
+
+    fn message_id(&self) -> Option<String> {
+        non_empty_owned(self.msg_id.clone())
+            .or_else(|| non_empty_owned(self.message_id.clone()))
+            .or_else(|| non_empty_owned(self.event_id.clone()))
+    }
+
+    fn app_channel(&self) -> String {
+        non_empty_owned(self.open_conversation_id.clone())
+            .or_else(|| non_empty_owned(self.conversation_id_camel.clone()))
+            .or_else(|| non_empty_owned(self.conversation_id.clone()))
+            .or_else(|| non_empty_owned(self.chatbot_corp_id.clone()))
+            .unwrap_or_default()
+    }
+
+    fn app_user(&self) -> String {
+        non_empty_owned(self.sender_staff_id.clone())
+            .or_else(|| non_empty_owned(self.sender_id.clone()))
+            .or_else(|| non_empty_owned(self.user_id.clone()))
+            .or_else(|| non_empty_owned(self.open_id.clone()))
+            .unwrap_or_default()
+    }
+
+    fn unsupported_media_ref(&self) -> Option<(String, String, String, String)> {
+        if self.text_body().is_some() {
+            return None;
+        }
+        let msg_type = non_empty_owned(self.msg_type_lower.clone())
+            .or_else(|| non_empty_owned(self.msg_type_camel.clone()))?;
+        if msg_type == "text" {
+            return None;
+        }
+        Some((
+            self.app_channel(),
+            self.app_user(),
+            self.message_id()?,
+            msg_type,
+        ))
+    }
+
+    fn into_inbound_message(&self) -> std::result::Result<Option<InboundAppMessage>, &'static str> {
+        let text = self.text_body();
         let Some(text) = text else {
             return Ok(None);
         };
-        let Some(message_id) = non_empty_owned(self.msg_id)
-            .or_else(|| non_empty_owned(self.message_id))
-            .or_else(|| non_empty_owned(self.event_id))
-        else {
+        let Some(message_id) = self.message_id() else {
             return Err("DingTalk message id missing");
         };
-        let channel = non_empty_owned(self.open_conversation_id)
-            .or_else(|| non_empty_owned(self.conversation_id_camel))
-            .or_else(|| non_empty_owned(self.conversation_id))
-            .or_else(|| non_empty_owned(self.chatbot_corp_id))
-            .unwrap_or_default();
-        let user = non_empty_owned(self.sender_staff_id)
-            .or_else(|| non_empty_owned(self.sender_id))
-            .or_else(|| non_empty_owned(self.user_id))
-            .or_else(|| non_empty_owned(self.open_id))
-            .unwrap_or_default();
         Ok(Some(InboundAppMessage {
-            app_channel: channel,
-            app_user: user,
+            app_channel: self.app_channel(),
+            app_user: self.app_user(),
             app_message_id: message_id,
             body: text,
         }))
@@ -391,6 +424,14 @@ async fn dingtalk_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
     let inbound = match payload.into_inbound_message() {
         Ok(Some(inbound)) => inbound,
         Ok(None) => {
+            if let Some((channel, user, message_id, media_kind)) = payload.unsupported_media_ref() {
+                state
+                    .ctx
+                    .report_unsupported_inbound_media(
+                        "dingtalk", channel, user, message_id, media_kind,
+                    )
+                    .await;
+            }
             webhook::ok_json(res, json!({ "ok": true }));
             return;
         }
@@ -433,6 +474,22 @@ mod tests {
         .unwrap();
         let inbound = payload.into_inbound_message().unwrap().expect("message");
         assert_eq!(inbound.app_user, "");
+    }
+
+    #[test]
+    fn dingtalk_unsupported_media_extracts_msgtype() {
+        let payload = dingtalk_inbound_payload(json!({
+            "msgtype": "picture",
+            "openConversationId": "conv-1",
+            "senderStaffId": "staff-1",
+            "msgId": "msg-1"
+        }))
+        .unwrap();
+        let media = payload.unsupported_media_ref().expect("unsupported media");
+        assert_eq!(media.0, "conv-1");
+        assert_eq!(media.1, "staff-1");
+        assert_eq!(media.2, "msg-1");
+        assert_eq!(media.3, "picture");
     }
 
     #[test]

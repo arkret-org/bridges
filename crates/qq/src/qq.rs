@@ -187,6 +187,12 @@ async fn qq_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     }
     let text = webhook::first_string_at(&body, &["/raw_message", "/message"]).unwrap_or_default();
     if text.is_empty() {
+        if let Some((channel, user, message_id, media_kind)) = qq_unsupported_media(&body) {
+            state
+                .ctx
+                .report_unsupported_inbound_media("qq", channel, user, message_id, media_kind)
+                .await;
+        }
         webhook::ok_json(res, json!({ "ok": true }));
         return;
     }
@@ -230,6 +236,26 @@ fn json_id_string(value: &Value) -> Option<String> {
     json_scalar_id_string(value)
 }
 
+fn qq_unsupported_media(body: &Value) -> Option<(String, String, String, String)> {
+    let segments = body.get("message").and_then(Value::as_array)?;
+    let media_kind = segments
+        .iter()
+        .filter_map(|segment| segment.get("type").and_then(Value::as_str))
+        .find(|kind| *kind != "text")?
+        .to_owned();
+    let user = body
+        .get("user_id")
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    let channel = if let Some(group_id) = body.get("group_id") {
+        group_id.to_string()
+    } else {
+        format!("private/{user}")
+    };
+    let message_id = body.get("message_id").and_then(json_id_string)?;
+    Some((channel, user, message_id, media_kind))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,6 +281,22 @@ mod tests {
             json_id_string(&json!(9007199254740993u64)).as_deref(),
             Some("9007199254740993")
         );
+    }
+
+    #[test]
+    fn qq_unsupported_media_extracts_non_text_segment() {
+        let body = json!({
+            "post_type": "message",
+            "message_id": 42,
+            "group_id": 123,
+            "user_id": 456,
+            "message": [{"type": "image", "data": {"file": "x"}}]
+        });
+        let media = qq_unsupported_media(&body).expect("unsupported media");
+        assert_eq!(media.0, "123");
+        assert_eq!(media.1, "456");
+        assert_eq!(media.2, "42");
+        assert_eq!(media.3, "image");
     }
 
     #[test]

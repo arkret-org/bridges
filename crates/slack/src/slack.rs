@@ -74,6 +74,10 @@ impl SlackApp {
         // Only care about the events_api type whose inner event is a message.
         let event = envelope.pointer("/payload/event");
         let Some(event) = event else { return true };
+        if let Some((channel, user, message_id, media_kind)) = slack_unsupported_media(event) {
+            ctx.report_unsupported_inbound_media("slack", channel, user, message_id, media_kind)
+                .await;
+        }
         let Some(inbound) = slack_inbound_message(event) else {
             return true;
         };
@@ -111,6 +115,33 @@ fn slack_inbound_message(event: &Value) -> Option<InboundAppMessage> {
         app_message_id: ts.to_owned(),
         body: text.to_owned(),
     })
+}
+
+fn slack_unsupported_media(event: &Value) -> Option<(String, String, String, &'static str)> {
+    if event.get("type").and_then(Value::as_str) != Some("message") {
+        return None;
+    }
+    // Ignore the bot itself and subtype messages (edits, joins, etc.) to avoid loops.
+    if event.get("bot_id").is_some() || event.get("subtype").is_some() {
+        return None;
+    }
+    let has_files = event
+        .get("files")
+        .and_then(Value::as_array)
+        .is_some_and(|files| !files.is_empty());
+    if !has_files {
+        return None;
+    }
+    Some((
+        event.get("channel").and_then(Value::as_str)?.to_owned(),
+        event
+            .get("user")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        event.get("ts").and_then(Value::as_str)?.to_owned(),
+        "files",
+    ))
 }
 
 #[cfg(test)]
@@ -161,6 +192,22 @@ mod tests {
             }))
             .is_none()
         );
+    }
+
+    #[test]
+    fn slack_unsupported_media_extracts_file_event() {
+        let event = json!({
+            "type": "message",
+            "channel": "C123",
+            "user": "U456",
+            "ts": "1700000000.123",
+            "files": [{"id": "F1"}]
+        });
+        let media = slack_unsupported_media(&event).expect("unsupported media");
+        assert_eq!(media.0, "C123");
+        assert_eq!(media.1, "U456");
+        assert_eq!(media.2, "1700000000.123");
+        assert_eq!(media.3, "files");
     }
 }
 

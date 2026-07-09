@@ -496,7 +496,21 @@ async fn wechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respons
     };
 
     let fields = parse_wechat_xml(&inner_xml);
+    let user = fields.from_user.unwrap_or_default();
+    let channel = user.clone();
     if fields.msg_type.as_deref() != Some("text") {
+        if let Some(message_id) = fields.msg_id.filter(|id| !id.trim().is_empty()) {
+            state
+                .ctx
+                .report_unsupported_inbound_media(
+                    "wechat",
+                    channel,
+                    user,
+                    message_id,
+                    fields.msg_type.as_deref().unwrap_or("unknown"),
+                )
+                .await;
+        }
         webhook::ok_text(res, "success");
         return;
     }
@@ -504,8 +518,6 @@ async fn wechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respons
         webhook::ok_text(res, "success");
         return;
     };
-    let user = fields.from_user.unwrap_or_default();
-    let channel = user.clone();
     let Some(message_id) = fields.msg_id.filter(|id| !id.trim().is_empty()) else {
         webhook::bad_request(res, "WeChat MsgId missing");
         return;
