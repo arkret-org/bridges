@@ -1117,7 +1117,8 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
             Some(strand_id) => strand_id,
             None => self.ctx.ensure_portal_strand(&channel, &realm_id).await?,
         };
-        if extract_strand_id(&event.payload) != Some(portal_strand.as_str()) {
+        let payload = event.as_message_create()?;
+        if extract_strand_id(&payload) != portal_strand.as_str() {
             tracing::debug!(
                 realm = %realm_id,
                 portal_strand = %portal_strand,
@@ -1125,8 +1126,8 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
             );
             return Ok(());
         }
-        let body = extract_plain_body(&event.payload);
-        let attachment = extract_attachment(&event.payload);
+        let body = extract_plain_body(&payload)?;
+        let attachment = extract_attachment(&payload)?;
         let sender_display = sender_display_for_event(
             self.ctx.store.clone(),
             event.actor_id.to_string(),

@@ -1,7 +1,7 @@
 use cokret::{
     CalendarAttendee, CalendarEventFields, CalendarEventLocation, CalendarLocation,
-    CalendarRecurrence, Did, RecurrenceFrequency, RecurrenceWeekday, RsvpSetPayload, RsvpStatus,
-    StrandId,
+    CalendarRecurrence, Did, MessageCreatePayload, RecurrenceFrequency, RecurrenceWeekday,
+    RsvpSetPayload, RsvpStatus, StrandId,
 };
 use serde_json::{Value, json};
 
@@ -127,14 +127,12 @@ fn media_kind_follows_mime_category_and_file_requires_filename() {
 fn extraction_reads_spec_shaped_payloads() {
     let att = media_attachment();
     let content = media_content_block(&att).unwrap();
-    let payload = serde_json::to_value(
-        build_message_create_payload(STRAND_ID, content, vec![att.blob_ref.clone()]).unwrap(),
-    )
-    .unwrap();
+    let payload =
+        build_message_create_payload(STRAND_ID, content, vec![att.blob_ref.clone()]).unwrap();
 
-    assert_eq!(extract_plain_body(&payload), "look at this");
-    assert_eq!(extract_strand_id(&payload), Some(STRAND_ID));
-    let extracted = extract_attachment(&payload).expect("attachment");
+    assert_eq!(extract_plain_body(&payload).unwrap(), "look at this");
+    assert_eq!(extract_strand_id(&payload), STRAND_ID);
+    let extracted = extract_attachment(&payload).unwrap().expect("attachment");
     assert_eq!(extracted.blob_ref, att.blob_ref);
     assert_eq!(extracted.media_type.as_deref(), Some("image/png"));
     assert_eq!(extracted.filename.as_deref(), Some("shot.png"));
@@ -144,7 +142,7 @@ fn extraction_reads_spec_shaped_payloads() {
 
 #[test]
 fn extraction_handles_composite_payloads() {
-    let composite = json!({
+    let composite = serde_json::from_value::<MessageCreatePayload>(json!({
         "strand_id": STRAND_ID,
         "track_name": "discussion",
         "content": {
@@ -162,8 +160,9 @@ fn extraction_handles_composite_payloads() {
                 }
             ]
         }
-    });
-    let extracted = extract_attachment(&composite).expect("attachment");
+    }))
+    .unwrap();
+    let extracted = extract_attachment(&composite).unwrap().expect("attachment");
     assert_eq!(extracted.filename.as_deref(), Some("spec.pdf"));
     assert_eq!(extracted.size, Some(7));
 }
