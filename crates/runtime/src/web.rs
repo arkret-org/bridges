@@ -33,7 +33,7 @@ use crate::idempotency::{
 use crate::run_blocking;
 
 static PROMETHEUS_HANDLE: OnceLock<std::result::Result<PrometheusHandle, String>> = OnceLock::new();
-const APPLET_TRANSACTION_OPERATION_ID: &str = "ck.edge.applet.command.transaction";
+const APPLET_TRANSACTION_OPERATION_ID: &str = "ak.edge.applet.command.transaction";
 const APPLET_TRANSACTION_DIRECTION: &str = "node_to_applet";
 const APPLET_TRANSACTION_SIGNATURE_MAX_LIFETIME_SECS: i64 = 300;
 const APPLET_TRANSACTION_SIGNATURE_MAX_CLOCK_SKEW_SECS: i64 = 30;

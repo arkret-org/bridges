@@ -728,7 +728,7 @@ mod tests {
         idempotency_key: &'a str,
     ) -> TransactionReplayKey<'a> {
         TransactionReplayKey {
-            operation_id: "ck.edge.applet.command.transaction",
+            operation_id: "ak.edge.applet.command.transaction",
             direction: "node_to_applet",
             source_service_did: "did:webvh:server.example",
             destination_service_did,
@@ -866,7 +866,7 @@ mod tests {
             .record(OutboundDeadLetterRecord {
                 event_id: "ak:event:01904100-0000-7000-8000-000000000101".to_owned(),
                 realm_id: "ak:realm:01904100-0000-7000-8000-000000000201".to_owned(),
-                kind: "ck.message.create".to_owned(),
+                kind: "ak.message.create".to_owned(),
                 attempts: 4,
                 retriable: true,
                 last_error: "first failure".to_owned(),

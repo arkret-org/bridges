@@ -410,7 +410,7 @@ pub(crate) async fn find_existing_portal_strand(
             )
             .await?;
         for event in &page.events {
-            if event.kind.as_str() != "ck.strand.create" {
+            if event.kind.as_str() != "ak.strand.create" {
                 continue;
             }
             let Some(object) = event.payload.get("object") else {
@@ -474,7 +474,7 @@ pub(crate) async fn create_portal_strand(
     // requires object.created_by == actor_id (both are the service DID here) and
     // object.created_at == the envelope created_at.
     let mut event = edge
-        .mint_event_unsigned_async("ck.strand.create", &realm, payload)
+        .mint_event_unsigned_async("ak.strand.create", &realm, payload)
         .await?;
     event.created_at = strand_created_at;
     event.external_ref = Some(location.clone());

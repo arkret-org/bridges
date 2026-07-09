@@ -72,7 +72,7 @@ fn text_payload_matches_message_create_schema_shape() {
             .unwrap();
     assert_eq!(payload["strand_id"], STRAND_ID);
     assert_eq!(payload["track_name"], PORTAL_STRAND_TRACK);
-    assert_eq!(payload["content"]["kind"], "ck.content.text");
+    assert_eq!(payload["content"]["kind"], "ak.content.text");
     assert_eq!(payload["content"]["body"], "hello");
     // Closed-schema hygiene: no stray top-level body / media fields.
     assert!(payload.get("body").is_none());
@@ -88,7 +88,7 @@ fn media_payload_uses_blob_refs_and_forbidden_field_names_are_absent() {
         build_message_create_payload(STRAND_ID, content, vec![att.blob_ref.clone()]).unwrap(),
     )
     .unwrap();
-    assert_eq!(payload["content"]["kind"], "ck.content.image");
+    assert_eq!(payload["content"]["kind"], "ak.content.image");
     assert_eq!(payload["content"]["body"], "look at this");
     assert_eq!(payload["content"]["blob_ref"], att.blob_ref);
     assert_eq!(payload["content"]["mime_type"], "image/png");
@@ -103,13 +103,13 @@ fn media_payload_uses_blob_refs_and_forbidden_field_names_are_absent() {
 
 #[test]
 fn media_kind_follows_mime_category_and_file_requires_filename() {
-    assert_eq!(media_content_kind(Some("video/mp4")), "ck.content.video");
-    assert_eq!(media_content_kind(Some("audio/ogg")), "ck.content.audio");
+    assert_eq!(media_content_kind(Some("video/mp4")), "ak.content.video");
+    assert_eq!(media_content_kind(Some("audio/ogg")), "ak.content.audio");
     assert_eq!(
         media_content_kind(Some("application/pdf")),
-        "ck.content.file"
+        "ak.content.file"
     );
-    assert_eq!(media_content_kind(None), "ck.content.file");
+    assert_eq!(media_content_kind(None), "ak.content.file");
 
     let mut att = media_attachment();
     att.media_type = Some("application/pdf".to_owned());
@@ -146,12 +146,12 @@ fn extraction_handles_composite_payloads() {
         "strand_id": STRAND_ID,
         "track_name": "discussion",
         "content": {
-            "kind": "ck.content.composite",
+            "kind": "ak.content.composite",
             "body": "caption text",
             "parts": [
-                { "kind": "ck.content.text", "body": "caption text" },
+                { "kind": "ak.content.text", "body": "caption text" },
                 {
-                    "kind": "ck.content.file",
+                    "kind": "ak.content.file",
                     "body": "spec.pdf",
                     "blob_ref": format!("ak:blob:sha256:{}", "b".repeat(64)),
                     "mime_type": "application/pdf",
@@ -230,7 +230,7 @@ fn encrypted_comment() -> serde_json::Value {
         "aad_visibility_event_id": "hidden",
         "aad": {
             "realm_id": "ak:realm:01904100-0000-7000-8000-000000000001",
-            "event_kind": "ck.rsvp.set"
+            "event_kind": "ak.rsvp.set"
         },
         "key_ref": {
             "algorithm": "MLS",
@@ -282,7 +282,7 @@ fn calendar_fields() -> CalendarEventFields {
 fn calendar_schedule_maps_only_profile_subset() {
     let schedule =
         serde_json::to_value(bridge_calendar_schedule_fields(calendar_fields()).unwrap()).unwrap();
-    assert_eq!(CALENDAR_EVENT_PROFILE, "ck.profile.calendar_event.v1");
+    assert_eq!(CALENDAR_EVENT_PROFILE, "ak.profile.calendar_event.v1");
     assert_eq!(schedule["timezone"], "America/New_York");
     assert_eq!(schedule["recurrence"]["frequency"], "WEEKLY");
     assert!(schedule.get("attendees").is_none());

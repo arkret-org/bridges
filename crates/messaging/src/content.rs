@@ -15,7 +15,7 @@ use crate::PORTAL_STRAND_TRACK;
 use crate::types::Attachment;
 
 /// Build the spec `content_block` for plain text
-/// (`zh/models/content-types.md` §4.1: `{ "kind": "ck.content.text", "body" }`).
+/// (`zh/models/content-types.md` §4.1: `{ "kind": "ak.content.text", "body" }`).
 pub fn text_content_block(body: &str) -> Result<ContentBlock> {
     Ok(ContentBlock::text(body))
 }

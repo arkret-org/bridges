@@ -587,7 +587,7 @@ impl CokretEdge {
         let mut event = self
             .build_delegated_event_async(
                 actor,
-                "ck.message.redact",
+                "ak.message.redact",
                 &realm,
                 content,
                 authorization_ref,
@@ -1256,7 +1256,7 @@ mod tests {
         let actor = Did::new("did:webvh:alice.example").unwrap();
         let hlc = Hlc::new("01970e589d21-0001-a13f9c2e").unwrap();
         let mut first = Event::new(
-            "ck.message.create",
+            "ak.message.create",
             realm,
             actor,
             1,

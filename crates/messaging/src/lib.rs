@@ -88,7 +88,7 @@ pub fn json_scalar_id_string(value: &Value) -> Option<String> {
 /// for capability enforcement (BRG-01-009): the runtime rejects any pushed event
 /// whose kind is not listed. `MessageAdapter::on_arkret_event` handles exactly
 /// message creation and redaction.
-const BRIDGE_HANDLED_EVENT_KINDS: [&str; 2] = ["ck.message.create", "ck.message.redact"];
+const BRIDGE_HANDLED_EVENT_KINDS: [&str; 2] = ["ak.message.create", "ck.message.redact"];
 
 /// The strand track bridged messages write into. Applet-integration §10.1
 /// requires bridge messages to use the `discussion` track; the v1
@@ -848,7 +848,7 @@ impl MessageContext {
                         .submit_with_external_ref_as(
                             &actor,
                             &realm_for_submit,
-                            "ck.message.create",
+                            "ak.message.create",
                             payload,
                             external_ref,
                             &mapping.authorization_ref,
@@ -1113,7 +1113,7 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
         // an event we previously bridged is mapped to an app-side deletion via the
         // adapter's `redact_in_app`. Honors the `disable_deletion_forwarding`
         // switch.
-        if event.kind == "ck.message.redact" {
+        if event.kind == "ak.message.redact" {
             if self.ctx.core().config.bridge.disable_deletion_forwarding {
                 return Ok(());
             }
@@ -1138,7 +1138,7 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
                 .await?;
             return Ok(());
         }
-        if event.kind != "ck.message.create" {
+        if event.kind != "ak.message.create" {
             return Ok(());
         }
         // Loop prevention: skip events this bridge itself submitted (app ->

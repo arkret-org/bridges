@@ -17,7 +17,7 @@ use std::fmt;
 use arkret::{CalendarEventFields, EncryptedEnvelope, RsvpSetPayload};
 use serde_json::Value;
 
-pub const CALENDAR_EVENT_PROFILE: &str = "ck.profile.calendar_event.v1";
+pub const CALENDAR_EVENT_PROFILE: &str = "ak.profile.calendar_event.v1";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CalendarMapError {

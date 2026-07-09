@@ -302,7 +302,7 @@ mod tests {
         idempotency_key: &'a str,
     ) -> TransactionReplayKey<'a> {
         TransactionReplayKey {
-            operation_id: "ck.edge.applet.command.transaction",
+            operation_id: "ak.edge.applet.command.transaction",
             direction: "node_to_applet",
             source_service_did: "did:webvh:server.example",
             destination_service_did,
