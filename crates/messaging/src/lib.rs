@@ -966,14 +966,17 @@ pub trait MessageBridge: Send + Sync + 'static {
 
     /// Forward a Cokret message redaction as an app-side deletion. The driver
     /// (`on_cokret_event`) already resolves the target `app_message_id` and
-    /// invokes this; the default is a no-op.
+    /// invokes this with the channel/message pair most app delete APIs require;
+    /// the default is a no-op.
     ///
     /// Status (BRG-HYG-003): **no adapter overrides this yet** — outbound delete
-    /// forwarding is dark on every bridge. Wiring it properly needs the callback
-    /// to also carry the `app_channel` (most platform delete APIs, e.g. Discord
-    /// `delete_message`, key on channel + message id), which is a shared trait
-    /// signature change; tracked in `_bridges_todos.md`.
-    async fn redact_in_app(&self, _ctx: Arc<MessageContext>, _app_message_id: &str) -> Result<()> {
+    /// forwarding is dark on every bridge; tracked in `_bridges_todos.md`.
+    async fn redact_in_app(
+        &self,
+        _ctx: Arc<MessageContext>,
+        _app_channel: &str,
+        _app_message_id: &str,
+    ) -> Result<()> {
         Ok(())
     }
 
@@ -1055,7 +1058,7 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
             let Some(target) = event.redacts.as_ref() else {
                 return Ok(());
             };
-            let Some(app_message_id) = self
+            let Some(mapping) = self
                 .ctx
                 .store
                 .clone()
@@ -1065,7 +1068,11 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
                 return Ok(());
             };
             self.user
-                .redact_in_app(self.ctx.clone(), &app_message_id)
+                .redact_in_app(
+                    self.ctx.clone(),
+                    &mapping.app_channel_id,
+                    &mapping.app_message_id,
+                )
                 .await?;
             return Ok(());
         }

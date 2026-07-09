@@ -211,14 +211,13 @@ impl MessageStore {
             .optional()?)
     }
 
-    pub fn app_message_for_event(&self, cokret_event_id: &str) -> Result<Option<String>> {
+    pub fn app_message_for_event(&self, cokret_event_id: &str) -> Result<Option<MessageMapping>> {
         use schema::message_mappings::dsl;
 
         let mut conn = self.db.conn()?;
         Ok(dsl::message_mappings
             .filter(dsl::cokret_event_id.eq(cokret_event_id))
-            .select(dsl::app_message_id)
-            .first::<String>(&mut conn)
+            .first::<MessageMapping>(&mut conn)
             .optional()?)
     }
 
@@ -395,7 +394,7 @@ impl MessageStore {
     pub async fn app_message_for_event_async(
         self: Arc<Self>,
         cokret_event_id: String,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<MessageMapping>> {
         run_blocking(move || self.app_message_for_event(&cokret_event_id)).await
     }
 
@@ -441,6 +440,50 @@ impl MessageStore {
         actor_id: String,
     ) -> Result<Option<UserMapping>> {
         run_blocking(move || self.user_by_actor(&actor_id)).await
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod tests {
+    use std::sync::Arc;
+
+    use cokret_bridge_runtime::DatabaseConfig;
+
+    use super::*;
+
+    fn sqlite_store(name: &str) -> Result<MessageStore> {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "cokret-bridge-messaging-{name}-{}-{}.sqlite",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let db = DatabaseManager::connect(&DatabaseConfig {
+            url: format!("sqlite://{}", path.display()),
+            pool_size: 1,
+        })?;
+        MessageStore::new(Arc::new(db))
+    }
+
+    #[test]
+    fn app_message_for_event_preserves_channel_and_message_id() {
+        let store = sqlite_store("message-target").unwrap();
+        store
+            .record_message(
+                "channel-1",
+                "app-message-1",
+                "sender-1",
+                "ck:event:01904100-0000-7000-8000-000000000123",
+                "ck:realm:01904100-0000-7000-8000-000000000001",
+            )
+            .unwrap();
+
+        let mapping = store
+            .app_message_for_event("ck:event:01904100-0000-7000-8000-000000000123")
+            .unwrap()
+            .expect("mapping");
+        assert_eq!(mapping.app_channel_id, "channel-1");
+        assert_eq!(mapping.app_message_id, "app-message-1");
     }
 }
 

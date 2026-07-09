@@ -13,7 +13,9 @@ use cokret_bridge_messaging::{
     AppMessageRef, ExternalMediaRequest, InboundAppMessage, MessageBridge, MessageContext,
     OutboundAppMessage, SenderRenderStyle,
 };
-use serenity::all::{ChannelId, CreateAttachment, CreateMessage, GatewayIntents, Http, Message};
+use serenity::all::{
+    ChannelId, CreateAttachment, CreateMessage, GatewayIntents, Http, Message, MessageId,
+};
 use serenity::client::{Context as SerenityContext, EventHandler};
 
 /// Discord bridge adapter.
@@ -83,6 +85,20 @@ impl MessageBridge for DiscordApp {
             app_message_id: sent.id.to_string(),
         })
     }
+
+    async fn redact_in_app(
+        &self,
+        _ctx: Arc<MessageContext>,
+        app_channel: &str,
+        app_message_id: &str,
+    ) -> Result<()> {
+        let channel = parse_discord_channel_id(app_channel)?;
+        let message = parse_discord_message_id(app_message_id)?;
+        channel
+            .delete_message(self.http.as_ref(), message)
+            .await
+            .map_err(|e| BridgeError::App(format!("Discord delete failed: {e}")))
+    }
 }
 
 fn parse_discord_channel_id(channel: &str) -> Result<ChannelId> {
@@ -90,6 +106,13 @@ fn parse_discord_channel_id(channel: &str) -> Result<ChannelId> {
         .parse()
         .map_err(|_| BridgeError::App(format!("invalid Discord channel id: {channel}")))?;
     Ok(ChannelId::new(channel_raw))
+}
+
+fn parse_discord_message_id(message: &str) -> Result<MessageId> {
+    let message_raw: u64 = message
+        .parse()
+        .map_err(|_| BridgeError::App(format!("invalid Discord message id: {message}")))?;
+    Ok(MessageId::new(message_raw))
 }
 
 /// Gateway event handling: forward inbound Discord messages to the core.
@@ -176,5 +199,16 @@ mod tests {
     fn discord_channel_id_parser_rejects_non_numeric_ids() {
         assert!(parse_discord_channel_id("general").is_err());
         assert!(parse_discord_channel_id("").is_err());
+    }
+
+    #[test]
+    fn discord_message_id_parser_accepts_numeric_ids() {
+        assert_eq!(parse_discord_message_id("987654").unwrap().get(), 987654);
+    }
+
+    #[test]
+    fn discord_message_id_parser_rejects_non_numeric_ids() {
+        assert!(parse_discord_message_id("not-a-message").is_err());
+        assert!(parse_discord_message_id("").is_err());
     }
 }

@@ -41,7 +41,12 @@ pub trait MessageBridge: Send + Sync + 'static {
     async fn run(self: Arc<Self>, ctx: Arc<MessageContext>) -> Result<()>;    // app 接收循环
     async fn send_to_app(&self, ctx: Arc<MessageContext>, msg: OutboundAppMessage)
         -> Result<AppMessageRef>;                                             // cokret→app 发送
-    async fn redact_in_app(&self, _ctx: Arc<MessageContext>, _id: &str) -> Result<()> { Ok(()) }
+    async fn redact_in_app(
+        &self,
+        _ctx: Arc<MessageContext>,
+        _app_channel: &str,
+        _app_message_id: &str,
+    ) -> Result<()> { Ok(()) }
     // 纯 HTTP 桥重写此项,返回入站 webhook 路由(由 runtime web 服务挂载);默认 None
     fn webhook_router(self: Arc<Self>, _ctx: Arc<MessageContext>) -> Option<salvo::Router> { None }
 }
@@ -57,10 +62,9 @@ pub trait MessageBridge: Send + Sync + 'static {
 > **能力就绪、尚未接线(BRG-HYG-001):** 三条删除 / ephemeral 链路在共享层(messaging)
 > 已**完整实现并有单测**,但目前**没有任何适配器接线**,运行时不会真实触达:
 > (a) 入站删除 `submit_app_delete`(app→cokret 删除)无桥构造 `InboundAppDelete`;
-> (b) 出站删除 `redact_in_app`(cokret→app 删除转发)在所有桥都是默认 no-op;
+> (b) 出站删除 `redact_in_app`(cokret→app 删除转发)已有 Discord 示例接线,其余桥仍默认 no-op;
 > (c) `on_ephemeral`(typing/presence/receipts 转发)在所有桥都是默认 no-op。
-> 阻碍点与接线计划见 [`_bridges_todos.md`](_bridges_todos.md)(`redact_in_app` 需把回调签名扩成
-> 带 `app_channel` 的共享 trait 变更,触及全部桥)。读者勿误以为删除 / typing 已经过桥生效。
+> 接线计划见 [`_bridges_todos.md`](_bridges_todos.md)。读者勿误以为删除 / typing 已在所有桥生效。
 
 ### Provenance 与回环防护(裁决记录)
 
