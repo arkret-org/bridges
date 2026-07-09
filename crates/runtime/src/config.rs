@@ -65,7 +65,7 @@ pub struct BridgeConfig {
     #[serde(default = "default_webhook_bind")]
     pub webhook_bind: String,
     /// Internal admin/edge listen port. The trusted applet protocol plane
-    /// (`/_cokret/edge/applet/*`) and the ops plane (`/health` + `/metrics`)
+    /// (`/_arkret/edge/applet/*`) and the ops plane (`/health` + `/metrics`)
     /// bind here, separated from the public webhook plane so that "no reverse
     /// proxy configured" still yields plane isolation by default. When omitted,
     /// it falls back to `port + 1000`.
@@ -77,7 +77,7 @@ pub struct BridgeConfig {
     #[serde(default = "default_admin_bind")]
     pub admin_bind: String,
     /// When set, `ck.message.redact` events from arkret are not forwarded as
-    /// app-side deletions (see `MessageAdapter::on_cokret_event`).
+    /// app-side deletions (see `MessageAdapter::on_arkret_event`).
     #[serde(default)]
     pub disable_deletion_forwarding: bool,
     /// Per-source-IP rate limiting on the public webhook plane. Enabled by

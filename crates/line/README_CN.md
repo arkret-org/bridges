@@ -13,7 +13,7 @@ Rust 实现的 **arkret ⇄ LINE** 桥接。基于共享核心
   `MessageContext::submit_app_message` 构造并签名 `ck.message.create` 事件提交到 arkret;
   `run` 为保活循环。
 - **出站(arkret → LINE)**:arkret server 经 applet 端点
-  `POST /_cokret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
+  `POST /_arkret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
   用 `ctx.http`(reqwest)以 Bearer `channel_access_token` POST
   `https://api.line.me/v2/bot/message/push`。
 - **映射**:频道↔realm、消息↔event、用户↔actor 存于 diesel 数据库(默认 sqlite)。

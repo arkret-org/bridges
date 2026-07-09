@@ -52,8 +52,8 @@ pub trait MessageBridge: Send + Sync + 'static {
 }
 ```
 
-下行(arkret→app)由 messaging 的 `MessageAdapter::on_cokret_event` 自动驱动 `send_to_app`,
-适配器无需自己实现 `on_cokret_event`;只转发 portal strand 上的 `ck.message.create`(§10.1 映射
+下行(arkret→app)由 messaging 的 `MessageAdapter::on_arkret_event` 自动驱动 `send_to_app`,
+适配器无需自己实现 `on_arkret_event`;只转发 portal strand 上的 `ck.message.create`(§10.1 映射
 单位是 `(realm_id, strand_id)`),正文从 `payload.content`(content_block)解析,媒体从
 `blob_ref`/`blob_refs[]` 解析。`config.app` 放该 app 专属配置(token 等),由
 `bridge_main` 经 serde 反序列化成每桥自定义的强类型 `AppConfig`(缺字段由 serde 按字段名报错)。
@@ -81,7 +81,7 @@ pub trait MessageBridge: Send + Sync + 'static {
 ## 每个 crate 必须产出的文件
 
 1. `Cargo.toml`:应用 crate 只直接依赖 `arkret-bridge-messaging`(`{ workspace = true }`)；
-   如需通用运行时类型，通过 `cokret_bridge_messaging::runtime` 使用 re-export，勿绕过消息层。
+   如需通用运行时类型，通过 `arkret_bridge_messaging::runtime` 使用 re-export，勿绕过消息层。
    + 该 app 传输库;`[[bin]]` name 同 crate;features 转发 sqlite/postgres/mysql 到这两个 crate(见 discord)。
    只声明源码实际 `use` 的依赖(`ctx.http` 已带 reqwest,桥自身通常无需再声明)。
 2. `src/main.rs`:定义 `#[derive(Deserialize)] struct AppConfig {...}` →

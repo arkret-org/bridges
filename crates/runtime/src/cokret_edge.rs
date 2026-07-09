@@ -774,7 +774,7 @@ pub struct BridgeAppletHandler {
     dedup: Arc<dyn EventDedupStore>,
     /// Trust-root DID resolver the SDK applet router uses to authenticate the
     /// source service DID's HTTP message signature and every pushed Event proof
-    /// on the inbound `POST /_cokret/edge/applet/transactions` path
+    /// on the inbound `POST /_arkret/edge/applet/transactions` path
     /// (applet-integration §7.3). Scoped to the methods this bridge accepts for
     /// inbound pushes (did:key / did:webvh, fail-closed).
     source_did_resolver: Arc<dyn DidResolver + Send + Sync>,

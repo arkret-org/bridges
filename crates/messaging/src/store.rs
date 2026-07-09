@@ -6,9 +6,9 @@
 
 use std::sync::Arc;
 
-use cokret_bridge_runtime::app::{AppletResolver, ResolvedActor, ResolvedRealm};
-use cokret_bridge_runtime::db::DatabaseManager;
-use cokret_bridge_runtime::{BridgeError, Result, run_blocking};
+use arkret_bridge_runtime::app::{AppletResolver, ResolvedActor, ResolvedRealm};
+use arkret_bridge_runtime::db::DatabaseManager;
+use arkret_bridge_runtime::{BridgeError, Result, run_blocking};
 use diesel::prelude::*;
 use diesel_migrations::{EmbeddedMigrations, embed_migrations};
 use serde_json::json;
@@ -59,14 +59,14 @@ impl MessageStore {
         if let Some(existing) = exists {
             // A realm change invalidates the cached portal strand (the strand
             // belongs to the previous realm); it is re-resolved lazily.
-            let portal_strand_id = if existing.cokret_realm_id == realm_id {
+            let portal_strand_id = if existing.arkret_realm_id == realm_id {
                 existing.portal_strand_id.clone()
             } else {
                 None
             };
             diesel::update(dsl::channel_realm_mappings.filter(dsl::id.eq(existing.id)))
                 .set((
-                    dsl::cokret_realm_id.eq(realm_id),
+                    dsl::arkret_realm_id.eq(realm_id),
                     dsl::portal_alias.eq(alias),
                     dsl::portal_strand_id.eq(portal_strand_id),
                 ))
@@ -75,7 +75,7 @@ impl MessageStore {
             diesel::insert_into(dsl::channel_realm_mappings)
                 .values(NewChannelRealmMapping {
                     app_channel_id: app_channel,
-                    cokret_realm_id: realm_id,
+                    arkret_realm_id: realm_id,
                     portal_alias: alias,
                     portal_strand_id: None,
                     created_at: now_ts(),
@@ -114,7 +114,7 @@ impl MessageStore {
 
         let mut conn = self.db.conn()?;
         Ok(dsl::channel_realm_mappings
-            .filter(dsl::cokret_realm_id.eq(realm_id))
+            .filter(dsl::arkret_realm_id.eq(realm_id))
             .first::<ChannelRealmMapping>(&mut conn)
             .optional()?)
     }
@@ -124,7 +124,7 @@ impl MessageStore {
         app_channel: &str,
         app_message_id: &str,
         normalized_sender: &str,
-        cokret_event_id: &str,
+        arkret_event_id: &str,
         realm_id: &str,
     ) -> Result<()> {
         use schema::message_mappings::dsl;
@@ -151,8 +151,8 @@ impl MessageStore {
         if let Some(existing) = exists {
             diesel::update(dsl::message_mappings.filter(dsl::id.eq(existing.id)))
                 .set((
-                    dsl::cokret_event_id.eq(cokret_event_id),
-                    dsl::cokret_realm_id.eq(realm_id),
+                    dsl::arkret_event_id.eq(arkret_event_id),
+                    dsl::arkret_realm_id.eq(realm_id),
                 ))
                 .execute(&mut conn)?;
         } else {
@@ -161,8 +161,8 @@ impl MessageStore {
                     app_channel_id: app_channel,
                     app_message_id,
                     normalized_sender,
-                    cokret_event_id,
-                    cokret_realm_id: realm_id,
+                    arkret_event_id,
+                    arkret_realm_id: realm_id,
                     created_at: now_ts(),
                 })
                 .execute(&mut conn)?;
@@ -185,7 +185,7 @@ impl MessageStore {
             .filter(dsl::app_channel_id.eq(app_channel))
             .filter(dsl::app_message_id.eq(app_message_id))
             .filter(dsl::normalized_sender.eq(normalized_sender))
-            .select(dsl::cokret_event_id)
+            .select(dsl::arkret_event_id)
             .first::<String>(&mut conn)
             .optional()?)
     }
@@ -206,17 +206,17 @@ impl MessageStore {
             .filter(dsl::app_channel_id.eq(app_channel))
             .filter(dsl::app_message_id.eq(app_message_id))
             .order(dsl::created_at.asc())
-            .select(dsl::cokret_event_id)
+            .select(dsl::arkret_event_id)
             .first::<String>(&mut conn)
             .optional()?)
     }
 
-    pub fn app_message_for_event(&self, cokret_event_id: &str) -> Result<Option<MessageMapping>> {
+    pub fn app_message_for_event(&self, arkret_event_id: &str) -> Result<Option<MessageMapping>> {
         use schema::message_mappings::dsl;
 
         let mut conn = self.db.conn()?;
         Ok(dsl::message_mappings
-            .filter(dsl::cokret_event_id.eq(cokret_event_id))
+            .filter(dsl::arkret_event_id.eq(arkret_event_id))
             .first::<MessageMapping>(&mut conn)
             .optional()?)
     }
@@ -252,7 +252,7 @@ impl MessageStore {
                 protocol,
                 tenant,
                 external_user_id,
-                cokret_actor_id: actor_id,
+                arkret_actor_id: actor_id,
                 profile_event_ref,
                 accountability_grant_ref,
                 authorization_ref,
@@ -273,7 +273,7 @@ impl MessageStore {
                         .filter(dsl::external_user_id.eq(external_user_id)),
                 )
                 .set((
-                    dsl::cokret_actor_id.eq(actor_id),
+                    dsl::arkret_actor_id.eq(actor_id),
                     dsl::profile_event_ref.eq(profile_event_ref),
                     dsl::accountability_grant_ref.eq(accountability_grant_ref),
                     dsl::authorization_ref.eq(authorization_ref),
@@ -309,7 +309,7 @@ impl MessageStore {
 
         let mut conn = self.db.conn()?;
         Ok(dsl::user_mappings
-            .filter(dsl::cokret_actor_id.eq(actor_id))
+            .filter(dsl::arkret_actor_id.eq(actor_id))
             .first::<UserMapping>(&mut conn)
             .optional()?)
     }
@@ -321,7 +321,7 @@ impl MessageStore {
 
         let mut conn = self.db.conn()?;
         Ok(dsl::channel_realm_mappings
-            .filter(dsl::cokret_realm_id.eq(key).or(dsl::portal_alias.eq(key)))
+            .filter(dsl::arkret_realm_id.eq(key).or(dsl::portal_alias.eq(key)))
             .first::<ChannelRealmMapping>(&mut conn)
             .optional()?)
     }
@@ -355,7 +355,7 @@ impl MessageStore {
         app_channel: String,
         app_message_id: String,
         normalized_sender: String,
-        cokret_event_id: String,
+        arkret_event_id: String,
         realm_id: String,
     ) -> Result<()> {
         run_blocking(move || {
@@ -363,7 +363,7 @@ impl MessageStore {
                 &app_channel,
                 &app_message_id,
                 &normalized_sender,
-                &cokret_event_id,
+                &arkret_event_id,
                 &realm_id,
             )
         })
@@ -393,9 +393,9 @@ impl MessageStore {
 
     pub async fn app_message_for_event_async(
         self: Arc<Self>,
-        cokret_event_id: String,
+        arkret_event_id: String,
     ) -> Result<Option<MessageMapping>> {
-        run_blocking(move || self.app_message_for_event(&cokret_event_id)).await
+        run_blocking(move || self.app_message_for_event(&arkret_event_id)).await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -447,7 +447,7 @@ impl MessageStore {
 mod tests {
     use std::sync::Arc;
 
-    use cokret_bridge_runtime::DatabaseConfig;
+    use arkret_bridge_runtime::DatabaseConfig;
 
     use super::*;
 
@@ -497,7 +497,7 @@ impl AppletResolver for MessageResolver {
     fn resolve_actor(&self, actor_id: &str) -> Option<ResolvedActor> {
         let row = self.store.user_by_actor(actor_id).ok().flatten()?;
         Some(ResolvedActor {
-            actor_id: row.cokret_actor_id,
+            actor_id: row.arkret_actor_id,
             display_name: row.display_name,
             external_ref: json!({
                 "protocol": row.protocol,
@@ -514,7 +514,7 @@ impl AppletResolver for MessageResolver {
             .ok()
             .flatten()?;
         Some(ResolvedRealm {
-            realm_id: row.cokret_realm_id,
+            realm_id: row.arkret_realm_id,
             title: row.portal_alias,
             external_ref: json!({ "app_channel": row.app_channel_id }),
         })

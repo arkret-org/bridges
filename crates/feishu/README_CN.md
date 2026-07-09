@@ -11,7 +11,7 @@ Rust 实现的 **arkret ⇄ 飞书(Feishu / Lark)** 桥接。基于共享核心
   (含 challenge 与 Verification Token 校验),再经 `webhook::submit` 入站;`run` 为保活循环。
   配置 Encrypt Key 后会强制验签、时间戳新鲜度、重放去重并解密 `{"encrypt":...}`;缺少 Encrypt Key 时 webhook 路由不挂载并 fail closed。
 - **出站(arkret → 飞书)**:arkret server 经 applet 端点
-  `POST /_cokret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
+  `POST /_arkret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
   用 `ctx.http` 先换 `tenant_access_token`,再
   `POST https://open.feishu.cn/open-apis/im/v1/messages` 发送文本消息。
 - **映射**:频道↔realm、消息↔event、用户↔actor 存于 diesel 数据库(默认 sqlite)。

@@ -5,7 +5,7 @@ bridge:
   port: 9105
   # 公网 webhook 面(/webhooks/*、Teams 的 /api/messages):必须可达外部平台回调。
   webhook_bind: "0.0.0.0"
-  # 内网 admin/edge 面(/_cokret/edge/applet/*、/health、/metrics):默认仅回环,
+  # 内网 admin/edge 面(/_arkret/edge/applet/*、/health、/metrics):默认仅回环,
   # 不配反代也与公网 webhook 面隔离。admin_port 省略时回落到 port+1000。
   admin_bind: "127.0.0.1"
   admin_port: 10105

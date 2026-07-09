@@ -30,7 +30,7 @@ impl MessageDirection {
 
 /// The bridge-message counter metric name (labelled by `bridge`, `direction`,
 /// `result`). Registered with a description in [`crate::web`].
-pub const BRIDGE_MESSAGES_METRIC: &str = "cokret_bridge_messages_total";
+pub const BRIDGE_MESSAGES_METRIC: &str = "arkret_bridge_messages_total";
 
 /// Record one bridged message attempt. `result` is `"ok"` or `"error"`;
 /// `bridge` is the adapter name (e.g. `"slack"`). No-op unless the `web`

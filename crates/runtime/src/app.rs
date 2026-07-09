@@ -5,9 +5,9 @@
 //! reusable *bridge runtime* on top of the SDK:
 //!
 //! - Inbound (arkret -> external): the arkret server pushes transactions; the core turns them into
-//!   an async stream and calls [`BridgeApp::on_cokret_event`] with the raw [`arkret::Event`].
+//!   an async stream and calls [`BridgeApp::on_arkret_event`] with the raw [`arkret::Event`].
 //! - Outbound (external -> arkret): the adapter mints + submits events via
-//!   [`crate::cokret_edge::CokretEdge`] (any event kind, arbitrary payload).
+//!   [`crate::arkret_edge::CokretEdge`] (any event kind, arbitrary payload).
 //!
 //! A bridge to a non-social system (IoT, ticketing, CI, …) implements
 //! [`BridgeApp`] directly. Social/chat bridges use the ergonomic helpers in the
@@ -31,7 +31,7 @@ use tokio::sync::mpsc::Receiver;
 
 // `Value` is also used below for the `external_ref` payload type.
 #[cfg(feature = "runtime")]
-use crate::cokret_edge::CokretEdge;
+use crate::arkret_edge::CokretEdge;
 #[cfg(feature = "runtime")]
 use crate::config::Config;
 #[cfg(feature = "runtime")]
@@ -168,7 +168,7 @@ pub trait BridgeApp: Send + Sync + 'static {
 
     /// Handle one raw arkret event pushed by the server. The adapter decides
     /// what (if anything) to do with each event kind.
-    async fn on_cokret_event(&self, ctx: Arc<BridgeContext>, event: Event) -> Result<()>;
+    async fn on_arkret_event(&self, ctx: Arc<BridgeContext>, event: Event) -> Result<()>;
 
     /// Handle an ephemeral signal (typing/presence/receipts/call-signal) pushed
     /// by the server alongside events, as the SDK [`EphemeralEnvelope`] wire
@@ -326,7 +326,7 @@ async fn deliver_inbound_event<A: BridgeApp>(
     let event_id = event.event_id.to_string();
     let mut backoff = INBOUND_RETRY_BASE_BACKOFF;
     for attempt in 1..=INBOUND_MAX_DELIVERY_ATTEMPTS {
-        match app.on_cokret_event(ctx.clone(), event.clone()).await {
+        match app.on_arkret_event(ctx.clone(), event.clone()).await {
             Ok(()) => return true,
             Err(e) => {
                 let retriable = e.is_retriable();

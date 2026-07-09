@@ -7,7 +7,7 @@ use arkret::{
     GhostActorProvisionRequestBody, Hlc, ObjectCreatePayload, RealmId, StrandCreateObject,
     StrandId, StrandTrackConfig,
 };
-use cokret_bridge_runtime::{BridgeError, Result};
+use arkret_bridge_runtime::{BridgeError, Result};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -96,7 +96,7 @@ pub(crate) fn assert_ghost_suffix_method(service_did: &Did) -> Result<()> {
 }
 
 /// The spec-registered ghost provision binding: `ck.self.applet.ghost.command.provision`
-/// = `POST /_cokret/self/applets/{applet_id}/ghosts/provision`
+/// = `POST /_arkret/self/applets/{applet_id}/ghosts/provision`
 /// (applet-integration §9.1, `operation-registry.json`, openapi).
 fn ghost_actor_provision_path(applet_id: &str) -> Result<String> {
     if applet_id.trim().is_empty() || applet_id.contains('/') {
@@ -105,7 +105,7 @@ fn ghost_actor_provision_path(applet_id: &str) -> Result<String> {
         ));
     }
     Ok(format!(
-        "/_cokret/self/applets/{applet_id}/ghosts/provision"
+        "/_arkret/self/applets/{applet_id}/ghosts/provision"
     ))
 }
 
@@ -270,7 +270,7 @@ pub(crate) fn require_nonempty_ref(label: &str, value: &str) -> Result<()> {
 /// underlying message text, so it never leaks external content).
 pub(crate) fn bridge_error_code(error: &BridgeError) -> &'static str {
     match error {
-        BridgeError::Arkret(_) => "cokret_unavailable",
+        BridgeError::Arkret(_) => "arkret_unavailable",
         BridgeError::Database(_) => "bridge_storage_error",
         BridgeError::Runtime(_) => "bridge_runtime_error",
         BridgeError::App(_) => "app_adapter_error",

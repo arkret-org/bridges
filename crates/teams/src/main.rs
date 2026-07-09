@@ -4,8 +4,8 @@ mod teams;
 
 use std::sync::Arc;
 
-use cokret_bridge_messaging::bridge_main;
-use cokret_bridge_messaging::webhook::{JwtAuthConfig, JwtVerifier};
+use arkret_bridge_messaging::bridge_main;
+use arkret_bridge_messaging::webhook::{JwtAuthConfig, JwtVerifier};
 use serde::Deserialize;
 
 use crate::teams::TeamsApp;

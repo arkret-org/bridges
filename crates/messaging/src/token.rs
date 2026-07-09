@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use cokret_bridge_runtime::{BridgeError, Result};
+use arkret_bridge_runtime::{BridgeError, Result};
 use serde_json::Value;
 
 use crate::{send_json_expect, send_json_expect_status};

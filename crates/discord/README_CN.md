@@ -8,7 +8,7 @@ Rust 实现的 **arkret ⇄ Discord** 桥接。基于共享核心 [`arkret-bridg
 - **入站(Discord → arkret)**:serenity gateway 收到消息 → `MessageContext::submit_app_message`
   → 核心构造并签名 `ck.message.create` 事件 → `events_submit` 提交到 arkret。
 - **出站(arkret → Discord)**:arkret server 经 applet 端点
-  `POST /_cokret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
+  `POST /_arkret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
   用 serenity HTTP 发到 Discord 频道。
 - **媒体(双向)**:入站附件从 Discord CDN 下载 → `upload_blob` → `submit_media_message`;
   出站 `MediaContent` 经 `download_blob` → serenity `CreateAttachment` 发回频道。

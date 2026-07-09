@@ -8,11 +8,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::runtime::Result;
-use cokret_bridge_messaging::runtime::cache::TokenCache;
-use cokret_bridge_messaging::salvo::prelude::*;
-use cokret_bridge_messaging::salvo::{self, affix_state};
-use cokret_bridge_messaging::{
+use arkret_bridge_messaging::runtime::Result;
+use arkret_bridge_messaging::runtime::cache::TokenCache;
+use arkret_bridge_messaging::salvo::prelude::*;
+use arkret_bridge_messaging::salvo::{self, affix_state};
+use arkret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, VendorTokenCheck, fetch_vendor_token, send_json_expect, webhook,
 };
@@ -479,14 +479,14 @@ mod tests {
 
     #[tokio::test]
     async fn replay_guard_rejects_second_identical_delivery() {
-        use cokret_bridge_messaging::runtime::db::{
+        use arkret_bridge_messaging::runtime::db::{
             DatabaseManager, DbReplayGuardStore, MIGRATIONS,
         };
 
         // The handler keys the replay guard on `timestamp:nonce:signature`. A
         // captured (validly signed) delivery must be accepted at most once.
         let db = Arc::new(
-            DatabaseManager::connect(&cokret_bridge_messaging::runtime::DatabaseConfig {
+            DatabaseManager::connect(&arkret_bridge_messaging::runtime::DatabaseConfig {
                 url: "sqlite://:memory:".to_owned(),
                 pool_size: 1,
             })

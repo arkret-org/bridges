@@ -2,7 +2,7 @@
 
 mod messenger;
 
-use cokret_bridge_messaging::{DEFAULT_GRAPH_API_VERSION, bridge_main};
+use arkret_bridge_messaging::{DEFAULT_GRAPH_API_VERSION, bridge_main};
 use serde::Deserialize;
 
 use crate::messenger::MessengerApp;

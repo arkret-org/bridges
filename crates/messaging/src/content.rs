@@ -8,7 +8,7 @@ use arkret::{
     BlobRef, CONTENT_KIND_AUDIO, CONTENT_KIND_FILE, CONTENT_KIND_IMAGE, CONTENT_KIND_VIDEO,
     ContentBlock, ContentBlockMediaAttachment, MessageCreatePayload, StrandId,
 };
-use cokret_bridge_runtime::{BridgeError, Result};
+use arkret_bridge_runtime::{BridgeError, Result};
 use serde_json::{Value, json};
 
 use crate::PORTAL_STRAND_TRACK;

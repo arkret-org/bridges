@@ -9,10 +9,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::runtime::{BridgeError, Result};
-use cokret_bridge_messaging::salvo::prelude::*;
-use cokret_bridge_messaging::salvo::{self, affix_state};
-use cokret_bridge_messaging::{
+use arkret_bridge_messaging::runtime::{BridgeError, Result};
+use arkret_bridge_messaging::salvo::prelude::*;
+use arkret_bridge_messaging::salvo::{self, affix_state};
+use arkret_bridge_messaging::{
     AppMessageRef, ExternalMediaRequest, InboundAppMessage, MessageBridge, MessageContext,
     OutboundAppMessage, SenderRenderStyle, send_json_expect_status, webhook,
 };

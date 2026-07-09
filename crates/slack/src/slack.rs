@@ -12,8 +12,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::runtime::{BridgeError, Result, jittered_delay};
-use cokret_bridge_messaging::{
+use arkret_bridge_messaging::runtime::{BridgeError, Result, jittered_delay};
+use arkret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, send_json_expect,
 };

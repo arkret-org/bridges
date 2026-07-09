@@ -7,7 +7,7 @@ diesel::table! {
     channel_realm_mappings (id) {
         id -> BigInt,
         app_channel_id -> Text,
-        cokret_realm_id -> Text,
+        arkret_realm_id -> Text,
         portal_alias -> Nullable<Text>,
         portal_strand_id -> Nullable<Text>,
         created_at -> BigInt,
@@ -22,8 +22,8 @@ diesel::table! {
         app_channel_id -> Text,
         app_message_id -> Text,
         normalized_sender -> Text,
-        cokret_event_id -> Text,
-        cokret_realm_id -> Text,
+        arkret_event_id -> Text,
+        arkret_realm_id -> Text,
         created_at -> BigInt,
     }
 }
@@ -35,7 +35,7 @@ diesel::table! {
         protocol -> Text,
         tenant -> Text,
         external_user_id -> Text,
-        cokret_actor_id -> Text,
+        arkret_actor_id -> Text,
         profile_event_ref -> Text,
         accountability_grant_ref -> Text,
         authorization_ref -> Text,

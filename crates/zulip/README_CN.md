@@ -10,7 +10,7 @@ REST 接口。
   `GET /api/v1/events`(长轮询)拉取 `message` 事件 → `MessageContext::submit_app_message`
   → 核心构造并签名 `ck.message.create` 事件 → `events_submit` 提交到 arkret。
 - **出站(arkret → Zulip)**:arkret server 经 applet 端点
-  `POST /_cokret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
+  `POST /_arkret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
   用 `ctx.http` `POST {site}/api/v1/messages`(HTTP basic auth:bot_email + api_key)发送。
 - **映射**:频道↔realm、消息↔event、用户↔actor 存于 diesel 数据库(默认 sqlite)。
 

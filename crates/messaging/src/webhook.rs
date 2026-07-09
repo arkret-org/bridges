@@ -8,7 +8,7 @@ use base64::Engine as _;
 use cbc::Decryptor;
 use cbc::cipher::block_padding::Pkcs7;
 use cbc::cipher::{BlockDecryptMut, KeyIvInit};
-use cokret_bridge_runtime::{ReplayGuardStore, run_blocking};
+use arkret_bridge_runtime::{ReplayGuardStore, run_blocking};
 use hmac::{Hmac, KeyInit, Mac};
 use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
@@ -676,10 +676,10 @@ mod tests {
 
     #[cfg(feature = "sqlite")]
     fn memory_replay_window(ttl: Duration) -> ReplayWindow {
-        use cokret_bridge_runtime::db::{DatabaseManager, DbReplayGuardStore, MIGRATIONS};
+        use arkret_bridge_runtime::db::{DatabaseManager, DbReplayGuardStore, MIGRATIONS};
 
         let db = Arc::new(
-            DatabaseManager::connect(&cokret_bridge_runtime::DatabaseConfig {
+            DatabaseManager::connect(&arkret_bridge_runtime::DatabaseConfig {
                 url: "sqlite://:memory:".to_owned(),
                 pool_size: 1,
             })

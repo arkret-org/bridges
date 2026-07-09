@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::runtime::{BridgeError, Result};
-use cokret_bridge_messaging::{
+use arkret_bridge_messaging::runtime::{BridgeError, Result};
+use arkret_bridge_messaging::{
     AppMessageRef, ExternalMediaRequest, InboundAppMessage, MessageBridge,
     MessageBridgeCapabilities, MessageContext, OutboundAppMessage, SenderRenderStyle,
 };

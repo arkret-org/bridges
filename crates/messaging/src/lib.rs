@@ -33,10 +33,10 @@ use arkret::{
     AppletBridgeErrorBuilder, AppletBridgeErrorVisibility, ContentBlock, Did, Event, EventId,
     MessageRedactPayload, RealmId,
 };
-pub use cokret_bridge_runtime as runtime;
-use cokret_bridge_runtime::app::{BridgeApp, BridgeContext};
-use cokret_bridge_runtime::db::{DbReplayGuardStore, DbTokenStore};
-use cokret_bridge_runtime::{
+pub use arkret_bridge_runtime as runtime;
+use arkret_bridge_runtime::app::{BridgeApp, BridgeContext};
+use arkret_bridge_runtime::db::{DbReplayGuardStore, DbTokenStore};
+use arkret_bridge_runtime::{
     BridgeError, MessageDirection, ReplayGuardStore, Result, TokenCache, TokenStore,
     record_bridge_message, redact_sensitive_url_values,
 };
@@ -86,7 +86,7 @@ pub fn json_scalar_id_string(value: &Value) -> Option<String> {
 
 /// The inbound (arkret → app) event kinds this messaging bridge consumes, used
 /// for capability enforcement (BRG-01-009): the runtime rejects any pushed event
-/// whose kind is not listed. `MessageAdapter::on_cokret_event` handles exactly
+/// whose kind is not listed. `MessageAdapter::on_arkret_event` handles exactly
 /// message creation and redaction.
 const BRIDGE_HANDLED_EVENT_KINDS: [&str; 2] = ["ck.message.create", "ck.message.redact"];
 
@@ -196,7 +196,7 @@ impl MessageContext {
             .portal_for_channel_async(msg.app_channel.clone())
             .await
         {
-            Ok(Some(row)) => row.cokret_realm_id,
+            Ok(Some(row)) => row.arkret_realm_id,
             Ok(None) => return,
             Err(lookup_err) => {
                 tracing::warn!(error = %lookup_err, "bridge_error realm lookup failed; skipping emit");
@@ -492,7 +492,7 @@ impl MessageContext {
                         .await?;
                     let alias = row.as_ref().and_then(|row| row.portal_alias.clone());
                     if let Some(row) = row
-                        && row.cokret_realm_id == realm_id
+                        && row.arkret_realm_id == realm_id
                         && let Some(strand_id) = row
                             .portal_strand_id
                             .filter(|strand_id| !strand_id.trim().is_empty())
@@ -595,7 +595,7 @@ impl MessageContext {
             .clone()
             .portal_for_channel_async(delete.app_channel.clone())
             .await?
-            .map(|row| row.cokret_realm_id)
+            .map(|row| row.arkret_realm_id)
             .ok_or_else(|| {
                 BridgeError::App(format!(
                     "channel {} has no realm mapping; cannot forward app delete",
@@ -690,7 +690,7 @@ impl MessageContext {
                         &mapping.accountability_grant_ref,
                     )?;
                     require_nonempty_ref("authorization_ref", &mapping.authorization_ref)?;
-                    let actor = Did::new(mapping.cokret_actor_id)?;
+                    let actor = Did::new(mapping.arkret_actor_id)?;
                     let payload =
                         redaction_payload_for_app_delete(&target_event_id, delete.reason)?
                             .expect("delete reason was checked before queue submission");
@@ -734,7 +734,7 @@ impl MessageContext {
             .clone()
             .portal_for_channel_async(msg.app_channel.clone())
             .await?
-            .map(|row| row.cokret_realm_id)
+            .map(|row| row.arkret_realm_id)
             .ok_or_else(|| {
                 BridgeError::App(format!(
                     "channel {} has no realm mapping; create an explicit channel-realm mapping",
@@ -843,7 +843,7 @@ impl MessageContext {
                         &mapping.accountability_grant_ref,
                     )?;
                     require_nonempty_ref("authorization_ref", &mapping.authorization_ref)?;
-                    let actor = Did::new(mapping.cokret_actor_id)?;
+                    let actor = Did::new(mapping.arkret_actor_id)?;
                     let event_id = edge
                         .submit_with_external_ref_as(
                             &actor,
@@ -997,7 +997,7 @@ pub trait MessageBridge: Send + Sync + 'static {
     ) -> Result<AppMessageRef>;
 
     /// Forward a Arkret message redaction as an app-side deletion. The driver
-    /// (`on_cokret_event`) already resolves the target `app_message_id` and
+    /// (`on_arkret_event`) already resolves the target `app_message_id` and
     /// invokes this with the channel/message pair most app delete APIs require;
     /// the default is a no-op.
     ///
@@ -1108,7 +1108,7 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
         self.user.clone().run(self.ctx.clone()).await
     }
 
-    async fn on_cokret_event(&self, _ctx: Arc<BridgeContext>, event: Event) -> Result<()> {
+    async fn on_arkret_event(&self, _ctx: Arc<BridgeContext>, event: Event) -> Result<()> {
         // Deletion forwarding (arkret -> app): a `ck.message.redact` that targets
         // an event we previously bridged is mapped to an app-side deletion via the
         // adapter's `redact_in_app`. Honors the `disable_deletion_forwarding`
@@ -1307,7 +1307,7 @@ where
         }));
         // Declare the inbound event kinds this messaging bridge consumes so the
         // applet handler rejects anything else as `capability_denied`
-        // (BRG-01-009). `MessageAdapter::on_cokret_event` handles exactly these.
+        // (BRG-01-009). `MessageAdapter::on_arkret_event` handles exactly these.
         core_ctx.set_handled_event_kinds(BRIDGE_HANDLED_EVENT_KINDS);
         let ctx = Arc::new(MessageContext::new(core_ctx, store));
         let user = Arc::new(factory(ctx.clone())?);
@@ -1329,7 +1329,7 @@ where
 ///
 /// #[tokio::main]
 /// async fn main() -> anyhow::Result<()> {
-///     cokret_bridge_messaging::bridge_main("arkret <-> Example bridge", |app: AppConfig, _ctx| {
+///     arkret_bridge_messaging::bridge_main("arkret <-> Example bridge", |app: AppConfig, _ctx| {
 ///         Ok(ExampleApp::new(app.bot_token))
 ///     })
 ///     .await

@@ -10,7 +10,7 @@ use super::schema::{channel_realm_mappings, message_mappings, user_mappings};
 pub struct ChannelRealmMapping {
     pub id: i64,
     pub app_channel_id: String,
-    pub cokret_realm_id: String,
+    pub arkret_realm_id: String,
     pub portal_alias: Option<String>,
     /// The portal strand this external location maps to (applet-integration
     /// §10.1: mapping unit is `(realm_id, strand_id)`); resolved lazily.
@@ -22,7 +22,7 @@ pub struct ChannelRealmMapping {
 #[diesel(table_name = channel_realm_mappings)]
 pub struct NewChannelRealmMapping<'a> {
     pub app_channel_id: &'a str,
-    pub cokret_realm_id: &'a str,
+    pub arkret_realm_id: &'a str,
     pub portal_alias: Option<&'a str>,
     pub portal_strand_id: Option<&'a str>,
     pub created_at: i64,
@@ -36,8 +36,8 @@ pub struct MessageMapping {
     pub app_message_id: String,
     /// Normalized external sender; part of the §16 dedup key.
     pub normalized_sender: String,
-    pub cokret_event_id: String,
-    pub cokret_realm_id: String,
+    pub arkret_event_id: String,
+    pub arkret_realm_id: String,
     pub created_at: i64,
 }
 
@@ -47,8 +47,8 @@ pub struct NewMessageMapping<'a> {
     pub app_channel_id: &'a str,
     pub app_message_id: &'a str,
     pub normalized_sender: &'a str,
-    pub cokret_event_id: &'a str,
-    pub cokret_realm_id: &'a str,
+    pub arkret_event_id: &'a str,
+    pub arkret_realm_id: &'a str,
     pub created_at: i64,
 }
 
@@ -59,7 +59,7 @@ pub struct UserMapping {
     pub protocol: String,
     pub tenant: String,
     pub external_user_id: String,
-    pub cokret_actor_id: String,
+    pub arkret_actor_id: String,
     pub profile_event_ref: String,
     pub accountability_grant_ref: String,
     pub authorization_ref: String,
@@ -73,7 +73,7 @@ pub struct NewUserMapping<'a> {
     pub protocol: &'a str,
     pub tenant: &'a str,
     pub external_user_id: &'a str,
-    pub cokret_actor_id: &'a str,
+    pub arkret_actor_id: &'a str,
     pub profile_event_ref: &'a str,
     pub accountability_grant_ref: &'a str,
     pub authorization_ref: &'a str,

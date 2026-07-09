@@ -9,7 +9,7 @@ Rust 实现的 **arkret ⇄ Telegram** 桥接。基于共享核心 [`arkret-brid
   `MessageContext::submit_app_message` → 核心构造并签名 `ck.message.create` 事件 →
   `events_submit` 提交到 arkret。
 - **出站(arkret → Telegram)**:arkret server 经 applet 端点
-  `POST /_cokret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
+  `POST /_arkret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
   用 `Bot::send_message`(媒体则 `send_document`)发到对应 chat。
 - **媒体(双向)**:入站 photo/document 经 `get_file` 下载 → `upload_blob` → `submit_media_message`;
   出站 `MediaContent` 经 `download_blob` → `InputFile::memory` 以 `send_document` 发回。

@@ -1,5 +1,5 @@
 //! salvo HTTP service: health check / metrics / provisioning, plus mounting
-//! the arkret applet routes (`/_cokret/edge/applet/*`) to receive event pushes
+//! the arkret applet routes (`/_arkret/edge/applet/*`) to receive event pushes
 //! from the arkret server.
 
 use std::sync::{Arc, OnceLock};
@@ -23,7 +23,7 @@ use salvo::prelude::*;
 use serde_json::{Value, json};
 
 use crate::app::BridgeContext;
-use crate::cokret_edge::BridgeAppletHandler;
+use crate::arkret_edge::BridgeAppletHandler;
 use crate::config::{Config, TrustedVerificationMethodConfig};
 use crate::db::{DbEventDedupStore, DbTransactionIdempotencyStore};
 use crate::error::{BridgeError, Result};
@@ -70,7 +70,7 @@ pub async fn serve(ctx: Arc<BridgeContext>, extra: Option<Router>) -> Result<()>
     prometheus_handle()
         .map_err(|err| BridgeError::Runtime(format!("metrics recorder init failed: {err}")))?;
     counter!(
-        "cokret_bridge_runtime_starts_total",
+        "arkret_bridge_runtime_starts_total",
         "bridge_id" => ctx.config.bridge.bridge_id.clone()
     )
     .increment(1);
@@ -101,7 +101,7 @@ pub async fn serve(ctx: Arc<BridgeContext>, extra: Option<Router>) -> Result<()>
     });
 
     // Internal plane: the trusted applet protocol surface
-    // (`/_cokret/edge/applet/*`) and the ops surface (`/health` + `/metrics`)
+    // (`/_arkret/edge/applet/*`) and the ops surface (`/health` + `/metrics`)
     // share one loopback-by-default acceptor. Keeping these off the public
     // webhook bind means "no reverse proxy configured" still isolates the
     // trusted and ops planes from the public network (BRG-06-004).
@@ -162,13 +162,13 @@ pub async fn serve(ctx: Arc<BridgeContext>, extra: Option<Router>) -> Result<()>
 
 #[handler]
 async fn health(res: &mut Response) {
-    counter!("cokret_bridge_health_requests_total").increment(1);
+    counter!("arkret_bridge_health_requests_total").increment(1);
     res.render(Json(serde_json::json!({ "status": "ok" })));
 }
 
 #[handler]
 async fn metrics_endpoint(res: &mut Response) {
-    counter!("cokret_bridge_metrics_scrapes_total").increment(1);
+    counter!("arkret_bridge_metrics_scrapes_total").increment(1);
     match prometheus_handle() {
         Ok(handle) => res.render(Text::Plain(handle.render())),
         Err(err) => {
@@ -186,19 +186,19 @@ fn prometheus_handle() -> std::result::Result<&'static PrometheusHandle, String>
             .install_recorder()
             .map_err(|err| err.to_string())?;
         describe_counter!(
-            "cokret_bridge_runtime_starts_total",
+            "arkret_bridge_runtime_starts_total",
             "Bridge runtime start count, labelled by bridge_id."
         );
         describe_counter!(
-            "cokret_bridge_health_requests_total",
+            "arkret_bridge_health_requests_total",
             "Bridge /health request count."
         );
         describe_counter!(
-            "cokret_bridge_metrics_scrapes_total",
+            "arkret_bridge_metrics_scrapes_total",
             "Bridge /metrics scrape count."
         );
         describe_counter!(
-            "cokret_bridge_applet_transactions_total",
+            "arkret_bridge_applet_transactions_total",
             "Applet transaction request count, labelled by result."
         );
         describe_counter!(
@@ -213,7 +213,7 @@ fn prometheus_handle() -> std::result::Result<&'static PrometheusHandle, String>
 }
 
 fn record_applet_transaction(result: &'static str) {
-    counter!("cokret_bridge_applet_transactions_total", "result" => result).increment(1);
+    counter!("arkret_bridge_applet_transactions_total", "result" => result).increment(1);
 }
 
 #[derive(Clone)]
@@ -282,7 +282,7 @@ struct HttpSignatureReject {
 }
 
 fn applet_router(state: AppletWebState) -> Router {
-    Router::with_path("_cokret/edge/applet")
+    Router::with_path("_arkret/edge/applet")
         .hoop(affix_state::inject(state))
         .push(Router::with_path("ping").get(applet_ping))
         .push(Router::with_path("describe").get(applet_describe))
@@ -1047,7 +1047,7 @@ fn request_target_uri(
 /// Render the spec standard error response shape
 /// (`{"ok":false,"error":{"code":..,"message":..}}`, see
 /// `service-http-binding.md` §9) with a registry error code. The protocol
-/// surface (`/_cokret/edge/applet/*`) is part of the universal failure surface
+/// surface (`/_arkret/edge/applet/*`) is part of the universal failure surface
 /// in `operations-error-mapping.json`, so the `code` must come from the closed
 /// `error-code-registry.json` set rather than being a free-form string.
 fn applet_error(res: &mut Response, status: StatusCode, code: &str, message: impl Into<String>) {

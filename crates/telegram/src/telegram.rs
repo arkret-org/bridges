@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
-use cokret_bridge_messaging::{
+use arkret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
+use arkret_bridge_messaging::{
     AppMessageRef, ExternalMediaRequest, InboundAppMessage, MessageBridge,
     MessageBridgeCapabilities, MessageContext, OutboundAppMessage, SenderRenderStyle,
 };
@@ -57,7 +57,7 @@ impl MessageBridge for TelegramApp {
                 // this bot's own echoes. Telegram's privacy mode usually hides
                 // these, but a group with privacy off (or multiple bots) can
                 // surface them. The authoritative loop guard remains in the
-                // shared layer (`on_cokret_event`).
+                // shared layer (`on_arkret_event`).
                 if msg.from.as_ref().map(|u| u.is_bot).unwrap_or(false) {
                     return respond(());
                 }

@@ -12,7 +12,7 @@ Rust 实现的 **arkret ⇄ Google Chat** 桥接。基于共享核心
   `MessageContext::submit_app_message` 构造并签名 `ck.message.create` 事件 →
   `events_submit` 提交到 arkret;`run` 为保活循环。
 - **出站(arkret → Google Chat)**:arkret server 经 applet 端点
-  `POST /_cokret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
+  `POST /_arkret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
   用 `ctx.http` POST `https://chat.googleapis.com/v1/{space}/messages` 发到 space。
 - **映射**:space↔realm、消息↔event、用户↔actor 存于 diesel 数据库(默认 sqlite)。
 

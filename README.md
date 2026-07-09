@@ -48,9 +48,9 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `arkret-bridge-
 
 每个桥都是一个 arkret **Applet**:
 
-- **入站(arkret → app)**:arkret server 经 `POST /_cokret/edge/applet/transactions`
+- **入站(arkret → app)**:arkret server 经 `POST /_arkret/edge/applet/transactions`
   推送事件 → runtime `BridgeAppletHandler` 入队 → `consume_inbound` 消费循环 →
-  `MessageBridge::on_cokret_event` → 适配器 `send_to_app`。
+  `MessageBridge::on_arkret_event` → 适配器 `send_to_app`。
 - **出站(app → arkret)**:适配器收到 app 消息(gateway/长轮询/webhook)→
   `MessageContext::submit_app_message` → runtime 构造并签名带 `external_ref` 溯源的
   per-user Ghost Actor `ck.message.create` 事件 → `events_submit` 提交。Ghost DID 按
@@ -70,7 +70,7 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `arkret-bridge-
   (`{body,blob,mimetype,filename,size}`)。
 - **媒体**:`MessageContext::{upload_blob,download_blob,submit_media_message}` + `Attachment`;
   discord/telegram 收发双向、whatsapp/line 入站已接,余者文本(通用能力就绪)。
-- **防回声**:`on_cokret_event` 跳过本桥 `external_ref.source` 自发事件、由本桥
+- **防回声**:`on_arkret_event` 跳过本桥 `external_ref.source` 自发事件、由本桥
   service actor 署名的事件,以及已在消息映射表记录的 event,避免出站回环。
 
 详见 [`_BRIDGE_CONTRACT.md`](_BRIDGE_CONTRACT.md)(适配器编写契约)。
@@ -92,12 +92,12 @@ cargo run -p arkret-bridge-discord -- --config config.yaml
 
 - **公网 webhook 面**(`/webhooks/*`,Teams 另含 Bot Framework 的 `/api/messages`):
   绑 `webhook_bind:port`,默认 `webhook_bind=0.0.0.0`,必须可被对应平台回调可达。
-- **内网 admin/edge 面**(受信协议面 `/_cokret/edge/applet/*` 与运维面 `/health`、
+- **内网 admin/edge 面**(受信协议面 `/_arkret/edge/applet/*` 与运维面 `/health`、
   `/metrics`):绑 `admin_bind:admin_port`,默认 `admin_bind=127.0.0.1`(仅回环),
   `admin_port` 省略时回落到 `port + 1000`。即使不配反向代理,协议面与运维面也默认不对
   公网开放。
 
-`/_cokret/edge/applet/*` 配置 `trusted_server_did` 与 `trusted_verification_methods` 后会
+`/_arkret/edge/applet/*` 配置 `trusted_server_did` 与 `trusted_verification_methods` 后会
 校验 HTTP Message Signature、source/destination DID 与 event proof;生产仍建议在反代/网络层
 进一步限制为仅可信 Arkret server 访问,并对 `/metrics` 做内网或认证访问控制。若需把 admin/edge
 面也对外(如 arkret server 在另一网段),显式设置 `admin_bind` 即可,但应自行收敛网络层暴露面。

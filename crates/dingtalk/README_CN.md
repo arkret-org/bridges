@@ -12,7 +12,7 @@ Rust 实现的 **arkret ⇄ 钉钉(DingTalk)** 桥接。基于共享核心
   `MessageContext::submit_app_message` 构造并签名 `ck.message.create` 事件提交到 arkret;`run`
   为保活循环。
 - **出站(arkret → 钉钉)**:arkret server 经 applet 端点
-  `POST /_cokret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
+  `POST /_arkret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
   用 `ctx.http`(reqwest)先以 `app_key`/`app_secret` 换取 `access_token`,再
   POST 钉钉企业机器人发消息接口。
 - **映射**:频道↔realm、消息↔event、用户↔actor 存于 diesel 数据库(默认 sqlite)。

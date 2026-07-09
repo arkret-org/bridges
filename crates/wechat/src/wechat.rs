@@ -12,11 +12,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::runtime::cache::TokenCache;
-use cokret_bridge_messaging::runtime::{BridgeError, Result};
-use cokret_bridge_messaging::salvo::prelude::*;
-use cokret_bridge_messaging::salvo::{self, affix_state};
-use cokret_bridge_messaging::{
+use arkret_bridge_messaging::runtime::cache::TokenCache;
+use arkret_bridge_messaging::runtime::{BridgeError, Result};
+use arkret_bridge_messaging::salvo::prelude::*;
+use arkret_bridge_messaging::salvo::{self, affix_state};
+use arkret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, VendorTokenCheck, fetch_vendor_token, json_scalar_id_string,
     send_json_expect, webhook,

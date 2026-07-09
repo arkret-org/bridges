@@ -9,7 +9,7 @@
 //! - **Inbound async pump**: turns the SDK's synchronous `AppletHandler` transaction pushes into an
 //!   async [`arkret::Event`] stream + a background consumer ([`app::consume_inbound`]).
 //! - **Outbound mint bookkeeping**: monotonic `actor_seq`, HLC generation, `applet_id` stamping and
-//!   signing, wrapped in [`cokret_edge::CokretEdge::mint_event`] / `submit_event`.
+//!   signing, wrapped in [`arkret_edge::CokretEdge::mint_event`] / `submit_event`.
 //! - **App-runtime scaffolding**: config loading, a diesel pool + migration runner, a salvo server
 //!   (applet routes + health/metrics + app webhooks), and the [`run_bridge`] orchestration loop.
 //!
@@ -33,7 +33,7 @@ pub mod app;
 pub mod backoff;
 pub mod blocking;
 pub mod cache;
-mod cokret_edge;
+mod arkret_edge;
 mod config;
 pub mod dead_letter;
 mod error;
@@ -57,8 +57,8 @@ pub use backoff::{exponential_backoff_with_jitter, jittered_delay};
 pub use blocking::run_blocking;
 pub use cache::{PersistedToken, TokenCache, TokenStore};
 #[cfg(feature = "db")]
-pub use cokret_edge::DbSeqStore;
-pub use cokret_edge::{CokretEdge, SeqAllocator, SeqStore};
+pub use arkret_edge::DbSeqStore;
+pub use arkret_edge::{CokretEdge, SeqAllocator, SeqStore};
 pub use config::{ChannelRealmMappingConfig, Config, DatabaseConfig, WebhookRateLimitConfig};
 #[cfg(feature = "db")]
 pub use db::{
@@ -98,11 +98,11 @@ where
     // the adapter by the background consumer loop. Bounded so a slow consumer
     // applies backpressure (the applet handler returns `retry_after_ms` when
     // full) instead of buffering without limit (BRG-02-001).
-    let (inbound_tx, inbound_rx) = mpsc::channel(cokret_edge::INBOUND_QUEUE_CAPACITY);
+    let (inbound_tx, inbound_rx) = mpsc::channel(arkret_edge::INBOUND_QUEUE_CAPACITY);
     // Ephemeral (typing/presence/receipts) is best-effort and may be dropped.
     // Keep it bounded so a slow adapter cannot turn provider bursts into
     // unbounded process memory growth.
-    let (ephemeral_tx, ephemeral_rx) = mpsc::channel(cokret_edge::EPHEMERAL_QUEUE_CAPACITY);
+    let (ephemeral_tx, ephemeral_rx) = mpsc::channel(arkret_edge::EPHEMERAL_QUEUE_CAPACITY);
 
     let db = Arc::new(db::DatabaseManager::connect(&config.database)?);
     // The diesel-backed restart-safe sequence store, injected into the edge.

@@ -13,7 +13,7 @@ Rust 实现的 **arkret ⇄ 微信(企业微信 / 公众号)** 桥接。基于�
   `msg_signature` 校验 + AES-256-CBC 解密 + receiveid 绑定;未配置时回退 plaintext 模式;
   企业微信(`agent_id`)入站强制要求安全模式,缺 `encoding_aes_key` 则启动即 fail closed。
 - **出站(arkret → 微信)**:arkret server 经 applet 端点
-  `POST /_cokret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
+  `POST /_arkret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
   用 `ctx.http` 先用 corp_id/corp_secret(或 app_id/app_secret)换 `access_token`,
   再 POST 企业微信应用消息 / 公众号客服消息接口。
 - **映射**:频道↔realm、消息↔event、用户↔actor 存于 diesel 数据库(默认 sqlite)。

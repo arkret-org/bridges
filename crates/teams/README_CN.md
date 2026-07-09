@@ -7,7 +7,7 @@ Rust 实现的 **arkret ⇄ Microsoft Teams** 桥接。基于共享核心
 ## 架构
 
 - **出站(arkret → Teams)**:arkret server 经 applet 端点
-  `POST /_cokret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`:
+  `POST /_arkret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`:
   1. 用 client_credentials 向 AAD(`login.microsoftonline.com/botframework.com`)取
      access token;
   2. `ctx.http` POST `{serviceUrl}/v3/conversations/{conversationId}/activities`

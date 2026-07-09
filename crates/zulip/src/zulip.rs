@@ -12,10 +12,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::runtime::{
+use arkret_bridge_messaging::runtime::{
     BridgeError, Result, exponential_backoff_with_jitter, redact_sensitive_url_values,
 };
-use cokret_bridge_messaging::{
+use arkret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, send_json_expect,
 };

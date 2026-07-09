@@ -2,7 +2,7 @@
 
 mod telegram;
 
-use cokret_bridge_messaging::bridge_main;
+use arkret_bridge_messaging::bridge_main;
 use serde::Deserialize;
 
 use crate::telegram::TelegramApp;
