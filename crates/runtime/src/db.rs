@@ -471,6 +471,15 @@ impl ReplayGuardStore for DbReplayGuardStore {
             Err(err) => Err(err.into()),
         }
     }
+
+    fn forget(&self, key: &str) -> Result<()> {
+        use idempotency_schema::webhook_replay_guard::dsl;
+
+        let mut conn = self.db.conn()?;
+        diesel::delete(dsl::webhook_replay_guard.filter(dsl::replay_key.eq(key)))
+            .execute(&mut conn)?;
+        Ok(())
+    }
 }
 
 /// Diesel-backed [`TokenStore`]: persists vendor access tokens so replicas of
@@ -641,6 +650,11 @@ mod tests {
         assert!(store.check_and_record("k2", -1).unwrap());
         assert!(!store.contains("k2").unwrap());
         assert!(store.check_and_record("k2", 600).unwrap());
+        assert!(store.check_and_record("k3", 600).unwrap());
+        assert!(store.contains("k3").unwrap());
+        store.forget("k3").unwrap();
+        assert!(!store.contains("k3").unwrap());
+        assert!(store.check_and_record("k3", 600).unwrap());
     }
 
     #[test]

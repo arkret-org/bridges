@@ -106,17 +106,21 @@ pub trait EventDedupStore: Send + Sync + 'static {
 /// G-4: any inbound verification scheme without a per-body nonce MUST hold a
 /// bounded replay/dedupe window).
 ///
-/// Keys are only recorded for deliveries that already passed source
-/// verification, so the table growth is bounded by legitimate traffic plus the
-/// TTL cleanup. The store is durable and shared, so the guard holds across
-/// restarts and across horizontally scaled replicas (unlike the former
-/// process-local window).
+/// Keys are only claimed for deliveries that already passed source verification,
+/// so the table growth is bounded by legitimate traffic plus the TTL cleanup.
+/// The store is durable and shared, so the guard holds across restarts and
+/// across horizontally scaled replicas (unlike the former process-local
+/// window).
 pub trait ReplayGuardStore: Send + Sync + 'static {
     /// Whether `key` is present and unexpired. Does not record the key.
     fn contains(&self, key: &str) -> Result<bool>;
-    /// Record `key` with `ttl_secs` retention. Returns `true` when the key was
-    /// fresh (recorded now); `false` means it was already present (replay).
+    /// Atomically claim `key` with `ttl_secs` retention. Returns `true` when the
+    /// key was fresh (claimed now); `false` means it was already present
+    /// (replay).
     fn check_and_record(&self, key: &str, ttl_secs: i64) -> Result<bool>;
+    /// Release a previously claimed key after a retriable downstream failure so
+    /// the vendor's redelivery can attempt the bridge submit again.
+    fn forget(&self, key: &str) -> Result<()>;
 }
 
 /// In-memory [`TransactionIdempotencyStore`] (tests / hosts without a DB).

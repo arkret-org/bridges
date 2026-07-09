@@ -126,6 +126,21 @@ impl ReplayWindow {
             }
         }
     }
+
+    /// Release a previously claimed key after a retriable downstream failure.
+    pub async fn forget(&self, key: impl Into<String>) {
+        let key = key.into();
+        if key.trim().is_empty() {
+            return;
+        }
+        let store = self.store.clone();
+        match run_blocking(move || store.forget(&key)).await {
+            Ok(()) => {}
+            Err(err) => {
+                tracing::warn!(error = %err, "replay guard release failed");
+            }
+        }
+    }
 }
 
 /// Encoding of an HMAC digest as carried in a signature header.
@@ -575,11 +590,10 @@ pub async fn submit(
     }
 }
 
-/// Submit one inbound message behind a replay guard, preserving the existing
-/// webhook order: skip known replay keys, submit fresh deliveries, then record
-/// the key only after the submit outcome is accepted. This intentionally does
-/// not make the replay check atomic; downstream message dedup remains the
-/// correctness guard for concurrent duplicate deliveries.
+/// Submit one inbound message behind a replay guard. The replay key is claimed
+/// before submit so concurrent duplicate deliveries cannot both enter the
+/// bridge; retriable downstream failures release the claim so the vendor
+/// redelivery can try again.
 pub async fn submit_deduped(
     ctx: Arc<MessageContext>,
     label: &str,
@@ -588,13 +602,13 @@ pub async fn submit_deduped(
     inbound: InboundAppMessage,
 ) -> SubmitOutcome {
     let replay_key = replay_key.into();
-    if replay.contains(&replay_key).await {
+    if !replay.check_and_record(replay_key.clone()).await {
         tracing::debug!(bridge = label, replay_key = %replay_key, "webhook delivery replayed; skipping");
         return SubmitOutcome::Accepted;
     }
     let outcome = submit(ctx, label, inbound).await;
-    if outcome == SubmitOutcome::Accepted {
-        replay.check_and_record(replay_key).await;
+    if outcome == SubmitOutcome::Retry {
+        replay.forget(replay_key).await;
     }
     outcome
 }
@@ -693,6 +707,17 @@ mod tests {
         assert!(!window.contains("a").await);
         assert!(window.check_and_record("a").await);
         assert!(window.contains("a").await);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn replay_window_forget_releases_claim() {
+        let window = memory_replay_window(Duration::from_secs(60));
+        assert!(window.check_and_record("a").await);
+        assert!(window.contains("a").await);
+        window.forget("a").await;
+        assert!(!window.contains("a").await);
+        assert!(window.check_and_record("a").await);
     }
 
     #[test]

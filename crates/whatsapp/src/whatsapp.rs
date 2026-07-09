@@ -217,12 +217,11 @@ async fn whatsapp_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
                     continue;
                 }
 
-                if state.replay.contains(&replay_key).await {
-                    tracing::debug!(message_id = %message_id, "WhatsApp event replayed; skipping");
-                    continue;
-                }
-
                 if let Some((media_id, mime, filename)) = whatsapp_media_ref(message) {
+                    if !state.replay.check_and_record(replay_key.clone()).await {
+                        tracing::debug!(message_id = %message_id, "WhatsApp event replayed; skipping");
+                        continue;
+                    }
                     match forward_whatsapp_media(
                         state,
                         &from,
@@ -233,14 +232,15 @@ async fn whatsapp_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
                     )
                     .await
                     {
-                        Ok(_) => {
-                            state.replay.check_and_record(replay_key).await;
-                        }
+                        Ok(_) => {}
                         // The shared media forwarder already ran the inbound
                         // failure audit; only translate retriability here.
                         Err(e) => {
                             tracing::warn!(error = %e, "WhatsApp media bridging failed");
-                            retry |= e.is_retriable();
+                            if e.is_retriable() {
+                                state.replay.forget(replay_key).await;
+                                retry = true;
+                            }
                         }
                     }
                 }

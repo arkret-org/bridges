@@ -16,6 +16,7 @@ use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, VendorTokenCheck, fetch_vendor_token, send_json_expect_status, webhook,
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 /// Fallback validity (seconds) when the API omits `expireIn`.
@@ -201,6 +202,116 @@ fn dingtalk_body_signature_ok(secret: &str, timestamp: &str, raw: &[u8], signatu
         )
 }
 
+#[derive(Debug, Deserialize)]
+struct DingTalkInboundPayload {
+    #[serde(default)]
+    challenge: Option<String>,
+    #[serde(default)]
+    text: Option<DingTalkTextField>,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    message: Option<DingTalkMessageField>,
+    #[serde(default, rename = "openConversationId")]
+    open_conversation_id: Option<String>,
+    #[serde(default, rename = "conversationId")]
+    conversation_id_camel: Option<String>,
+    #[serde(default)]
+    conversation_id: Option<String>,
+    #[serde(default, rename = "chatbotCorpId")]
+    chatbot_corp_id: Option<String>,
+    #[serde(default, rename = "senderStaffId")]
+    sender_staff_id: Option<String>,
+    #[serde(default, rename = "senderId")]
+    sender_id: Option<String>,
+    #[serde(default, rename = "userId")]
+    user_id: Option<String>,
+    #[serde(default, rename = "openId")]
+    open_id: Option<String>,
+    #[serde(default, rename = "msgId")]
+    msg_id: Option<String>,
+    #[serde(default, rename = "messageId")]
+    message_id: Option<String>,
+    #[serde(default, rename = "eventId")]
+    event_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum DingTalkTextField {
+    Object { content: Option<String> },
+    String(String),
+}
+
+#[derive(Debug, Deserialize)]
+struct DingTalkMessageField {
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    content: Option<String>,
+}
+
+impl DingTalkTextField {
+    fn content(&self) -> Option<String> {
+        match self {
+            Self::Object { content } => non_empty_owned(content.clone()),
+            Self::String(value) => non_empty_owned(Some(value.clone())),
+        }
+    }
+}
+
+impl DingTalkMessageField {
+    fn text(&self) -> Option<String> {
+        non_empty_owned(self.text.clone()).or_else(|| non_empty_owned(self.content.clone()))
+    }
+}
+
+impl DingTalkInboundPayload {
+    fn into_inbound_message(self) -> std::result::Result<Option<InboundAppMessage>, &'static str> {
+        let text = self
+            .text
+            .as_ref()
+            .and_then(DingTalkTextField::content)
+            .or_else(|| non_empty_owned(self.content.clone()))
+            .or_else(|| self.message.as_ref().and_then(DingTalkMessageField::text));
+        let Some(text) = text else {
+            return Ok(None);
+        };
+        let Some(message_id) = non_empty_owned(self.msg_id)
+            .or_else(|| non_empty_owned(self.message_id))
+            .or_else(|| non_empty_owned(self.event_id))
+        else {
+            return Err("DingTalk message id missing");
+        };
+        let channel = non_empty_owned(self.open_conversation_id)
+            .or_else(|| non_empty_owned(self.conversation_id_camel))
+            .or_else(|| non_empty_owned(self.conversation_id))
+            .or_else(|| non_empty_owned(self.chatbot_corp_id))
+            .unwrap_or_default();
+        let user = non_empty_owned(self.sender_staff_id)
+            .or_else(|| non_empty_owned(self.sender_id))
+            .or_else(|| non_empty_owned(self.user_id))
+            .or_else(|| non_empty_owned(self.open_id))
+            .unwrap_or_default();
+        Ok(Some(InboundAppMessage {
+            app_channel: channel,
+            app_user: user,
+            app_message_id: message_id,
+            body: text,
+        }))
+    }
+}
+
+fn non_empty_owned(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn dingtalk_inbound_payload(body: Value) -> std::result::Result<DingTalkInboundPayload, String> {
+    serde_json::from_value(body).map_err(|err| format!("invalid DingTalk callback shape: {err}"))
+}
+
 #[handler]
 async fn dingtalk_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let Ok(state) = depot.get_typed::<DingTalkWebhookState>() else {
@@ -263,71 +374,66 @@ async fn dingtalk_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
         webhook::unauthorized(res, "DingTalk callback replay");
         return;
     }
+    let payload = match dingtalk_inbound_payload(body) {
+        Ok(payload) => payload,
+        Err(message) => {
+            webhook::bad_request(res, message);
+            return;
+        }
+    };
+
     // The challenge echo now runs only after the body HMAC + replay guards pass.
-    if let Some(challenge) = body.get("challenge").and_then(Value::as_str) {
+    if let Some(challenge) = payload.challenge.as_deref() {
         webhook::ok_json(res, json!({ "challenge": challenge }));
         return;
     }
 
-    let text = webhook::first_string_at(
-        &body,
-        &[
-            "/text/content",
-            "/text",
-            "/content",
-            "/message/text",
-            "/message/content",
-        ],
-    )
-    .unwrap_or_default();
-    if text.is_empty() {
-        webhook::ok_json(res, json!({ "ok": true }));
-        return;
-    }
-    let channel = webhook::first_string_at(
-        &body,
-        &[
-            "/openConversationId",
-            "/conversationId",
-            "/conversation_id",
-            "/chatbotCorpId",
-        ],
-    )
-    .unwrap_or_default();
-    let user = webhook::first_string_at(
-        &body,
-        &[
-            "/senderStaffId",
-            "/senderId",
-            "/userId",
-            "/openId",
-            "/senderNick",
-        ],
-    )
-    .unwrap_or_default();
-    let Some(message_id) =
-        webhook::first_non_empty_string_at(&body, &["/msgId", "/messageId", "/eventId"])
-    else {
-        webhook::bad_request(res, "DingTalk message id missing");
-        return;
+    let inbound = match payload.into_inbound_message() {
+        Ok(Some(inbound)) => inbound,
+        Ok(None) => {
+            webhook::ok_json(res, json!({ "ok": true }));
+            return;
+        }
+        Err(message) => {
+            webhook::bad_request(res, message);
+            return;
+        }
     };
-    let outcome = webhook::submit(
-        state.ctx.clone(),
-        "dingtalk",
-        InboundAppMessage {
-            app_channel: channel,
-            app_user: user,
-            app_message_id: message_id,
-            body: text,
-        },
-    )
-    .await;
+    let outcome = webhook::submit(state.ctx.clone(), "dingtalk", inbound).await;
     webhook::respond_submit(res, outcome);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dingtalk_inbound_message_extracts_stable_fields() {
+        let payload = dingtalk_inbound_payload(json!({
+            "text": { "content": "hello" },
+            "openConversationId": "conv-1",
+            "senderStaffId": "staff-1",
+            "msgId": "msg-1"
+        }))
+        .unwrap();
+        let inbound = payload.into_inbound_message().unwrap().expect("message");
+        assert_eq!(inbound.app_channel, "conv-1");
+        assert_eq!(inbound.app_user, "staff-1");
+        assert_eq!(inbound.app_message_id, "msg-1");
+        assert_eq!(inbound.body, "hello");
+    }
+
+    #[test]
+    fn dingtalk_inbound_message_does_not_use_sender_nick_as_user_id() {
+        let payload = dingtalk_inbound_payload(json!({
+            "text": "hello",
+            "senderNick": "Alice",
+            "msgId": "msg-1"
+        }))
+        .unwrap();
+        let inbound = payload.into_inbound_message().unwrap().expect("message");
+        assert_eq!(inbound.app_user, "");
+    }
 
     #[test]
     fn dingtalk_signature_rejects_malformed_or_stale_timestamp() {

@@ -15,6 +15,7 @@ use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, send_json_expect_status, webhook,
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 /// iMessage bridge adapter.
@@ -189,46 +190,150 @@ async fn imessage_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
     webhook::respond_submit(res, outcome);
 }
 
+#[derive(Debug, Deserialize)]
+struct IMessageWebhookPayload {
+    #[serde(default)]
+    data: Option<IMessageWebhookData>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    guid: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default, rename = "chatGuid")]
+    chat_guid_camel: Option<String>,
+    #[serde(default)]
+    chat_guid: Option<String>,
+    #[serde(default)]
+    chat: Option<IMessageChatRef>,
+    #[serde(default)]
+    handle: Option<IMessageHandleRef>,
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    sender: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IMessageWebhookData {
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    guid: Option<String>,
+    #[serde(default, rename = "chatGuid")]
+    chat_guid_camel: Option<String>,
+    #[serde(default)]
+    chat_guid: Option<String>,
+    #[serde(default)]
+    chat: Option<IMessageChatRef>,
+    #[serde(default)]
+    handle: Option<IMessageHandleRef>,
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    sender: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IMessageChatRef {
+    #[serde(default)]
+    guid: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IMessageHandleRef {
+    #[serde(default)]
+    address: Option<String>,
+}
+
+fn imessage_non_empty(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+impl IMessageWebhookPayload {
+    fn into_inbound_message(self) -> std::result::Result<Option<InboundAppMessage>, &'static str> {
+        let data = self.data;
+        let text = data
+            .as_ref()
+            .and_then(|data| imessage_non_empty(data.text.clone()))
+            .or_else(|| {
+                data.as_ref()
+                    .and_then(|data| imessage_non_empty(data.message.clone()))
+            })
+            .or_else(|| imessage_non_empty(self.text.clone()))
+            .or_else(|| imessage_non_empty(self.message.clone()));
+        let Some(text) = text else {
+            return Ok(None);
+        };
+        let Some(message_id) = data
+            .as_ref()
+            .and_then(|data| imessage_non_empty(data.guid.clone()))
+            .or_else(|| imessage_non_empty(self.guid.clone()))
+            .or_else(|| imessage_non_empty(self.id.clone()))
+        else {
+            return Err("iMessage message id missing");
+        };
+        let channel = data
+            .as_ref()
+            .and_then(|data| imessage_non_empty(data.chat_guid_camel.clone()))
+            .or_else(|| {
+                data.as_ref()
+                    .and_then(|data| imessage_non_empty(data.chat_guid.clone()))
+            })
+            .or_else(|| imessage_non_empty(self.chat_guid_camel.clone()))
+            .or_else(|| imessage_non_empty(self.chat_guid.clone()))
+            .or_else(|| {
+                data.as_ref()
+                    .and_then(|data| data.chat.as_ref())
+                    .and_then(|chat| imessage_non_empty(chat.guid.clone()))
+            })
+            .or_else(|| {
+                self.chat
+                    .as_ref()
+                    .and_then(|chat| imessage_non_empty(chat.guid.clone()))
+            })
+            .unwrap_or_default();
+        let user = data
+            .as_ref()
+            .and_then(|data| data.handle.as_ref())
+            .and_then(|handle| imessage_non_empty(handle.address.clone()))
+            .or_else(|| {
+                self.handle
+                    .as_ref()
+                    .and_then(|handle| imessage_non_empty(handle.address.clone()))
+            })
+            .or_else(|| {
+                data.as_ref()
+                    .and_then(|data| imessage_non_empty(data.from.clone()))
+            })
+            .or_else(|| {
+                data.as_ref()
+                    .and_then(|data| imessage_non_empty(data.sender.clone()))
+            })
+            .or_else(|| imessage_non_empty(self.from.clone()))
+            .or_else(|| imessage_non_empty(self.sender.clone()))
+            .unwrap_or_default();
+        Ok(Some(InboundAppMessage {
+            app_channel: channel,
+            app_user: user,
+            app_message_id: message_id,
+            body: text,
+        }))
+    }
+}
+
 fn imessage_inbound_message(
     body: &Value,
 ) -> std::result::Result<Option<InboundAppMessage>, &'static str> {
-    let text =
-        webhook::first_string_at(body, &["/data/text", "/data/message", "/text", "/message"])
-            .unwrap_or_default();
-    if text.is_empty() {
-        return Ok(None);
-    }
-    let Some(message_id) =
-        webhook::first_non_empty_string_at(body, &["/data/guid", "/guid", "/id"])
-    else {
-        return Err("iMessage message id missing");
-    };
-    let channel = webhook::first_string_at(
-        body,
-        &[
-            "/data/chatGuid",
-            "/chatGuid",
-            "/data/chat/guid",
-            "/chat/guid",
-        ],
-    )
-    .unwrap_or_default();
-    let user = webhook::first_string_at(
-        body,
-        &[
-            "/data/handle/address",
-            "/handle/address",
-            "/from",
-            "/sender",
-        ],
-    )
-    .unwrap_or_default();
-    Ok(Some(InboundAppMessage {
-        app_channel: channel,
-        app_user: user,
-        app_message_id: message_id,
-        body: text,
-    }))
+    serde_json::from_value::<IMessageWebhookPayload>(body.clone())
+        .map_err(|_| "invalid iMessage callback shape")?
+        .into_inbound_message()
 }
 
 #[cfg(test)]

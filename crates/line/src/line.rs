@@ -215,11 +215,6 @@ async fn line_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response)
             continue;
         }
 
-        if state.replay.contains(&replay_key).await {
-            tracing::debug!(message_id = %message_id, "LINE event replayed; skipping");
-            continue;
-        }
-
         if matches!(msg_type, "image" | "video" | "audio" | "file") {
             // The content id is the message id; the binary is fetched from the
             // LINE content endpoint.
@@ -227,18 +222,23 @@ async fn line_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response)
                 tracing::warn!("LINE media event missing content message id; skipping");
                 continue;
             };
+            if !state.replay.check_and_record(replay_key.clone()).await {
+                tracing::debug!(message_id = %message_id, "LINE event replayed; skipping");
+                continue;
+            }
             let filename = webhook::string_at(event, "/message/fileName");
             match forward_line_media(state, &channel, &user, &message_id, &content_id, filename)
                 .await
             {
-                Ok(_) => {
-                    state.replay.check_and_record(replay_key).await;
-                }
+                Ok(_) => {}
                 // The shared media forwarder already ran the inbound failure
                 // audit; only translate retriability here.
                 Err(e) => {
                     tracing::warn!(error = %e, "LINE media bridging failed");
-                    retry |= e.is_retriable();
+                    if e.is_retriable() {
+                        state.replay.forget(replay_key).await;
+                        retry = true;
+                    }
                 }
             }
         }
