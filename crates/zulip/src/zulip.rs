@@ -11,7 +11,6 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use arkret_bridge_messaging::runtime::{
     BridgeError, Result, exponential_backoff_with_jitter, redact_sensitive_url_values,
 };
@@ -19,6 +18,7 @@ use arkret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, send_json_expect,
 };
+use async_trait::async_trait;
 use serde_json::Value;
 
 /// Zulip REST success flag: top-level `result == "success"`.

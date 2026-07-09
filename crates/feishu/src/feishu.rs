@@ -7,7 +7,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use arkret_bridge_messaging::runtime::Result;
 use arkret_bridge_messaging::runtime::cache::TokenCache;
 use arkret_bridge_messaging::salvo::prelude::*;
@@ -16,6 +15,7 @@ use arkret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, VendorTokenCheck, fetch_vendor_token, send_json_expect, webhook,
 };
+use async_trait::async_trait;
 use serde_json::{Value, json};
 
 /// Feishu / Lark API success flag: top-level `code == 0`.
@@ -223,8 +223,7 @@ fn feishu_decrypt(aes_key: &[u8; 32], encrypt_b64: &str) -> Option<Value> {
 
 #[handler]
 async fn feishu_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let Ok(state) = depot.get_typed::<FeishuWebhookState>() else {
-        webhook::bad_request(res, "webhook state missing");
+    let Some(state) = webhook::require_state::<FeishuWebhookState>(depot, res) else {
         return;
     };
     // Fail closed: a Verification Token MUST be configured.

@@ -179,6 +179,418 @@ dependencies = [
 ]
 
 [[package]]
+name = "arkret"
+version = "0.3.0"
+dependencies = [
+ "argon2",
+ "arkret-core",
+ "arkret-crypto",
+ "arkret-ffi",
+ "arkret-html",
+ "arkret-http-client",
+ "arkret-keystore",
+ "arkret-server",
+ "arkret-signatures",
+ "base64",
+ "chacha20poly1305",
+ "chrono",
+ "chrono-tz",
+ "ed25519-dalek",
+ "getrandom 0.4.2",
+ "hex",
+ "hkdf 0.13.0",
+ "hpke",
+ "parking_lot",
+ "rand_core 0.9.5",
+ "regex",
+ "reqwest 0.13.4",
+ "salvo 0.93.0 (git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863)",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "subtle",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "arkret-bridge-dingtalk"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "arkret-bridge-messaging",
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "arkret-bridge-discord"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "arkret-bridge-messaging",
+ "async-trait",
+ "serde",
+ "serenity",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "arkret-bridge-feishu"
+version = "0.3.0"
+dependencies = [
+ "aes",
+ "anyhow",
+ "arkret-bridge-messaging",
+ "async-trait",
+ "base64",
+ "cbc",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "arkret-bridge-googlechat"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "arkret-bridge-messaging",
+ "async-trait",
+ "chrono",
+ "jsonwebtoken",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "arkret-bridge-imessage"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "arkret-bridge-messaging",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "arkret-bridge-line"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "arkret-bridge-messaging",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "arkret-bridge-messaging"
+version = "0.3.0"
+dependencies = [
+ "aes",
+ "anyhow",
+ "arkret",
+ "arkret-bridge-runtime",
+ "async-trait",
+ "base64",
+ "cbc",
+ "chrono",
+ "clap",
+ "diesel",
+ "diesel_migrations",
+ "futures",
+ "hex",
+ "hmac 0.13.0",
+ "jsonwebtoken",
+ "reqwest 0.13.4",
+ "salvo 0.93.0 (git+https://github.com/salvo-rs/salvo.git?branch=main)",
+ "serde",
+ "serde_json",
+ "sha1 0.11.0",
+ "sha2 0.11.0",
+ "subtle",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "arkret-bridge-messenger"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "arkret-bridge-messaging",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "arkret-bridge-qq"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "arkret-bridge-messaging",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "arkret-bridge-runtime"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "arkret",
+ "async-trait",
+ "chrono",
+ "diesel",
+ "diesel_migrations",
+ "libsqlite3-sys",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "parking_lot",
+ "reqwest 0.13.4",
+ "salvo 0.93.0 (git+https://github.com/salvo-rs/salvo.git?branch=main)",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
+name = "arkret-bridge-slack"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "arkret-bridge-messaging",
+ "async-trait",
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tracing",
+]
+
+[[package]]
+name = "arkret-bridge-teams"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "arkret-bridge-messaging",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "arkret-bridge-telegram"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "arkret-bridge-messaging",
+ "async-trait",
+ "serde",
+ "teloxide",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "arkret-bridge-wechat"
+version = "0.3.0"
+dependencies = [
+ "aes",
+ "anyhow",
+ "arkret-bridge-messaging",
+ "async-trait",
+ "base64",
+ "cbc",
+ "quick-xml",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "arkret-bridge-whatsapp"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "arkret-bridge-messaging",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "arkret-bridge-zulip"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "arkret-bridge-messaging",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "arkret-core"
+version = "0.3.0"
+dependencies = [
+ "arkret-identifiers",
+ "base64",
+ "blake3",
+ "bs58",
+ "chrono",
+ "chrono-tz",
+ "getrandom 0.4.2",
+ "hex",
+ "hmac 0.13.0",
+ "regex",
+ "salvo 0.93.0 (git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863)",
+ "salvo-oapi 0.93.0 (git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863)",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tracing",
+ "unicode-normalization",
+ "url",
+ "zeroize",
+]
+
+[[package]]
+name = "arkret-crypto"
+version = "0.3.0"
+dependencies = [
+ "arkret-core",
+ "arkret-signatures",
+ "chrono",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "arkret-ffi"
+version = "0.3.0"
+dependencies = [
+ "arkret-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "arkret-html"
+version = "0.3.0"
+dependencies = [
+ "arkret-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "arkret-http-client"
+version = "0.3.0"
+dependencies = [
+ "arkret-core",
+ "arkret-signatures",
+ "base64",
+ "chrono",
+ "futures-util",
+ "getrandom 0.4.2",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "url",
+]
+
+[[package]]
+name = "arkret-identifiers"
+version = "0.3.0"
+dependencies = [
+ "getrandom 0.2.17",
+ "getrandom 0.4.2",
+ "hex",
+ "salvo 0.93.0 (git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863)",
+ "salvo-oapi 0.93.0 (git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863)",
+ "serde",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "arkret-keystore"
+version = "0.3.0"
+dependencies = [
+ "arkret-core",
+ "tracing",
+]
+
+[[package]]
+name = "arkret-server"
+version = "0.3.0"
+dependencies = [
+ "arkret-core",
+ "arkret-signatures",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "arkret-signatures"
+version = "0.3.0"
+dependencies = [
+ "arkret-core",
+ "base64",
+ "chrono",
+ "ed25519-dalek",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "subtle",
+ "thiserror 2.0.18",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -605,418 +1017,6 @@ name = "cmov"
 version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
-
-[[package]]
-name = "arkret"
-version = "0.3.0"
-dependencies = [
- "argon2",
- "base64",
- "chacha20poly1305",
- "chrono",
- "chrono-tz",
- "arkret-core",
- "arkret-crypto",
- "arkret-ffi",
- "arkret-html",
- "arkret-http-client",
- "arkret-keystore",
- "arkret-server",
- "arkret-signatures",
- "ed25519-dalek",
- "getrandom 0.4.2",
- "hex",
- "hkdf 0.13.0",
- "hpke",
- "parking_lot",
- "rand_core 0.9.5",
- "regex",
- "reqwest 0.13.4",
- "salvo 0.93.0 (git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863)",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "subtle",
- "thiserror 2.0.18",
- "tokio",
- "uuid",
- "x25519-dalek",
- "zeroize",
-]
-
-[[package]]
-name = "arkret-bridge-dingtalk"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "arkret-bridge-messaging",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "arkret-bridge-discord"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "arkret-bridge-messaging",
- "serde",
- "serenity",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "arkret-bridge-feishu"
-version = "0.3.0"
-dependencies = [
- "aes",
- "anyhow",
- "async-trait",
- "base64",
- "cbc",
- "arkret-bridge-messaging",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "arkret-bridge-googlechat"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "arkret-bridge-messaging",
- "jsonwebtoken",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "arkret-bridge-imessage"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "arkret-bridge-messaging",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "arkret-bridge-line"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "arkret-bridge-messaging",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "arkret-bridge-messaging"
-version = "0.3.0"
-dependencies = [
- "aes",
- "anyhow",
- "async-trait",
- "base64",
- "cbc",
- "chrono",
- "clap",
- "arkret",
- "arkret-bridge-runtime",
- "diesel",
- "diesel_migrations",
- "futures",
- "hex",
- "hmac 0.13.0",
- "jsonwebtoken",
- "reqwest 0.13.4",
- "salvo 0.93.0 (git+https://github.com/salvo-rs/salvo.git?branch=main)",
- "serde",
- "serde_json",
- "sha1 0.11.0",
- "sha2 0.11.0",
- "subtle",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "arkret-bridge-messenger"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "arkret-bridge-messaging",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "arkret-bridge-qq"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "arkret-bridge-messaging",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "arkret-bridge-runtime"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "arkret",
- "diesel",
- "diesel_migrations",
- "libsqlite3-sys",
- "metrics",
- "metrics-exporter-prometheus",
- "parking_lot",
- "reqwest 0.13.4",
- "salvo 0.93.0 (git+https://github.com/salvo-rs/salvo.git?branch=main)",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "url",
-]
-
-[[package]]
-name = "arkret-bridge-slack"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "arkret-bridge-messaging",
- "futures",
- "serde",
- "serde_json",
- "tokio",
- "tokio-tungstenite 0.29.0",
- "tracing",
-]
-
-[[package]]
-name = "arkret-bridge-teams"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "arkret-bridge-messaging",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "arkret-bridge-telegram"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "arkret-bridge-messaging",
- "serde",
- "teloxide",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "arkret-bridge-wechat"
-version = "0.3.0"
-dependencies = [
- "aes",
- "anyhow",
- "async-trait",
- "base64",
- "cbc",
- "arkret-bridge-messaging",
- "quick-xml",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "arkret-bridge-whatsapp"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "arkret-bridge-messaging",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "arkret-bridge-zulip"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "arkret-bridge-messaging",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "arkret-core"
-version = "0.3.0"
-dependencies = [
- "base64",
- "blake3",
- "bs58",
- "chrono",
- "chrono-tz",
- "arkret-identifiers",
- "getrandom 0.4.2",
- "hex",
- "hmac 0.13.0",
- "regex",
- "salvo 0.93.0 (git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863)",
- "salvo-oapi 0.93.0 (git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863)",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "thiserror 2.0.18",
- "tracing",
- "unicode-normalization",
- "url",
- "zeroize",
-]
-
-[[package]]
-name = "arkret-crypto"
-version = "0.3.0"
-dependencies = [
- "chrono",
- "arkret-core",
- "arkret-signatures",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "arkret-ffi"
-version = "0.3.0"
-dependencies = [
- "arkret-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "arkret-html"
-version = "0.3.0"
-dependencies = [
- "arkret-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "arkret-http-client"
-version = "0.3.0"
-dependencies = [
- "base64",
- "chrono",
- "arkret-core",
- "arkret-signatures",
- "futures-util",
- "getrandom 0.4.2",
- "reqwest 0.13.4",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "url",
-]
-
-[[package]]
-name = "arkret-identifiers"
-version = "0.3.0"
-dependencies = [
- "getrandom 0.2.17",
- "getrandom 0.4.2",
- "hex",
- "salvo 0.93.0 (git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863)",
- "salvo-oapi 0.93.0 (git+https://github.com/salvo-rs/salvo.git?rev=d1365f0d0e8e0f35ed3a04fb2faec861881c9863)",
- "serde",
- "sha2 0.11.0",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "arkret-keystore"
-version = "0.3.0"
-dependencies = [
- "arkret-core",
- "tracing",
-]
-
-[[package]]
-name = "arkret-server"
-version = "0.3.0"
-dependencies = [
- "arkret-core",
- "arkret-signatures",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "arkret-signatures"
-version = "0.3.0"
-dependencies = [
- "base64",
- "chrono",
- "arkret-core",
- "ed25519-dalek",
- "rand_core 0.6.4",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "subtle",
- "thiserror 2.0.18",
- "url",
- "zeroize",
-]
 
 [[package]]
 name = "colorchoice"

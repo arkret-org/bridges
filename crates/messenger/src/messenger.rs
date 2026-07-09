@@ -7,7 +7,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use arkret_bridge_messaging::runtime::Result;
 use arkret_bridge_messaging::salvo::prelude::*;
 use arkret_bridge_messaging::salvo::{self, affix_state};
@@ -15,6 +14,7 @@ use arkret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, send_json_expect_status, webhook,
 };
+use async_trait::async_trait;
 use serde_json::{Value, json};
 
 /// Messenger bridge adapter.
@@ -139,8 +139,7 @@ struct MessengerWebhookState {
 
 #[handler]
 async fn messenger_verify(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let Ok(state) = depot.get_typed::<MessengerWebhookState>() else {
-        webhook::bad_request(res, "webhook state missing");
+    let Some(state) = webhook::require_state::<MessengerWebhookState>(depot, res) else {
         return;
     };
     webhook::meta_hub_verify(req, res, &state.app.verify_token);
@@ -148,8 +147,7 @@ async fn messenger_verify(req: &mut Request, depot: &mut Depot, res: &mut Respon
 
 #[handler]
 async fn messenger_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let Ok(state) = depot.get_typed::<MessengerWebhookState>() else {
-        webhook::bad_request(res, "webhook state missing");
+    let Some(state) = webhook::require_state::<MessengerWebhookState>(depot, res) else {
         return;
     };
     let Some((_raw, body)) = webhook::meta_signed_json_body(req, res, &state.app.app_secret).await

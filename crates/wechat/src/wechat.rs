@@ -11,7 +11,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use arkret_bridge_messaging::runtime::cache::TokenCache;
 use arkret_bridge_messaging::runtime::{BridgeError, Result};
 use arkret_bridge_messaging::salvo::prelude::*;
@@ -21,6 +20,7 @@ use arkret_bridge_messaging::{
     SenderRenderStyle, VendorTokenCheck, fetch_vendor_token, json_scalar_id_string,
     send_json_expect, webhook,
 };
+use async_trait::async_trait;
 use serde_json::{Value, json};
 
 /// WeChat API success flag: top-level `errcode == 0` (absent treated as 0).
@@ -376,8 +376,7 @@ fn wechat_msg_signature_input(req: &Request) -> WechatSignatureInput {
 
 #[handler]
 async fn wechat_verify(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let Ok(state) = depot.get_typed::<WechatWebhookState>() else {
-        webhook::bad_request(res, "webhook state missing");
+    let Some(state) = webhook::require_state::<WechatWebhookState>(depot, res) else {
         return;
     };
     let echostr = req.query::<String>("echostr").unwrap_or_default();
@@ -416,8 +415,7 @@ async fn wechat_verify(req: &mut Request, depot: &mut Depot, res: &mut Response)
 
 #[handler]
 async fn wechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let Ok(state) = depot.get_typed::<WechatWebhookState>() else {
-        webhook::bad_request(res, "webhook state missing");
+    let Some(state) = webhook::require_state::<WechatWebhookState>(depot, res) else {
         return;
     };
 

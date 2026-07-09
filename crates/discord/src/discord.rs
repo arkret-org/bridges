@@ -7,12 +7,12 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use arkret_bridge_messaging::runtime::{BridgeError, Result};
 use arkret_bridge_messaging::{
     AppMessageRef, ExternalMediaRequest, InboundAppMessage, MessageBridge,
     MessageBridgeCapabilities, MessageContext, OutboundAppMessage, SenderRenderStyle,
 };
+use async_trait::async_trait;
 use serenity::all::{
     ChannelId, CreateAttachment, CreateMessage, GatewayIntents, Http, Message, MessageId,
 };

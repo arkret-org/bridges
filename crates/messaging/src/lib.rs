@@ -24,10 +24,6 @@ pub mod webhook;
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
-pub use calendar::{
-    CALENDAR_EVENT_PROFILE, CalendarMapError, bridge_calendar_schedule_fields, bridge_rsvp_payload,
-};
 use arkret::models::EphemeralEnvelope;
 use arkret::{
     AppletBridgeErrorBuilder, AppletBridgeErrorVisibility, ContentBlock, Did, Event, EventId,
@@ -39,6 +35,10 @@ use arkret_bridge_runtime::db::{DbReplayGuardStore, DbTokenStore};
 use arkret_bridge_runtime::{
     BridgeError, MessageDirection, ReplayGuardStore, Result, TokenCache, TokenStore,
     record_bridge_message, redact_sensitive_url_values,
+};
+use async_trait::async_trait;
+pub use calendar::{
+    CALENDAR_EVENT_PROFILE, CalendarMapError, bridge_calendar_schedule_fields, bridge_rsvp_payload,
 };
 pub use content::{
     extract_attachment, extract_plain_body, extract_strand_id, media_content_block,

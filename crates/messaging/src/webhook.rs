@@ -4,11 +4,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aes::{Aes128, Aes256};
+use arkret_bridge_runtime::{ReplayGuardStore, run_blocking};
 use base64::Engine as _;
 use cbc::Decryptor;
 use cbc::cipher::block_padding::Pkcs7;
 use cbc::cipher::{BlockDecryptMut, KeyIvInit};
-use arkret_bridge_runtime::{ReplayGuardStore, run_blocking};
 use hmac::{Hmac, KeyInit, Mac};
 use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
@@ -376,6 +376,26 @@ pub fn ok_text(res: &mut Response, value: impl Into<String>) {
 pub fn bad_request(res: &mut Response, message: impl Into<String>) {
     res.status_code(StatusCode::BAD_REQUEST);
     res.render(Json(json!({ "ok": false, "error": message.into() })));
+}
+
+/// Fetch the typed per-bridge webhook state injected into the Salvo `Depot`.
+///
+/// Every webhook handler opens with the same prelude: pull its `XxxWebhookState`
+/// out of the depot and short-circuit with `400 webhook state missing` when the
+/// wiring is absent. This collapses that repeated `let Ok(state) = … else { … }`
+/// into a single call: `let Some(state) = webhook::require_state::<T>(depot, res)
+/// else { return; };`.
+pub fn require_state<'a, T>(depot: &'a Depot, res: &mut Response) -> Option<&'a T>
+where
+    T: Send + Sync + 'static,
+{
+    match depot.get_typed::<T>() {
+        Ok(state) => Some(state),
+        Err(_) => {
+            bad_request(res, "webhook state missing");
+            None
+        }
+    }
 }
 
 pub fn unauthorized(res: &mut Response, message: impl Into<String>) {

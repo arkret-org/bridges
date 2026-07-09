@@ -6,7 +6,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use arkret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
 use arkret_bridge_messaging::salvo::prelude::*;
 use arkret_bridge_messaging::salvo::{self, affix_state};
@@ -14,6 +13,7 @@ use arkret_bridge_messaging::{
     AppMessageRef, ExternalMediaRequest, InboundAppMessage, MessageBridge, MessageContext,
     OutboundAppMessage, SenderRenderStyle, webhook,
 };
+use async_trait::async_trait;
 use serde_json::{Value, json};
 
 /// LINE bridge adapter.
@@ -134,8 +134,7 @@ struct LineWebhookState {
 
 #[handler]
 async fn line_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let Ok(state) = depot.get_typed::<LineWebhookState>() else {
-        webhook::bad_request(res, "webhook state missing");
+    let Some(state) = webhook::require_state::<LineWebhookState>(depot, res) else {
         return;
     };
     let signature = req.header::<String>("x-line-signature").unwrap_or_default();

@@ -8,7 +8,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use arkret_bridge_messaging::runtime::{BridgeError, Result};
 use arkret_bridge_messaging::salvo::prelude::*;
 use arkret_bridge_messaging::salvo::{self, affix_state};
@@ -16,6 +15,7 @@ use arkret_bridge_messaging::{
     AppMessageRef, ExternalMediaRequest, InboundAppMessage, MessageBridge, MessageContext,
     OutboundAppMessage, SenderRenderStyle, send_json_expect_status, webhook,
 };
+use async_trait::async_trait;
 use serde_json::{Value, json};
 
 /// WhatsApp bridge adapter.
@@ -147,8 +147,7 @@ struct WhatsAppWebhookState {
 
 #[handler]
 async fn whatsapp_verify(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let Ok(state) = depot.get_typed::<WhatsAppWebhookState>() else {
-        webhook::bad_request(res, "webhook state missing");
+    let Some(state) = webhook::require_state::<WhatsAppWebhookState>(depot, res) else {
         return;
     };
     webhook::meta_hub_verify(req, res, &state.app.verify_token);
@@ -156,8 +155,7 @@ async fn whatsapp_verify(req: &mut Request, depot: &mut Depot, res: &mut Respons
 
 #[handler]
 async fn whatsapp_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let Ok(state) = depot.get_typed::<WhatsAppWebhookState>() else {
-        webhook::bad_request(res, "webhook state missing");
+    let Some(state) = webhook::require_state::<WhatsAppWebhookState>(depot, res) else {
         return;
     };
     let Some((_raw, body)) = webhook::meta_signed_json_body(req, res, &state.app.app_secret).await

@@ -7,7 +7,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use arkret_bridge_messaging::runtime::{BridgeError, Result};
 use arkret_bridge_messaging::salvo::prelude::*;
 use arkret_bridge_messaging::salvo::{self, affix_state};
@@ -15,6 +14,7 @@ use arkret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, json_scalar_id_string, send_json_expect, webhook,
 };
+use async_trait::async_trait;
 use serde_json::{Value, json};
 
 /// QQ bridge adapter.
@@ -147,8 +147,7 @@ struct QqWebhookState {
 
 #[handler]
 async fn qq_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let Ok(state) = depot.get_typed::<QqWebhookState>() else {
-        webhook::bad_request(res, "webhook state missing");
+    let Some(state) = webhook::require_state::<QqWebhookState>(depot, res) else {
         return;
     };
     // Fail closed: OneBot HTTP POST events MUST carry a valid

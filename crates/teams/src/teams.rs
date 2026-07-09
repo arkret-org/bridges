@@ -9,7 +9,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use arkret_bridge_messaging::runtime::Result;
 use arkret_bridge_messaging::runtime::cache::TokenCache;
 use arkret_bridge_messaging::salvo::prelude::*;
@@ -18,6 +17,7 @@ use arkret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, VendorTokenCheck, fetch_vendor_token, send_json_expect_status, webhook,
 };
+use async_trait::async_trait;
 use serde_json::{Value, json};
 
 /// Fallback validity (seconds) when AAD omits `expires_in`.
@@ -163,8 +163,7 @@ struct TeamsWebhookState {
 
 #[handler]
 async fn teams_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let Ok(state) = depot.get_typed::<TeamsWebhookState>() else {
-        webhook::bad_request(res, "webhook state missing");
+    let Some(state) = webhook::require_state::<TeamsWebhookState>(depot, res) else {
         return;
     };
     let authorization = req.header::<String>("authorization");

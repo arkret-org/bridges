@@ -11,12 +11,12 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use arkret_bridge_messaging::runtime::{BridgeError, Result, jittered_delay};
 use arkret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, send_json_expect,
 };
+use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
