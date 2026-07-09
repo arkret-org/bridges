@@ -1,20 +1,20 @@
-# cokret-applets
+# arkret-applets
 
-cokret 协议的桥接(bridge)applet 集合,与 `palpo-im` 的 `matrix-bridge-*` 一一对应,
-把 **cokret 去中心化协作协议** 与各第三方 chat app 互联。Rust 实现,技术栈 salvo + diesel,
-协议侧基于 [`cokret-rust-sdk`](../cokret-rust-sdk)。
+arkret 协议的桥接(bridge)applet 集合,与 `palpo-im` 的 `matrix-bridge-*` 一一对应,
+把 **arkret 去中心化协作协议** 与各第三方 chat app 互联。Rust 实现,技术栈 salvo + diesel,
+协议侧基于 [`arkret-rust-sdk`](../arkret-rust-sdk)。
 
 ## 结构
 
-Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `cokret-bridge-` 前缀,
-包名仍为 `cokret-bridge-*`)。例:`crates/discord/` ⇒ 包 `cokret-bridge-discord`。
+Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `arkret-bridge-` 前缀,
+包名仍为 `arkret-bridge-*`)。例:`crates/discord/` ⇒ 包 `arkret-bridge-discord`。
 
 共享层拆为两个 crate(均在 `crates/` 下,目录名与包名不同):
 
-- `crates/runtime/` ⇒ 包 **`cokret-bridge-runtime`**:与聊天无关的**通用桥运行时**——cokret 接入
+- `crates/runtime/` ⇒ 包 **`arkret-bridge-runtime`**:与聊天无关的**通用桥运行时**——arkret 接入
   (`CokretEdge`/`BridgeAppletHandler`)、DB 连接池、salvo web、队列/缓存、配置/日志,契约是
-  泛型 trait `BridgeApp`(收发裸 `cokret::Event`)。非聊天集成(IoT/工单/CI)可直接实现它。
-- `crates/messaging/` ⇒ 包 **`cokret-bridge-messaging`**:在 runtime 之上的**消息层**——频道/
+  泛型 trait `BridgeApp`(收发裸 `arkret::Event`)。非聊天集成(IoT/工单/CI)可直接实现它。
+- `crates/messaging/` ⇒ 包 **`arkret-bridge-messaging`**:在 runtime 之上的**消息层**——频道/
   用户/消息映射表、`ck.message.create` 转换、actor/realm 反查解析、webhook 助手,契约是
   `MessageBridge`/`MessageContext`(14 个聊天桥都实现它,经 `run_message_bridge` 装配)。
 
@@ -22,36 +22,36 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `cokret-bridge-
 
 | 目录 | 包名 | 当前职责 | 历史/旧称 |
 |---|---|---|---|
-| `crates/runtime` | `cokret-bridge-runtime` | 通用桥运行时 | core/runtime |
-| `crates/messaging` | `cokret-bridge-messaging` | 聊天消息契约层 | messaging |
+| `crates/runtime` | `arkret-bridge-runtime` | 通用桥运行时 | core/runtime |
+| `crates/messaging` | `arkret-bridge-messaging` | 聊天消息契约层 | messaging |
 
 | crate(包名) | 对端 app | 应用侧技术 | 端口 |
 |---|---|---|---|
-| `cokret-bridge-runtime`(`crates/runtime`) | — | 通用桥运行时(cokret 接入/DB/web/队列) | — |
-| `cokret-bridge-messaging`(`crates/messaging`) | — | 消息层(映射/`ck.message.create`/webhook 助手) | — |
-| `cokret-bridge-discord` | Discord | serenity gateway | 9101 |
-| `cokret-bridge-telegram` | Telegram | teloxide | 9102 |
-| `cokret-bridge-slack` | Slack | tungstenite socket mode | 9103 |
-| `cokret-bridge-feishu` | 飞书 | reqwest | 9104 |
-| `cokret-bridge-wechat` | 微信 | reqwest | 9105 |
-| `cokret-bridge-dingtalk` | 钉钉 | reqwest | 9106 |
-| `cokret-bridge-zulip` | Zulip | reqwest event queue long-polling | 9107 |
-| `cokret-bridge-whatsapp` | WhatsApp | reqwest (Cloud API) | 9108 |
-| `cokret-bridge-line` | LINE | reqwest | 9109 |
-| `cokret-bridge-qq` | QQ | reqwest (OneBot/官方) | 9110 |
-| `cokret-bridge-googlechat` | Google Chat | reqwest | 9111 |
-| `cokret-bridge-imessage` | iMessage | reqwest (网关) | 9112 |
-| `cokret-bridge-messenger` | Messenger | reqwest (Graph API) | 9113 |
-| `cokret-bridge-teams` | MS Teams | reqwest (Bot Framework) | 9114 |
+| `arkret-bridge-runtime`(`crates/runtime`) | — | 通用桥运行时(arkret 接入/DB/web/队列) | — |
+| `arkret-bridge-messaging`(`crates/messaging`) | — | 消息层(映射/`ck.message.create`/webhook 助手) | — |
+| `arkret-bridge-discord` | Discord | serenity gateway | 9101 |
+| `arkret-bridge-telegram` | Telegram | teloxide | 9102 |
+| `arkret-bridge-slack` | Slack | tungstenite socket mode | 9103 |
+| `arkret-bridge-feishu` | 飞书 | reqwest | 9104 |
+| `arkret-bridge-wechat` | 微信 | reqwest | 9105 |
+| `arkret-bridge-dingtalk` | 钉钉 | reqwest | 9106 |
+| `arkret-bridge-zulip` | Zulip | reqwest event queue long-polling | 9107 |
+| `arkret-bridge-whatsapp` | WhatsApp | reqwest (Cloud API) | 9108 |
+| `arkret-bridge-line` | LINE | reqwest | 9109 |
+| `arkret-bridge-qq` | QQ | reqwest (OneBot/官方) | 9110 |
+| `arkret-bridge-googlechat` | Google Chat | reqwest | 9111 |
+| `arkret-bridge-imessage` | iMessage | reqwest (网关) | 9112 |
+| `arkret-bridge-messenger` | Messenger | reqwest (Graph API) | 9113 |
+| `arkret-bridge-teams` | MS Teams | reqwest (Bot Framework) | 9114 |
 
 ## 架构
 
-每个桥都是一个 cokret **Applet**:
+每个桥都是一个 arkret **Applet**:
 
-- **入站(cokret → app)**:cokret server 经 `POST /_cokret/edge/applet/transactions`
+- **入站(arkret → app)**:arkret server 经 `POST /_cokret/edge/applet/transactions`
   推送事件 → runtime `BridgeAppletHandler` 入队 → `consume_inbound` 消费循环 →
   `MessageBridge::on_cokret_event` → 适配器 `send_to_app`。
-- **出站(app → cokret)**:适配器收到 app 消息(gateway/长轮询/webhook)→
+- **出站(app → arkret)**:适配器收到 app 消息(gateway/长轮询/webhook)→
   `MessageContext::submit_app_message` → runtime 构造并签名带 `external_ref` 溯源的
   per-user Ghost Actor `ck.message.create` 事件 → `events_submit` 提交。Ghost DID 按
   `protocol/tenant/external_user_id` 生成并写入 `user_mappings`;proof 使用该 Ghost DID 的
@@ -64,7 +64,7 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `cokret-bridge-
   无入站面的“健康”进程)。配齐 access token 不等于入站可用,还须配齐这些 body 验签材料。
 - **映射 / 解析**:频道↔realm、消息↔event、用户↔actor 持久化于 diesel(sqlite/postgres/mysql);
   反查驱动 applet `resolve_actor`/`resolve_realm`(ghost/portal 读侧解析)。用户↔actor 映射
-  同时参与 app→cokret 写侧署名。
+  同时参与 app→arkret 写侧署名。
 - **序号**:服务 actor 的事件 seq 经 DB 块预留持久化,重启后严格单调。
 - **消息内容**:对齐 SDK 规范类型 `TextMessageContent`(`{body}`)/`MediaContent`
   (`{body,blob,mimetype,filename,size}`)。
@@ -79,7 +79,7 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `cokret-bridge-
 
 ```bash
 cargo check --workspace
-cargo run -p cokret-bridge-discord -- --config config.yaml
+cargo run -p arkret-bridge-discord -- --config config.yaml
 ```
 
 每个 crate 默认 `sqlite` feature;`--features postgres` / `--features mysql` 切换后端。
@@ -99,8 +99,8 @@ cargo run -p cokret-bridge-discord -- --config config.yaml
 
 `/_cokret/edge/applet/*` 配置 `trusted_server_did` 与 `trusted_verification_methods` 后会
 校验 HTTP Message Signature、source/destination DID 与 event proof;生产仍建议在反代/网络层
-进一步限制为仅可信 Cokret server 访问,并对 `/metrics` 做内网或认证访问控制。若需把 admin/edge
-面也对外(如 cokret server 在另一网段),显式设置 `admin_bind` 即可,但应自行收敛网络层暴露面。
+进一步限制为仅可信 Arkret server 访问,并对 `/metrics` 做内网或认证访问控制。若需把 admin/edge
+面也对外(如 arkret server 在另一网段),显式设置 `admin_bind` 即可,但应自行收敛网络层暴露面。
 
 公网 webhook 面**默认启用每源 IP 速率限制**(`bridge.webhook_rate_limit`,默认
 `enabled: true`、`max_requests: 600`、`window_secs: 60`,即每 IP 持续 10 rps),用于无反代
@@ -116,13 +116,13 @@ cargo run -p cokret-bridge-discord -- --config config.yaml
 ## 容器发布
 
 仓库提供一个统一的多阶段 `Dockerfile`,通过 `BRIDGE_BIN` 选择要打包的桥二进制。由于 workspace
-依赖 sibling `cokret-rust-sdk`,Docker build context 必须是同时包含 `bridges/` 与
-`cokret-rust-sdk/` 的父目录:
+依赖 sibling `arkret-rust-sdk`,Docker build context 必须是同时包含 `bridges/` 与
+`arkret-rust-sdk/` 的父目录:
 
 ```bash
 docker build -f bridges/Dockerfile \
-  --build-arg BRIDGE_BIN=cokret-bridge-slack \
-  -t cokret-bridge-slack:local .
+  --build-arg BRIDGE_BIN=arkret-bridge-slack \
+  -t arkret-bridge-slack:local .
 ```
 
 tag 推送会触发 `.github/workflows/release.yml`,矩阵构建 14 个桥镜像并推送到 GHCR,同时生成

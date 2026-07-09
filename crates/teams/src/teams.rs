@@ -1,9 +1,9 @@
 //! Microsoft Teams adapter (Bot Framework).
 //!
-//! - Outbound (cokret → Teams): [`MessageBridge::send_to_app`] first uses client_credentials to
+//! - Outbound (arkret → Teams): [`MessageBridge::send_to_app`] first uses client_credentials to
 //!   fetch an access token from AAD, then uses `ctx.http` to POST to the Bot Framework
 //!   `{serviceUrl}/v3/conversations/{conversationId}/activities`.
-//! - Inbound (Teams → cokret): the Bot Framework POSTs an Activity to the bot's `/api/messages` via
+//! - Inbound (Teams → arkret): the Bot Framework POSTs an Activity to the bot's `/api/messages` via
 //!   an HTTPS webhook.
 
 use std::sync::Arc;

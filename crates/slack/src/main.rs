@@ -1,4 +1,4 @@
-//! cokret-bridge-slack executable entry point.
+//! arkret-bridge-slack executable entry point.
 
 mod slack;
 
@@ -17,7 +17,7 @@ struct AppConfig {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    bridge_main("cokret <-> Slack bridge", |app: AppConfig, _ctx| {
+    bridge_main("arkret <-> Slack bridge", |app: AppConfig, _ctx| {
         Ok(SlackApp::new(app.bot_token, app.app_token))
     })
     .await

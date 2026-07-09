@@ -1,8 +1,8 @@
 //! WhatsApp adapter (WhatsApp Cloud API, reqwest HTTP).
 //!
-//! - Inbound (WhatsApp -> cokret): the Cloud API pushes messages via `/webhooks/whatsapp` (GET
+//! - Inbound (WhatsApp -> arkret): the Cloud API pushes messages via `/webhooks/whatsapp` (GET
 //!   verification + POST delivery).
-//! - Outbound (cokret → WhatsApp): [`MessageBridge::send_to_app`] uses `ctx.http` (reqwest) to POST
+//! - Outbound (arkret → WhatsApp): [`MessageBridge::send_to_app`] uses `ctx.http` (reqwest) to POST
 //!   `https://graph.facebook.com/v20.0/{phone_number_id}/messages`.
 
 use std::sync::Arc;
@@ -196,7 +196,7 @@ async fn whatsapp_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
                 // signature does not bind a timestamp, so a captured event would
                 // replay forever. Text submits use the shared dedupe helper;
                 // media keeps local handling because it resolves Graph media
-                // before Cokret submit.
+                // before Arkret submit.
                 let replay_key = format!("whatsapp:{message_id}");
 
                 if let Some(text) = webhook::str_at(message, "/text/body") {

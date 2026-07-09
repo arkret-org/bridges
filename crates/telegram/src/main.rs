@@ -1,4 +1,4 @@
-//! cokret-bridge-telegram executable entry point.
+//! arkret-bridge-telegram executable entry point.
 
 mod telegram;
 
@@ -15,7 +15,7 @@ struct AppConfig {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    bridge_main("cokret <-> Telegram bridge", |app: AppConfig, _ctx| {
+    bridge_main("arkret <-> Telegram bridge", |app: AppConfig, _ctx| {
         Ok(TelegramApp::new(app.bot_token))
     })
     .await

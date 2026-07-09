@@ -12,8 +12,8 @@ pub enum BridgeError {
     #[error("database error: {0}")]
     Database(String),
 
-    #[error("cokret protocol error: {0}")]
-    Cokret(String),
+    #[error("arkret protocol error: {0}")]
+    Arkret(String),
 
     #[error("app adapter error: {0}")]
     App(String),
@@ -30,28 +30,28 @@ impl BridgeError {
     /// caller (e.g. the platform redelivering a webhook, or the outbound
     /// consumer re-attempting).
     ///
-    /// Retriable: cokret server unreachable / 5xx / connection pool exhaustion /
-    /// generic runtime hiccups ([`BridgeError::Cokret`] / [`BridgeError::Database`]
+    /// Retriable: arkret server unreachable / 5xx / connection pool exhaustion /
+    /// generic runtime hiccups ([`BridgeError::Arkret`] / [`BridgeError::Database`]
     /// / [`BridgeError::Runtime`]). Deterministic (not worth retrying): bad
     /// input, missing realm mapping, malformed config
     /// ([`BridgeError::App`] / [`BridgeError::Config`] / [`BridgeError::Other`]).
     pub fn is_retriable(&self) -> bool {
         matches!(
             self,
-            BridgeError::Cokret(_) | BridgeError::Database(_) | BridgeError::Runtime(_)
+            BridgeError::Arkret(_) | BridgeError::Database(_) | BridgeError::Runtime(_)
         )
     }
 }
 
-impl From<cokret::Error> for BridgeError {
-    fn from(e: cokret::Error) -> Self {
-        BridgeError::Cokret(e.to_string())
+impl From<arkret::Error> for BridgeError {
+    fn from(e: arkret::Error) -> Self {
+        BridgeError::Arkret(e.to_string())
     }
 }
 
-impl From<cokret::identifiers::IdentifierError> for BridgeError {
-    fn from(e: cokret::identifiers::IdentifierError) -> Self {
-        BridgeError::Cokret(e.to_string())
+impl From<arkret::identifiers::IdentifierError> for BridgeError {
+    fn from(e: arkret::identifiers::IdentifierError) -> Self {
+        BridgeError::Arkret(e.to_string())
     }
 }
 

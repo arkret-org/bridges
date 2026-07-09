@@ -1,17 +1,17 @@
 //! The generic bridge contract — carries **no** chat/messaging assumptions.
 //!
-//! The cokret SDK already provides the protocol primitives (the `AppletHandler`
+//! The arkret SDK already provides the protocol primitives (the `AppletHandler`
 //! inbound surface and `events_submit` outbound). This module adds only the
 //! reusable *bridge runtime* on top of the SDK:
 //!
-//! - Inbound (cokret -> external): the cokret server pushes transactions; the core turns them into
-//!   an async stream and calls [`BridgeApp::on_cokret_event`] with the raw [`cokret::Event`].
-//! - Outbound (external -> cokret): the adapter mints + submits events via
+//! - Inbound (arkret -> external): the arkret server pushes transactions; the core turns them into
+//!   an async stream and calls [`BridgeApp::on_cokret_event`] with the raw [`arkret::Event`].
+//! - Outbound (external -> arkret): the adapter mints + submits events via
 //!   [`crate::cokret_edge::CokretEdge`] (any event kind, arbitrary payload).
 //!
 //! A bridge to a non-social system (IoT, ticketing, CI, …) implements
 //! [`BridgeApp`] directly. Social/chat bridges use the ergonomic helpers in the
-//! `cokret-bridge-messaging` crate, which are built on top of this same runtime.
+//! `arkret-bridge-messaging` crate, which are built on top of this same runtime.
 
 #[cfg(feature = "runtime")]
 use std::sync::Arc;
@@ -21,8 +21,8 @@ use std::time::Duration;
 #[cfg(feature = "runtime")]
 use async_trait::async_trait;
 #[cfg(feature = "runtime")]
-use cokret::Event;
-use cokret::models::EphemeralEnvelope;
+use arkret::Event;
+use arkret::models::EphemeralEnvelope;
 #[cfg(feature = "runtime")]
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -43,20 +43,20 @@ use crate::error::{BridgeError, Result, redact_sensitive_url_values};
 #[cfg(feature = "runtime")]
 use crate::queue::ChannelQueue;
 
-/// A resolved actor returned to the cokret server's `resolve_actor` probe.
+/// A resolved actor returned to the arkret server's `resolve_actor` probe.
 #[derive(Clone, Debug)]
 pub struct ResolvedActor {
-    /// The canonical cokret actor DID (as a string; parsed by the handler).
+    /// The canonical arkret actor DID (as a string; parsed by the handler).
     pub actor_id: String,
     pub display_name: Option<String>,
     /// Provenance back to the upstream app (e.g. `{ "app_user": "U123" }`).
     pub external_ref: Value,
 }
 
-/// A resolved realm returned to the cokret server's `resolve_realm` probe.
+/// A resolved realm returned to the arkret server's `resolve_realm` probe.
 #[derive(Clone, Debug)]
 pub struct ResolvedRealm {
-    /// The canonical cokret realm id (as a string; parsed by the handler).
+    /// The canonical arkret realm id (as a string; parsed by the handler).
     pub realm_id: String,
     pub title: Option<String>,
     /// Provenance back to the upstream app (e.g. `{ "app_channel": "C123" }`).
@@ -65,7 +65,7 @@ pub struct ResolvedRealm {
 
 /// Optional ghost/portal resolution backing the applet `resolve_actor` /
 /// `resolve_realm` endpoints. The generic runtime owns no mapping schema, so a
-/// higher layer (e.g. `cokret-bridge-messaging`) installs an implementation via
+/// higher layer (e.g. `arkret-bridge-messaging`) installs an implementation via
 /// [`BridgeContext::set_resolver`]. When absent, both probes report
 /// `exists: false`, preserving the previous behaviour.
 pub trait AppletResolver: Send + Sync + 'static {
@@ -73,7 +73,7 @@ pub trait AppletResolver: Send + Sync + 'static {
     fn resolve_realm(&self, realm_id_or_alias: &str) -> Option<ResolvedRealm>;
 }
 
-/// Runtime context shared with every adapter. Generic: it exposes the cokret
+/// Runtime context shared with every adapter. Generic: it exposes the arkret
 /// edge, the (schema-agnostic) database manager, a per-key serial queue, and a
 /// shared HTTP client. No messaging-specific surface here.
 #[cfg(feature = "runtime")]
@@ -87,8 +87,8 @@ pub struct BridgeContext {
     /// Installed by a higher layer before the web service starts; read by the
     /// applet handler to answer actor/realm resolution probes.
     resolver: Mutex<Option<Arc<dyn AppletResolver>>>,
-    /// The set of cokret event kinds this bridge actually consumes on the inbound
-    /// (cokret → app) path, declared by a higher layer (e.g. messaging declares
+    /// The set of arkret event kinds this bridge actually consumes on the inbound
+    /// (arkret → app) path, declared by a higher layer (e.g. messaging declares
     /// `ck.message.create` + `ck.message.redact`). The applet handler rejects any
     /// pushed event whose kind is not in this set as `capability_denied`
     /// (applet-integration §7/§13 capability enforcement). `None` (the generic
@@ -166,7 +166,7 @@ pub trait BridgeApp: Send + Sync + 'static {
     /// error occurs.
     async fn run(self: Arc<Self>, ctx: Arc<BridgeContext>) -> Result<()>;
 
-    /// Handle one raw cokret event pushed by the server. The adapter decides
+    /// Handle one raw arkret event pushed by the server. The adapter decides
     /// what (if anything) to do with each event kind.
     async fn on_cokret_event(&self, ctx: Arc<BridgeContext>, event: Event) -> Result<()>;
 
@@ -198,7 +198,7 @@ pub trait BridgeApp: Send + Sync + 'static {
     }
 }
 
-/// Maximum delivery attempts for one inbound (cokret → app) event before it is
+/// Maximum delivery attempts for one inbound (arkret → app) event before it is
 /// dead-lettered. Only transient ([`BridgeError::is_retriable`]) failures are
 /// retried; deterministic failures fail fast on the first attempt.
 #[cfg(feature = "runtime")]
@@ -230,7 +230,7 @@ const INBOUND_REALM_MAILBOX_DEPTH: usize = 256;
 #[cfg(feature = "runtime")]
 const INBOUND_REALM_IDLE_TTL: Duration = Duration::from_secs(300);
 
-/// Inbound consumer loop: events pushed by the cokret server -> adapter.
+/// Inbound consumer loop: events pushed by the arkret server -> adapter.
 ///
 /// Events are routed to a per-realm worker so distinct realms drain in parallel
 /// (one slow channel no longer head-of-line-blocks the rest) while events within
@@ -432,7 +432,7 @@ pub async fn replay_outbound_dead_letters<A: BridgeApp>(
     }
 }
 
-/// Ephemeral consumer loop: typing/presence/receipts pushed by the cokret
+/// Ephemeral consumer loop: typing/presence/receipts pushed by the arkret
 /// server -> adapter.
 #[cfg(feature = "runtime")]
 pub async fn consume_ephemeral<A: BridgeApp>(

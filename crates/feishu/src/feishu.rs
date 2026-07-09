@@ -1,7 +1,7 @@
 //! Feishu / Lark adapter (reqwest).
 //!
-//! - Inbound (Feishu -> cokret): Feishu events are pushed via `/webhooks/feishu`.
-//! - Outbound (cokret -> Feishu): [`MessageBridge::send_to_app`] uses `ctx.http` `POST https://open.feishu.cn/open-apis/im/v1/messages`,
+//! - Inbound (Feishu -> arkret): Feishu events are pushed via `/webhooks/feishu`.
+//! - Outbound (arkret -> Feishu): [`MessageBridge::send_to_app`] uses `ctx.http` `POST https://open.feishu.cn/open-apis/im/v1/messages`,
 //!   which first exchanges app_id/app_secret for a `tenant_access_token`.
 
 use std::sync::Arc;

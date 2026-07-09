@@ -1,4 +1,4 @@
-//! cokret-bridge-line executable entry point.
+//! arkret-bridge-line executable entry point.
 
 mod line;
 
@@ -18,7 +18,7 @@ struct AppConfig {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    bridge_main("cokret <-> LINE bridge", |app: AppConfig, _ctx| {
+    bridge_main("arkret <-> LINE bridge", |app: AppConfig, _ctx| {
         Ok(LineApp::new(app.channel_access_token, app.channel_secret))
     })
     .await

@@ -551,15 +551,15 @@ fn bearer_token(authorization: Option<&str>) -> std::result::Result<&str, String
     Ok(token)
 }
 
-/// Outcome of forwarding one inbound app message to cokret. The webhook handler
-/// turns this into the HTTP status the platform sees: a retriable failure (cokret
+/// Outcome of forwarding one inbound app message to arkret. The webhook handler
+/// turns this into the HTTP status the platform sees: a retriable failure (arkret
 /// unreachable, connection pool exhausted) becomes 5xx so the platform redelivers;
 /// a deterministic failure (no realm mapping, malformed input) and success both
 /// stay 2xx (the message is not recoverable by redelivery, and the platform must
 /// not be made to retry it forever).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SubmitOutcome {
-    /// The message was accepted by cokret, or failed deterministically (no
+    /// The message was accepted by arkret, or failed deterministically (no
     /// redelivery would help). Respond 2xx.
     Accepted,
     /// The message hit a transient failure; ask the platform to redeliver by
@@ -569,7 +569,7 @@ pub enum SubmitOutcome {
 }
 
 /// Forward one inbound app message and classify the result. A retriable error
-/// (cokret unreachable, pool exhausted) yields [`SubmitOutcome::Retry`]; success
+/// (arkret unreachable, pool exhausted) yields [`SubmitOutcome::Retry`]; success
 /// and deterministic errors yield [`SubmitOutcome::Accepted`]. On any error a
 /// `ck.applet.bridge_error` Event is best-effort emitted so the failure is
 /// auditable rather than silently logged (applet-integration §14/§16).

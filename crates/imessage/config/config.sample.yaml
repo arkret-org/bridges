@@ -1,4 +1,4 @@
-# cokret <-> iMessage 桥接示例配置(snake_case)。
+# arkret <-> iMessage 桥接示例配置(snake_case)。
 
 bridge:
   bridge_id: "imessage"
@@ -11,16 +11,16 @@ bridge:
   admin_port: 10112
   disable_deletion_forwarding: false
 
-cokret:
+arkret:
   server_url: "http://localhost:8008"
   service_did: "did:webvh:imessage-bridge.example"
-  applet_id: "ck:applet:00000000-0000-7000-8000-0000000imsg"
-  access_token: "CHANGE_ME_COKRET_ACCESS_TOKEN"
+  applet_id: "ak:applet:00000000-0000-7000-8000-0000000imsg"
+  access_token: "CHANGE_ME_ARKRET_ACCESS_TOKEN"
   signing_key_seed_hex: "0000000000000000000000000000000000000000000000000000000000000000"
   verification_method_id: "#key-1"
-  trusted_server_did: "did:webvh:cokret-server.example"
+  trusted_server_did: "did:webvh:arkret-server.example"
   trusted_verification_methods:
-    - verification_method: "did:webvh:cokret-server.example#key-1"
+    - verification_method: "did:webvh:arkret-server.example#key-1"
       public_key:
         encoding: "ed25519_multibase"
         value: "zCHANGE_ME_SERVER_ED25519_PUBLIC_KEY"
@@ -37,7 +37,7 @@ logging:
 # closed unless their app channel is mapped to a Realm.
 # mappings:
 #   - app_channel: "CHANGE_ME_APP_CHANNEL"
-#     realm_id: "ck:realm:01904100-0000-7000-8000-000000000001"
+#     realm_id: "ak:realm:01904100-0000-7000-8000-000000000001"
 #     alias: "main"
 # iMessage 适配器专属(BlueBubbles / AirMessage HTTP 网关)
 app:
@@ -45,7 +45,7 @@ app:
   gateway_url: "http://127.0.0.1:1234"
   # 网关访问口令(BlueBubbles 作 ?guid= 查询参数)。
   password: "CHANGE_ME_GATEWAY_PASSWORD"
-  # 入站 /webhooks/imessage 的 HMAC 密钥。网关回调须带 x-cokret-timestamp 与
-  # x-cokret-signature-256 = hex(HMAC-SHA256(secret,
-  # x-cokret-timestamp + "\n" + raw_body)),否则返回 401。
+  # 入站 /webhooks/imessage 的 HMAC 密钥。网关回调须带 x-arkret-timestamp 与
+  # x-arkret-signature-256 = hex(HMAC-SHA256(secret,
+  # x-arkret-timestamp + "\n" + raw_body)),否则返回 401。
   webhook_secret: "CHANGE_ME_IMESSAGE_WEBHOOK_SECRET"

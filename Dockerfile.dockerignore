@@ -5,8 +5,8 @@
 !bridges/.rustfmt.toml
 !bridges/crates
 !bridges/crates/**
-!cokret-rust-sdk
-!cokret-rust-sdk/Cargo.toml
-!cokret-rust-sdk/Cargo.lock
-!cokret-rust-sdk/crates
-!cokret-rust-sdk/crates/**
+!arkret-rust-sdk
+!arkret-rust-sdk/Cargo.toml
+!arkret-rust-sdk/Cargo.lock
+!arkret-rust-sdk/crates
+!arkret-rust-sdk/crates/**

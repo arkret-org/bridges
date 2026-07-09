@@ -43,11 +43,11 @@ jobs:
         with:
           path: bridges
 
-      - name: Checkout Cokret Rust SDK
+      - name: Checkout Arkret Rust SDK
         uses: actions/checkout@v6
         with:
-          repository: ${{ github.repository_owner }}/cokret-rust-sdk
-          path: cokret-rust-sdk
+          repository: ${{ github.repository_owner }}/arkret-rust-sdk
+          path: arkret-rust-sdk
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
       - name: Set up Docker Buildx
@@ -57,7 +57,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/cokret-bridge-${{ matrix.bridge }}
+          images: ghcr.io/${{ github.repository_owner }}/arkret-bridge-${{ matrix.bridge }}
           tags: |
             type=ref,event=tag
             type=sha,prefix=sha-
@@ -77,7 +77,7 @@ jobs:
           file: bridges/Dockerfile
           push: ${{ startsWith(github.ref, 'refs/tags/') }}
           build-args: |
-            BRIDGE_BIN=cokret-bridge-${{ matrix.bridge }}
+            BRIDGE_BIN=arkret-bridge-${{ matrix.bridge }}
           labels: ${{ steps.meta.outputs.labels }}
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha,scope=${{ matrix.bridge }}
@@ -88,13 +88,13 @@ jobs:
         with:
           path: bridges
           format: cyclonedx-json
-          output-file: sbom-cokret-bridge-${{ matrix.bridge }}.cyclonedx.json
+          output-file: sbom-arkret-bridge-${{ matrix.bridge }}.cyclonedx.json
 
       - name: Upload SBOM
         uses: actions/upload-artifact@v4
         with:
-          name: sbom-cokret-bridge-${{ matrix.bridge }}
-          path: sbom-cokret-bridge-${{ matrix.bridge }}.cyclonedx.json
+          name: sbom-arkret-bridge-${{ matrix.bridge }}
+          path: sbom-arkret-bridge-${{ matrix.bridge }}.cyclonedx.json
 
       - name: Install cosign
         if: startsWith(github.ref, 'refs/tags/')

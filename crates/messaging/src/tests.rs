@@ -1,4 +1,4 @@
-use cokret::{
+use arkret::{
     CalendarAttendee, CalendarEventFields, CalendarEventLocation, CalendarLocation,
     CalendarRecurrence, Did, MessageCreatePayload, RecurrenceFrequency, RecurrenceWeekday,
     RsvpSetPayload, RsvpStatus, StrandId,
@@ -17,7 +17,7 @@ use crate::{
     redaction_payload_for_app_delete,
 };
 
-const STRAND_ID: &str = "ck:strand:01904100-0000-7000-8000-000000000001";
+const STRAND_ID: &str = "ak:strand:01904100-0000-7000-8000-000000000001";
 
 #[test]
 fn json_scalar_id_string_accepts_string_and_integer_ids() {
@@ -41,7 +41,7 @@ fn json_scalar_id_string_rejects_empty_or_non_scalar_ids() {
 
 #[test]
 fn ghost_suffix_method_is_webvh_only() {
-    use cokret::Did;
+    use arkret::Did;
 
     // Workspace-wide rule: bridge service identities are did:webvh only.
     let webvh = Did::new("did:webvh:bridge.example").unwrap();
@@ -56,7 +56,7 @@ fn ghost_suffix_method_is_webvh_only() {
 
 fn media_attachment() -> Attachment {
     Attachment {
-        blob_ref: format!("ck:blob:sha256:{}", "a".repeat(64)),
+        blob_ref: format!("ak:blob:sha256:{}", "a".repeat(64)),
         media_type: Some("image/png".to_owned()),
         filename: Some("shot.png".to_owned()),
         size: Some(2048),
@@ -153,7 +153,7 @@ fn extraction_handles_composite_payloads() {
                 {
                     "kind": "ck.content.file",
                     "body": "spec.pdf",
-                    "blob_ref": format!("ck:blob:sha256:{}", "b".repeat(64)),
+                    "blob_ref": format!("ak:blob:sha256:{}", "b".repeat(64)),
                     "mime_type": "application/pdf",
                     "filename": "spec.pdf",
                     "size_bytes": 7
@@ -184,7 +184,7 @@ fn location_match_requires_protocol_network_and_location() {
 
 #[test]
 fn app_delete_recall_builds_message_redact_payload() {
-    let target_event_id = "ck:event:01904100-0000-7000-8000-000000000123";
+    let target_event_id = "ak:event:01904100-0000-7000-8000-000000000123";
     let payload = redaction_payload_for_app_delete(target_event_id, AppDeleteReason::UserDeleted)
         .expect("redaction payload result")
         .expect("redaction payload");
@@ -199,7 +199,7 @@ fn app_delete_recall_builds_message_redact_payload() {
 fn app_delete_expiry_is_not_a_redaction() {
     assert!(
         redaction_payload_for_app_delete(
-            "ck:event:01904100-0000-7000-8000-000000000123",
+            "ak:event:01904100-0000-7000-8000-000000000123",
             AppDeleteReason::DisappearingExpiry,
         )
         .expect("redaction payload result")
@@ -229,7 +229,7 @@ fn encrypted_comment() -> serde_json::Value {
         "ciphertext": "abc123",
         "aad_visibility_event_id": "hidden",
         "aad": {
-            "realm_id": "ck:realm:01904100-0000-7000-8000-000000000001",
+            "realm_id": "ak:realm:01904100-0000-7000-8000-000000000001",
             "event_kind": "ck.rsvp.set"
         },
         "key_ref": {

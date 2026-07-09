@@ -1,4 +1,4 @@
-//! cokret-bridge-zulip executable entry point.
+//! arkret-bridge-zulip executable entry point.
 
 mod zulip;
 
@@ -17,7 +17,7 @@ struct AppConfig {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    bridge_main("cokret <-> Zulip bridge", |app: AppConfig, _ctx| {
+    bridge_main("arkret <-> Zulip bridge", |app: AppConfig, _ctx| {
         Ok(ZulipApp::new(
             app.site.trim_end_matches('/').to_owned(),
             app.bot_email,

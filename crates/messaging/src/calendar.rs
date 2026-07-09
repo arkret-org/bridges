@@ -1,6 +1,6 @@
 //! Calendar-event bridge mapping guards.
 //!
-//! Calendar events are Cokret Strand profile fields plus `ck.rsvp.set`; this
+//! Calendar events are Arkret Strand profile fields plus `ck.rsvp.set`; this
 //! module intentionally rejects provider-specific preservation/downgrade fields
 //! instead of smuggling them into Strand metadata or message content.
 //!
@@ -14,7 +14,7 @@
 
 use std::fmt;
 
-use cokret::{CalendarEventFields, EncryptedEnvelope, RsvpSetPayload};
+use arkret::{CalendarEventFields, EncryptedEnvelope, RsvpSetPayload};
 use serde_json::Value;
 
 pub const CALENDAR_EVENT_PROFILE: &str = "ck.profile.calendar_event.v1";

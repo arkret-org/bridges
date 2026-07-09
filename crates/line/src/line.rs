@@ -1,7 +1,7 @@
 //! LINE adapter (LINE Messaging API, reqwest HTTP).
 //!
-//! - Inbound (LINE -> cokret): the Messaging API pushes signed events via `/webhooks/line`.
-//! - Outbound (cokret → LINE): [`MessageBridge::send_to_app`] uses `ctx.http` (reqwest) to POST `https://api.line.me/v2/bot/message/push`.
+//! - Inbound (LINE -> arkret): the Messaging API pushes signed events via `/webhooks/line`.
+//! - Outbound (arkret → LINE): [`MessageBridge::send_to_app`] uses `ctx.http` (reqwest) to POST `https://api.line.me/v2/bot/message/push`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -190,7 +190,7 @@ async fn line_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response)
         // Bounded replay/dedupe (BRG-SEC-001 / contract G-4): the LINE signature
         // does not bind a timestamp, so a captured event would replay forever.
         // Text submits use the shared dedupe helper; media keeps local handling
-        // because it has a platform-specific fetch step before Cokret submit.
+        // because it has a platform-specific fetch step before Arkret submit.
         let replay_key = format!("line:{message_id}");
         let msg_type = webhook::str_at(event, "/message/type").unwrap_or_default();
 

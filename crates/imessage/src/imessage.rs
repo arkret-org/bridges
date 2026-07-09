@@ -1,7 +1,7 @@
 //! iMessage adapter (via HTTP gateways such as BlueBubbles / AirMessage, pure reqwest).
 //!
-//! - Inbound (iMessage -> cokret): gateway JSON callbacks are accepted at `/webhooks/imessage`.
-//! - Outbound (cokret → iMessage): [`MessageBridge::send_to_app`] uses `ctx.http` to POST the
+//! - Inbound (iMessage -> arkret): gateway JSON callbacks are accepted at `/webhooks/imessage`.
+//! - Outbound (arkret → iMessage): [`MessageBridge::send_to_app`] uses `ctx.http` to POST the
 //!   gateway's send endpoint (using BlueBubbles `/api/v1/message/text` as an example).
 
 use std::sync::Arc;
@@ -141,14 +141,14 @@ async fn imessage_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
         return;
     };
     let timestamp = req
-        .header::<String>("x-cokret-timestamp")
+        .header::<String>("x-arkret-timestamp")
         .unwrap_or_default();
     if !webhook::unix_timestamp_is_fresh(&timestamp, IMESSAGE_DELIVERY_MAX_SKEW) {
         webhook::unauthorized(res, "iMessage webhook timestamp is stale or invalid");
         return;
     }
     let signature = req
-        .header::<String>("x-cokret-signature-256")
+        .header::<String>("x-arkret-signature-256")
         .unwrap_or_default();
     if !webhook::verify_timestamped_hmac_sha256(
         state.secret.as_bytes(),

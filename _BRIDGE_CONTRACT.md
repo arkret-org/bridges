@@ -1,24 +1,24 @@
-# cokret-bridge-<app> 编写契约(子代理必读)
+# arkret-bridge-<app> 编写契约(子代理必读)
 
-每个 bridge 只实现「app 适配器」,其余全在共享 crate:`cokret-bridge-runtime`(通用桥运行时)+
-`cokret-bridge-messaging`(消息层)。**必须**严格按本契约,与参考实现 `crates/discord/` 保持一致
+每个 bridge 只实现「app 适配器」,其余全在共享 crate:`arkret-bridge-runtime`(通用桥运行时)+
+`arkret-bridge-messaging`(消息层)。**必须**严格按本契约,与参考实现 `crates/discord/` 保持一致
 结构,确保 `cargo check` 通过。
 
-> 历史:共享层早期为单 crate `cokret-bridge-core`/trait `BridgeApp`,现已拆为 runtime+messaging,
+> 历史:共享层早期为单 crate `arkret-bridge-core`/trait `BridgeApp`,现已拆为 runtime+messaging,
 > 聊天桥实现 `MessageBridge`(不再直接实现 `BridgeApp`)。`BridgeApp` 仍是 runtime 的泛型底座,
 > 供非聊天集成直接使用。
 
-## 核心 API(聊天桥用 `cokret-bridge-messaging`;勿改两个共享 crate)
+## 核心 API(聊天桥用 `arkret-bridge-messaging`;勿改两个共享 crate)
 
 ```rust
-// cokret-bridge-messaging(lib.rs)—— 聊天桥装配入口
+// arkret-bridge-messaging(lib.rs)—— 聊天桥装配入口
 pub async fn run_message_bridge<M, F>(config: Config, factory: F) -> Result<()>
 where M: MessageBridge, F: FnOnce(Arc<MessageContext>) -> Result<M>;
 
-// cokret-bridge-runtime 重导出:Config(Config::load(path))、BridgeError/Result、logging::init
+// arkret-bridge-runtime 重导出:Config(Config::load(path))、BridgeError/Result、logging::init
 pub struct MessageContext { pub http: reqwest::Client, /* + core()/store() */ }
 impl MessageContext {
-    // 出站:把 app 入站消息作为 per-user Ghost Actor 事件提交到 cokret portal strand,
+    // 出站:把 app 入站消息作为 per-user Ghost Actor 事件提交到 arkret portal strand,
     // 返回 event_id。payload 按权威 message_create_payload 组装
     // ({strand_id, track_name:"discussion", content: content_block, blob_refs[]}),
     // 外部 location 的映射单位是 (realm_id, strand_id)(applet-integration §10.1):
@@ -40,7 +40,7 @@ pub trait MessageBridge: Send + Sync + 'static {
     fn name(&self) -> &str;
     async fn run(self: Arc<Self>, ctx: Arc<MessageContext>) -> Result<()>;    // app 接收循环
     async fn send_to_app(&self, ctx: Arc<MessageContext>, msg: OutboundAppMessage)
-        -> Result<AppMessageRef>;                                             // cokret→app 发送
+        -> Result<AppMessageRef>;                                             // arkret→app 发送
     async fn redact_in_app(
         &self,
         _ctx: Arc<MessageContext>,
@@ -52,7 +52,7 @@ pub trait MessageBridge: Send + Sync + 'static {
 }
 ```
 
-下行(cokret→app)由 messaging 的 `MessageAdapter::on_cokret_event` 自动驱动 `send_to_app`,
+下行(arkret→app)由 messaging 的 `MessageAdapter::on_cokret_event` 自动驱动 `send_to_app`,
 适配器无需自己实现 `on_cokret_event`;只转发 portal strand 上的 `ck.message.create`(§10.1 映射
 单位是 `(realm_id, strand_id)`),正文从 `payload.content`(content_block)解析,媒体从
 `blob_ref`/`blob_refs[]` 解析。`config.app` 放该 app 专属配置(token 等),由
@@ -61,8 +61,8 @@ pub trait MessageBridge: Send + Sync + 'static {
 
 > **能力就绪、尚未接线(BRG-HYG-001):** 三条删除 / ephemeral 链路在共享层(messaging)
 > 已**完整实现并有单测**,但目前**没有任何适配器接线**,运行时不会真实触达:
-> (a) 入站删除 `submit_app_delete`(app→cokret 删除)无桥构造 `InboundAppDelete`;
-> (b) 出站删除 `redact_in_app`(cokret→app 删除转发)已有 Discord 示例接线,其余桥仍默认 no-op;
+> (a) 入站删除 `submit_app_delete`(app→arkret 删除)无桥构造 `InboundAppDelete`;
+> (b) 出站删除 `redact_in_app`(arkret→app 删除转发)已有 Discord 示例接线,其余桥仍默认 no-op;
 > (c) `on_ephemeral`(typing/presence/receipts 转发)在所有桥都是默认 no-op。
 > 接线计划见 [`_bridges_todos.md`](_bridges_todos.md)。读者勿误以为删除 / typing 已在所有桥生效。
 
@@ -80,15 +80,15 @@ pub trait MessageBridge: Send + Sync + 'static {
 
 ## 每个 crate 必须产出的文件
 
-1. `Cargo.toml`:应用 crate 只直接依赖 `cokret-bridge-messaging`(`{ workspace = true }`)；
+1. `Cargo.toml`:应用 crate 只直接依赖 `arkret-bridge-messaging`(`{ workspace = true }`)；
    如需通用运行时类型，通过 `cokret_bridge_messaging::runtime` 使用 re-export，勿绕过消息层。
    + 该 app 传输库;`[[bin]]` name 同 crate;features 转发 sqlite/postgres/mysql 到这两个 crate(见 discord)。
    只声明源码实际 `use` 的依赖(`ctx.http` 已带 reqwest,桥自身通常无需再声明)。
 2. `src/main.rs`:定义 `#[derive(Deserialize)] struct AppConfig {...}` →
-   `bridge_main("cokret <-> Xxx bridge", |app: AppConfig, _ctx| Ok(App::new(...)))`(CLI/配置加载/
+   `bridge_main("arkret <-> Xxx bridge", |app: AppConfig, _ctx| Ok(App::new(...)))`(CLI/配置加载/
    日志初始化/`run_message_bridge` 都在 `messaging::bridge_main` 里,勿在桥内重写)。
 3. `src/<app>.rs`:实现 `MessageBridge`。
-4. `config/config.sample.yaml`:含 `bridge`/`cokret`/`database`/`logging`/`app` 段
+4. `config/config.sample.yaml`:含 `bridge`/`arkret`/`database`/`logging`/`app` 段
    (照抄 discord,改 bridge_id、端口、app 段)。
 5. `README_CN.md`:照 discord 风格。残留待办 / 不确定项小节统一用标题
    `## 待完善(TODO)`(勿用「不确定点(TODO)」「不确定点 / TODO」等变体)。
@@ -114,7 +114,7 @@ pub trait MessageBridge: Send + Sync + 'static {
   生效;TTL 须覆盖该方案的凭据/签名可被接受的整个窗口)；缺少稳定 id 的投递不得进入
   `submit_app_message`。如果平台原生签名不覆盖 raw body(如钉钉 outgoing
   robot),桥必须要求可信 ingress 额外注入覆盖 `timestamp + "\n" + raw_body` 的
-  `x-cokret-signature-256`(或同等 body HMAC)并在未配置时 fail closed;不得把只覆盖 app secret
+  `x-arkret-signature-256`(或同等 body HMAC)并在未配置时 fail closed;不得把只覆盖 app secret
   或 handshake 的平台签名宣称为 body-bound 来源验签。
   关键是**编译通过、出入站链路真实可读**;来源验签未补齐者 MUST 明确标 TODO,不得宣称"已验签"。
 
@@ -126,9 +126,9 @@ messenger=9113, teams=9114。
 
 ## 不要做
 
-- 只有跨桥共享能力才放入 `cokret-bridge-runtime` / `cokret-bridge-messaging`;
+- 只有跨桥共享能力才放入 `arkret-bridge-runtime` / `arkret-bridge-messaging`;
   单桥协议细节留在各自 adapter。确需下沉到共享层的改动 / 待办登记到
   [`_bridges_todos.md`](_bridges_todos.md)。
-- 各 crate 位于 `crates/<短名>`(去掉 `cokret-bridge-` 前缀;包名仍 `cokret-bridge-*`);
+- 各 crate 位于 `crates/<短名>`(去掉 `arkret-bridge-` 前缀;包名仍 `arkret-bridge-*`);
   workspace `members = ["crates/*"]` 自动纳入,无需手改根 `Cargo.toml`。
 - 不要引入未缓存的专有 SDK(feishu-sdk/dingtalk-sdk 等);一律用 `reqwest`。

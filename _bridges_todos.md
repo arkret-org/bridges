@@ -1,7 +1,7 @@
 # 共享层变更 / 待办登记(bridges)
 
-`_BRIDGE_CONTRACT.md` 要求适配器**勿改两个共享 crate**(`cokret-bridge-runtime` /
-`cokret-bridge-messaging`)。当某项能力确属跨桥共享、必须下沉到共享层时,在此登记,
+`_BRIDGE_CONTRACT.md` 要求适配器**勿改两个共享 crate**(`arkret-bridge-runtime` /
+`arkret-bridge-messaging`)。当某项能力确属跨桥共享、必须下沉到共享层时,在此登记,
 让契约约束有一个可承载的记录面(否则共享层会被各桥各自悄悄改动)。
 
 登记规则:

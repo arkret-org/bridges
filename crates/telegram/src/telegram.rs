@@ -1,8 +1,8 @@
 //! Telegram adapter (teloxide long polling).
 //!
-//! - Inbound (Telegram → cokret): once `teloxide::repl` long polling receives a text message, it
+//! - Inbound (Telegram → arkret): once `teloxide::repl` long polling receives a text message, it
 //!   calls [`MessageContext::submit_app_message`].
-//! - Outbound (cokret → Telegram): [`MessageBridge::send_to_app`] uses the Bot HTTP `send_message`
+//! - Outbound (arkret → Telegram): [`MessageBridge::send_to_app`] uses the Bot HTTP `send_message`
 //!   to deliver to the corresponding chat.
 
 use std::sync::Arc;
@@ -112,7 +112,7 @@ impl MessageBridge for TelegramApp {
         let bot = &self.bot;
         let body = msg.rendered_body(SenderRenderStyle::Plain);
 
-        // With an attachment: download the cokret blob and send it as a document.
+        // With an attachment: download the arkret blob and send it as a document.
         if let Some(att) = &msg.attachment {
             let bytes = ctx.download_blob(&att.blob_ref).await?;
             let filename = att.filename.clone().unwrap_or_else(|| "file".to_owned());

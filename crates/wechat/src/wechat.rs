@@ -1,10 +1,10 @@
 //! WeChat (WeChat Work / Official Account) adapter (reqwest).
 //!
-//! - Inbound (WeChat -> cokret): WeChat callbacks are accepted at `/webhooks/wechat`. Inbound
+//! - Inbound (WeChat -> arkret): WeChat callbacks are accepted at `/webhooks/wechat`. Inbound
 //!   **delivery (POST) requires safe mode** (EncodingAESKey configured): only `msg_signature`
 //!   covers the request body, so plaintext POST deliveries are rejected fail-closed. The GET
 //!   subscription handshake still echoes in either mode.
-//! - Outbound (cokret -> WeChat): [`MessageBridge::send_to_app`] uses `ctx.http` to first exchange
+//! - Outbound (arkret -> WeChat): [`MessageBridge::send_to_app`] uses `ctx.http` to first exchange
 //!   corp_id/corp_secret (or app_id/app_secret) for an `access_token`, then POST to the WeChat Work
 //!   app-message / Official Account customer-service-message API.
 

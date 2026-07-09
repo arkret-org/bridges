@@ -1,4 +1,4 @@
-//! Durable dead-letter storage for cokret-to-app deliveries.
+//! Durable dead-letter storage for arkret-to-app deliveries.
 //!
 //! Runtime delivery is at-least-once: a bridge adapter may fail after the server
 //! has handed the event to this process. Once bounded retries are exhausted, the

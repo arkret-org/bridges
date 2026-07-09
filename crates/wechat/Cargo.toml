@@ -1,26 +1,26 @@
 [package]
-name = "cokret-bridge-wechat"
+name = "arkret-bridge-wechat"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "cokret <-> WeChat (WeChat Work / Official Account) bridge (reqwest)."
+description = "arkret <-> WeChat (WeChat Work / Official Account) bridge (reqwest)."
 
 [[bin]]
-name = "cokret-bridge-wechat"
+name = "arkret-bridge-wechat"
 path = "src/main.rs"
 
 [features]
 default = ["sqlite"]
-sqlite = ["cokret-bridge-messaging/sqlite"]
-postgres = ["cokret-bridge-messaging/postgres"]
-mysql = ["cokret-bridge-messaging/mysql"]
+sqlite = ["arkret-bridge-messaging/sqlite"]
+postgres = ["arkret-bridge-messaging/postgres"]
+mysql = ["arkret-bridge-messaging/mysql"]
 
 [dependencies]
 anyhow = {workspace = true}
 async-trait = {workspace = true}
-cokret-bridge-messaging = {workspace = true,default-features = false}
+arkret-bridge-messaging = {workspace = true,default-features = false}
 quick-xml = {workspace = true}
 serde = {workspace = true}
 serde_json = {workspace = true}

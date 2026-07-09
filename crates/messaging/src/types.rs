@@ -1,6 +1,6 @@
 //! Message-shaped value types exchanged between the app adapter and the bridge.
 
-/// An inbound message from an external app into Cokret.
+/// An inbound message from an external app into Arkret.
 #[derive(Clone, Debug)]
 pub struct InboundAppMessage {
     pub app_channel: String,
@@ -19,7 +19,7 @@ pub struct InboundAppDelete {
     /// The external app message being deleted.
     pub app_message_id: String,
     /// Optional external transaction id for the delete event itself. When absent,
-    /// the bridge still records target provenance without inventing a Cokret
+    /// the bridge still records target provenance without inventing a Arkret
     /// deletion event for expiry-style signals.
     pub source_event_id: Option<String>,
     pub reason: AppDeleteReason,
@@ -94,7 +94,7 @@ pub enum AppDeleteOutcome {
 /// message bridge driver.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MessageBridgeCapabilities {
-    /// The adapter sends Cokret media attachments as native app attachments.
+    /// The adapter sends Arkret media attachments as native app attachments.
     /// When false, the shared outbound guard downgrades attachments into a text
     /// notice before the adapter sees the message.
     pub outbound_native_attachments: bool,
@@ -120,13 +120,13 @@ impl Default for MessageBridgeCapabilities {
     }
 }
 
-/// An outbound message from Cokret to an external app.
+/// An outbound message from Arkret to an external app.
 #[derive(Clone, Debug)]
 pub struct OutboundAppMessage {
     pub app_channel: String,
     pub sender_display: String,
     pub body: String,
-    /// Present when the cokret event carried media; the adapter may download it
+    /// Present when the arkret event carried media; the adapter may download it
     /// via [`crate::MessageContext::download_blob`] and re-send to the app.
     pub attachment: Option<Attachment>,
 }
@@ -219,7 +219,7 @@ pub struct AppMessageRef {
     pub app_message_id: String,
 }
 
-/// A media attachment that already resides in cokret blob storage (referenced by
+/// A media attachment that already resides in arkret blob storage (referenced by
 /// `blob_ref`). Inbound: the adapter downloads app media, uploads it via
 /// [`crate::MessageContext::upload_blob`], then submits with
 /// [`crate::MessageContext::submit_media_message`]. Outbound: extracted from a `ck.message.create`
@@ -330,7 +330,7 @@ mod tests {
             sender_display: "alice".to_owned(),
             body: "see this".to_owned(),
             attachment: Some(Attachment {
-                blob_ref: "ck:blob:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                blob_ref: "ak:blob:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     .to_owned(),
                 media_type: Some("image/png".to_owned()),
                 filename: Some("shot.png".to_owned()),
@@ -360,7 +360,7 @@ mod tests {
             sender_display: "alice".to_owned(),
             body: String::new(),
             attachment: Some(Attachment {
-                blob_ref: "ck:blob:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                blob_ref: "ak:blob:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                     .to_owned(),
                 media_type: None,
                 filename: None,

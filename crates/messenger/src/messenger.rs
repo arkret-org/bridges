@@ -1,7 +1,7 @@
 //! Messenger adapter (Facebook Graph API, pure reqwest).
 //!
-//! - Inbound (Messenger -> cokret): Facebook pushes `messages` events via `/webhooks/messenger`.
-//! - Outbound (cokret → Messenger): [`MessageBridge::send_to_app`] uses `ctx.http` to POST `https://graph.facebook.com/v20.0/me/messages`
+//! - Inbound (Messenger -> arkret): Facebook pushes `messages` events via `/webhooks/messenger`.
+//! - Outbound (arkret → Messenger): [`MessageBridge::send_to_app`] uses `ctx.http` to POST `https://graph.facebook.com/v20.0/me/messages`
 //!   (Bearer page_access_token).
 
 use std::sync::Arc;

@@ -1,8 +1,8 @@
 //! Ghost actor provisioning, external_ref provenance, and portal strand
 //! acquisition helpers (applet-integration §9.1 / §10.1 / §16).
 
-use cokret::http_client::ClientRequestOptions;
-use cokret::{
+use arkret::http_client::ClientRequestOptions;
+use arkret::{
     AppletBridgeErrorClass, AppletId, Did, EventId, GhostActorProvisionOutcome,
     GhostActorProvisionRequestBody, Hlc, ObjectCreatePayload, RealmId, StrandCreateObject,
     StrandId, StrandTrackConfig,
@@ -42,7 +42,7 @@ pub(crate) fn bridge_tenant(config: &runtime::Config) -> String {
         .as_deref()
         .map(normalized_external_id)
         .filter(|tenant| !tenant.is_empty())
-        .unwrap_or_else(|| normalized_external_id(&config.cokret.service_did))
+        .unwrap_or_else(|| normalized_external_id(&config.arkret.service_did))
 }
 
 fn requested_ghost_actor_id_for_user(
@@ -68,11 +68,11 @@ fn requested_ghost_actor_id_for_user(
     // the bare suffix would not even be a valid actor DID. Assert the method
     // before deriving so a misconfigured service DID fails closed here rather
     // than producing a malformed ghost id.
-    let service_did = Did::new(config.cokret.service_did.clone())?;
+    let service_did = Did::new(config.arkret.service_did.clone())?;
     assert_ghost_suffix_method(&service_did)?;
     let material =
         [protocol, tenant, external_user_id].join(&MESSAGE_MAPPING_KEY_SEPARATOR.to_string());
-    let encoded = cokret::base64url_encode(material.as_bytes());
+    let encoded = arkret::base64url_encode(material.as_bytes());
     let did = format!(
         "{}:ghost:u{encoded}",
         service_did.as_str().trim_end_matches(':')
@@ -101,7 +101,7 @@ pub(crate) fn assert_ghost_suffix_method(service_did: &Did) -> Result<()> {
 fn ghost_actor_provision_path(applet_id: &str) -> Result<String> {
     if applet_id.trim().is_empty() || applet_id.contains('/') {
         return Err(BridgeError::Config(
-            "cokret.applet_id must be a non-empty path-safe ck:applet id".into(),
+            "arkret.applet_id must be a non-empty path-safe ck:applet id".into(),
         ));
     }
     Ok(format!(
@@ -206,7 +206,7 @@ pub(crate) async fn provision_ghost_actor(
         external_user_id,
     )?)?;
     let mut request = GhostActorProvisionRequestBody::new(
-        AppletId::new(config.cokret.applet_id.clone())?,
+        AppletId::new(config.arkret.applet_id.clone())?,
         edge.service_did().clone(),
         ghost_actor_id.clone(),
         protocol,
@@ -223,9 +223,9 @@ pub(crate) async fn provision_ghost_actor(
     if let Some(display_name) = display_name {
         request = request.with_display_name(display_name);
     }
-    let path = ghost_actor_provision_path(&config.cokret.applet_id)?;
+    let path = ghost_actor_provision_path(&config.arkret.applet_id)?;
     let options = ClientRequestOptions::new().idempotency_key(ghost_provision_idempotency_key(
-        &config.cokret.applet_id,
+        &config.arkret.applet_id,
         protocol,
         tenant,
         external_user_id,
@@ -242,7 +242,7 @@ fn validate_ghost_provision_response(
     response: GhostActorProvisionOutcome,
 ) -> Result<GhostActorProvisionOutcome> {
     if &response.ghost_actor_id != requested_actor {
-        return Err(BridgeError::Cokret(format!(
+        return Err(BridgeError::Arkret(format!(
             "ghost provisioning returned actor {} but requested {}",
             response.ghost_actor_id, requested_actor
         )));
@@ -258,7 +258,7 @@ fn validate_ghost_provision_response(
 
 pub(crate) fn require_nonempty_ref(label: &str, value: &str) -> Result<()> {
     if value.trim().is_empty() {
-        return Err(BridgeError::Cokret(format!(
+        return Err(BridgeError::Arkret(format!(
             "ghost provisioning response requires {label}"
         )));
     }
@@ -270,7 +270,7 @@ pub(crate) fn require_nonempty_ref(label: &str, value: &str) -> Result<()> {
 /// underlying message text, so it never leaks external content).
 pub(crate) fn bridge_error_code(error: &BridgeError) -> &'static str {
     match error {
-        BridgeError::Cokret(_) => "cokret_unavailable",
+        BridgeError::Arkret(_) => "cokret_unavailable",
         BridgeError::Database(_) => "bridge_storage_error",
         BridgeError::Runtime(_) => "bridge_runtime_error",
         BridgeError::App(_) => "app_adapter_error",
@@ -283,7 +283,7 @@ pub(crate) fn bridge_error_class(error: &BridgeError) -> AppletBridgeErrorClass 
     match error {
         BridgeError::Config(_) => AppletBridgeErrorClass::Policy,
         BridgeError::App(_) => AppletBridgeErrorClass::Schema,
-        BridgeError::Cokret(_)
+        BridgeError::Arkret(_)
         | BridgeError::Database(_)
         | BridgeError::Runtime(_)
         | BridgeError::Other(_) => AppletBridgeErrorClass::ExternalNetwork,
@@ -456,7 +456,7 @@ pub(crate) async fn create_portal_strand(
     location: &Value,
 ) -> Result<String> {
     let realm = RealmId::new(realm_id.to_owned())?;
-    let strand_id = StrandId::new(cokret::new_prefixed_uuid7("ck:strand:"))?;
+    let strand_id = StrandId::new(arkret::new_prefixed_uuid7("ak:strand:"))?;
     let title = alias
         .filter(|alias| !alias.trim().is_empty())
         .unwrap_or(app_channel);

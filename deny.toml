@@ -1,5 +1,5 @@
 # cargo-deny configuration. Run `cargo deny check` locally; mirrors the
-# supply-chain expectations shared with the sibling cokret repositories.
+# supply-chain expectations shared with the sibling arkret repositories.
 
 [graph]
 targets = [

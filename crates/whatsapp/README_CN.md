@@ -1,17 +1,17 @@
-# cokret-bridge-whatsapp
+# arkret-bridge-whatsapp
 
-Rust 实现的 **cokret ⇄ WhatsApp** 桥接。基于共享核心
-[`cokret-bridge-runtime`](../runtime) + [`cokret-bridge-messaging`](../messaging),应用侧仅使用
+Rust 实现的 **arkret ⇄ WhatsApp** 桥接。基于共享核心
+[`arkret-bridge-runtime`](../runtime) + [`arkret-bridge-messaging`](../messaging),应用侧仅使用
 [`reqwest`](https://crates.io/crates/reqwest) 直连
 [WhatsApp Cloud API](https://developers.facebook.com/docs/whatsapp/cloud-api)。
 
 ## 架构
 
-- **入站(WhatsApp → cokret)**:Cloud API 通过 webhook(GET 校验 + POST 接收)推送消息,
+- **入站(WhatsApp → arkret)**:Cloud API 通过 webhook(GET 校验 + POST 接收)推送消息,
   由 `MessageBridge::webhook_router` 暴露的路由处理(GET 校验 `verify_token`、POST 解析
   前校验 `X-Hub-Signature-256` 后解析 `entry[].changes[].value.messages[]`),经 `webhook::submit` → `MessageContext::submit_app_message`
-  构造并签名 `ck.message.create` 事件提交到 cokret;`run` 为保活循环。
-- **出站(cokret → WhatsApp)**:cokret server 经 applet 端点
+  构造并签名 `ck.message.create` 事件提交到 arkret;`run` 为保活循环。
+- **出站(arkret → WhatsApp)**:arkret server 经 applet 端点
   `POST /_cokret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
   用 `ctx.http`(reqwest)以 Bearer `access_token` POST
   `https://graph.facebook.com/v20.0/{phone_number_id}/messages`。
@@ -21,14 +21,14 @@ Rust 实现的 **cokret ⇄ WhatsApp** 桥接。基于共享核心
 
 ```bash
 cp config/config.sample.yaml config.yaml
-# 填入 cokret.access_token / signing_key_seed_hex 与
+# 填入 arkret.access_token / signing_key_seed_hex 与
 # app.phone_number_id / access_token / verify_token / app_secret
-cargo run -p cokret-bridge-whatsapp -- --config config.yaml
+cargo run -p arkret-bridge-whatsapp -- --config config.yaml
 ```
 
 ## 配置要点
 
-- `cokret.*`:cokret 接入(server_url、service_did、applet_id、access_token、签名种子)。
+- `arkret.*`:arkret 接入(server_url、service_did、applet_id、access_token、签名种子)。
 - `app.phone_number_id`:发送方电话号码 ID(出站 URL 路径段)。
 - `app.access_token`:Cloud API 令牌(Bearer)。
 - `app.verify_token`:webhook 校验回显令牌(入站接入时使用)。

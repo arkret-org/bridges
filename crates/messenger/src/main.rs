@@ -1,4 +1,4 @@
-//! cokret-bridge-messenger executable entry point.
+//! arkret-bridge-messenger executable entry point.
 
 mod messenger;
 
@@ -25,7 +25,7 @@ struct AppConfig {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    bridge_main("cokret <-> Messenger bridge", |app: AppConfig, _ctx| {
+    bridge_main("arkret <-> Messenger bridge", |app: AppConfig, _ctx| {
         Ok(MessengerApp::new(
             app.page_access_token,
             app.verify_token,

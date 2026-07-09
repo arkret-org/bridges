@@ -1,19 +1,19 @@
 //! salvo HTTP service: health check / metrics / provisioning, plus mounting
-//! the cokret applet routes (`/_cokret/edge/applet/*`) to receive event pushes
-//! from the cokret server.
+//! the arkret applet routes (`/_cokret/edge/applet/*`) to receive event pushes
+//! from the arkret server.
 
 use std::sync::{Arc, OnceLock};
 
 use ::metrics::{counter, describe_counter};
-use cokret::identity::{ResolverFailMode, ResolverPolicy};
-use cokret::models::{AppletTransactionOutcome, AppletTransactionRequestBody};
-use cokret::signatures::http_signature::{
+use arkret::identity::{ResolverFailMode, ResolverPolicy};
+use arkret::models::{AppletTransactionOutcome, AppletTransactionRequestBody};
+use arkret::signatures::http_signature::{
     Component, HttpMessageVerificationError, SignatureInput, SignaturePolicyError,
     SignatureVerificationPolicy, parse_signature_input, public_key_from_bytes,
     verify_signed_http_message,
 };
-use cokret::signatures::{Ed25519DetachedJwsVerifier, EventProofBuilder, PublicKeyMaterial};
-use cokret::{
+use arkret::signatures::{Ed25519DetachedJwsVerifier, EventProofBuilder, PublicKeyMaterial};
+use arkret::{
     AppletHandler, CompositeDidResolver, Did, DidKeyResolver, DidResolver, HttpDidResolver,
 };
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
@@ -203,7 +203,7 @@ fn prometheus_handle() -> std::result::Result<&'static PrometheusHandle, String>
         );
         describe_counter!(
             crate::metrics::BRIDGE_MESSAGES_METRIC,
-            "App<->cokret bridged message count, labelled by bridge, direction (inbound/outbound/inbound_media) and result (ok/error)."
+            "App<->arkret bridged message count, labelled by bridge, direction (inbound/outbound/inbound_media) and result (ok/error)."
         );
         Ok(handle)
     }) {
@@ -384,7 +384,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
             return;
         }
     };
-    let request_hash = match cokret::canonical::canonical_sha256(&value) {
+    let request_hash = match arkret::canonical::canonical_sha256(&value) {
         Ok(hash) => hash,
         Err(err) => {
             record_applet_transaction("bad_request");
@@ -411,7 +411,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         );
         return;
     }
-    if source != state.config.cokret.trusted_server_did {
+    if source != state.config.arkret.trusted_server_did {
         record_applet_transaction("unauthorized");
         unauthorized_code(
             res,
@@ -454,7 +454,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         }
         Ok(TransactionClaim::Pending) => {
             record_applet_transaction("pending");
-            res.render(Json(cokret::models::AppletTransactionOutcome {
+            res.render(Json(arkret::models::AppletTransactionOutcome {
                 ok: false,
                 rejected: Vec::new(),
                 retry_after_ms: Some(1000),
@@ -467,7 +467,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
             // applet-integration §7.3/§14 require the closed error code
             // `duplicate_conflict` (the registry has no `idempotency_conflict`).
             res.status_code(StatusCode::CONFLICT);
-            res.render(Json(cokret::models::AppletTransactionOutcome {
+            res.render(Json(arkret::models::AppletTransactionOutcome {
                 ok: false,
                 rejected: vec![json!({ "reason_code": "duplicate_conflict" })],
                 retry_after_ms: None,
@@ -674,7 +674,7 @@ fn verify_http_applet_request(
     let trusted_method = trusted_verification_method(config, &signature_input.key_id)?;
     let signer_did =
         verification_method_did(&signature_input.key_id).map_err(http_signature_invalid)?;
-    if signer_did != config.cokret.trusted_server_did {
+    if signer_did != config.arkret.trusted_server_did {
         return Err(http_signature_invalid(
             "HTTP signature keyid is not owned by the trusted server DID",
         ));
@@ -682,7 +682,7 @@ fn verify_http_applet_request(
 
     let origin = header_value_from(headers, SOURCE_SERVICE_DID_HEADER)
         .ok_or_else(|| http_signature_invalid("Source-Service-DID header is required"))?;
-    if origin != config.cokret.trusted_server_did {
+    if origin != config.arkret.trusted_server_did {
         return Err(http_signature_invalid(
             "HTTP signature source service DID is not trusted",
         ));
@@ -690,7 +690,7 @@ fn verify_http_applet_request(
 
     let destination = header_value_from(headers, DESTINATION_SERVICE_DID_HEADER)
         .ok_or_else(|| http_signature_invalid("Destination-Service-DID header is required"))?;
-    if destination != config.cokret.service_did {
+    if destination != config.arkret.service_did {
         return Err(http_signature_invalid(
             "HTTP signature destination service DID does not match this bridge",
         ));
@@ -700,7 +700,7 @@ fn verify_http_applet_request(
         .public_key
         .ed25519_bytes()
         .map_err(|err| http_signature_invalid(err.to_string()))?;
-    let source_key_state_digest = cokret::canonical::canonical_digest(&public_key_bytes);
+    let source_key_state_digest = arkret::canonical::canonical_digest(&public_key_bytes);
     let public_key = public_key_from_bytes(&public_key_bytes)
         .map_err(|err| http_signature_invalid(err.to_string()))?;
     let authority = request_authority(req, headers)?;
@@ -748,7 +748,7 @@ fn verify_http_applet_request(
         .iter()
         .map(Component::canonical_name)
         .collect();
-    let canonical_message_digest = cokret::canonical::canonical_digest(&verified.canonical_message);
+    let canonical_message_digest = arkret::canonical::canonical_digest(&verified.canonical_message);
     let key_id = verified.signature_input.key_id.clone();
     let created = verified.signature_input.created;
     let expires = verified.signature_input.expires;
@@ -802,7 +802,7 @@ fn build_source_signature_anchor(
         .content_digest
         .as_deref()
         .ok_or_else(|| "verified transaction missing Content-Digest".to_owned())?;
-    cokret::canonical::canonical_sha256(&json!({
+    arkret::canonical::canonical_sha256(&json!({
         "canonical_body_digest": canonical_body_digest,
         "canonical_message_digest": &verified.canonical_message_digest,
         "content_digest": content_digest,
@@ -964,7 +964,7 @@ fn trusted_verification_method<'a>(
     verification_method: &str,
 ) -> std::result::Result<&'a TrustedVerificationMethodConfig, HttpSignatureReject> {
     config
-        .cokret
+        .arkret
         .trusted_verification_methods
         .iter()
         .find(|method| method.verification_method == verification_method)
@@ -1132,7 +1132,7 @@ mod tests {
 
     #[test]
     fn verification_method_lookup_accepts_full_fragment_and_single_key_documents() {
-        let key = cokret::ed25519_pubkey_to_did_key_multibase(&[7u8; 32]);
+        let key = arkret::ed25519_pubkey_to_did_key_multibase(&[7u8; 32]);
 
         let mut full = BTreeMap::new();
         full.insert("did:webvh:server.example#key-1".to_owned(), key.clone());
@@ -1166,7 +1166,7 @@ mod tests {
 
     #[test]
     fn did_document_key_material_accepts_multibase_did_key_and_jwk_container() {
-        let multibase = cokret::ed25519_pubkey_to_did_key_multibase(&[8u8; 32]);
+        let multibase = arkret::ed25519_pubkey_to_did_key_multibase(&[8u8; 32]);
         let public_key =
             public_key_material_from_did_document_value(&format!("did:key:{multibase}")).unwrap();
         assert_eq!(public_key.ed25519_bytes().unwrap(), [8u8; 32]);
@@ -1175,7 +1175,7 @@ mod tests {
             "publicKeyJwk": {
                 "kty": "OKP",
                 "crv": "Ed25519",
-                "x": cokret::base64url_encode([9u8; 32]),
+                "x": arkret::base64url_encode([9u8; 32]),
             }
         });
         let public_key = public_key_material_from_did_document_value(&jwk.to_string()).unwrap();

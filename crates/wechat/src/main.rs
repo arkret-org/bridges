@@ -1,4 +1,4 @@
-//! cokret-bridge-wechat executable entry point.
+//! arkret-bridge-wechat executable entry point.
 
 mod wechat;
 
@@ -30,7 +30,7 @@ struct AppConfig {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    bridge_main("cokret <-> WeChat bridge", |app: AppConfig, ctx| {
+    bridge_main("arkret <-> WeChat bridge", |app: AppConfig, ctx| {
         let has_safe_mode = app
             .encoding_aes_key
             .as_ref()

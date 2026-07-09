@@ -1,9 +1,9 @@
-//! The cokret protocol-side edge (replaces the Matrix bridge's
+//! The arkret protocol-side edge (replaces the Matrix bridge's
 //! `MatrixAppservice`).
 //!
-//! - **Outbound (app -> cokret)**: [`CokretEdge::mint_event`] / [`CokretEdge::submit`] build and
-//!   sign an `Event` and submit it via [`cokret::http_client::Client::events_submit`].
-//! - **Inbound (cokret → app)**: transactions pushed by the cokret server via the applet HTTP
+//! - **Outbound (app -> arkret)**: [`CokretEdge::mint_event`] / [`CokretEdge::submit`] build and
+//!   sign an `Event` and submit it via [`arkret::http_client::Client::events_submit`].
+//! - **Inbound (arkret → app)**: transactions pushed by the arkret server via the applet HTTP
 //!   endpoints are placed into the `inbound_tx` queue by [`BridgeAppletHandler`]; after the core
 //!   consumes them they are forwarded to the app adapter.
 //! - **Media**: [`CokretEdge::upload_blob`] / [`CokretEdge::download_blob`].
@@ -17,18 +17,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 #[cfg(any(feature = "web", test))]
-use cokret::DidResolver;
-use cokret::http_client::{Auth, Client};
-use cokret::models::EphemeralEnvelope;
+use arkret::DidResolver;
+use arkret::http_client::{Auth, Client};
+use arkret::models::EphemeralEnvelope;
 #[cfg(any(feature = "web", test))]
-use cokret::models::{
+use arkret::models::{
     AppletActorView, AppletDescription, AppletPingOutcome, AppletProtocolMetadata, AppletRealmView,
     AppletTransactionOutcome, AppletTransactionRequestBody,
 };
 #[cfg(any(feature = "web", test))]
-use cokret::signatures::EventProofBuilder;
-use cokret::signatures::{SignEventOptions, sign_event};
-use cokret::{AppletId, Did, Ed25519MoveSigner, Event, EventId, Hlc, HlcGenerator, RealmId};
+use arkret::signatures::EventProofBuilder;
+use arkret::signatures::{SignEventOptions, sign_event};
+use arkret::{AppletId, Did, Ed25519MoveSigner, Event, EventId, Hlc, HlcGenerator, RealmId};
 use parking_lot::Mutex;
 use serde::Serialize;
 use serde_json::Value;
@@ -43,7 +43,7 @@ use crate::error::{BridgeError, Result};
 #[cfg(any(feature = "web", test))]
 use crate::idempotency::{DedupVerdict, EventDedupStore};
 
-/// Bound on the inbound (cokret → app) event queue. Past this depth the applet
+/// Bound on the inbound (arkret → app) event queue. Past this depth the applet
 /// handler stops accepting events and asks the server to retry (backpressure)
 /// rather than buffering without limit. Sized so a healthy consumer drains it
 /// well within the server's retry window; a persistently full queue means the
@@ -172,7 +172,7 @@ impl SeqAllocator {
     }
 }
 
-/// The cokret edge client.
+/// The arkret edge client.
 pub struct CokretEdge {
     config: Arc<Config>,
     client: Client,
@@ -187,13 +187,13 @@ pub struct CokretEdge {
     hlc_generators: Mutex<HashMap<String, HlcGenerator>>,
     hlc_device_id: String,
     hlc_secret: [u8; 32],
-    /// Inbound event queue: cokret server push → core consumer loop. Bounded so
+    /// Inbound event queue: arkret server push → core consumer loop. Bounded so
     /// a slow consumer applies backpressure (the handler returns `retry_after_ms`
     /// when full) instead of buffering without limit. `None` for outbound-only
     /// edges.
     inbound_tx: Option<Sender<Event>>,
     /// Inbound ephemeral queue (typing/presence/receipts/call-signal as the SDK
-    /// [`EphemeralEnvelope`] wire type): cokret server push → core consumer loop.
+    /// [`EphemeralEnvelope`] wire type): arkret server push → core consumer loop.
     /// `None` for outbound-only edges.
     ephemeral_tx: Option<Sender<EphemeralEnvelope>>,
 }
@@ -206,12 +206,12 @@ impl CokretEdge {
         seq: Arc<dyn SeqStore>,
         inbound_tx: Sender<Event>,
     ) -> Result<Self> {
-        let service_did = Did::new(config.cokret.service_did.clone())?;
+        let service_did = Did::new(config.arkret.service_did.clone())?;
         let seed = config.signing_seed()?;
         let signer = Ed25519MoveSigner::from_did_key_seed(
             seed,
             service_did.clone(),
-            config.cokret.verification_method_id.clone(),
+            config.arkret.verification_method_id.clone(),
         );
         Self::build(config, seq, signer, service_did, seed, Some(inbound_tx))
     }
@@ -224,7 +224,7 @@ impl CokretEdge {
         hlc_secret: [u8; 32],
         inbound_tx: Option<Sender<Event>>,
     ) -> Result<Self> {
-        let base = url::Url::parse(&config.cokret.server_url)
+        let base = url::Url::parse(&config.arkret.server_url)
             .map_err(|e| BridgeError::Config(format!("server_url: {e}")))?;
         // Outbound transport policy (spec §7, sync/api-conventions §11.2): the
         // bridge actively connects out to this address, so require TLS. A plain
@@ -233,12 +233,12 @@ impl CokretEdge {
         // dev exception. Fail closed otherwise.
         if base.scheme() != "https" && !host_is_loopback(base.host_str()) {
             return Err(BridgeError::Config(format!(
-                "cokret.server_url must use https (got scheme `{}`); only loopback may use http",
+                "arkret.server_url must use https (got scheme `{}`); only loopback may use http",
                 base.scheme()
             )));
         }
         let client = Client::builder(base)
-            .auth(Auth::Bearer(config.cokret.access_token.clone()))
+            .auth(Auth::Bearer(config.arkret.access_token.clone()))
             .build()?;
 
         // The default applet namespaces and ghost actor ids derive from the
@@ -257,7 +257,7 @@ impl CokretEdge {
             }
         }
 
-        let applet_id = AppletId::new(config.cokret.applet_id.clone())?;
+        let applet_id = AppletId::new(config.arkret.applet_id.clone())?;
         let hlc_device_id = config.bridge.bridge_id.clone();
 
         let seq = SeqAllocator::new(seq, SEQ_STATE_KEY);
@@ -422,7 +422,7 @@ impl CokretEdge {
     /// actor as `actor_id`.
     pub fn mint_event_as<T>(
         &self,
-        actor: &cokret::Did,
+        actor: &arkret::Did,
         kind: &str,
         realm_id: &RealmId,
         content: T,
@@ -443,7 +443,7 @@ impl CokretEdge {
     /// [`Self::sign_as_service`], avoiding a discarded first signature.
     fn build_delegated_event<T>(
         &self,
-        actor: &cokret::Did,
+        actor: &arkret::Did,
         kind: &str,
         realm_id: &RealmId,
         content: T,
@@ -465,7 +465,7 @@ impl CokretEdge {
 
     async fn build_delegated_event_async(
         &self,
-        actor: &cokret::Did,
+        actor: &arkret::Did,
         kind: &str,
         realm_id: &RealmId,
         content: Value,
@@ -498,7 +498,7 @@ impl CokretEdge {
     fn verification_method_for_actor(&self, actor: &Did) -> Result<String> {
         let (_, fragment) = self
             .config
-            .cokret
+            .arkret
             .verification_method_id
             .rsplit_once('#')
             .ok_or_else(|| {
@@ -601,14 +601,14 @@ impl CokretEdge {
 
     /// Emit a `ck.applet.bridge_error` Event so a bridging failure is durable
     /// and auditable rather than silently dropped (applet-integration §14/§16;
-    /// SDK [`cokret::AppletBridgeErrorBuilder`]). The builder is filled with all
+    /// SDK [`arkret::AppletBridgeErrorBuilder`]). The builder is filled with all
     /// required bindings (realm/failed_transaction_ref/retriable/visibility) by
     /// the caller; this allocates the actor seq + HLC, signs with the service
     /// key, and submits. Returns the new event_id.
     pub async fn submit_bridge_error(
         &self,
         realm_id: &RealmId,
-        builder: cokret::AppletBridgeErrorBuilder,
+        builder: arkret::AppletBridgeErrorBuilder,
     ) -> Result<String> {
         let seq = self.seq.alloc_blocking().await?;
         let hlc = self.next_hlc(realm_id)?;
@@ -623,14 +623,14 @@ impl CokretEdge {
         self.submit_event(&event).await
     }
 
-    /// The configured applet id this bridge presents to cokret.
+    /// The configured applet id this bridge presents to arkret.
     pub fn applet_id(&self) -> &str {
         self.applet_id.as_str()
     }
 
     /// Media upload: returns the blob reference string.
     pub async fn upload_blob(&self, bytes: &[u8], mime: &str) -> Result<String> {
-        let meta = cokret::models::BlobUploadMetadata {
+        let meta = arkret::models::BlobUploadMetadata {
             realm_id: None,
             content_digest: None,
             size_bytes: bytes.len() as u64,
@@ -644,7 +644,7 @@ impl CokretEdge {
 
     /// Media download.
     pub async fn download_blob(&self, blob_ref: &str) -> Result<Vec<u8>> {
-        let r = cokret::BlobRef::new(blob_ref.to_owned())?;
+        let r = arkret::BlobRef::new(blob_ref.to_owned())?;
         Ok(self.client.blob_download(&r, None).await?)
     }
 }
@@ -652,7 +652,7 @@ impl CokretEdge {
 fn validate_authorization_ref(authorization_ref: &str) -> Result<String> {
     let authorization_ref = authorization_ref.trim();
     if authorization_ref.is_empty() {
-        return Err(BridgeError::Cokret(
+        return Err(BridgeError::Arkret(
             "delegated actor events require authorization_ref".to_owned(),
         ));
     }
@@ -664,7 +664,7 @@ where
     T: Serialize,
 {
     serde_json::to_value(content).map_err(|error| {
-        BridgeError::Cokret(format!("event payload serialization failed: {error}"))
+        BridgeError::Arkret(format!("event payload serialization failed: {error}"))
     })
 }
 
@@ -673,7 +673,7 @@ where
     T: Serialize,
 {
     serde_json::to_value(external_ref).map_err(|error| {
-        BridgeError::Cokret(format!("event external_ref serialization failed: {error}"))
+        BridgeError::Arkret(format!("event external_ref serialization failed: {error}"))
     })
 }
 
@@ -752,8 +752,8 @@ fn event_content_fingerprint(event: &Event) -> i64 {
 }
 
 #[cfg(any(feature = "web", test))]
-/// The receiver for transactions pushed by the cokret server (implements
-/// [`cokret::AppletHandler`]). It delivers the events in a transaction to the
+/// The receiver for transactions pushed by the arkret server (implements
+/// [`arkret::AppletHandler`]). It delivers the events in a transaction to the
 /// inbound queue; the business forwarding is done in the core consumer loop.
 pub struct BridgeAppletHandler {
     applet_id: String,
@@ -840,26 +840,26 @@ impl BridgeAppletHandler {
     ) -> Result<Self> {
         let bridge_id = edge.config.bridge.bridge_id.clone();
         let service_did = edge.service_did.clone();
-        let verification_method_id = edge.config.cokret.verification_method_id.clone();
+        let verification_method_id = edge.config.arkret.verification_method_id.clone();
         Ok(Self {
-            applet_id: edge.config.cokret.applet_id.clone(),
+            applet_id: edge.config.arkret.applet_id.clone(),
             service_did: service_did.clone(),
             protocols: vec![bridge_id.clone()],
             namespaces: edge
                 .config
-                .cokret
+                .arkret
                 .applet_namespaces
                 .clone()
                 .unwrap_or_else(|| default_applet_namespaces(&bridge_id, &service_did)),
             limits: edge
                 .config
-                .cokret
+                .arkret
                 .applet_limits
                 .clone()
                 .unwrap_or_else(default_applet_limits),
             auth: edge
                 .config
-                .cokret
+                .arkret
                 .applet_auth
                 .clone()
                 .unwrap_or_else(|| default_applet_auth(&service_did, &verification_method_id)),
@@ -910,7 +910,7 @@ impl BridgeAppletHandler {
 }
 
 /// Whether a URL host is a loopback address (the only operator-controlled
-/// exception to the https requirement on `cokret.server_url`, for local dev).
+/// exception to the https requirement on `arkret.server_url`, for local dev).
 fn host_is_loopback(host: Option<&str>) -> bool {
     match host {
         Some(host) => {
@@ -935,12 +935,12 @@ fn glob_suffix_match(pattern: &str, candidate: &str) -> bool {
 }
 
 #[cfg(any(feature = "web", test))]
-impl cokret::AppletHandler for BridgeAppletHandler {
+impl arkret::AppletHandler for BridgeAppletHandler {
     fn source_did_resolver(&self) -> &dyn DidResolver {
         self.source_did_resolver.as_ref()
     }
 
-    fn ping(&self) -> cokret::Result<AppletPingOutcome> {
+    fn ping(&self) -> arkret::Result<AppletPingOutcome> {
         Ok(AppletPingOutcome {
             ok: true,
             applet_id: self.applet_id.clone(),
@@ -949,7 +949,7 @@ impl cokret::AppletHandler for BridgeAppletHandler {
         })
     }
 
-    fn describe(&self) -> cokret::Result<AppletDescription> {
+    fn describe(&self) -> arkret::Result<AppletDescription> {
         Ok(AppletDescription {
             applet_id: self.applet_id.clone(),
             service_did: self.service_did.clone(),
@@ -964,7 +964,7 @@ impl cokret::AppletHandler for BridgeAppletHandler {
         &self,
         _idempotency_key: &str,
         req: AppletTransactionRequestBody,
-    ) -> cokret::Result<AppletTransactionOutcome> {
+    ) -> arkret::Result<AppletTransactionOutcome> {
         let mut rejected: Vec<Value> = Vec::new();
         let mut enqueue_failed = false;
         // Set when the bounded inbound queue is full: we ask the server to retry
@@ -1140,7 +1140,7 @@ impl cokret::AppletHandler for BridgeAppletHandler {
         })
     }
 
-    fn resolve_actor(&self, actor_id: &str) -> cokret::Result<AppletActorView> {
+    fn resolve_actor(&self, actor_id: &str) -> arkret::Result<AppletActorView> {
         if let Some(resolved) = self
             .resolver
             .as_ref()
@@ -1162,7 +1162,7 @@ impl cokret::AppletHandler for BridgeAppletHandler {
         })
     }
 
-    fn resolve_realm(&self, realm_id_or_alias: &str) -> cokret::Result<AppletRealmView> {
+    fn resolve_realm(&self, realm_id_or_alias: &str) -> arkret::Result<AppletRealmView> {
         if let Some(resolved) = self
             .resolver
             .as_ref()
@@ -1184,7 +1184,7 @@ impl cokret::AppletHandler for BridgeAppletHandler {
         })
     }
 
-    fn resolve_protocol(&self, protocol: &str) -> cokret::Result<AppletProtocolMetadata> {
+    fn resolve_protocol(&self, protocol: &str) -> arkret::Result<AppletProtocolMetadata> {
         Ok(AppletProtocolMetadata {
             protocol: protocol.to_owned(),
             display_name: protocol.to_owned(),
@@ -1252,7 +1252,7 @@ mod tests {
 
     #[test]
     fn event_fingerprint_ignores_unsigned_and_proofs() {
-        let realm = RealmId::new("ck:realm:01904100-0000-7000-8000-668e2181b41d").unwrap();
+        let realm = RealmId::new("ak:realm:01904100-0000-7000-8000-668e2181b41d").unwrap();
         let actor = Did::new("did:webvh:alice.example").unwrap();
         let hlc = Hlc::new("01970e589d21-0001-a13f9c2e").unwrap();
         let mut first = Event::new(
@@ -1287,12 +1287,12 @@ mod tests {
         );
     }
 
-    fn test_proof(jws: &str) -> cokret::Proof {
-        cokret::Proof {
+    fn test_proof(jws: &str) -> arkret::Proof {
+        arkret::Proof {
             kind: "detached_jws".to_owned(),
             alg: "EdDSA".to_owned(),
             verification_method: "did:webvh:alice.example#key-1".to_owned(),
-            event_digest: cokret::Hash::new(
+            event_digest: arkret::Hash::new(
                 "sha256:0000000000000000000000000000000000000000000000000000000000000000",
             )
             .unwrap(),

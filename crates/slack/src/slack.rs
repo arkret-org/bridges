@@ -1,8 +1,8 @@
 //! Slack adapter (socket mode + Web API).
 //!
-//! - Inbound (Slack → cokret): a socket mode WebSocket long-lived read loop parses `message` events
+//! - Inbound (Slack → arkret): a socket mode WebSocket long-lived read loop parses `message` events
 //!   and then calls [`MessageContext::submit_app_message`].
-//! - Outbound (cokret → Slack): [`MessageBridge::send_to_app`] uses `ctx.http` to POST `https://slack.com/api/chat.postMessage`.
+//! - Outbound (arkret → Slack): [`MessageBridge::send_to_app`] uses `ctx.http` to POST `https://slack.com/api/chat.postMessage`.
 //!
 //! Socket mode connection strand: first POST `app_token` (`xapp-`) to
 //! `https://slack.com/api/apps.connections.open` to obtain a one-time wss URL, then

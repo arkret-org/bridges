@@ -1,27 +1,27 @@
 [package]
-name = "cokret-bridge-dingtalk"
+name = "arkret-bridge-dingtalk"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "cokret <-> DingTalk bridge (reqwest HTTP)."
+description = "arkret <-> DingTalk bridge (reqwest HTTP)."
 
 [[bin]]
-name = "cokret-bridge-dingtalk"
+name = "arkret-bridge-dingtalk"
 path = "src/main.rs"
 
 [features]
 default = ["sqlite"]
-sqlite = ["cokret-bridge-messaging/sqlite"]
-postgres = ["cokret-bridge-messaging/postgres"]
-mysql = ["cokret-bridge-messaging/mysql"]
+sqlite = ["arkret-bridge-messaging/sqlite"]
+postgres = ["arkret-bridge-messaging/postgres"]
+mysql = ["arkret-bridge-messaging/mysql"]
 
 [dependencies]
 anyhow = {workspace = true}
 async-trait = {workspace = true}
 chrono = {workspace = true}
-cokret-bridge-messaging = {workspace = true,default-features = false}
+arkret-bridge-messaging = {workspace = true,default-features = false}
 serde = {workspace = true}
 serde_json = {workspace = true}
 tokio = {workspace = true}

@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use cokret::models::AppletTransactionOutcome;
+use arkret::models::AppletTransactionOutcome;
 use parking_lot::Mutex;
 
 use crate::error::Result;

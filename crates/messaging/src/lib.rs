@@ -1,6 +1,6 @@
-//! Messaging helper layer for chat/social Cokret Applet bridges.
+//! Messaging helper layer for chat/social Arkret Applet bridges.
 //!
-//! This crate sits on top of `cokret-bridge-runtime`. It owns the
+//! This crate sits on top of `arkret-bridge-runtime`. It owns the
 //! message-shaped contract shared by the social bridge adapters:
 //!
 //! - app channel/message/user mapping tables (location ↔ `(realm_id, strand_id)` per
@@ -28,8 +28,8 @@ use async_trait::async_trait;
 pub use calendar::{
     CALENDAR_EVENT_PROFILE, CalendarMapError, bridge_calendar_schedule_fields, bridge_rsvp_payload,
 };
-use cokret::models::EphemeralEnvelope;
-use cokret::{
+use arkret::models::EphemeralEnvelope;
+use arkret::{
     AppletBridgeErrorBuilder, AppletBridgeErrorVisibility, ContentBlock, Did, Event, EventId,
     MessageRedactPayload, RealmId,
 };
@@ -66,7 +66,7 @@ pub use types::{
 // protocol objects/operations/schemas. This is a bridge-private (applet-side)
 // provenance schema id, so it uses a reverse-domain product prefix to avoid
 // colliding with any future spec-defined messaging external_ref schema.
-pub(crate) const EXTERNAL_REF_SCHEMA: &str = "org.cokret.bridge.external_ref.messaging.v1";
+pub(crate) const EXTERNAL_REF_SCHEMA: &str = "org.arkret.bridge.external_ref.messaging.v1";
 pub(crate) const MESSAGE_MAPPING_KEY_SEPARATOR: char = '\u{1f}';
 
 pub fn json_scalar_id_string(value: &Value) -> Option<String> {
@@ -84,7 +84,7 @@ pub fn json_scalar_id_string(value: &Value) -> Option<String> {
     }
 }
 
-/// The inbound (cokret → app) event kinds this messaging bridge consumes, used
+/// The inbound (arkret → app) event kinds this messaging bridge consumes, used
 /// for capability enforcement (BRG-01-009): the runtime rejects any pushed event
 /// whose kind is not listed. `MessageAdapter::on_cokret_event` handles exactly
 /// message creation and redaction.
@@ -170,7 +170,7 @@ impl MessageContext {
         TokenCache::new(self.token_store.clone(), cache_key)
     }
 
-    /// Emit a `ck.applet.bridge_error` Event for a failed inbound (app → cokret)
+    /// Emit a `ck.applet.bridge_error` Event for a failed inbound (app → arkret)
     /// submission so the failure is durable and visible to realm admins, rather
     /// than only logged (applet-integration §14 SHOULD, §16 bindings;
     /// `ck.profile.applet_bridge.v1` "bridge error event visibility" test item).
@@ -284,10 +284,10 @@ impl MessageContext {
         self.report_inbound_failure(label, &inbound, &error).await
     }
 
-    /// Emit a `ck.applet.bridge_error` Event for a failed outbound (cokret → app)
+    /// Emit a `ck.applet.bridge_error` Event for a failed outbound (arkret → app)
     /// delivery so the failure is durable and visible to realm admins, mirroring
     /// the inbound path ([`MessageContext::report_inbound_bridge_error`]). The
-    /// failed cokret `event_id` is the `failed_transaction_ref`; `external_ref`
+    /// failed arkret `event_id` is the `failed_transaction_ref`; `external_ref`
     /// binds only the target external location (no message body). Best-effort: a
     /// failure to emit must not mask the original delivery failure.
     pub async fn report_outbound_bridge_error(
@@ -332,18 +332,18 @@ impl MessageContext {
         Ok(())
     }
 
-    /// Upload bytes to cokret blob storage, returning the blob_ref string.
+    /// Upload bytes to arkret blob storage, returning the blob_ref string.
     pub async fn upload_blob(&self, bytes: &[u8], mime: &str) -> Result<String> {
         self.inner.edge.upload_blob(bytes, mime).await
     }
 
-    /// Download a cokret blob by its blob_ref string.
+    /// Download a arkret blob by its blob_ref string.
     pub async fn download_blob(&self, blob_ref: &str) -> Result<Vec<u8>> {
         self.inner.edge.download_blob(blob_ref).await
     }
 
     /// Download app-hosted media with HTTPS, host allow-list and a hard byte
-    /// cap. Use this for all inbound media fetches before uploading to Cokret blob
+    /// cap. Use this for all inbound media fetches before uploading to Arkret blob
     /// storage.
     pub async fn download_external_media(
         &self,
@@ -418,7 +418,7 @@ impl MessageContext {
         })
     }
 
-    /// Forward one piece of inbound external media into cokret with the shared
+    /// Forward one piece of inbound external media into arkret with the shared
     /// skeleton: download (https + host allowlist + byte cap) → MIME fallback
     /// (`mime_hint` → download `Content-Type` → [`DEFAULT_MEDIA_MIME`]) → blob
     /// upload → [`Attachment`] assembly → [`Self::submit_media_message`].
@@ -563,7 +563,7 @@ impl MessageContext {
         result
     }
 
-    /// Submit an inbound app-side explicit delete/recall as a Cokret message
+    /// Submit an inbound app-side explicit delete/recall as a Arkret message
     /// redaction. Expiry, retention and bridge-drop signals are not redactions
     /// and are returned as ignored outcomes without minting protocol events.
     ///
@@ -996,7 +996,7 @@ pub trait MessageBridge: Send + Sync + 'static {
         msg: OutboundAppMessage,
     ) -> Result<AppMessageRef>;
 
-    /// Forward a Cokret message redaction as an app-side deletion. The driver
+    /// Forward a Arkret message redaction as an app-side deletion. The driver
     /// (`on_cokret_event`) already resolves the target `app_message_id` and
     /// invokes this with the channel/message pair most app delete APIs require;
     /// the default is a no-op.
@@ -1109,7 +1109,7 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
     }
 
     async fn on_cokret_event(&self, _ctx: Arc<BridgeContext>, event: Event) -> Result<()> {
-        // Deletion forwarding (cokret -> app): a `ck.message.redact` that targets
+        // Deletion forwarding (arkret -> app): a `ck.message.redact` that targets
         // an event we previously bridged is mapped to an app-side deletion via the
         // adapter's `redact_in_app`. Honors the `disable_deletion_forwarding`
         // switch.
@@ -1142,7 +1142,7 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
             return Ok(());
         }
         // Loop prevention: skip events this bridge itself submitted (app ->
-        // cokret), which the server echoes back. Only signature-covered fields
+        // arkret), which the server echoes back. Only signature-covered fields
         // are consulted: every delegated ghost event this bridge submits carries
         // `executed_by = service_did` plus signed Applet provenance, and service
         // actor events are authored by the service DID itself.
@@ -1233,7 +1233,7 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
                     retriable,
                     realm = %realm_id,
                     app_channel = %channel,
-                    "cokret → app delivery failed"
+                    "arkret → app delivery failed"
                 );
                 // Durable audit, symmetric with the inbound path. Best-effort.
                 self.ctx
@@ -1329,7 +1329,7 @@ where
 ///
 /// #[tokio::main]
 /// async fn main() -> anyhow::Result<()> {
-///     cokret_bridge_messaging::bridge_main("cokret <-> Example bridge", |app: AppConfig, _ctx| {
+///     cokret_bridge_messaging::bridge_main("arkret <-> Example bridge", |app: AppConfig, _ctx| {
 ///         Ok(ExampleApp::new(app.bot_token))
 ///     })
 ///     .await
@@ -1341,7 +1341,7 @@ where
     M: MessageBridge,
     F: FnOnce(C, Arc<MessageContext>) -> Result<M>,
 {
-    // Use the invoked binary name (e.g. `cokret-bridge-slack`) for help/version
+    // Use the invoked binary name (e.g. `arkret-bridge-slack`) for help/version
     // output instead of hardcoding one shared name here.
     let bin_name = std::env::args()
         .next()
@@ -1349,7 +1349,7 @@ where
         .map(std::path::Path::new)
         .and_then(|p| p.file_stem())
         .and_then(|s| s.to_str())
-        .unwrap_or("cokret-bridge")
+        .unwrap_or("arkret-bridge")
         .to_owned();
     let matches = clap::Command::new(bin_name)
         .version(env!("CARGO_PKG_VERSION"))

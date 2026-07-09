@@ -1,4 +1,4 @@
-# cokret <-> Google Chat 桥接示例配置(snake_case)。
+# arkret <-> Google Chat 桥接示例配置(snake_case)。
 
 bridge:
   bridge_id: "googlechat"
@@ -11,16 +11,16 @@ bridge:
   admin_port: 10111
   disable_deletion_forwarding: false
 
-cokret:
+arkret:
   server_url: "http://localhost:8008"
   service_did: "did:webvh:googlechat-bridge.example"
-  applet_id: "ck:applet:00000000-0000-7000-8000-00000000gcht"
-  access_token: "CHANGE_ME_COKRET_ACCESS_TOKEN"
+  applet_id: "ak:applet:00000000-0000-7000-8000-00000000gcht"
+  access_token: "CHANGE_ME_ARKRET_ACCESS_TOKEN"
   signing_key_seed_hex: "0000000000000000000000000000000000000000000000000000000000000000"
   verification_method_id: "#key-1"
-  trusted_server_did: "did:webvh:cokret-server.example"
+  trusted_server_did: "did:webvh:arkret-server.example"
   trusted_verification_methods:
-    - verification_method: "did:webvh:cokret-server.example#key-1"
+    - verification_method: "did:webvh:arkret-server.example#key-1"
       public_key:
         encoding: "ed25519_multibase"
         value: "zCHANGE_ME_SERVER_ED25519_PUBLIC_KEY"
@@ -37,7 +37,7 @@ logging:
 # closed unless their app channel is mapped to a Realm.
 # mappings:
 #   - app_channel: "CHANGE_ME_APP_CHANNEL"
-#     realm_id: "ck:realm:01904100-0000-7000-8000-000000000001"
+#     realm_id: "ak:realm:01904100-0000-7000-8000-000000000001"
 #     alias: "main"
 # Google Chat 适配器专属
 app:

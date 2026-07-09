@@ -1,4 +1,4 @@
-//! cokret-bridge-whatsapp executable entry point.
+//! arkret-bridge-whatsapp executable entry point.
 
 mod whatsapp;
 
@@ -26,7 +26,7 @@ struct AppConfig {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    bridge_main("cokret <-> WhatsApp bridge", |app: AppConfig, _ctx| {
+    bridge_main("arkret <-> WhatsApp bridge", |app: AppConfig, _ctx| {
         Ok(WhatsAppApp::new(
             app.phone_number_id,
             app.access_token,

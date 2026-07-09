@@ -1,4 +1,4 @@
-//! cokret-bridge-discord executable entry point.
+//! arkret-bridge-discord executable entry point.
 
 mod discord;
 
@@ -15,7 +15,7 @@ struct AppConfig {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    bridge_main("cokret <-> Discord bridge", |app: AppConfig, _ctx| {
+    bridge_main("arkret <-> Discord bridge", |app: AppConfig, _ctx| {
         Ok(DiscordApp::new(app.bot_token))
     })
     .await

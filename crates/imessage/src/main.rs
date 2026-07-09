@@ -1,4 +1,4 @@
-//! cokret-bridge-imessage executable entry point.
+//! arkret-bridge-imessage executable entry point.
 
 mod imessage;
 
@@ -18,7 +18,7 @@ struct AppConfig {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    bridge_main("cokret <-> iMessage bridge", |app: AppConfig, _ctx| {
+    bridge_main("arkret <-> iMessage bridge", |app: AppConfig, _ctx| {
         Ok(IMessageApp::new(
             app.gateway_url,
             app.password,

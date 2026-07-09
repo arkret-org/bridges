@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use cokret::models::AppletTransactionOutcome;
+use arkret::models::AppletTransactionOutcome;
 use diesel::prelude::*;
 use diesel::r2d2::{ConnectionManager, Pool, PooledConnection};
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
@@ -152,7 +152,7 @@ mod idempotency_schema {
     }
 
     diesel::table! {
-        /// Durable dead letters for cokret-to-app delivery failures.
+        /// Durable dead letters for arkret-to-app delivery failures.
         outbound_dead_letters (event_id) {
             event_id -> Text,
             realm_id -> Text,
@@ -555,7 +555,7 @@ impl TokenStore for DbTokenStore {
     }
 }
 
-/// Diesel-backed [`OutboundDeadLetterStore`]: persists cokret-to-app events that
+/// Diesel-backed [`OutboundDeadLetterStore`]: persists arkret-to-app events that
 /// exhausted adapter delivery retries so they can be replayed after recovery.
 pub struct DbOutboundDeadLetterStore {
     db: Arc<DatabaseManager>,
@@ -864,18 +864,18 @@ mod tests {
         let store = DbOutboundDeadLetterStore::new(db);
         store
             .record(OutboundDeadLetterRecord {
-                event_id: "ck:event:01904100-0000-7000-8000-000000000101".to_owned(),
-                realm_id: "ck:realm:01904100-0000-7000-8000-000000000201".to_owned(),
+                event_id: "ak:event:01904100-0000-7000-8000-000000000101".to_owned(),
+                realm_id: "ak:realm:01904100-0000-7000-8000-000000000201".to_owned(),
                 kind: "ck.message.create".to_owned(),
                 attempts: 4,
                 retriable: true,
                 last_error: "first failure".to_owned(),
-                event_json: r#"{"event_id":"ck:event:01904100-0000-7000-8000-000000000101"}"#
+                event_json: r#"{"event_id":"ak:event:01904100-0000-7000-8000-000000000101"}"#
                     .to_owned(),
             })
             .unwrap();
         let first = store
-            .load("ck:event:01904100-0000-7000-8000-000000000101")
+            .load("ak:event:01904100-0000-7000-8000-000000000101")
             .unwrap()
             .unwrap();
         assert_eq!(first.attempts, 4);
@@ -890,7 +890,7 @@ mod tests {
                 retriable: false,
                 last_error: "deterministic failure".to_owned(),
                 event_json:
-                    r#"{"event_id":"ck:event:01904100-0000-7000-8000-000000000101","retry":2}"#
+                    r#"{"event_id":"ak:event:01904100-0000-7000-8000-000000000101","retry":2}"#
                         .to_owned(),
             })
             .unwrap();

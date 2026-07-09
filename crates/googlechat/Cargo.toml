@@ -1,27 +1,27 @@
 [package]
-name = "cokret-bridge-googlechat"
+name = "arkret-bridge-googlechat"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "cokret <-> Google Chat bridge (Google Chat API, reqwest)."
+description = "arkret <-> Google Chat bridge (Google Chat API, reqwest)."
 
 [[bin]]
-name = "cokret-bridge-googlechat"
+name = "arkret-bridge-googlechat"
 path = "src/main.rs"
 
 [features]
 default = ["sqlite"]
-sqlite = ["cokret-bridge-messaging/sqlite"]
-postgres = ["cokret-bridge-messaging/postgres"]
-mysql = ["cokret-bridge-messaging/mysql"]
+sqlite = ["arkret-bridge-messaging/sqlite"]
+postgres = ["arkret-bridge-messaging/postgres"]
+mysql = ["arkret-bridge-messaging/mysql"]
 
 [dependencies]
 anyhow = {workspace = true}
 async-trait = {workspace = true}
 chrono = {workspace = true}
-cokret-bridge-messaging = {workspace = true,default-features = false}
+arkret-bridge-messaging = {workspace = true,default-features = false}
 jsonwebtoken = {workspace = true}
 serde = {workspace = true}
 serde_json = {workspace = true}

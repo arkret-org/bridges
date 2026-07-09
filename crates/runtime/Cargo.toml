@@ -1,11 +1,11 @@
 [package]
-name = "cokret-bridge-runtime"
+name = "arkret-bridge-runtime"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Applet bridge runtime for Cokret integrations: protocol-side event submission, applet routes, database pool, configuration, salvo web, queue/cache, and logging."
+description = "Applet bridge runtime for Arkret integrations: protocol-side event submission, applet routes, database pool, configuration, salvo web, queue/cache, and logging."
 
 [features]
 default  = ["full", "sqlite"]
@@ -22,7 +22,7 @@ runtime  = ["db", "web"]
 anyhow = {workspace = true}
 async-trait = {workspace = true}
 chrono = {workspace = true}
-cokret = {workspace = true}
+arkret = {workspace = true}
 diesel = {workspace = true,optional = true}
 diesel_migrations = {workspace = true,optional = true}
 libsqlite3-sys = {workspace = true,features = ["bundled"],optional = true}

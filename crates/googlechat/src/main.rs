@@ -1,4 +1,4 @@
-//! cokret-bridge-googlechat executable entry point.
+//! arkret-bridge-googlechat executable entry point.
 
 mod googlechat;
 
@@ -23,7 +23,7 @@ struct AppConfig {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    bridge_main("cokret <-> Google Chat bridge", |app: AppConfig, ctx| {
+    bridge_main("arkret <-> Google Chat bridge", |app: AppConfig, ctx| {
         // Prefer a service account (auto-refreshing) over a static access token.
         let auth = match (app.service_account_json, app.token) {
             (Some(key), _) => GoogleChatAuth::ServiceAccount(Box::new(key)),

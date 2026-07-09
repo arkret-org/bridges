@@ -1,4 +1,4 @@
-//! cokret-bridge-qq executable entry point.
+//! arkret-bridge-qq executable entry point.
 
 mod qq;
 
@@ -19,7 +19,7 @@ struct AppConfig {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    bridge_main("cokret <-> QQ bridge", |app: AppConfig, _ctx| {
+    bridge_main("arkret <-> QQ bridge", |app: AppConfig, _ctx| {
         Ok(QqApp::new(
             app.onebot_url,
             app.access_token,

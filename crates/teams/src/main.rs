@@ -1,4 +1,4 @@
-//! cokret-bridge-teams executable entry point.
+//! arkret-bridge-teams executable entry point.
 
 mod teams;
 
@@ -25,7 +25,7 @@ struct AppConfig {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     bridge_main(
-        "cokret <-> Microsoft Teams bridge",
+        "arkret <-> Microsoft Teams bridge",
         |app: AppConfig, ctx| {
             Ok(TeamsApp::new(
                 app.app_id,

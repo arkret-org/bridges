@@ -1,14 +1,14 @@
-# cokret-bridge-telegram
+# arkret-bridge-telegram
 
-Rust 实现的 **cokret ⇄ Telegram** 桥接。基于共享核心 [`cokret-bridge-runtime`](../runtime) + [`cokret-bridge-messaging`](../messaging),
+Rust 实现的 **arkret ⇄ Telegram** 桥接。基于共享核心 [`arkret-bridge-runtime`](../runtime) + [`arkret-bridge-messaging`](../messaging),
 应用侧使用 [`teloxide`](https://crates.io/crates/teloxide) 长轮询。
 
 ## 架构
 
-- **入站(Telegram → cokret)**:`teloxide::repl` 长轮询收到文本消息 →
+- **入站(Telegram → arkret)**:`teloxide::repl` 长轮询收到文本消息 →
   `MessageContext::submit_app_message` → 核心构造并签名 `ck.message.create` 事件 →
-  `events_submit` 提交到 cokret。
-- **出站(cokret → Telegram)**:cokret server 经 applet 端点
+  `events_submit` 提交到 arkret。
+- **出站(arkret → Telegram)**:arkret server 经 applet 端点
   `POST /_cokret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
   用 `Bot::send_message`(媒体则 `send_document`)发到对应 chat。
 - **媒体(双向)**:入站 photo/document 经 `get_file` 下载 → `upload_blob` → `submit_media_message`;
@@ -19,13 +19,13 @@ Rust 实现的 **cokret ⇄ Telegram** 桥接。基于共享核心 [`cokret-brid
 
 ```bash
 cp config/config.sample.yaml config.yaml
-# 填入 cokret.access_token / signing_key_seed_hex 与 app.bot_token
-cargo run -p cokret-bridge-telegram -- --config config.yaml
+# 填入 arkret.access_token / signing_key_seed_hex 与 app.bot_token
+cargo run -p arkret-bridge-telegram -- --config config.yaml
 ```
 
 ## 配置要点
 
-- `cokret.*`:cokret 接入(server_url、service_did、applet_id、access_token、签名种子)。
+- `arkret.*`:arkret 接入(server_url、service_did、applet_id、access_token、签名种子)。
 - `app.bot_token`:Telegram bot token(从 @BotFather 获取)。
 - `database.url`:`sqlite://...` / `postgres://...` / `mysql://...`(对应 feature)。
 

@@ -1,20 +1,20 @@
 //! Bridge message-flow metrics.
 //!
-//! Counters for the app↔cokret message bridge so inbound submits, outbound
+//! Counters for the app↔arkret message bridge so inbound submits, outbound
 //! deliveries and media bridging are observable alongside the applet
 //! transaction counters in [`crate::web`]. The actual prometheus recorder is
 //! installed by the `web` feature ([`crate::web::serve`]); when that feature is
 //! absent these calls are cheap no-ops, so the messaging layer can record
 //! unconditionally without pulling in the exporter.
 
-/// Direction of a bridged message relative to cokret.
+/// Direction of a bridged message relative to arkret.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MessageDirection {
-    /// App → cokret submission (inbound).
+    /// App → arkret submission (inbound).
     Inbound,
-    /// cokret → app delivery (outbound).
+    /// arkret → app delivery (outbound).
     Outbound,
-    /// App → cokret media (blob) bridging (inbound attachment).
+    /// App → arkret media (blob) bridging (inbound attachment).
     InboundMedia,
 }
 

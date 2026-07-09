@@ -607,7 +607,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
-name = "cokret"
+name = "arkret"
 version = "0.3.0"
 dependencies = [
  "argon2",
@@ -615,14 +615,14 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "chrono-tz",
- "cokret-core",
- "cokret-crypto",
- "cokret-ffi",
- "cokret-html",
- "cokret-http-client",
- "cokret-keystore",
- "cokret-server",
- "cokret-signatures",
+ "arkret-core",
+ "arkret-crypto",
+ "arkret-ffi",
+ "arkret-html",
+ "arkret-http-client",
+ "arkret-keystore",
+ "arkret-server",
+ "arkret-signatures",
  "ed25519-dalek",
  "getrandom 0.4.2",
  "hex",
@@ -645,25 +645,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "cokret-bridge-dingtalk"
+name = "arkret-bridge-dingtalk"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "cokret-bridge-messaging",
+ "arkret-bridge-messaging",
  "serde",
  "serde_json",
  "tokio",
 ]
 
 [[package]]
-name = "cokret-bridge-discord"
+name = "arkret-bridge-discord"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "cokret-bridge-messaging",
+ "arkret-bridge-messaging",
  "serde",
  "serenity",
  "tokio",
@@ -671,7 +671,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "cokret-bridge-feishu"
+name = "arkret-bridge-feishu"
 version = "0.3.0"
 dependencies = [
  "aes",
@@ -679,7 +679,7 @@ dependencies = [
  "async-trait",
  "base64",
  "cbc",
- "cokret-bridge-messaging",
+ "arkret-bridge-messaging",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -688,13 +688,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "cokret-bridge-googlechat"
+name = "arkret-bridge-googlechat"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "cokret-bridge-messaging",
+ "arkret-bridge-messaging",
  "jsonwebtoken",
  "serde",
  "serde_json",
@@ -703,24 +703,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "cokret-bridge-imessage"
+name = "arkret-bridge-imessage"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "cokret-bridge-messaging",
+ "arkret-bridge-messaging",
  "serde",
  "serde_json",
  "tokio",
 ]
 
 [[package]]
-name = "cokret-bridge-line"
+name = "arkret-bridge-line"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "cokret-bridge-messaging",
+ "arkret-bridge-messaging",
  "serde",
  "serde_json",
  "tokio",
@@ -728,7 +728,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "cokret-bridge-messaging"
+name = "arkret-bridge-messaging"
 version = "0.3.0"
 dependencies = [
  "aes",
@@ -738,8 +738,8 @@ dependencies = [
  "cbc",
  "chrono",
  "clap",
- "cokret",
- "cokret-bridge-runtime",
+ "arkret",
+ "arkret-bridge-runtime",
  "diesel",
  "diesel_migrations",
  "futures",
@@ -758,12 +758,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "cokret-bridge-messenger"
+name = "arkret-bridge-messenger"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "cokret-bridge-messaging",
+ "arkret-bridge-messaging",
  "serde",
  "serde_json",
  "tokio",
@@ -771,25 +771,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "cokret-bridge-qq"
+name = "arkret-bridge-qq"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "cokret-bridge-messaging",
+ "arkret-bridge-messaging",
  "serde",
  "serde_json",
  "tokio",
 ]
 
 [[package]]
-name = "cokret-bridge-runtime"
+name = "arkret-bridge-runtime"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "cokret",
+ "arkret",
  "diesel",
  "diesel_migrations",
  "libsqlite3-sys",
@@ -809,12 +809,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "cokret-bridge-slack"
+name = "arkret-bridge-slack"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "cokret-bridge-messaging",
+ "arkret-bridge-messaging",
  "futures",
  "serde",
  "serde_json",
@@ -824,12 +824,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "cokret-bridge-teams"
+name = "arkret-bridge-teams"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "cokret-bridge-messaging",
+ "arkret-bridge-messaging",
  "serde",
  "serde_json",
  "tokio",
@@ -837,12 +837,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "cokret-bridge-telegram"
+name = "arkret-bridge-telegram"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "cokret-bridge-messaging",
+ "arkret-bridge-messaging",
  "serde",
  "teloxide",
  "tokio",
@@ -850,7 +850,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "cokret-bridge-wechat"
+name = "arkret-bridge-wechat"
 version = "0.3.0"
 dependencies = [
  "aes",
@@ -858,7 +858,7 @@ dependencies = [
  "async-trait",
  "base64",
  "cbc",
- "cokret-bridge-messaging",
+ "arkret-bridge-messaging",
  "quick-xml",
  "serde",
  "serde_json",
@@ -867,12 +867,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "cokret-bridge-whatsapp"
+name = "arkret-bridge-whatsapp"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "cokret-bridge-messaging",
+ "arkret-bridge-messaging",
  "serde",
  "serde_json",
  "tokio",
@@ -880,12 +880,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "cokret-bridge-zulip"
+name = "arkret-bridge-zulip"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "cokret-bridge-messaging",
+ "arkret-bridge-messaging",
  "serde",
  "serde_json",
  "tokio",
@@ -893,7 +893,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "cokret-core"
+name = "arkret-core"
 version = "0.3.0"
 dependencies = [
  "base64",
@@ -901,7 +901,7 @@ dependencies = [
  "bs58",
  "chrono",
  "chrono-tz",
- "cokret-identifiers",
+ "arkret-identifiers",
  "getrandom 0.4.2",
  "hex",
  "hmac 0.13.0",
@@ -919,12 +919,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "cokret-crypto"
+name = "arkret-crypto"
 version = "0.3.0"
 dependencies = [
  "chrono",
- "cokret-core",
- "cokret-signatures",
+ "arkret-core",
+ "arkret-signatures",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -932,31 +932,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "cokret-ffi"
+name = "arkret-ffi"
 version = "0.3.0"
 dependencies = [
- "cokret-core",
+ "arkret-core",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "cokret-html"
+name = "arkret-html"
 version = "0.3.0"
 dependencies = [
- "cokret-core",
+ "arkret-core",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "cokret-http-client"
+name = "arkret-http-client"
 version = "0.3.0"
 dependencies = [
  "base64",
  "chrono",
- "cokret-core",
- "cokret-signatures",
+ "arkret-core",
+ "arkret-signatures",
  "futures-util",
  "getrandom 0.4.2",
  "reqwest 0.13.4",
@@ -968,7 +968,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "cokret-identifiers"
+name = "arkret-identifiers"
 version = "0.3.0"
 dependencies = [
  "getrandom 0.2.17",
@@ -983,30 +983,30 @@ dependencies = [
 ]
 
 [[package]]
-name = "cokret-keystore"
+name = "arkret-keystore"
 version = "0.3.0"
 dependencies = [
- "cokret-core",
+ "arkret-core",
  "tracing",
 ]
 
 [[package]]
-name = "cokret-server"
+name = "arkret-server"
 version = "0.3.0"
 dependencies = [
- "cokret-core",
- "cokret-signatures",
+ "arkret-core",
+ "arkret-signatures",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "cokret-signatures"
+name = "arkret-signatures"
 version = "0.3.0"
 dependencies = [
  "base64",
  "chrono",
- "cokret-core",
+ "arkret-core",
  "ed25519-dalek",
  "rand_core 0.6.4",
  "serde",

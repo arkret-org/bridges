@@ -1,11 +1,11 @@
 //! Configuration loading (YAML). The top-level structure is
-//! `bridge` / `cokret` / `database` / `logging` plus a per-adapter `app`
+//! `bridge` / `arkret` / `database` / `logging` plus a per-adapter `app`
 //! section.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use cokret::signatures::PublicKeyMaterial;
+use arkret::signatures::PublicKeyMaterial;
 use serde::Deserialize;
 
 use crate::error::{BridgeError, Result};
@@ -14,7 +14,7 @@ use crate::error::{BridgeError, Result};
 #[derive(Clone, Debug, Deserialize)]
 pub struct Config {
     pub bridge: BridgeConfig,
-    pub cokret: CokretConfig,
+    pub arkret: CokretConfig,
     #[serde(default)]
     pub database: DatabaseConfig,
     #[serde(default)]
@@ -37,7 +37,7 @@ pub struct Config {
 pub struct ChannelRealmMappingConfig {
     /// The app-side channel identifier (e.g. a Slack channel id or LINE group id).
     pub app_channel: String,
-    /// The cokret realm id this channel maps to.
+    /// The arkret realm id this channel maps to.
     pub realm_id: String,
     /// Optional portal alias.
     #[serde(default)]
@@ -51,7 +51,7 @@ pub struct BridgeConfig {
     /// prefixes.
     pub bridge_id: String,
     /// Optional upstream tenant/workspace/team identifier. When omitted, the
-    /// bridge's Cokret service DID is used as the tenant boundary for external
+    /// bridge's Arkret service DID is used as the tenant boundary for external
     /// event deduplication.
     #[serde(default)]
     pub tenant_id: Option<String>,
@@ -76,7 +76,7 @@ pub struct BridgeConfig {
     /// the public network unless an operator explicitly opens them.
     #[serde(default = "default_admin_bind")]
     pub admin_bind: String,
-    /// When set, `ck.message.redact` events from cokret are not forwarded as
+    /// When set, `ck.message.redact` events from arkret are not forwarded as
     /// app-side deletions (see `MessageAdapter::on_cokret_event`).
     #[serde(default)]
     pub disable_deletion_forwarding: bool,
@@ -146,11 +146,11 @@ impl BridgeConfig {
     }
 }
 
-/// cokret protocol-side integration parameters (server URL, service DID,
+/// arkret protocol-side integration parameters (server URL, service DID,
 /// applet id, signing material).
 #[derive(Clone, Deserialize)]
 pub struct CokretConfig {
-    /// The cokret edge/home server base URL (used for events_submit / blob /
+    /// The arkret edge/home server base URL (used for events_submit / blob /
     /// directory).
     pub server_url: String,
     /// The service DID of this bridge acting as an Applet.
@@ -164,7 +164,7 @@ pub struct CokretConfig {
     /// The signing verification method id (the kid on the DID).
     #[serde(default = "default_kid")]
     pub verification_method_id: String,
-    /// The only cokret server DID accepted for server -> bridge transaction
+    /// The only arkret server DID accepted for server -> bridge transaction
     /// pushes.
     pub trusted_server_did: String,
     /// Static DID verification-method public keys accepted for HTTP message
@@ -299,7 +299,7 @@ impl Config {
     /// an operator who copies a sample without changing it would otherwise run
     /// with a publicly predictable signing key.
     pub fn signing_seed(&self) -> Result<[u8; 32]> {
-        let bytes = hex_decode(&self.cokret.signing_key_seed_hex).ok_or_else(|| {
+        let bytes = hex_decode(&self.arkret.signing_key_seed_hex).ok_or_else(|| {
             BridgeError::Config("signing_key_seed_hex is not valid hexadecimal".into())
         })?;
         let seed: [u8; 32] = bytes
@@ -428,10 +428,10 @@ mod tests {
             r##"
 bridge:
   bridge_id: test
-cokret:
+arkret:
   server_url: "https://example.test"
   service_did: "did:webvh:bridge.example"
-  applet_id: "ck:applet:01904100-0000-7000-8000-000000000001"
+  applet_id: "ak:applet:01904100-0000-7000-8000-000000000001"
   access_token: "token"
   signing_key_seed_hex: "1111111111111111111111111111111111111111111111111111111111111111"
   verification_method_id: "#key-1"
@@ -444,7 +444,7 @@ cokret:
     #[test]
     fn config_resolves_file_references() {
         let path = std::env::temp_dir().join(format!(
-            "cokret-bridge-config-secret-{}.txt",
+            "arkret-bridge-config-secret-{}.txt",
             std::process::id()
         ));
         std::fs::write(&path, "from-file\n").unwrap();
@@ -471,9 +471,9 @@ cokret:
 
     #[test]
     fn config_rejects_missing_env_references() {
-        let text = minimal_config("app:\n  secret: \"env:COKRET_BRIDGE_TEST_MISSING_ENV\"\n");
+        let text = minimal_config("app:\n  secret: \"env:ARKRET_BRIDGE_TEST_MISSING_ENV\"\n");
         let err = Config::from_yaml(&text).unwrap_err();
 
-        assert!(format!("{err}").contains("COKRET_BRIDGE_TEST_MISSING_ENV"));
+        assert!(format!("{err}").contains("ARKRET_BRIDGE_TEST_MISSING_ENV"));
     }
 }

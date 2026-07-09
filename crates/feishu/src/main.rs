@@ -1,4 +1,4 @@
-//! cokret-bridge-feishu executable entry point.
+//! arkret-bridge-feishu executable entry point.
 
 mod feishu;
 
@@ -23,7 +23,7 @@ struct AppConfig {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    bridge_main("cokret <-> Feishu bridge", |app: AppConfig, ctx| {
+    bridge_main("arkret <-> Feishu bridge", |app: AppConfig, ctx| {
         Ok(FeishuApp::new(
             app.app_id,
             app.app_secret,

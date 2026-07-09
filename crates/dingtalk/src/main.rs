@@ -1,4 +1,4 @@
-//! cokret-bridge-dingtalk executable entry point.
+//! arkret-bridge-dingtalk executable entry point.
 
 mod dingtalk;
 
@@ -20,7 +20,7 @@ struct AppConfig {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    bridge_main("cokret <-> DingTalk bridge", |app: AppConfig, ctx| {
+    bridge_main("arkret <-> DingTalk bridge", |app: AppConfig, ctx| {
         Ok(DingTalkApp::new(
             app.app_key,
             app.app_secret,

@@ -1,21 +1,21 @@
-//! # cokret-bridge-runtime
+//! # arkret-bridge-runtime
 //!
-//! A reusable **Applet bridge runtime** layered on top of the `cokret` SDK. The SDK
+//! A reusable **Applet bridge runtime** layered on top of the `arkret` SDK. The SDK
 //! already provides the full protocol surface — the `AppletHandler` inbound
 //! path and `events_submit` / event signing on the outbound path — so this
 //! crate adds *no new protocol capability*. What it factors out (so that N
 //! bridges don't each re-implement it) is:
 //!
 //! - **Inbound async pump**: turns the SDK's synchronous `AppletHandler` transaction pushes into an
-//!   async [`cokret::Event`] stream + a background consumer ([`app::consume_inbound`]).
+//!   async [`arkret::Event`] stream + a background consumer ([`app::consume_inbound`]).
 //! - **Outbound mint bookkeeping**: monotonic `actor_seq`, HLC generation, `applet_id` stamping and
 //!   signing, wrapped in [`cokret_edge::CokretEdge::mint_event`] / `submit_event`.
 //! - **App-runtime scaffolding**: config loading, a diesel pool + migration runner, a salvo server
 //!   (applet routes + health/metrics + app webhooks), and the [`run_bridge`] orchestration loop.
 //!
-//! The base contract [`app::BridgeApp`] is **generic** (it deals in raw cokret
+//! The base contract [`app::BridgeApp`] is **generic** (it deals in raw arkret
 //! events) so it can back non-social integrations (IoT, ticketing, CI, ...).
-//! Chat/social bridge helpers live in `cokret-bridge-messaging`; this runtime
+//! Chat/social bridge helpers live in `arkret-bridge-messaging`; this runtime
 //! intentionally does not expose message-shaped APIs.
 //!
 //! ## Cargo features
@@ -80,7 +80,7 @@ pub use salvo;
 #[cfg(feature = "runtime")]
 use tokio::sync::mpsc;
 
-/// Wire up and run a generic bridge: load config -> build the cokret edge ->
+/// Wire up and run a generic bridge: load config -> build the arkret edge ->
 /// build the database -> start the adapter and the web service.
 ///
 /// `app_factory` receives a ready [`BridgeContext`] and returns the
@@ -94,7 +94,7 @@ where
 {
     let config = Arc::new(config);
 
-    // Events pushed by the cokret server are queued first, then forwarded to
+    // Events pushed by the arkret server are queued first, then forwarded to
     // the adapter by the background consumer loop. Bounded so a slow consumer
     // applies backpressure (the applet handler returns `retry_after_ms` when
     // full) instead of buffering without limit (BRG-02-001).
@@ -116,7 +116,7 @@ where
 
     let app = Arc::new(app_factory(ctx.clone())?);
 
-    // 1) Background: consume cokret -> adapter events
+    // 1) Background: consume arkret -> adapter events
     let consumer = {
         let ctx = ctx.clone();
         let app = app.clone();
@@ -130,7 +130,7 @@ where
         tokio::spawn(async move { app::consume_ephemeral(ctx, app, ephemeral_rx).await })
     };
 
-    // 1c) Background: retry persisted cokret -> adapter dead letters.
+    // 1c) Background: retry persisted arkret -> adapter dead letters.
     let dead_letter_replayer = {
         let ctx = ctx.clone();
         let app = app.clone();
@@ -164,7 +164,7 @@ where
         tokio::spawn(async move { app.run(ctx).await })
     };
 
-    tracing::info!(bridge = %config.bridge.bridge_id, "cokret bridge started");
+    tracing::info!(bridge = %config.bridge.bridge_id, "arkret bridge started");
 
     tokio::select! {
         r = consumer => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,

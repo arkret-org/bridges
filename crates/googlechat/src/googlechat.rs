@@ -1,7 +1,7 @@
 //! Google Chat adapter (Google Chat REST API, pure reqwest).
 //!
-//! - Inbound (Google Chat -> cokret): Google Chat pushes message events via `/webhooks/googlechat`.
-//! - Outbound (cokret → Google Chat): [`MessageBridge::send_to_app`] uses `ctx.http` to POST `https://chat.googleapis.com/v1/{space}/messages`.
+//! - Inbound (Google Chat -> arkret): Google Chat pushes message events via `/webhooks/googlechat`.
+//! - Outbound (arkret → Google Chat): [`MessageBridge::send_to_app`] uses `ctx.http` to POST `https://chat.googleapis.com/v1/{space}/messages`.
 
 use std::sync::Arc;
 use std::time::Duration;

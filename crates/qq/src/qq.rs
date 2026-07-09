@@ -1,7 +1,7 @@
 //! QQ adapter (OneBot HTTP API / QQ official bot, pure reqwest).
 //!
-//! - Inbound (QQ -> cokret): OneBot HTTP reports are accepted at `/webhooks/qq`.
-//! - Outbound (cokret → QQ): [`MessageBridge::send_to_app`] uses `ctx.http` to POST to OneBot
+//! - Inbound (QQ -> arkret): OneBot HTTP reports are accepted at `/webhooks/qq`.
+//! - Outbound (arkret → QQ): [`MessageBridge::send_to_app`] uses `ctx.http` to POST to OneBot
 //!   `send_msg` (or the official `/channels/{id}/messages`).
 
 use std::sync::Arc;

@@ -1,4 +1,4 @@
-# cokret <-> Zulip 桥接示例配置(snake_case)。
+# arkret <-> Zulip 桥接示例配置(snake_case)。
 
 bridge:
   bridge_id: "zulip"
@@ -11,16 +11,16 @@ bridge:
   admin_port: 10107
   disable_deletion_forwarding: false
 
-cokret:
+arkret:
   server_url: "http://localhost:8008"
   service_did: "did:webvh:zulip-bridge.example"
-  applet_id: "ck:applet:00000000-0000-7000-8000-0000000000d7"
-  access_token: "CHANGE_ME_COKRET_ACCESS_TOKEN"
+  applet_id: "ak:applet:00000000-0000-7000-8000-0000000000d7"
+  access_token: "CHANGE_ME_ARKRET_ACCESS_TOKEN"
   signing_key_seed_hex: "0000000000000000000000000000000000000000000000000000000000000000"
   verification_method_id: "#key-1"
-  trusted_server_did: "did:webvh:cokret-server.example"
+  trusted_server_did: "did:webvh:arkret-server.example"
   trusted_verification_methods:
-    - verification_method: "did:webvh:cokret-server.example#key-1"
+    - verification_method: "did:webvh:arkret-server.example#key-1"
       public_key:
         encoding: "ed25519_multibase"
         value: "zCHANGE_ME_SERVER_ED25519_PUBLIC_KEY"
@@ -37,12 +37,12 @@ logging:
 # closed unless their app channel is mapped to a Realm.
 # mappings:
 #   - app_channel: "CHANGE_ME_APP_CHANNEL"
-#     realm_id: "ck:realm:01904100-0000-7000-8000-000000000001"
+#     realm_id: "ak:realm:01904100-0000-7000-8000-000000000001"
 #     alias: "main"
 # Zulip 适配器专属
 app:
   # Zulip 站点基址(无尾斜杠),如 https://your-org.zulipchat.com
   site: "https://your-org.zulipchat.com"
   # bot 账号邮箱与 API key(Zulip 设置 → 你的 bot → API key)
-  bot_email: "cokret-bot@your-org.zulipchat.com"
+  bot_email: "arkret-bot@your-org.zulipchat.com"
   api_key: "CHANGE_ME_ZULIP_API_KEY"

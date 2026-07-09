@@ -33,13 +33,13 @@ jobs:
         with:
           path: bridges
 
-      # The workspace depends on the cokret SDK via a `../cokret-rust-sdk`
+      # The workspace depends on the arkret SDK via a `../arkret-rust-sdk`
       # path dependency, so the SDK must be checked out as a sibling.
-      - name: Checkout Cokret Rust SDK
+      - name: Checkout Arkret Rust SDK
         uses: actions/checkout@v6
         with:
-          repository: ${{ github.repository_owner }}/cokret-rust-sdk
-          path: cokret-rust-sdk
+          repository: ${{ github.repository_owner }}/arkret-rust-sdk
+          path: arkret-rust-sdk
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
       - name: Install Rust
@@ -73,11 +73,11 @@ jobs:
         with:
           path: bridges
 
-      - name: Checkout Cokret Rust SDK
+      - name: Checkout Arkret Rust SDK
         uses: actions/checkout@v6
         with:
-          repository: ${{ github.repository_owner }}/cokret-rust-sdk
-          path: cokret-rust-sdk
+          repository: ${{ github.repository_owner }}/arkret-rust-sdk
+          path: arkret-rust-sdk
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
       - name: Install Rust
@@ -99,11 +99,11 @@ jobs:
         with:
           path: bridges
 
-      - name: Checkout Cokret Rust SDK
+      - name: Checkout Arkret Rust SDK
         uses: actions/checkout@v6
         with:
-          repository: ${{ github.repository_owner }}/cokret-rust-sdk
-          path: cokret-rust-sdk
+          repository: ${{ github.repository_owner }}/arkret-rust-sdk
+          path: arkret-rust-sdk
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
       - name: Install Rust 1.96

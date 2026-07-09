@@ -6,11 +6,11 @@ members = ["crates/*"]
 version = "0.3.0"
 edition = "2024"
 rust-version = "1.96"
-authors = ["Cokret Team <chris@acroidea.com>"]
+authors = ["Arkret Team <chris@acroidea.com>"]
 license = "Apache-2.0"
 
 [workspace.dependencies]
-# Local cokret SDK (protocol side). Path is relative to the workspace root.
+# Local arkret SDK (protocol side). Path is relative to the workspace root.
 # Applet bridge runtime and chat/social helper layer.
 aes = "0.8"
 anyhow = "1.0"
@@ -19,14 +19,14 @@ base64 = "0.22"
 cbc = {version = "0.1",features = ["block-padding"]}
 chrono = {version = "0.4",features = ["serde"]}
 clap = {version = "4.6",features = ["string"]}
-cokret = {version = "0.3.0",path = "../cokret-rust-sdk/crates/sdk",default-features = false,features = [
+arkret = {version = "0.3.0",path = "../arkret-rust-sdk/crates/sdk",default-features = false,features = [
     "client",
     "salvo",
     "applet-runtime",
     "signer",
 ]}
-cokret-bridge-messaging = {path = "crates/messaging",default-features = false}
-cokret-bridge-runtime = {path = "crates/runtime",default-features = false}
+arkret-bridge-messaging = {path = "crates/messaging",default-features = false}
+arkret-bridge-runtime = {path = "crates/runtime",default-features = false}
 diesel = {version = "2.3",default-features = false,features = ["r2d2", "chrono"]}
 diesel_migrations = "2.3"
 futures = "0.3"

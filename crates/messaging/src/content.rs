@@ -1,10 +1,10 @@
 //! Spec-shaped `ck.message.create` payload assembly and parsing.
 //!
 //! Builds the authoritative `message_create_payload` from app-side messages and
-//! extracts displayable text / media back out of cokret-shaped content blocks
+//! extracts displayable text / media back out of arkret-shaped content blocks
 //! (`zh/models/content-types.md`).
 
-use cokret::{
+use arkret::{
     BlobRef, CONTENT_KIND_AUDIO, CONTENT_KIND_FILE, CONTENT_KIND_IMAGE, CONTENT_KIND_VIDEO,
     ContentBlock, ContentBlockMediaAttachment, MessageCreatePayload, StrandId,
 };

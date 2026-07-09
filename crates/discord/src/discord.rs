@@ -1,8 +1,8 @@
 //! Discord adapter (serenity).
 //!
-//! - Inbound (Discord → cokret): once the gateway `EventHandler::message` receives a message, it
+//! - Inbound (Discord → arkret): once the gateway `EventHandler::message` receives a message, it
 //!   calls [`MessageContext::submit_app_message`].
-//! - Outbound (cokret → Discord): [`MessageBridge::send_to_app`] uses the serenity HTTP client to
+//! - Outbound (arkret → Discord): [`MessageBridge::send_to_app`] uses the serenity HTTP client to
 //!   send a message to the channel.
 
 use std::sync::Arc;
@@ -66,7 +66,7 @@ impl MessageBridge for DiscordApp {
         let channel = parse_discord_channel_id(&msg.app_channel)?;
         let body = msg.rendered_body(SenderRenderStyle::MarkdownBold);
 
-        // With an attachment: download the cokret blob and upload it to Discord.
+        // With an attachment: download the arkret blob and upload it to Discord.
         if let Some(att) = &msg.attachment {
             let bytes = ctx.download_blob(&att.blob_ref).await?;
             let filename = att.filename.clone().unwrap_or_else(|| "file".to_owned());

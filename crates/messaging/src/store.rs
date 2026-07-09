@@ -2,7 +2,7 @@
 //!
 //! Owns the messaging mapping tables (`channel_realm_mappings`,
 //! `message_mappings`, `user_mappings`) per applet-integration §10.1 / §16,
-//! and answers the cokret server's actor/realm probes from them.
+//! and answers the arkret server's actor/realm probes from them.
 
 use std::sync::Arc;
 
@@ -108,7 +108,7 @@ impl MessageStore {
         Ok(())
     }
 
-    /// The portal mapping row for a realm (cokret → app direction).
+    /// The portal mapping row for a realm (arkret → app direction).
     pub fn channel_for_realm(&self, realm_id: &str) -> Result<Option<ChannelRealmMapping>> {
         use schema::channel_realm_mappings::dsl;
 
@@ -303,7 +303,7 @@ impl MessageStore {
             .optional()?)
     }
 
-    /// Reverse lookup for ghost resolution: find the user row by cokret actor DID.
+    /// Reverse lookup for ghost resolution: find the user row by arkret actor DID.
     pub fn user_by_actor(&self, actor_id: &str) -> Result<Option<UserMapping>> {
         use schema::user_mappings::dsl;
 
@@ -314,7 +314,7 @@ impl MessageStore {
             .optional()?)
     }
 
-    /// Reverse lookup for portal resolution: find the channel mapping by cokret
+    /// Reverse lookup for portal resolution: find the channel mapping by arkret
     /// realm id or by portal alias.
     pub fn channel_by_realm_or_alias(&self, key: &str) -> Result<Option<ChannelRealmMapping>> {
         use schema::channel_realm_mappings::dsl;
@@ -454,7 +454,7 @@ mod tests {
     fn sqlite_store(name: &str) -> Result<MessageStore> {
         let mut path = std::env::temp_dir();
         path.push(format!(
-            "cokret-bridge-messaging-{name}-{}-{}.sqlite",
+            "arkret-bridge-messaging-{name}-{}-{}.sqlite",
             std::process::id(),
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
         ));
@@ -473,13 +473,13 @@ mod tests {
                 "channel-1",
                 "app-message-1",
                 "sender-1",
-                "ck:event:01904100-0000-7000-8000-000000000123",
-                "ck:realm:01904100-0000-7000-8000-000000000001",
+                "ak:event:01904100-0000-7000-8000-000000000123",
+                "ak:realm:01904100-0000-7000-8000-000000000001",
             )
             .unwrap();
 
         let mapping = store
-            .app_message_for_event("ck:event:01904100-0000-7000-8000-000000000123")
+            .app_message_for_event("ak:event:01904100-0000-7000-8000-000000000123")
             .unwrap()
             .expect("mapping");
         assert_eq!(mapping.app_channel_id, "channel-1");
@@ -487,7 +487,7 @@ mod tests {
     }
 }
 
-/// DB-backed [`AppletResolver`] answering the cokret server's actor/realm probes
+/// DB-backed [`AppletResolver`] answering the arkret server's actor/realm probes
 /// from the messaging mapping tables.
 pub(crate) struct MessageResolver {
     pub(crate) store: Arc<MessageStore>,

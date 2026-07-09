@@ -1,9 +1,9 @@
 //! Zulip adapter (event queue long-polling).
 //!
-//! - Inbound (Zulip -> cokret): `run` uses reqwest to call Zulip `register` to create an event
+//! - Inbound (Zulip -> arkret): `run` uses reqwest to call Zulip `register` to create an event
 //!   queue, then loops `GET /api/v1/events` long-polling to pull new messages ->
 //!   [`MessageContext::submit_app_message`].
-//! - Outbound (cokret -> Zulip): [`MessageBridge::send_to_app`] uses `ctx.http` to POST
+//! - Outbound (arkret -> Zulip): [`MessageBridge::send_to_app`] uses `ctx.http` to POST
 //!   `{site}/api/v1/messages` (HTTP basic auth: bot_email + api_key).
 //!
 //! The receive path uses Zulip's official event queue long-polling REST
@@ -318,7 +318,7 @@ impl MessageBridge for ZulipApp {
             let (stream, topic) = msg
                 .app_channel
                 .split_once('/')
-                .unwrap_or((msg.app_channel.as_str(), "cokret"));
+                .unwrap_or((msg.app_channel.as_str(), "arkret"));
             form.push(("type", "stream".to_owned()));
             form.push(("to", stream.to_owned()));
             form.push(("topic", topic.to_owned()));
@@ -350,7 +350,7 @@ fn zulip_app_channel(message: &Value) -> String {
             .get("subject")
             .or_else(|| message.get("topic"))
             .and_then(|v| v.as_str())
-            .unwrap_or("cokret");
+            .unwrap_or("arkret");
         format!("{stream_id}/{topic}")
     } else {
         format!(
