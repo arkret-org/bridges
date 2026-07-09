@@ -18,7 +18,7 @@ use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
-    SenderRenderStyle, send_json_expect, webhook,
+    SenderRenderStyle, json_scalar_id_string, send_json_expect, webhook,
 };
 use serde_json::{Value, json};
 
@@ -217,7 +217,7 @@ impl MessageBridge for WechatApp {
         // WeChat APIs often return no standalone message id; msgid is used when present.
         let message_id = body
             .get("msgid")
-            .and_then(|v| v.as_str())
+            .and_then(json_scalar_id_string)
             .unwrap_or_default()
             .to_owned();
         Ok(AppMessageRef {
@@ -738,5 +738,17 @@ mod tests {
         assert_eq!(fields.msg_type.as_deref(), Some("text"));
         assert_eq!(fields.content.as_deref(), Some("hello"));
         assert_eq!(fields.msg_id.as_deref(), Some("12345"));
+    }
+
+    #[test]
+    fn wechat_msgid_accepts_numeric_and_string_values() {
+        assert_eq!(
+            json_scalar_id_string(&json!(" 12345 ")).as_deref(),
+            Some("12345")
+        );
+        assert_eq!(
+            json_scalar_id_string(&json!(12345)).as_deref(),
+            Some("12345")
+        );
     }
 }

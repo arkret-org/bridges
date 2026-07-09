@@ -953,6 +953,7 @@ dependencies = [
 name = "cokret-http-client"
 version = "0.3.0"
 dependencies = [
+ "base64",
  "chrono",
  "cokret-core",
  "cokret-signatures",
@@ -3445,6 +3446,7 @@ dependencies = [
  "js-sys",
  "log",
  "mime",
+ "mime_guess",
  "percent-encoding",
  "pin-project-lite",
  "quinn",

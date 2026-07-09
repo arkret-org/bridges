@@ -29,7 +29,10 @@ impl MessageContext {
 pub struct InboundAppMessage  { pub app_channel: String, pub app_user: String,
                                 pub app_message_id: String, pub body: String }
 pub struct OutboundAppMessage { pub app_channel: String, pub sender_display: String,
-                                pub body: String, pub reply_to: Option<String> }
+                                pub body: String, pub attachment: Option<Attachment> }
+pub struct Attachment { pub blob_ref: String, pub media_type: Option<String>,
+                        pub filename: Option<String>, pub size: Option<u64>,
+                        pub caption: String }
 pub struct AppMessageRef { pub app_message_id: String }
 
 #[async_trait]

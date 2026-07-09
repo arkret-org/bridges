@@ -3,7 +3,7 @@
 //! section.
 
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use cokret::signatures::PublicKeyMaterial;
 use serde::Deserialize;
@@ -279,11 +279,18 @@ impl Config {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path)
             .map_err(|e| BridgeError::Config(format!("reading {}: {e}", path.display())))?;
-        Self::from_yaml(&text)
+        Self::from_yaml_with_base_dir(&text, path.parent())
     }
 
     pub fn from_yaml(text: &str) -> Result<Self> {
-        serde_yaml_ng::from_str(text).map_err(|e| BridgeError::Config(e.to_string()))
+        Self::from_yaml_with_base_dir(text, None)
+    }
+
+    fn from_yaml_with_base_dir(text: &str, base_dir: Option<&Path>) -> Result<Self> {
+        let mut value: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(text).map_err(|e| BridgeError::Config(e.to_string()))?;
+        resolve_config_references(&mut value, base_dir)?;
+        serde_yaml_ng::from_value(value).map_err(|e| BridgeError::Config(e.to_string()))
     }
 
     /// Decode the signing seed into 32 bytes.
@@ -307,6 +314,94 @@ impl Config {
     }
 }
 
+fn resolve_config_references(
+    value: &mut serde_yaml_ng::Value,
+    base_dir: Option<&Path>,
+) -> Result<()> {
+    match value {
+        serde_yaml_ng::Value::String(s) => {
+            *s = resolve_config_string(s, base_dir)?;
+        }
+        serde_yaml_ng::Value::Sequence(items) => {
+            for item in items {
+                resolve_config_references(item, base_dir)?;
+            }
+        }
+        serde_yaml_ng::Value::Mapping(map) => {
+            for value in map.values_mut() {
+                resolve_config_references(value, base_dir)?;
+            }
+        }
+        serde_yaml_ng::Value::Null
+        | serde_yaml_ng::Value::Bool(_)
+        | serde_yaml_ng::Value::Number(_) => {}
+        serde_yaml_ng::Value::Tagged(tagged) => {
+            resolve_config_references(&mut tagged.value, base_dir)?;
+        }
+    }
+    Ok(())
+}
+
+fn resolve_config_string(value: &str, base_dir: Option<&Path>) -> Result<String> {
+    let value = interpolate_env_vars(value)?;
+    if let Some(name) = value.strip_prefix("env:") {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(BridgeError::Config("empty env: reference".to_owned()));
+        }
+        return std::env::var(name).map_err(|err| {
+            BridgeError::Config(format!("environment variable {name} is not set: {err}"))
+        });
+    }
+    if let Some(path) = value.strip_prefix("file:") {
+        let path = path.trim();
+        if path.is_empty() {
+            return Err(BridgeError::Config("empty file: reference".to_owned()));
+        }
+        let path = resolve_config_file_path(path, base_dir);
+        let text = std::fs::read_to_string(&path)
+            .map_err(|err| BridgeError::Config(format!("reading {}: {err}", path.display())))?;
+        return Ok(text.trim_end_matches(['\r', '\n']).to_owned());
+    }
+    Ok(value)
+}
+
+fn resolve_config_file_path(path: &str, base_dir: Option<&Path>) -> PathBuf {
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        path
+    } else if let Some(base_dir) = base_dir {
+        base_dir.join(path)
+    } else {
+        path
+    }
+}
+
+fn interpolate_env_vars(value: &str) -> Result<String> {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after_start = &rest[start + 2..];
+        let Some(end) = after_start.find('}') else {
+            return Err(BridgeError::Config(
+                "unterminated ${...} reference".to_owned(),
+            ));
+        };
+        let name = after_start[..end].trim();
+        if name.is_empty() {
+            return Err(BridgeError::Config("empty ${...} reference".to_owned()));
+        }
+        let replacement = std::env::var(name).map_err(|err| {
+            BridgeError::Config(format!("environment variable {name} is not set: {err}"))
+        })?;
+        out.push_str(&replacement);
+        rest = &after_start[end + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
     let s = s.trim();
     // Operate on bytes (not the str) so multi-byte UTF-8 input cannot panic on a
@@ -322,4 +417,63 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
             u8::from_str_radix(s, 16).ok()
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minimal_config(extra: &str) -> String {
+        format!(
+            r##"
+bridge:
+  bridge_id: test
+cokret:
+  server_url: "https://example.test"
+  service_did: "did:webvh:bridge.example"
+  applet_id: "ck:applet:01904100-0000-7000-8000-000000000001"
+  access_token: "token"
+  signing_key_seed_hex: "1111111111111111111111111111111111111111111111111111111111111111"
+  verification_method_id: "#key-1"
+  trusted_server_did: "did:webvh:server.example"
+{extra}
+"##
+        )
+    }
+
+    #[test]
+    fn config_resolves_file_references() {
+        let path = std::env::temp_dir().join(format!(
+            "cokret-bridge-config-secret-{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&path, "from-file\n").unwrap();
+        let yaml_path = path.to_string_lossy().replace('\\', "/");
+
+        let text = minimal_config(&format!("app:\n  webhook_secret: \"file:{yaml_path}\"\n",));
+        let config = Config::from_yaml(&text).unwrap();
+
+        assert_eq!(config.app["webhook_secret"], "from-file");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn config_resolves_env_references_inside_strings() {
+        let Some(path) = std::env::var_os("PATH") else {
+            return;
+        };
+        let expected = path.to_string_lossy();
+        let text = minimal_config("app:\n  path_copy: \"${PATH}\"\n");
+        let config = Config::from_yaml(&text).unwrap();
+
+        assert_eq!(config.app["path_copy"], expected.as_ref());
+    }
+
+    #[test]
+    fn config_rejects_missing_env_references() {
+        let text = minimal_config("app:\n  secret: \"env:COKRET_BRIDGE_TEST_MISSING_ENV\"\n");
+        let err = Config::from_yaml(&text).unwrap_err();
+
+        assert!(format!("{err}").contains("COKRET_BRIDGE_TEST_MISSING_ENV"));
+    }
 }

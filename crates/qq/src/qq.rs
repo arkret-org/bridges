@@ -13,7 +13,7 @@ use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
-    SenderRenderStyle, send_json_expect_status, webhook,
+    SenderRenderStyle, json_scalar_id_string, send_json_expect, webhook,
 };
 use serde_json::{Value, json};
 
@@ -75,13 +75,13 @@ impl MessageBridge for QqApp {
             req = req.bearer_auth(token);
         }
 
-        let value = send_json_expect_status(req, "QQ send").await?;
+        let value = send_json_expect(req, "QQ send", qq_send_ok).await?;
 
         // OneBot send_msg returns data.message_id on success.
         let message_id = value
             .get("data")
             .and_then(|d| d.get("message_id"))
-            .map(|id| id.to_string())
+            .and_then(json_scalar_id_string)
             .unwrap_or_default();
         Ok(AppMessageRef {
             app_message_id: message_id,
@@ -230,19 +230,12 @@ async fn qq_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     webhook::respond_submit(res, outcome);
 }
 
+fn qq_send_ok(value: &Value) -> bool {
+    value.get("retcode").and_then(Value::as_i64) == Some(0)
+}
+
 fn json_id_string(value: &Value) -> Option<String> {
-    if let Some(s) = value.as_str() {
-        let trimmed = s.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_owned())
-        }
-    } else if let Some(n) = value.as_i64() {
-        Some(n.to_string())
-    } else {
-        value.as_u64().map(|n| n.to_string())
-    }
+    json_scalar_id_string(value)
 }
 
 #[cfg(test)]
@@ -277,5 +270,12 @@ mod tests {
         assert!(json_id_string(&json!("   ")).is_none());
         assert!(json_id_string(&json!(null)).is_none());
         assert!(json_id_string(&json!({"id": "nested"})).is_none());
+    }
+
+    #[test]
+    fn qq_send_ok_requires_success_retcode() {
+        assert!(qq_send_ok(&json!({"status": "ok", "retcode": 0})));
+        assert!(!qq_send_ok(&json!({"status": "failed", "retcode": 100})));
+        assert!(!qq_send_ok(&json!({"status": "ok"})));
     }
 }

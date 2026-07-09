@@ -67,6 +67,21 @@ pub use types::{
 pub(crate) const EXTERNAL_REF_SCHEMA: &str = "org.cokret.bridge.external_ref.messaging.v1";
 pub(crate) const MESSAGE_MAPPING_KEY_SEPARATOR: char = '\u{1f}';
 
+pub fn json_scalar_id_string(value: &Value) -> Option<String> {
+    if let Some(s) = value.as_str() {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_owned())
+        }
+    } else if let Some(n) = value.as_i64() {
+        Some(n.to_string())
+    } else {
+        value.as_u64().map(|n| n.to_string())
+    }
+}
+
 /// The inbound (cokret → app) event kinds this messaging bridge consumes, used
 /// for capability enforcement (BRG-01-009): the runtime rejects any pushed event
 /// whose kind is not listed. `MessageAdapter::on_cokret_event` handles exactly
@@ -1100,7 +1115,7 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
             Some(strand_id) => strand_id,
             None => self.ctx.ensure_portal_strand(&channel, &realm_id).await?,
         };
-        if extract_strand_id(&event.content) != Some(portal_strand.as_str()) {
+        if extract_strand_id(&event.payload) != Some(portal_strand.as_str()) {
             tracing::debug!(
                 realm = %realm_id,
                 portal_strand = %portal_strand,
@@ -1108,8 +1123,8 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
             );
             return Ok(());
         }
-        let body = extract_plain_body(&event.content);
-        let attachment = extract_attachment(&event.content);
+        let body = extract_plain_body(&event.payload);
+        let attachment = extract_attachment(&event.payload);
         let sender_display = sender_display_for_event(
             self.ctx.store.clone(),
             event.actor_id.to_string(),
@@ -1120,7 +1135,6 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
             app_channel: channel.clone(),
             sender_display,
             body,
-            reply_to: None,
             attachment,
         };
         let app_ref = match self.user.send_to_app(self.ctx.clone(), out).await {

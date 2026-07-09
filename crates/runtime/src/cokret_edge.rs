@@ -1280,7 +1280,7 @@ mod tests {
             event_content_fingerprint(&second)
         );
 
-        second.content = json!({ "body": "changed" });
+        second.payload = json!({ "body": "changed" });
         assert_ne!(
             event_content_fingerprint(&first),
             event_content_fingerprint(&second)

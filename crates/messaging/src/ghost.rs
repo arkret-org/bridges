@@ -413,7 +413,7 @@ pub(crate) async fn find_existing_portal_strand(
             if event.kind.as_str() != "ck.strand.create" {
                 continue;
             }
-            let Some(object) = event.content.get("object") else {
+            let Some(object) = event.payload.get("object") else {
                 continue;
             };
             if !location_matches(object.pointer("/metadata/fields/external_ref"), location) {

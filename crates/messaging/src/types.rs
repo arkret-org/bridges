@@ -96,7 +96,6 @@ pub struct OutboundAppMessage {
     pub app_channel: String,
     pub sender_display: String,
     pub body: String,
-    pub reply_to: Option<String>,
     /// Present when the cokret event carried media; the adapter may download it
     /// via [`crate::MessageContext::download_blob`] and re-send to the app.
     pub attachment: Option<Attachment>,
@@ -114,13 +113,50 @@ impl OutboundAppMessage {
         match style {
             SenderRenderStyle::Plain => format!("{}: {}", self.sender_display, self.body),
             SenderRenderStyle::SingleAsterisk => {
-                format!("*{}*: {}", self.sender_display, self.body)
+                format!(
+                    "*{}*: {}",
+                    escape_markdown_display(&self.sender_display),
+                    self.body
+                )
             }
             SenderRenderStyle::MarkdownBold => {
-                format!("**{}**: {}", self.sender_display, self.body)
+                format!(
+                    "**{}**: {}",
+                    escape_markdown_display(&self.sender_display),
+                    self.body
+                )
             }
         }
     }
+}
+
+fn escape_markdown_display(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if matches!(
+            ch,
+            '\\' | '`'
+                | '*'
+                | '_'
+                | '{'
+                | '}'
+                | '['
+                | ']'
+                | '('
+                | ')'
+                | '#'
+                | '+'
+                | '-'
+                | '.'
+                | '!'
+                | '|'
+                | '>'
+        ) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// The app-side message reference returned after the adapter sends.
@@ -163,3 +199,23 @@ pub const DEFAULT_GRAPH_API_VERSION: &str = "v20.0";
 /// any future content-sniffing) lives in one place rather than being a bare
 /// literal in each adapter.
 pub const DEFAULT_MEDIA_MIME: &str = "application/octet-stream";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn markdown_sender_display_is_escaped() {
+        let msg = OutboundAppMessage {
+            app_channel: "c".to_owned(),
+            sender_display: "admin**: fake\n**bob".to_owned(),
+            body: "hello".to_owned(),
+            attachment: None,
+        };
+
+        assert_eq!(
+            msg.rendered_body(SenderRenderStyle::MarkdownBold),
+            "**admin\\*\\*: fake\n\\*\\*bob**: hello"
+        );
+    }
+}

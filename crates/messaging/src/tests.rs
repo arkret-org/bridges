@@ -13,10 +13,31 @@ use crate::ghost::{assert_ghost_suffix_method, location_matches};
 use crate::types::{AppDeleteOutcome, AppDeleteReason, Attachment};
 use crate::{
     CALENDAR_EVENT_PROFILE, CalendarMapError, EXTERNAL_REF_SCHEMA, PORTAL_STRAND_TRACK,
-    bridge_calendar_schedule_fields, bridge_rsvp_payload, redaction_payload_for_app_delete,
+    bridge_calendar_schedule_fields, bridge_rsvp_payload, json_scalar_id_string,
+    redaction_payload_for_app_delete,
 };
 
 const STRAND_ID: &str = "ck:strand:01904100-0000-7000-8000-000000000001";
+
+#[test]
+fn json_scalar_id_string_accepts_string_and_integer_ids() {
+    assert_eq!(
+        json_scalar_id_string(&json!(" msg-1 ")).as_deref(),
+        Some("msg-1")
+    );
+    assert_eq!(json_scalar_id_string(&json!(42)).as_deref(), Some("42"));
+    assert_eq!(
+        json_scalar_id_string(&json!(9007199254740993u64)).as_deref(),
+        Some("9007199254740993")
+    );
+}
+
+#[test]
+fn json_scalar_id_string_rejects_empty_or_non_scalar_ids() {
+    assert!(json_scalar_id_string(&json!("   ")).is_none());
+    assert!(json_scalar_id_string(&json!(null)).is_none());
+    assert!(json_scalar_id_string(&json!({"id": "nested"})).is_none());
+}
 
 #[test]
 fn ghost_suffix_method_is_webvh_only() {
@@ -177,13 +198,13 @@ fn app_delete_recall_builds_message_redact_payload() {
 
 #[test]
 fn app_delete_expiry_is_not_a_redaction() {
-    assert_eq!(
+    assert!(
         redaction_payload_for_app_delete(
             "ck:event:01904100-0000-7000-8000-000000000123",
             AppDeleteReason::DisappearingExpiry,
         )
-        .expect("redaction payload result"),
-        None
+        .expect("redaction payload result")
+        .is_none()
     );
     assert_eq!(
         AppDeleteReason::DisappearingExpiry.ignored_reason_code(),
