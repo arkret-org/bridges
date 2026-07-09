@@ -35,6 +35,7 @@ pub mod blocking;
 pub mod cache;
 mod cokret_edge;
 mod config;
+pub mod dead_letter;
 mod error;
 pub mod idempotency;
 pub mod logging;
@@ -60,7 +61,14 @@ pub use cokret_edge::DbSeqStore;
 pub use cokret_edge::{CokretEdge, SeqAllocator, SeqStore};
 pub use config::{ChannelRealmMappingConfig, Config, DatabaseConfig, WebhookRateLimitConfig};
 #[cfg(feature = "db")]
-pub use db::{DbEventDedupStore, DbReplayGuardStore, DbTokenStore, DbTransactionIdempotencyStore};
+pub use db::{
+    DbEventDedupStore, DbOutboundDeadLetterStore, DbReplayGuardStore, DbTokenStore,
+    DbTransactionIdempotencyStore,
+};
+pub use dead_letter::{
+    OUTBOUND_DEAD_LETTER_REPLAY_INTERVAL_SECS, OutboundDeadLetter, OutboundDeadLetterRecord,
+    OutboundDeadLetterStore,
+};
 pub use error::{BridgeError, Result, redact_sensitive_url_values};
 pub use idempotency::{
     DedupVerdict, EventDedupStore, MemoryEventDedupStore, MemoryTransactionIdempotencyStore,
@@ -122,6 +130,13 @@ where
         tokio::spawn(async move { app::consume_ephemeral(ctx, app, ephemeral_rx).await })
     };
 
+    // 1c) Background: retry persisted cokret -> adapter dead letters.
+    let dead_letter_replayer = {
+        let ctx = ctx.clone();
+        let app = app.clone();
+        tokio::spawn(async move { app::replay_outbound_dead_letters(ctx, app).await })
+    };
+
     // 2) web: health/metrics + applet routes + app webhook routes
     let web = {
         let ctx = ctx.clone();
@@ -154,6 +169,7 @@ where
     tokio::select! {
         r = consumer => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,
         r = ephemeral_consumer => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,
+        r = dead_letter_replayer => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,
         r = web => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,
         r = runner => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,
     }

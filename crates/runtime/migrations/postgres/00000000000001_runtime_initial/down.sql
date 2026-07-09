@@ -1,3 +1,4 @@
+DROP TABLE IF EXISTS outbound_dead_letters;
 DROP TABLE IF EXISTS token_cache;
 DROP TABLE IF EXISTS webhook_replay_guard;
 DROP TABLE IF EXISTS bridge_state;

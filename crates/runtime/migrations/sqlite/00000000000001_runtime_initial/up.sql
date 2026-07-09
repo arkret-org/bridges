@@ -35,3 +35,14 @@ CREATE TABLE IF NOT EXISTS token_cache (
     cache_key TEXT PRIMARY KEY,
     token_value TEXT NOT NULL,
     expires_at BIGINT NOT NULL);
+
+CREATE TABLE IF NOT EXISTS outbound_dead_letters (
+    event_id TEXT PRIMARY KEY,
+    realm_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    attempts INTEGER NOT NULL,
+    retriable BOOLEAN NOT NULL,
+    last_error TEXT NOT NULL,
+    event_json TEXT NOT NULL,
+    first_seen_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL);

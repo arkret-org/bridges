@@ -16,6 +16,7 @@ use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 
 use crate::cache::{PersistedToken, TokenStore};
 use crate::config::DatabaseConfig;
+use crate::dead_letter::{OutboundDeadLetter, OutboundDeadLetterRecord, OutboundDeadLetterStore};
 use crate::error::{BridgeError, Result};
 use crate::idempotency::{
     DedupVerdict, EventDedupStore, IDEMPOTENCY_TTL_SECS, PENDING_TAKEOVER_GRACE_SECS,
@@ -147,6 +148,21 @@ mod idempotency_schema {
             cache_key -> Text,
             token_value -> Text,
             expires_at -> BigInt,
+        }
+    }
+
+    diesel::table! {
+        /// Durable dead letters for cokret-to-app delivery failures.
+        outbound_dead_letters (event_id) {
+            event_id -> Text,
+            realm_id -> Text,
+            kind -> Text,
+            attempts -> Integer,
+            retriable -> Bool,
+            last_error -> Text,
+            event_json -> Text,
+            first_seen_at -> BigInt,
+            updated_at -> BigInt,
         }
     }
 }
@@ -539,6 +555,156 @@ impl TokenStore for DbTokenStore {
     }
 }
 
+/// Diesel-backed [`OutboundDeadLetterStore`]: persists cokret-to-app events that
+/// exhausted adapter delivery retries so they can be replayed after recovery.
+pub struct DbOutboundDeadLetterStore {
+    db: Arc<DatabaseManager>,
+}
+
+impl DbOutboundDeadLetterStore {
+    /// Build the store. The `outbound_dead_letters` table is created by the
+    /// runtime migrations, which [`crate::run_bridge`] applies at startup (via
+    /// [`crate::DbSeqStore::new`]); standalone hosts and tests must run
+    /// [`MIGRATIONS`] themselves.
+    pub fn new(db: Arc<DatabaseManager>) -> Self {
+        Self { db }
+    }
+}
+
+#[derive(Queryable)]
+struct OutboundDeadLetterRow {
+    event_id: String,
+    realm_id: String,
+    kind: String,
+    attempts: i32,
+    retriable: bool,
+    last_error: String,
+    event_json: String,
+    first_seen_at: i64,
+    updated_at: i64,
+}
+
+impl From<OutboundDeadLetterRow> for OutboundDeadLetter {
+    fn from(row: OutboundDeadLetterRow) -> Self {
+        Self {
+            event_id: row.event_id,
+            realm_id: row.realm_id,
+            kind: row.kind,
+            attempts: row.attempts.max(0) as u32,
+            retriable: row.retriable,
+            last_error: row.last_error,
+            event_json: row.event_json,
+            first_seen_at: row.first_seen_at,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
+impl OutboundDeadLetterStore for DbOutboundDeadLetterStore {
+    fn record(&self, record: OutboundDeadLetterRecord) -> Result<()> {
+        use idempotency_schema::outbound_dead_letters::dsl;
+
+        let mut conn = self.db.conn()?;
+        let now = now_ts();
+        let new_attempts = i32::try_from(record.attempts).unwrap_or(i32::MAX);
+        let previous_attempts = dsl::outbound_dead_letters
+            .filter(dsl::event_id.eq(record.event_id.as_str()))
+            .select(dsl::attempts)
+            .first::<i32>(&mut conn)
+            .optional()?
+            .unwrap_or(0);
+        let attempts = previous_attempts.saturating_add(new_attempts);
+        let updated = diesel::update(
+            dsl::outbound_dead_letters.filter(dsl::event_id.eq(record.event_id.as_str())),
+        )
+        .set((
+            dsl::realm_id.eq(record.realm_id.as_str()),
+            dsl::kind.eq(record.kind.as_str()),
+            dsl::attempts.eq(attempts),
+            dsl::retriable.eq(record.retriable),
+            dsl::last_error.eq(record.last_error.as_str()),
+            dsl::event_json.eq(record.event_json.as_str()),
+            dsl::updated_at.eq(now),
+        ))
+        .execute(&mut conn)?;
+        if updated == 0 {
+            diesel::insert_into(dsl::outbound_dead_letters)
+                .values((
+                    dsl::event_id.eq(record.event_id.as_str()),
+                    dsl::realm_id.eq(record.realm_id.as_str()),
+                    dsl::kind.eq(record.kind.as_str()),
+                    dsl::attempts.eq(attempts),
+                    dsl::retriable.eq(record.retriable),
+                    dsl::last_error.eq(record.last_error.as_str()),
+                    dsl::event_json.eq(record.event_json.as_str()),
+                    dsl::first_seen_at.eq(now),
+                    dsl::updated_at.eq(now),
+                ))
+                .execute(&mut conn)?;
+        }
+        Ok(())
+    }
+
+    fn clear(&self, event_id: &str) -> Result<()> {
+        use idempotency_schema::outbound_dead_letters::dsl;
+
+        let mut conn = self.db.conn()?;
+        diesel::delete(dsl::outbound_dead_letters.filter(dsl::event_id.eq(event_id)))
+            .execute(&mut conn)?;
+        Ok(())
+    }
+
+    fn load(&self, event_id: &str) -> Result<Option<OutboundDeadLetter>> {
+        use idempotency_schema::outbound_dead_letters::dsl;
+
+        let mut conn = self.db.conn()?;
+        dsl::outbound_dead_letters
+            .filter(dsl::event_id.eq(event_id))
+            .select((
+                dsl::event_id,
+                dsl::realm_id,
+                dsl::kind,
+                dsl::attempts,
+                dsl::retriable,
+                dsl::last_error,
+                dsl::event_json,
+                dsl::first_seen_at,
+                dsl::updated_at,
+            ))
+            .first::<OutboundDeadLetterRow>(&mut conn)
+            .optional()
+            .map(|row| row.map(Into::into))
+            .map_err(Into::into)
+    }
+
+    fn list_due(&self, now_ts: i64, limit: u32) -> Result<Vec<OutboundDeadLetter>> {
+        use idempotency_schema::outbound_dead_letters::dsl;
+
+        let mut conn = self.db.conn()?;
+        dsl::outbound_dead_letters
+            .filter(
+                dsl::updated_at
+                    .le(now_ts - crate::dead_letter::OUTBOUND_DEAD_LETTER_REPLAY_INTERVAL_SECS),
+            )
+            .order(dsl::updated_at.asc())
+            .limit(i64::from(limit))
+            .select((
+                dsl::event_id,
+                dsl::realm_id,
+                dsl::kind,
+                dsl::attempts,
+                dsl::retriable,
+                dsl::last_error,
+                dsl::event_json,
+                dsl::first_seen_at,
+                dsl::updated_at,
+            ))
+            .load::<OutboundDeadLetterRow>(&mut conn)
+            .map(|rows| rows.into_iter().map(Into::into).collect())
+            .map_err(Into::into)
+    }
+}
+
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
@@ -689,5 +855,61 @@ mod tests {
             store.check_and_record("ev2", 100),
             Ok(DedupVerdict::Fresh)
         ));
+    }
+
+    #[test]
+    fn db_outbound_dead_letter_records_updates_lists_and_clears() {
+        let db = memory_db();
+        db.run_migrations(MIGRATIONS).unwrap();
+        let store = DbOutboundDeadLetterStore::new(db);
+        store
+            .record(OutboundDeadLetterRecord {
+                event_id: "ck:event:01904100-0000-7000-8000-000000000101".to_owned(),
+                realm_id: "ck:realm:01904100-0000-7000-8000-000000000201".to_owned(),
+                kind: "ck.message.create".to_owned(),
+                attempts: 4,
+                retriable: true,
+                last_error: "first failure".to_owned(),
+                event_json: r#"{"event_id":"ck:event:01904100-0000-7000-8000-000000000101"}"#
+                    .to_owned(),
+            })
+            .unwrap();
+        let first = store
+            .load("ck:event:01904100-0000-7000-8000-000000000101")
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.attempts, 4);
+        assert_eq!(first.last_error, "first failure");
+
+        store
+            .record(OutboundDeadLetterRecord {
+                event_id: first.event_id.clone(),
+                realm_id: first.realm_id.clone(),
+                kind: first.kind.clone(),
+                attempts: 2,
+                retriable: false,
+                last_error: "deterministic failure".to_owned(),
+                event_json:
+                    r#"{"event_id":"ck:event:01904100-0000-7000-8000-000000000101","retry":2}"#
+                        .to_owned(),
+            })
+            .unwrap();
+        let updated = store.load(&first.event_id).unwrap().unwrap();
+        assert_eq!(updated.attempts, 6);
+        assert!(!updated.retriable);
+        assert_eq!(updated.first_seen_at, first.first_seen_at);
+        assert_eq!(updated.last_error, "deterministic failure");
+
+        let due = store
+            .list_due(
+                updated.updated_at + crate::dead_letter::OUTBOUND_DEAD_LETTER_REPLAY_INTERVAL_SECS,
+                10,
+            )
+            .unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].event_id, updated.event_id);
+
+        store.clear(&updated.event_id).unwrap();
+        assert!(store.load(&updated.event_id).unwrap().is_none());
     }
 }

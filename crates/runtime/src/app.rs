@@ -35,9 +35,11 @@ use crate::cokret_edge::CokretEdge;
 #[cfg(feature = "runtime")]
 use crate::config::Config;
 #[cfg(feature = "runtime")]
-use crate::db::DatabaseManager;
+use crate::db::{DatabaseManager, DbOutboundDeadLetterStore};
 #[cfg(feature = "runtime")]
-use crate::error::{BridgeError, Result};
+use crate::dead_letter::{OutboundDeadLetterRecord, OutboundDeadLetterStore};
+#[cfg(feature = "runtime")]
+use crate::error::{BridgeError, Result, redact_sensitive_url_values};
 #[cfg(feature = "runtime")]
 use crate::queue::ChannelQueue;
 
@@ -79,6 +81,7 @@ pub struct BridgeContext {
     pub config: Arc<Config>,
     pub edge: Arc<CokretEdge>,
     pub db: Arc<DatabaseManager>,
+    pub dead_letters: Arc<dyn OutboundDeadLetterStore>,
     pub queue: ChannelQueue,
     pub http: reqwest::Client,
     /// Installed by a higher layer before the web service starts; read by the
@@ -109,6 +112,7 @@ impl BridgeContext {
         Ok(Self {
             config,
             edge,
+            dead_letters: Arc::new(DbOutboundDeadLetterStore::new(db.clone())),
             db,
             queue: ChannelQueue::new(),
             http,
@@ -203,6 +207,10 @@ const INBOUND_MAX_DELIVERY_ATTEMPTS: u32 = 4;
 /// Base backoff between inbound delivery retries; doubled each attempt.
 #[cfg(feature = "runtime")]
 const INBOUND_RETRY_BASE_BACKOFF: Duration = Duration::from_millis(200);
+
+/// Maximum dead-letter rows replayed in one scan tick.
+#[cfg(feature = "runtime")]
+const OUTBOUND_DEAD_LETTER_SCAN_LIMIT: u32 = 100;
 
 /// Per-realm worker mailbox depth. Each realm gets its own ordered worker; this
 /// bounds how far ahead the dispatcher may run before a slow realm applies
@@ -310,12 +318,16 @@ pub async fn consume_inbound<A: BridgeApp>(
 /// Deliver one inbound event to the adapter with bounded retry + backoff, then
 /// dead-letter on persistent failure.
 #[cfg(feature = "runtime")]
-async fn deliver_inbound_event<A: BridgeApp>(ctx: Arc<BridgeContext>, app: Arc<A>, event: Event) {
+async fn deliver_inbound_event<A: BridgeApp>(
+    ctx: Arc<BridgeContext>,
+    app: Arc<A>,
+    event: Event,
+) -> bool {
     let event_id = event.event_id.to_string();
     let mut backoff = INBOUND_RETRY_BASE_BACKOFF;
     for attempt in 1..=INBOUND_MAX_DELIVERY_ATTEMPTS {
         match app.on_cokret_event(ctx.clone(), event.clone()).await {
-            Ok(()) => return,
+            Ok(()) => return true,
             Err(e) => {
                 let retriable = e.is_retriable();
                 if !retriable || attempt == INBOUND_MAX_DELIVERY_ATTEMPTS {
@@ -329,7 +341,8 @@ async fn deliver_inbound_event<A: BridgeApp>(ctx: Arc<BridgeContext>, app: Arc<A
                         retriable,
                         "dead-lettering inbound event: delivery to adapter failed"
                     );
-                    return;
+                    record_outbound_dead_letter(ctx.clone(), &event, attempt, retriable, &e).await;
+                    return false;
                 }
                 tracing::warn!(
                     %event_id,
@@ -339,6 +352,81 @@ async fn deliver_inbound_event<A: BridgeApp>(ctx: Arc<BridgeContext>, app: Arc<A
                 );
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(5));
+            }
+        }
+    }
+    false
+}
+
+#[cfg(feature = "runtime")]
+async fn record_outbound_dead_letter(
+    ctx: Arc<BridgeContext>,
+    event: &Event,
+    attempts: u32,
+    retriable: bool,
+    error: &BridgeError,
+) {
+    let event_id = event.event_id.to_string();
+    let event_json = match serde_json::to_string(event) {
+        Ok(event_json) => event_json,
+        Err(err) => {
+            tracing::error!(%event_id, error = %err, "failed to serialize outbound dead-letter event");
+            return;
+        }
+    };
+    let record = OutboundDeadLetterRecord {
+        event_id: event_id.clone(),
+        realm_id: event.realm_id.to_string(),
+        kind: event.kind.to_string(),
+        attempts,
+        retriable,
+        last_error: redact_sensitive_url_values(error.to_string()),
+        event_json,
+    };
+    let store = ctx.dead_letters.clone();
+    if let Err(err) = crate::run_blocking(move || store.record(record)).await {
+        tracing::error!(%event_id, error = %err, "failed to persist outbound dead-letter event");
+    }
+}
+
+/// Low-frequency dead-letter replayer. It reuses the exact adapter delivery
+/// path; a successful replay clears the row, a failed replay refreshes the row's
+/// `updated_at` through `deliver_inbound_event` so it is not retried in a tight
+/// loop.
+#[cfg(feature = "runtime")]
+pub async fn replay_outbound_dead_letters<A: BridgeApp>(
+    ctx: Arc<BridgeContext>,
+    app: Arc<A>,
+) -> Result<()> {
+    let mut interval = tokio::time::interval(Duration::from_secs(
+        crate::dead_letter::OUTBOUND_DEAD_LETTER_REPLAY_INTERVAL_SECS as u64,
+    ));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        let store = ctx.dead_letters.clone();
+        let due = crate::run_blocking(move || {
+            store.list_due(
+                chrono::Utc::now().timestamp(),
+                OUTBOUND_DEAD_LETTER_SCAN_LIMIT,
+            )
+        })
+        .await?;
+        for dead in due {
+            let event_id = dead.event_id.clone();
+            let event: Event = match serde_json::from_str(&dead.event_json) {
+                Ok(event) => event,
+                Err(err) => {
+                    tracing::error!(%event_id, error = %err, "outbound dead-letter row contains unreadable event json");
+                    continue;
+                }
+            };
+            if deliver_inbound_event(ctx.clone(), app.clone(), event).await {
+                let store = ctx.dead_letters.clone();
+                let clear_event_id = event_id.clone();
+                if let Err(err) = crate::run_blocking(move || store.clear(&clear_event_id)).await {
+                    tracing::error!(%event_id, error = %err, "failed to clear replayed outbound dead-letter event");
+                }
             }
         }
     }
