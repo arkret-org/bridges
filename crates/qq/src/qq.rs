@@ -205,17 +205,12 @@ async fn qq_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     };
     // Bounded replay/dedupe (BRG-SEC-001 / contract G-4): the OneBot signature
     // does not bind a timestamp, so a captured event would replay forever.
-    // Record only after submit is accepted so transient failures can be
-    // recovered by platform redelivery.
     let replay_key = format!("qq:{message_id}");
-    if state.replay.contains(&replay_key).await {
-        // Replayed event already accepted in the window; ack idempotently.
-        webhook::ok_json(res, json!({ "ok": true }));
-        return;
-    }
-    let outcome = webhook::submit(
+    let outcome = webhook::submit_deduped(
         state.ctx.clone(),
         "qq",
+        &state.replay,
+        replay_key,
         InboundAppMessage {
             app_channel: channel,
             app_user: user,
@@ -224,9 +219,6 @@ async fn qq_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
         },
     )
     .await;
-    if outcome == webhook::SubmitOutcome::Accepted {
-        state.replay.check_and_record(replay_key).await;
-    }
     webhook::respond_submit(res, outcome);
 }
 

@@ -17,6 +17,7 @@ mod ghost;
 mod models;
 mod schema;
 mod store;
+mod token;
 mod types;
 pub mod webhook;
 
@@ -54,6 +55,7 @@ pub use runtime::salvo;
 use serde_json::{Value, json};
 use store::MessageResolver;
 pub use store::{ChannelRealmMapping, MessageMapping, MessageStore, UserMapping};
+pub use token::{VendorTokenCheck, fetch_vendor_token};
 pub use types::{
     AppDeleteOutcome, AppDeleteReason, AppMessageRef, Attachment, DEFAULT_GRAPH_API_VERSION,
     DEFAULT_MEDIA_MIME, DownloadedMedia, InboundAppDelete, InboundAppMessage,

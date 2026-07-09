@@ -163,20 +163,15 @@ async fn messenger_delivery(req: &mut Request, depot: &mut Depot, res: &mut Resp
     for inbound in messenger_inbound_messages(&body) {
         // Bounded replay/dedupe (BRG-SEC-001 / contract G-4): the Meta signature
         // does not bind a timestamp, so a captured event would replay forever.
-        // Record only after submit is accepted so transient failures can be
-        // recovered by Meta redelivery.
         let replay_key = format!("messenger:{}", inbound.app_message_id);
-        if state.replay.contains(&replay_key).await {
-            tracing::debug!(
-                message_id = %inbound.app_message_id,
-                "Messenger event replayed; skipping"
-            );
-            continue;
-        }
-        let outcome = webhook::submit(state.ctx.clone(), "messenger", inbound).await;
-        if outcome == webhook::SubmitOutcome::Accepted {
-            state.replay.check_and_record(replay_key).await;
-        }
+        let outcome = webhook::submit_deduped(
+            state.ctx.clone(),
+            "messenger",
+            &state.replay,
+            replay_key,
+            inbound,
+        )
+        .await;
         retry |= outcome == webhook::SubmitOutcome::Retry;
     }
     if retry {

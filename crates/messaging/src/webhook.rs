@@ -575,6 +575,30 @@ pub async fn submit(
     }
 }
 
+/// Submit one inbound message behind a replay guard, preserving the existing
+/// webhook order: skip known replay keys, submit fresh deliveries, then record
+/// the key only after the submit outcome is accepted. This intentionally does
+/// not make the replay check atomic; downstream message dedup remains the
+/// correctness guard for concurrent duplicate deliveries.
+pub async fn submit_deduped(
+    ctx: Arc<MessageContext>,
+    label: &str,
+    replay: &ReplayWindow,
+    replay_key: impl Into<String>,
+    inbound: InboundAppMessage,
+) -> SubmitOutcome {
+    let replay_key = replay_key.into();
+    if replay.contains(&replay_key).await {
+        tracing::debug!(bridge = label, replay_key = %replay_key, "webhook delivery replayed; skipping");
+        return SubmitOutcome::Accepted;
+    }
+    let outcome = submit(ctx, label, inbound).await;
+    if outcome == SubmitOutcome::Accepted {
+        replay.check_and_record(replay_key).await;
+    }
+    outcome
+}
+
 /// Render the HTTP response for a [`SubmitOutcome`] in the common (single
 /// message, JSON body) case: `{"ok":true}` on accept, 5xx on retry.
 pub fn respond_submit(res: &mut Response, outcome: SubmitOutcome) {

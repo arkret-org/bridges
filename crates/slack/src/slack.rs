@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cokret_bridge_messaging::runtime::{BridgeError, Result};
+use cokret_bridge_messaging::runtime::{BridgeError, Result, jittered_delay};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, send_json_expect,
@@ -34,18 +34,6 @@ const SOCKET_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
 /// Base delay after a clean disconnect before reconnecting.
 const DISCONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// Apply ±25% process-local jitter to a reconnect delay so a fleet of bridges
-/// that drop together does not reconnect in lockstep (thundering herd). No
-/// `rand` dependency: sub-second clock nanos are entropy enough for spreading.
-fn jittered(base: std::time::Duration) -> std::time::Duration {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    let factor = 0.75 + (f64::from(nanos) / f64::from(u32::MAX)) * 0.5;
-    base.mul_f64(factor)
-}
 
 /// Slack bridge adapter.
 pub struct SlackApp {
@@ -189,7 +177,7 @@ impl MessageBridge for SlackApp {
                 Ok(u) => u,
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to fetch Slack socket URL, retrying");
-                    tokio::time::sleep(jittered(RECONNECT_BACKOFF)).await;
+                    tokio::time::sleep(jittered_delay(RECONNECT_BACKOFF)).await;
                     continue;
                 }
             };
@@ -198,7 +186,7 @@ impl MessageBridge for SlackApp {
                 Ok(pair) => pair,
                 Err(e) => {
                     tracing::warn!(error = %e, "Slack socket connection failed, retrying");
-                    tokio::time::sleep(jittered(RECONNECT_BACKOFF)).await;
+                    tokio::time::sleep(jittered_delay(RECONNECT_BACKOFF)).await;
                     continue;
                 }
             };
@@ -268,7 +256,7 @@ impl MessageBridge for SlackApp {
             }
 
             tracing::warn!("Slack socket disconnected, reconnecting shortly");
-            tokio::time::sleep(jittered(DISCONNECT_BACKOFF)).await;
+            tokio::time::sleep(jittered_delay(DISCONNECT_BACKOFF)).await;
         }
     }
 

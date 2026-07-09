@@ -13,12 +13,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use cokret_bridge_messaging::runtime::cache::TokenCache;
-use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
+use cokret_bridge_messaging::runtime::{BridgeError, Result};
 use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
-    SenderRenderStyle, json_scalar_id_string, send_json_expect, webhook,
+    SenderRenderStyle, VendorTokenCheck, fetch_vendor_token, json_scalar_id_string,
+    send_json_expect, webhook,
 };
 use serde_json::{Value, json};
 
@@ -30,7 +31,7 @@ fn wechat_errcode_ok(body: &Value) -> bool {
 const WECHAT_OFFICIAL_BASE: &str = "https://api.weixin.qq.com/cgi-bin";
 const WECHAT_WORK_BASE: &str = "https://qyapi.weixin.qq.com/cgi-bin";
 /// Fallback validity (seconds) when the API omits `expires_in`.
-const WECHAT_TOKEN_FALLBACK_SECS: u64 = 7000;
+const WECHAT_TOKEN_FALLBACK: Duration = Duration::from_secs(7000);
 const WECHAT_TIMESTAMP_WINDOW_SECS: i64 = 5 * 60;
 
 /// WeChat bridge adapter.
@@ -119,7 +120,7 @@ impl WechatApp {
     /// vendor-reported expiry, then re-fetched.
     async fn access_token(&self, ctx: &Arc<MessageContext>) -> Result<String> {
         self.token_cache
-            .get_or_try_refresh(|| async {
+            .get_or_try_refresh(|| {
                 let url = match self.mode() {
                     WechatMode::Work => format!(
                         "{WECHAT_WORK_BASE}/gettoken?corpid={}&corpsecret={}",
@@ -130,44 +131,14 @@ impl WechatApp {
                         self.cred_id, self.cred_secret
                     ),
                 };
-                let resp = ctx
-                    .http
-                    .get(&url)
-                    .send()
-                    .await
-                    .map_err(|e| {
-                        BridgeError::App(format!(
-                            "WeChat token request failed: {}",
-                            redact_sensitive_url_values(e.to_string())
-                        ))
-                    })?;
-
-                let body: Value = resp
-                    .json()
-                    .await
-                    .map_err(|e| {
-                        BridgeError::App(format!(
-                            "WeChat token parse failed: {}",
-                            redact_sensitive_url_values(e.to_string())
-                        ))
-                    })?;
-
-                if body.get("errcode").and_then(|v| v.as_i64()).unwrap_or(0) != 0 {
-                    return Err(BridgeError::App(format!(
-                        "WeChat token returned an error: {}",
-                        redact_sensitive_url_values(body.to_string())
-                    )));
-                }
-                let token = body
-                    .get("access_token")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_owned())
-                    .ok_or_else(|| BridgeError::App("WeChat access_token is missing".to_owned()))?;
-                let ttl = body
-                    .get("expires_in")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(WECHAT_TOKEN_FALLBACK_SECS);
-                Ok((token, Duration::from_secs(ttl)))
+                fetch_vendor_token(
+                    ctx.http.get(&url),
+                    "WeChat token",
+                    VendorTokenCheck::JsonBody(wechat_errcode_ok),
+                    "/access_token",
+                    "/expires_in",
+                    WECHAT_TOKEN_FALLBACK,
+                )
             })
             .await
     }

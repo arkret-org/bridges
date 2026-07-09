@@ -194,18 +194,17 @@ async fn whatsapp_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
                 };
                 // Bounded replay/dedupe (BRG-SEC-001 / contract G-4): the Meta
                 // signature does not bind a timestamp, so a captured event would
-                // replay forever. Record only after submit/media is accepted so
-                // a transient failure can be recovered by platform redelivery.
+                // replay forever. Text submits use the shared dedupe helper;
+                // media keeps local handling because it resolves Graph media
+                // before Cokret submit.
                 let replay_key = format!("whatsapp:{message_id}");
-                if state.replay.contains(&replay_key).await {
-                    tracing::debug!(message_id = %message_id, "WhatsApp event replayed; skipping");
-                    continue;
-                }
 
                 if let Some(text) = webhook::str_at(message, "/text/body") {
-                    let outcome = webhook::submit(
+                    let outcome = webhook::submit_deduped(
                         state.ctx.clone(),
                         "whatsapp",
+                        &state.replay,
+                        replay_key,
                         InboundAppMessage {
                             app_channel: from.clone(),
                             app_user: from,
@@ -214,10 +213,12 @@ async fn whatsapp_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
                         },
                     )
                     .await;
-                    if outcome == webhook::SubmitOutcome::Accepted {
-                        state.replay.check_and_record(replay_key).await;
-                    }
                     retry |= outcome == webhook::SubmitOutcome::Retry;
+                    continue;
+                }
+
+                if state.replay.contains(&replay_key).await {
+                    tracing::debug!(message_id = %message_id, "WhatsApp event replayed; skipping");
                     continue;
                 }
 

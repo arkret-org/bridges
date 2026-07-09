@@ -8,18 +8,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use cokret_bridge_messaging::runtime::Result;
 use cokret_bridge_messaging::runtime::cache::TokenCache;
-use cokret_bridge_messaging::runtime::{BridgeError, Result};
 use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
-    SenderRenderStyle, send_json_expect_status, webhook,
+    SenderRenderStyle, VendorTokenCheck, fetch_vendor_token, send_json_expect_status, webhook,
 };
 use serde_json::{Value, json};
 
 /// Fallback validity (seconds) when the API omits `expireIn`.
-const DINGTALK_TOKEN_FALLBACK_SECS: u64 = 7000;
+const DINGTALK_TOKEN_FALLBACK: Duration = Duration::from_secs(7000);
 
 /// DingTalk bridge adapter.
 pub struct DingTalkApp {
@@ -57,31 +57,23 @@ impl DingTalkApp {
     /// AppKey/AppSecret.
     async fn access_token(&self, ctx: &Arc<MessageContext>) -> Result<String> {
         self.token_cache
-            .get_or_try_refresh(|| async {
+            .get_or_try_refresh(|| {
                 // DingTalk's new API for obtaining an access_token.
-                let value = send_json_expect_status(
-                    ctx.http
-                        .post("https://api.dingtalk.com/v1.0/oauth2/accessToken")
-                        .json(&json!({
-                            "appKey": self.app_key,
-                            "appSecret": self.app_secret,
-                        })),
+                let request = ctx
+                    .http
+                    .post("https://api.dingtalk.com/v1.0/oauth2/accessToken")
+                    .json(&json!({
+                        "appKey": self.app_key,
+                        "appSecret": self.app_secret,
+                    }));
+                fetch_vendor_token(
+                    request,
                     "DingTalk access_token",
+                    VendorTokenCheck::HttpStatus,
+                    "/accessToken",
+                    "/expireIn",
+                    DINGTALK_TOKEN_FALLBACK,
                 )
-                .await?;
-
-                let token = value
-                    .get("accessToken")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_owned())
-                    .ok_or_else(|| {
-                        BridgeError::App("DingTalk accessToken is missing".to_owned())
-                    })?;
-                let ttl = value
-                    .get("expireIn")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(DINGTALK_TOKEN_FALLBACK_SECS);
-                Ok((token, Duration::from_secs(ttl)))
             })
             .await
     }

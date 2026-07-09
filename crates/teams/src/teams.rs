@@ -10,18 +10,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use cokret_bridge_messaging::runtime::Result;
 use cokret_bridge_messaging::runtime::cache::TokenCache;
-use cokret_bridge_messaging::runtime::{BridgeError, Result};
 use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
-    SenderRenderStyle, send_json_expect_status, webhook,
+    SenderRenderStyle, VendorTokenCheck, fetch_vendor_token, send_json_expect_status, webhook,
 };
 use serde_json::{Value, json};
 
 /// Fallback validity (seconds) when AAD omits `expires_in`.
-const TEAMS_TOKEN_FALLBACK_SECS: u64 = 3600;
+const TEAMS_TOKEN_FALLBACK: Duration = Duration::from_secs(3600);
 
 /// Microsoft Teams bridge adapter.
 pub struct TeamsApp {
@@ -56,7 +56,7 @@ impl TeamsApp {
     /// nears the AAD-reported expiry, then re-fetched via client_credentials.
     async fn access_token(&self, ctx: &MessageContext) -> Result<String> {
         self.token_cache
-            .get_or_try_refresh(|| async {
+            .get_or_try_refresh(|| {
                 // The Bot Framework botframework.com multi-tenant login endpoint.
                 const TOKEN_URL: &str =
                     "https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token";
@@ -66,22 +66,14 @@ impl TeamsApp {
                     ("client_secret", self.app_password.as_str()),
                     ("scope", "https://api.botframework.com/.default"),
                 ];
-                let resp =
-                    send_json_expect_status(ctx.http.post(TOKEN_URL).form(&params), "Teams token")
-                        .await?;
-
-                let token = resp
-                    .get("access_token")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .ok_or_else(|| {
-                        BridgeError::App("Teams token response has no access_token".to_owned())
-                    })?;
-                let ttl = resp
-                    .get("expires_in")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(TEAMS_TOKEN_FALLBACK_SECS);
-                Ok((token, Duration::from_secs(ttl)))
+                fetch_vendor_token(
+                    ctx.http.post(TOKEN_URL).form(&params),
+                    "Teams token",
+                    VendorTokenCheck::HttpStatus,
+                    "/access_token",
+                    "/expires_in",
+                    TEAMS_TOKEN_FALLBACK,
+                )
             })
             .await
     }
@@ -221,18 +213,16 @@ async fn teams_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response
     };
     // Replay/dedupe on the stable activity id (contract G-4): the JWT does not
     // bind the body, so a captured request replays verbatim inside the token
-    // lifetime without this guard. Record only after the submit is accepted so
-    // a transient failure stays recoverable by platform redelivery.
+    // lifetime without this guard.
     let replay_key = format!("teams:{}", inbound.app_message_id);
-    if state.replay.contains(&replay_key).await {
-        tracing::debug!(activity_id = %inbound.app_message_id, "Teams activity replayed; skipping");
-        webhook::ok_json(res, json!({ "ok": true }));
-        return;
-    }
-    let outcome = webhook::submit(state.ctx.clone(), "teams", inbound).await;
-    if outcome == webhook::SubmitOutcome::Accepted {
-        state.replay.check_and_record(replay_key).await;
-    }
+    let outcome = webhook::submit_deduped(
+        state.ctx.clone(),
+        "teams",
+        &state.replay,
+        replay_key,
+        inbound,
+    )
+    .await;
     webhook::respond_submit(res, outcome);
 }
 

@@ -30,6 +30,7 @@
 //!   behavior.
 
 pub mod app;
+pub mod backoff;
 pub mod blocking;
 pub mod cache;
 mod cokret_edge;
@@ -51,6 +52,7 @@ use std::sync::Arc;
 pub use app::{AppletResolver, ResolvedActor, ResolvedRealm};
 #[cfg(feature = "runtime")]
 pub use app::{BridgeApp, BridgeContext};
+pub use backoff::{exponential_backoff_with_jitter, jittered_delay};
 pub use blocking::run_blocking;
 pub use cache::{PersistedToken, TokenCache, TokenStore};
 #[cfg(feature = "db")]

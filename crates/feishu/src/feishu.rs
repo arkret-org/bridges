@@ -8,13 +8,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use cokret_bridge_messaging::runtime::Result;
 use cokret_bridge_messaging::runtime::cache::TokenCache;
-use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
 use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
-    SenderRenderStyle, send_json_expect, webhook,
+    SenderRenderStyle, VendorTokenCheck, fetch_vendor_token, send_json_expect, webhook,
 };
 use serde_json::{Value, json};
 
@@ -25,7 +25,7 @@ fn feishu_code_ok(body: &Value) -> bool {
 
 const FEISHU_BASE: &str = "https://open.feishu.cn/open-apis";
 /// Fallback validity (seconds) when the API omits `expire`.
-const FEISHU_TOKEN_FALLBACK_SECS: u64 = 7000;
+const FEISHU_TOKEN_FALLBACK: Duration = Duration::from_secs(7000);
 /// Freshness window for the `X-Lark-Request-Timestamp` carried by each delivery.
 /// Deliveries whose timestamp is outside this skew (past or future) are rejected,
 /// bounding the replay window the source signature alone cannot close.
@@ -69,49 +69,20 @@ impl FeishuApp {
     /// vendor-reported expiry, then re-fetched via app_id/app_secret.
     async fn access_token(&self, ctx: &Arc<MessageContext>) -> Result<String> {
         self.token_cache
-            .get_or_try_refresh(|| async {
+            .get_or_try_refresh(|| {
                 let url = format!("{FEISHU_BASE}/auth/v3/tenant_access_token/internal");
-                let resp = ctx
-                    .http
-                    .post(&url)
-                    .json(&json!({
-                        "app_id": self.app_id,
-                        "app_secret": self.app_secret,
-                    }))
-                    .send()
-                    .await
-                    .map_err(|e| {
-                        BridgeError::App(format!(
-                            "Feishu token request failed: {}",
-                            redact_sensitive_url_values(e.to_string())
-                        ))
-                    })?;
-
-                let body: Value = resp.json().await.map_err(|e| {
-                    BridgeError::App(format!(
-                        "Feishu token parse failed: {}",
-                        redact_sensitive_url_values(e.to_string())
-                    ))
-                })?;
-
-                if body.get("code").and_then(|v| v.as_i64()) != Some(0) {
-                    return Err(BridgeError::App(format!(
-                        "Feishu token returned an error: {}",
-                        redact_sensitive_url_values(body.to_string())
-                    )));
-                }
-                let token = body
-                    .get("tenant_access_token")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_owned())
-                    .ok_or_else(|| {
-                        BridgeError::App("Feishu tenant_access_token is missing".to_owned())
-                    })?;
-                let ttl = body
-                    .get("expire")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(FEISHU_TOKEN_FALLBACK_SECS);
-                Ok((token, Duration::from_secs(ttl)))
+                let request = ctx.http.post(&url).json(&json!({
+                    "app_id": self.app_id,
+                    "app_secret": self.app_secret,
+                }));
+                fetch_vendor_token(
+                    request,
+                    "Feishu token",
+                    VendorTokenCheck::JsonBody(feishu_code_ok),
+                    "/tenant_access_token",
+                    "/expire",
+                    FEISHU_TOKEN_FALLBACK,
+                )
             })
             .await
     }

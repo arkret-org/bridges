@@ -13,7 +13,7 @@ use cokret_bridge_messaging::salvo::prelude::*;
 use cokret_bridge_messaging::salvo::{self, affix_state};
 use cokret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
-    SenderRenderStyle, send_json_expect_status, webhook,
+    SenderRenderStyle, VendorTokenCheck, fetch_vendor_token, send_json_expect_status, webhook,
 };
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,7 @@ const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const CHAT_BOT_SCOPE: &str = "https://www.googleapis.com/auth/chat.bot";
 /// Lifetime (seconds) of the self-signed JWT assertion (Google caps this at 1h).
 const ASSERTION_TTL_SECS: u64 = 3600;
+const ASSERTION_TTL: Duration = Duration::from_secs(ASSERTION_TTL_SECS);
 
 /// A Google service-account JSON key (the relevant subset) used to mint
 /// JWT-bearer assertions for the OAuth2 token endpoint.
@@ -99,10 +100,7 @@ impl GoogleChatApp {
             GoogleChatAuth::StaticToken(token) => Ok(token.clone()),
             GoogleChatAuth::ServiceAccount(key) => {
                 self.token_cache
-                    .get_or_try_refresh(|| async {
-                        let (token, ttl) = fetch_service_account_token(ctx, key).await?;
-                        Ok::<_, BridgeError>((token, ttl))
-                    })
+                    .get_or_try_refresh(|| fetch_service_account_token(ctx, key))
                     .await
             }
         }
@@ -129,24 +127,18 @@ async fn fetch_service_account_token(
     let assertion = jsonwebtoken::encode(&Header::new(Algorithm::RS256), &claims, &encoding_key)
         .map_err(|e| BridgeError::App(format!("Google JWT assertion signing failed: {e}")))?;
 
-    let body = send_json_expect_status(
+    fetch_vendor_token(
         ctx.http.post(&key.token_uri).form(&[
             ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
             ("assertion", &assertion),
         ]),
         "Google token exchange",
+        VendorTokenCheck::HttpStatus,
+        "/access_token",
+        "/expires_in",
+        ASSERTION_TTL,
     )
-    .await?;
-    let token = body
-        .get("access_token")
-        .and_then(Value::as_str)
-        .ok_or_else(|| BridgeError::App("Google token response missing access_token".to_owned()))?
-        .to_owned();
-    let ttl = body
-        .get("expires_in")
-        .and_then(Value::as_u64)
-        .unwrap_or(ASSERTION_TTL_SECS);
-    Ok((token, Duration::from_secs(ttl)))
+    .await
 }
 
 #[async_trait]
@@ -256,18 +248,13 @@ async fn googlechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Res
     };
     // Replay/dedupe on the stable message resource name (contract G-4): the
     // JWT does not bind the body, so a captured request replays verbatim
-    // inside the token lifetime without this guard. Record only after the
-    // submit is accepted so a transient failure stays recoverable by platform
-    // redelivery.
+    // inside the token lifetime without this guard.
     let replay_key = format!("googlechat:{message_id}");
-    if state.replay.contains(&replay_key).await {
-        tracing::debug!(message_name = %message_id, "Google Chat message replayed; skipping");
-        webhook::ok_json(res, json!({ "ok": true }));
-        return;
-    }
-    let outcome = webhook::submit(
+    let outcome = webhook::submit_deduped(
         state.ctx.clone(),
         "googlechat",
+        &state.replay,
+        replay_key,
         InboundAppMessage {
             app_channel: channel,
             app_user: user,
@@ -276,8 +263,5 @@ async fn googlechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Res
         },
     )
     .await;
-    if outcome == webhook::SubmitOutcome::Accepted {
-        state.replay.check_and_record(replay_key).await;
-    }
     webhook::respond_submit(res, outcome);
 }
