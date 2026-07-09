@@ -10,8 +10,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cokret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
 use cokret_bridge_messaging::{
-    AppMessageRef, ExternalMediaRequest, InboundAppMessage, MessageBridge, MessageContext,
-    OutboundAppMessage, SenderRenderStyle,
+    AppMessageRef, ExternalMediaRequest, InboundAppMessage, MessageBridge,
+    MessageBridgeCapabilities, MessageContext, OutboundAppMessage, SenderRenderStyle,
 };
 use teloxide::prelude::*;
 use teloxide::types::{ChatId, FileId, InputFile};
@@ -36,6 +36,10 @@ impl TelegramApp {
 impl MessageBridge for TelegramApp {
     fn name(&self) -> &str {
         "telegram"
+    }
+
+    fn capabilities(&self) -> MessageBridgeCapabilities {
+        MessageBridgeCapabilities::native_outbound_attachments()
     }
 
     async fn run(self: Arc<Self>, ctx: Arc<MessageContext>) -> Result<()> {

@@ -90,6 +90,36 @@ pub enum AppDeleteOutcome {
     },
 }
 
+/// Static capabilities declared by an app adapter and enforced by the shared
+/// message bridge driver.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MessageBridgeCapabilities {
+    /// The adapter sends Cokret media attachments as native app attachments.
+    /// When false, the shared outbound guard downgrades attachments into a text
+    /// notice before the adapter sees the message.
+    pub outbound_native_attachments: bool,
+}
+
+impl MessageBridgeCapabilities {
+    pub const fn text_only() -> Self {
+        Self {
+            outbound_native_attachments: false,
+        }
+    }
+
+    pub const fn native_outbound_attachments() -> Self {
+        Self {
+            outbound_native_attachments: true,
+        }
+    }
+}
+
+impl Default for MessageBridgeCapabilities {
+    fn default() -> Self {
+        Self::text_only()
+    }
+}
+
 /// An outbound message from Cokret to an external app.
 #[derive(Clone, Debug)]
 pub struct OutboundAppMessage {
@@ -127,6 +157,30 @@ impl OutboundAppMessage {
                 )
             }
         }
+    }
+
+    pub(crate) fn downgrade_attachment_to_text(&mut self) -> Option<AttachmentDowngrade> {
+        let attachment = self.attachment.take()?;
+        let notice = attachment_downgrade_notice(&attachment);
+        if self.body.trim().is_empty() {
+            if attachment.caption.trim().is_empty() {
+                self.body = notice.clone();
+            } else {
+                self.body = attachment.caption.clone();
+                self.body.push_str("\n\n");
+                self.body.push_str(&notice);
+            }
+        } else {
+            self.body.push_str("\n\n");
+            self.body.push_str(&notice);
+        }
+        Some(AttachmentDowngrade {
+            blob_ref: attachment.blob_ref,
+            filename: attachment.filename,
+            media_type: attachment.media_type,
+            size: attachment.size,
+            notice,
+        })
     }
 }
 
@@ -181,6 +235,44 @@ pub struct Attachment {
     pub caption: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AttachmentDowngrade {
+    pub(crate) blob_ref: String,
+    pub(crate) filename: Option<String>,
+    pub(crate) media_type: Option<String>,
+    pub(crate) size: Option<u64>,
+    pub(crate) notice: String,
+}
+
+impl AttachmentDowngrade {
+    pub(crate) fn audit_message(&self) -> String {
+        format!("outbound attachment downgraded to text: {}", self.notice)
+    }
+}
+
+fn attachment_downgrade_notice(attachment: &Attachment) -> String {
+    let filename = attachment
+        .filename
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("unnamed attachment");
+    let mut details = vec![format!("filename: {filename}")];
+    if let Some(media_type) = attachment
+        .media_type
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        details.push(format!("type: {media_type}"));
+    }
+    if let Some(size) = attachment.size {
+        details.push(format!("size: {size} bytes"));
+    }
+    format!(
+        "[attachment not sent: {}; native attachment delivery is not supported by this bridge]",
+        details.join(", ")
+    )
+}
+
 pub struct DownloadedMedia {
     pub bytes: Vec<u8>,
     pub content_type: Option<String>,
@@ -217,5 +309,73 @@ mod tests {
             msg.rendered_body(SenderRenderStyle::MarkdownBold),
             "**admin\\*\\*: fake\n\\*\\*bob**: hello"
         );
+    }
+
+    #[test]
+    fn bridge_capabilities_default_to_text_only() {
+        assert_eq!(
+            MessageBridgeCapabilities::default(),
+            MessageBridgeCapabilities::text_only()
+        );
+        assert!(!MessageBridgeCapabilities::default().outbound_native_attachments);
+        assert!(
+            MessageBridgeCapabilities::native_outbound_attachments().outbound_native_attachments
+        );
+    }
+
+    #[test]
+    fn attachment_downgrade_removes_attachment_and_appends_notice() {
+        let mut msg = OutboundAppMessage {
+            app_channel: "c".to_owned(),
+            sender_display: "alice".to_owned(),
+            body: "see this".to_owned(),
+            attachment: Some(Attachment {
+                blob_ref: "ck:blob:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_owned(),
+                media_type: Some("image/png".to_owned()),
+                filename: Some("shot.png".to_owned()),
+                size: Some(2048),
+                caption: "caption from media".to_owned(),
+            }),
+        };
+
+        let downgrade = msg
+            .downgrade_attachment_to_text()
+            .expect("attachment was downgraded");
+
+        assert!(msg.attachment.is_none());
+        assert!(msg.body.contains("see this"));
+        assert!(msg.body.contains("attachment not sent"));
+        assert!(msg.body.contains("shot.png"));
+        assert!(msg.body.contains("image/png"));
+        assert!(msg.body.contains("2048 bytes"));
+        assert_eq!(downgrade.filename.as_deref(), Some("shot.png"));
+        assert!(downgrade.audit_message().contains("downgraded to text"));
+    }
+
+    #[test]
+    fn attachment_downgrade_uses_caption_when_body_is_empty() {
+        let mut msg = OutboundAppMessage {
+            app_channel: "c".to_owned(),
+            sender_display: "alice".to_owned(),
+            body: String::new(),
+            attachment: Some(Attachment {
+                blob_ref: "ck:blob:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    .to_owned(),
+                media_type: None,
+                filename: None,
+                size: None,
+                caption: "media caption".to_owned(),
+            }),
+        };
+
+        msg.downgrade_attachment_to_text()
+            .expect("attachment was downgraded");
+
+        assert!(
+            msg.body
+                .starts_with("media caption\n\n[attachment not sent")
+        );
+        assert!(msg.body.contains("unnamed attachment"));
     }
 }

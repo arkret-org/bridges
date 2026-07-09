@@ -59,7 +59,7 @@ pub use token::{VendorTokenCheck, fetch_vendor_token};
 pub use types::{
     AppDeleteOutcome, AppDeleteReason, AppMessageRef, Attachment, DEFAULT_GRAPH_API_VERSION,
     DEFAULT_MEDIA_MIME, DownloadedMedia, InboundAppDelete, InboundAppMessage,
-    MAX_EXTERNAL_MEDIA_BYTES, OutboundAppMessage, SenderRenderStyle,
+    MAX_EXTERNAL_MEDIA_BYTES, MessageBridgeCapabilities, OutboundAppMessage, SenderRenderStyle,
 };
 
 // Not a `ck.`-prefixed id: the `ck.` namespace is reserved for spec-registered
@@ -948,6 +948,13 @@ pub async fn send_json_expect_status(
 pub trait MessageBridge: Send + Sync + 'static {
     fn name(&self) -> &str;
 
+    /// Static adapter capabilities. The default is intentionally conservative:
+    /// text-only bridges get a shared outbound attachment downgrade instead of
+    /// receiving an attachment they would silently ignore.
+    fn capabilities(&self) -> MessageBridgeCapabilities {
+        MessageBridgeCapabilities::default()
+    }
+
     /// The app-side receive loop. Pure webhook bridges (whose inbound path is the
     /// salvo `webhook_router`) can rely on the default keep-alive loop and only
     /// need to override `webhook_router`. Gateway / long-poll bridges (Discord,
@@ -1014,6 +1021,36 @@ pub trait MessageBridge: Send + Sync + 'static {
 struct MessageAdapter<M: MessageBridge> {
     user: Arc<M>,
     ctx: Arc<MessageContext>,
+}
+
+impl<M: MessageBridge> MessageAdapter<M> {
+    async fn apply_outbound_capability_guard(
+        &self,
+        realm_id: &str,
+        event_id: &str,
+        out: &mut OutboundAppMessage,
+    ) {
+        if self.user.capabilities().outbound_native_attachments {
+            return;
+        }
+        let Some(downgrade) = out.downgrade_attachment_to_text() else {
+            return;
+        };
+        tracing::warn!(
+            bridge = self.user.name(),
+            realm = %realm_id,
+            app_channel = %out.app_channel.as_str(),
+            attachment_blob_ref = %downgrade.blob_ref.as_str(),
+            attachment_filename = downgrade.filename.as_deref().unwrap_or("<none>"),
+            attachment_media_type = downgrade.media_type.as_deref().unwrap_or("<unknown>"),
+            attachment_size_bytes = ?downgrade.size,
+            "outbound attachment downgraded to text because bridge lacks native attachment capability"
+        );
+        let error = BridgeError::App(downgrade.audit_message());
+        self.ctx
+            .report_outbound_bridge_error(realm_id, &out.app_channel, event_id, &error, false)
+            .await;
+    }
 }
 
 async fn sender_display_for_event(
@@ -1141,12 +1178,14 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
             event.executed_by.as_ref().map(ToString::to_string),
         )
         .await?;
-        let out = OutboundAppMessage {
+        let mut out = OutboundAppMessage {
             app_channel: channel.clone(),
             sender_display,
             body,
             attachment,
         };
+        self.apply_outbound_capability_guard(&realm_id, &event_id, &mut out)
+            .await;
         let app_ref = match self.user.send_to_app(self.ctx.clone(), out).await {
             Ok(app_ref) => {
                 record_bridge_message(

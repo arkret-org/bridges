@@ -10,8 +10,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cokret_bridge_messaging::runtime::{BridgeError, Result};
 use cokret_bridge_messaging::{
-    AppMessageRef, ExternalMediaRequest, InboundAppMessage, MessageBridge, MessageContext,
-    OutboundAppMessage, SenderRenderStyle,
+    AppMessageRef, ExternalMediaRequest, InboundAppMessage, MessageBridge,
+    MessageBridgeCapabilities, MessageContext, OutboundAppMessage, SenderRenderStyle,
 };
 use serenity::all::{
     ChannelId, CreateAttachment, CreateMessage, GatewayIntents, Http, Message, MessageId,
@@ -36,6 +36,10 @@ impl DiscordApp {
 impl MessageBridge for DiscordApp {
     fn name(&self) -> &str {
         "discord"
+    }
+
+    fn capabilities(&self) -> MessageBridgeCapabilities {
+        MessageBridgeCapabilities::native_outbound_attachments()
     }
 
     async fn run(self: Arc<Self>, ctx: Arc<MessageContext>) -> Result<()> {
