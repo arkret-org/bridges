@@ -573,6 +573,8 @@ impl JwtVerifier {
         let mut validation = Validation::new(Algorithm::RS256);
         validation.set_issuer(&[self.config.issuer.as_str()]);
         validation.set_audience(&[self.config.audience.as_str()]);
+        validation.set_required_spec_claims(&["exp", "iss", "aud"]);
+        validation.validate_nbf = true;
         validation.leeway = self.policy.clock_skew.as_secs();
         let data = decode::<Value>(token, &key, &validation)
             .map_err(|err| JwtDecodeFailure::Invalid(format!("JWT verification failed: {err}")))?;
@@ -699,7 +701,7 @@ pub fn first_string_at(value: &Value, pointers: &[&str]) -> Option<String> {
 }
 
 pub fn non_empty_string_at(value: &Value, pointer: &str) -> Option<String> {
-    string_at(value, pointer).and_then(|s| if s.trim().is_empty() { None } else { Some(s) })
+    string_at(value, pointer).filter(|s| !s.trim().is_empty())
 }
 
 pub fn first_non_empty_string_at(value: &Value, pointers: &[&str]) -> Option<String> {

@@ -11,8 +11,8 @@ use arkret_bridge_messaging::runtime::Result;
 use arkret_bridge_messaging::salvo::prelude::*;
 use arkret_bridge_messaging::salvo::{self, affix_state};
 use arkret_bridge_messaging::{
-    AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
-    SenderRenderStyle, send_json_expect_status, webhook,
+    AppMessageRef, ExternalMediaRequest, InboundAppMessage, MessageBridge, MessageContext,
+    OutboundAppMessage, SenderRenderStyle, send_json_expect_status, webhook,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -172,19 +172,34 @@ async fn messenger_delivery(req: &mut Request, depot: &mut Depot, res: &mut Resp
         .await;
         retry |= outcome == webhook::SubmitOutcome::Retry;
     }
-    for (channel, user, message_id, media_kind) in messenger_unsupported_media(&body) {
-        let replay_key = format!("messenger:media:{message_id}");
-        if state.replay.check_and_record(replay_key).await {
-            state
+    for media in messenger_media(&body) {
+        let replay_key = format!("messenger:media:{}", media.message_id);
+        if state.replay.check_and_record(replay_key.clone()).await {
+            let inbound = InboundAppMessage {
+                app_channel: media.channel,
+                app_user: media.user,
+                app_message_id: media.message_id.clone(),
+                body: String::new(),
+            };
+            if let Err(error) = state
                 .ctx
-                .report_unsupported_inbound_media(
+                .forward_external_media(
                     "messenger",
-                    channel,
-                    user,
-                    message_id,
-                    media_kind,
+                    inbound,
+                    ExternalMediaRequest {
+                        url: &media.url,
+                        bearer_token: None,
+                        allowed_hosts: &["fbcdn.net", "fbsbx.com"],
+                        mime_hint: media.mime,
+                        filename: media.filename,
+                    },
                 )
-                .await;
+                .await
+                && error.is_retriable()
+            {
+                retry = true;
+                state.replay.forget(replay_key).await;
+            }
         }
     }
     if retry {
@@ -234,7 +249,17 @@ fn messenger_inbound_messages(body: &Value) -> Vec<InboundAppMessage> {
     out
 }
 
-fn messenger_unsupported_media(body: &Value) -> Vec<(String, String, String, &'static str)> {
+#[derive(Debug, Eq, PartialEq)]
+struct MessengerMedia {
+    channel: String,
+    user: String,
+    message_id: String,
+    url: String,
+    mime: Option<String>,
+    filename: Option<String>,
+}
+
+fn messenger_media(body: &Value) -> Vec<MessengerMedia> {
     let mut out = Vec::new();
     for entry in body
         .get("entry")
@@ -255,22 +280,43 @@ fn messenger_unsupported_media(body: &Value) -> Vec<(String, String, String, &'s
             {
                 continue;
             }
-            let has_attachments = event
+            let Some(attachments) = event
                 .pointer("/message/attachments")
                 .and_then(Value::as_array)
-                .is_some_and(|attachments| !attachments.is_empty());
-            if !has_attachments {
+            else {
                 continue;
-            }
+            };
             let Some(message_id) = webhook::non_empty_string_at(event, "/message/mid") else {
                 tracing::warn!("Messenger media event missing message.mid; skipping audit");
                 continue;
             };
             let user = webhook::string_at(event, "/sender/id").unwrap_or_default();
-            out.push((user.clone(), user, message_id, "attachments"));
+            for (index, attachment) in attachments.iter().enumerate() {
+                let Some(url) = webhook::non_empty_string_at(attachment, "/payload/url") else {
+                    continue;
+                };
+                let kind = webhook::string_at(attachment, "/type").unwrap_or_default();
+                out.push(MessengerMedia {
+                    channel: user.clone(),
+                    user: user.clone(),
+                    message_id: format!("{message_id}:{index}"),
+                    url,
+                    mime: messenger_attachment_mime(&kind),
+                    filename: None,
+                });
+            }
         }
     }
     out
+}
+
+fn messenger_attachment_mime(kind: &str) -> Option<String> {
+    match kind {
+        "image" => Some("image/jpeg".to_owned()),
+        "audio" => Some("audio/mpeg".to_owned()),
+        "video" => Some("video/mp4".to_owned()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -323,19 +369,29 @@ mod tests {
     }
 
     #[test]
-    fn messenger_unsupported_media_extracts_attachment_events() {
+    fn messenger_media_extracts_downloadable_attachment_events() {
         let body = json!({
             "entry": [{
                 "messaging": [{
                     "sender": {"id": "PSID1"},
-                    "message": {"mid": "m_1", "attachments": [{"type": "image"}]}
+                    "message": {"mid": "m_1", "attachments": [{
+                        "type": "image",
+                        "payload": {"url": "https://lookaside.fbsbx.com/image.jpg"}
+                    }]}
                 }]
             }]
         });
-        let media = messenger_unsupported_media(&body);
+        let media = messenger_media(&body);
         assert_eq!(
             media,
-            vec![("PSID1".into(), "PSID1".into(), "m_1".into(), "attachments")]
+            vec![MessengerMedia {
+                channel: "PSID1".into(),
+                user: "PSID1".into(),
+                message_id: "m_1:0".into(),
+                url: "https://lookaside.fbsbx.com/image.jpg".into(),
+                mime: Some("image/jpeg".into()),
+                filename: None,
+            }]
         );
     }
 }

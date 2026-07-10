@@ -14,6 +14,7 @@
 mod calendar;
 mod content;
 mod ghost;
+mod media;
 mod models;
 mod schema;
 mod store;
@@ -24,7 +25,7 @@ pub mod webhook;
 use std::sync::Arc;
 use std::time::Duration;
 
-use arkret::models::EphemeralEnvelope;
+pub use arkret::models::EphemeralEnvelope;
 use arkret::{
     AppletBridgeErrorBuilder, AppletBridgeErrorVisibility, ContentBlock, Did, Event, EventId,
     MessageRedactPayload, RealmId,
@@ -44,12 +45,14 @@ pub use content::{
     extract_attachment, extract_plain_body, extract_strand_id, media_content_block,
     text_content_block,
 };
-use futures::StreamExt;
 use ghost::{
     bridge_error_class, bridge_error_code, bridge_protocol, bridge_tenant, create_portal_strand,
     external_id_object_ref_digest, external_ref_for_delete, external_ref_for_message,
-    find_existing_portal_strand, host_allowed, message_mapping_channel_key, normalized_external_id,
+    find_existing_portal_strand, message_mapping_channel_key, normalized_external_id,
     portal_location_ref, provision_ghost_actor, require_nonempty_ref,
+};
+pub use media::{
+    HttpInboundMediaFetcher, InboundMediaFetchPolicy, InboundMediaFetcher, InboundMediaReference,
 };
 pub use runtime::salvo;
 use serde_json::{Value, json};
@@ -351,71 +354,17 @@ impl MessageContext {
         bearer_token: Option<&str>,
         allowed_hosts: &[&str],
     ) -> Result<DownloadedMedia> {
-        let parsed = reqwest::Url::parse(url)
-            .map_err(|err| BridgeError::App(format!("media URL parse failed: {err}")))?;
-        if parsed.scheme() != "https" {
-            return Err(BridgeError::App(
-                "media download URL must use https".to_owned(),
-            ));
-        }
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| BridgeError::App("media download URL has no host".to_owned()))?;
-        if !host_allowed(host, allowed_hosts) {
-            return Err(BridgeError::App(format!(
-                "media download host {host} is not allow-listed"
-            )));
-        }
-
-        let mut request = self.http.get(parsed);
-        if let Some(token) = bearer_token {
-            request = request.bearer_auth(token);
-        }
-        let response = request.send().await.map_err(|err| {
-            BridgeError::App(format!(
-                "media download failed: {}",
-                redact_sensitive_url_values(err.to_string())
-            ))
-        })?;
-        let response = response.error_for_status().map_err(|err| {
-            BridgeError::App(format!(
-                "media download status failed: {}",
-                redact_sensitive_url_values(err.to_string())
-            ))
-        })?;
-        if let Some(size) = response.content_length()
-            && size > MAX_EXTERNAL_MEDIA_BYTES as u64
-        {
-            return Err(BridgeError::App(format!(
-                "media download is {size} bytes; limit is {MAX_EXTERNAL_MEDIA_BYTES} bytes"
-            )));
-        }
-        let content_type = response
-            .headers()
-            .get("content-type")
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-
-        let mut bytes = Vec::new();
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|err| {
-                BridgeError::App(format!(
-                    "media download read failed: {}",
-                    redact_sensitive_url_values(err.to_string())
-                ))
-            })?;
-            if bytes.len() + chunk.len() > MAX_EXTERNAL_MEDIA_BYTES {
-                return Err(BridgeError::App(format!(
-                    "media download exceeded {MAX_EXTERNAL_MEDIA_BYTES} bytes"
-                )));
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        Ok(DownloadedMedia {
-            bytes,
-            content_type,
-        })
+        let reference = InboundMediaReference {
+            url: url.to_owned(),
+            bearer_token: bearer_token.map(str::to_owned),
+            allowed_hosts: allowed_hosts
+                .iter()
+                .map(|host| (*host).to_owned())
+                .collect(),
+        };
+        HttpInboundMediaFetcher::new(self.http.clone())
+            .fetch(&reference, InboundMediaFetchPolicy::default())
+            .await
     }
 
     /// Forward one piece of inbound external media into arkret with the shared
@@ -523,6 +472,17 @@ impl MessageContext {
                 }
             })
             .await
+    }
+
+    /// Resolve the external channel mapped to a portal Realm. Ephemeral signals
+    /// use this reverse mapping without creating durable message history.
+    pub async fn app_channel_for_realm(&self, realm_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .store
+            .clone()
+            .channel_for_realm_async(realm_id.to_owned())
+            .await?
+            .map(|mapping| mapping.app_channel_id))
     }
 
     /// The metrics `bridge` label for this context (the configured bridge id).
@@ -999,32 +959,31 @@ pub trait MessageBridge: Send + Sync + 'static {
     /// Forward a Arkret message redaction as an app-side deletion. The driver
     /// (`on_arkret_event`) already resolves the target `app_message_id` and
     /// invokes this with the channel/message pair most app delete APIs require;
-    /// the default is a no-op.
-    ///
-    /// Status (BRG-HYG-003): **no adapter overrides this yet** — outbound delete
-    /// forwarding is dark on every bridge; tracked in `_bridges_todos.md`.
+    /// the default is a structured rejection so an unsupported adapter can
+    /// never acknowledge a deletion it did not perform.
     async fn redact_in_app(
         &self,
         _ctx: Arc<MessageContext>,
         _app_channel: &str,
         _app_message_id: &str,
     ) -> Result<()> {
-        Ok(())
+        Err(BridgeError::App(
+            "outbound deletion is not supported by this adapter".to_owned(),
+        ))
     }
 
     /// Handle an ephemeral signal (typing/presence/receipts/call-signal) pushed
     /// alongside events, as the SDK [`EphemeralEnvelope`] wire type; defaults to
-    /// a no-op.
-    ///
-    /// Status (BRG-HYG-003): **no adapter overrides this yet** — ephemeral
-    /// forwarding is dark on every bridge; override per platform as needed.
-    /// Tracked in `_bridges_todos.md`.
+    /// a structured rejection. Ephemeral rejection is logged by the consumer
+    /// and never converted into a durable Event.
     async fn on_ephemeral(
         &self,
         _ctx: Arc<MessageContext>,
         _ephemeral: EphemeralEnvelope,
     ) -> Result<()> {
-        Ok(())
+        Err(BridgeError::App(
+            "ephemeral forwarding is not supported by this adapter".to_owned(),
+        ))
     }
 
     /// Whether this bridge's inbound surface is the salvo `webhook_router`. When

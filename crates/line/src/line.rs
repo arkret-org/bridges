@@ -10,8 +10,9 @@ use arkret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url
 use arkret_bridge_messaging::salvo::prelude::*;
 use arkret_bridge_messaging::salvo::{self, affix_state};
 use arkret_bridge_messaging::{
-    AppMessageRef, ExternalMediaRequest, InboundAppMessage, MessageBridge, MessageContext,
-    OutboundAppMessage, SenderRenderStyle, webhook,
+    AppDeleteReason, AppMessageRef, EphemeralEnvelope, ExternalMediaRequest, InboundAppDelete,
+    InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage, SenderRenderStyle,
+    webhook,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -37,6 +38,53 @@ impl LineApp {
 impl MessageBridge for LineApp {
     fn name(&self) -> &str {
         "line"
+    }
+
+    async fn on_ephemeral(
+        &self,
+        ctx: Arc<MessageContext>,
+        ephemeral: EphemeralEnvelope,
+    ) -> Result<()> {
+        if ephemeral.kind != "ak.typing" {
+            return Err(BridgeError::App(format!(
+                "LINE does not support ephemeral kind {}",
+                ephemeral.kind
+            )));
+        }
+        if ephemeral.payload.get("typing").and_then(Value::as_bool) != Some(true) {
+            return Ok(());
+        }
+        let channel = ctx
+            .app_channel_for_realm(ephemeral.realm_id.as_str())
+            .await?
+            .ok_or_else(|| {
+                BridgeError::App("LINE typing Realm has no external channel mapping".to_owned())
+            })?;
+        let ttl_ms = ephemeral
+            .payload
+            .get("ttl_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(5_000)
+            .min(15_000);
+        let loading_seconds = ttl_ms.div_ceil(1_000).clamp(5, 60);
+        let response = ctx
+            .http
+            .post("https://api.line.me/v2/bot/chat/loading/start")
+            .bearer_auth(&self.channel_access_token)
+            .json(&json!({
+                "chatId": channel,
+                "loadingSeconds": loading_seconds,
+            }))
+            .send()
+            .await
+            .map_err(|error| BridgeError::App(format!("LINE typing request failed: {error}")))?;
+        if !response.status().is_success() {
+            return Err(BridgeError::App(format!(
+                "LINE typing returned status {}",
+                response.status()
+            )));
+        }
+        Ok(())
     }
 
     async fn send_to_app(
@@ -171,6 +219,25 @@ async fn line_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response)
         .into_iter()
         .flatten()
     {
+        if let Some(delete) = line_unsend(event) {
+            let replay_key = format!(
+                "line:unsend:{}",
+                delete
+                    .source_event_id
+                    .as_deref()
+                    .unwrap_or(&delete.app_message_id)
+            );
+            if !state.replay.check_and_record(replay_key.clone()).await {
+                continue;
+            }
+            if let Err(error) = state.ctx.submit_app_delete(delete).await
+                && error.is_retriable()
+            {
+                state.replay.forget(replay_key).await;
+                retry = true;
+            }
+            continue;
+        }
         if webhook::str_at(event, "/type") != Some("message") {
             continue;
         }
@@ -249,6 +316,24 @@ async fn line_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response)
     }
 }
 
+fn line_unsend(event: &Value) -> Option<InboundAppDelete> {
+    if webhook::str_at(event, "/type") != Some("unsend") {
+        return None;
+    }
+    let channel = webhook::first_non_empty_string_at(
+        event,
+        &["/source/groupId", "/source/roomId", "/source/userId"],
+    )?;
+    let user = webhook::non_empty_string_at(event, "/source/userId")?;
+    Some(InboundAppDelete {
+        app_channel: channel,
+        app_user: user,
+        app_message_id: webhook::non_empty_string_at(event, "/unsend/messageId")?,
+        source_event_id: webhook::non_empty_string_at(event, "/webhookEventId"),
+        reason: AppDeleteReason::AppRecall,
+    })
+}
+
 /// Download LINE message content (image/video/audio/file) from the content
 /// endpoint via the shared [`MessageContext::forward_external_media`] skeleton
 /// (download → blob upload → media message + failure audit); only the LINE
@@ -306,5 +391,21 @@ mod tests {
         assert!(verify_line_signature("topsecret", payload, signature));
         assert!(!verify_line_signature("topsecret", payload, "invalid"));
         assert!(!verify_line_signature("wrong", payload, signature));
+    }
+
+    #[test]
+    fn line_unsend_maps_to_explicit_app_recall() {
+        let delete = line_unsend(&json!({
+            "type": "unsend",
+            "webhookEventId": "evt-1",
+            "source": {"type": "group", "groupId": "group-1", "userId": "user-1"},
+            "unsend": {"messageId": "message-1"}
+        }))
+        .expect("LINE unsend");
+        assert_eq!(delete.app_channel, "group-1");
+        assert_eq!(delete.app_user, "user-1");
+        assert_eq!(delete.app_message_id, "message-1");
+        assert_eq!(delete.source_event_id.as_deref(), Some("evt-1"));
+        assert_eq!(delete.reason, AppDeleteReason::AppRecall);
     }
 }

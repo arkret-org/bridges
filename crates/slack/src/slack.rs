@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use arkret_bridge_messaging::runtime::{BridgeError, Result, jittered_delay};
 use arkret_bridge_messaging::{
-    AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
-    SenderRenderStyle, send_json_expect,
+    AppMessageRef, ExternalMediaRequest, InboundAppMessage, MessageBridge, MessageContext,
+    OutboundAppMessage, SenderRenderStyle, send_json_expect,
 };
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
@@ -70,13 +70,38 @@ impl SlackApp {
     /// Handle a single socket mode envelope. Returns whether the envelope may be
     /// acked back to Slack. Retriable submit failures deliberately withhold the
     /// ack so Slack redelivers the envelope instead of silently dropping it.
-    async fn handle_envelope(ctx: &Arc<MessageContext>, envelope: &Value) -> bool {
+    async fn handle_envelope(&self, ctx: &Arc<MessageContext>, envelope: &Value) -> bool {
         // Only care about the events_api type whose inner event is a message.
         let event = envelope.pointer("/payload/event");
         let Some(event) = event else { return true };
-        if let Some((channel, user, message_id, media_kind)) = slack_unsupported_media(event) {
-            ctx.report_unsupported_inbound_media("slack", channel, user, message_id, media_kind)
-                .await;
+        let media = slack_media(event);
+        if !media.is_empty() {
+            let mut accepted = true;
+            for item in media {
+                let inbound = InboundAppMessage {
+                    app_channel: item.channel,
+                    app_user: item.user,
+                    app_message_id: item.id,
+                    body: item.caption,
+                };
+                if let Err(error) = ctx
+                    .forward_external_media(
+                        "slack",
+                        inbound,
+                        ExternalMediaRequest {
+                            url: &item.url,
+                            bearer_token: Some(&self.bot_token),
+                            allowed_hosts: &["files.slack.com"],
+                            mime_hint: item.mime,
+                            filename: item.filename,
+                        },
+                    )
+                    .await
+                {
+                    accepted &= !error.is_retriable();
+                }
+            }
+            return accepted;
         }
         let Some(inbound) = slack_inbound_message(event) else {
             return true;
@@ -117,31 +142,55 @@ fn slack_inbound_message(event: &Value) -> Option<InboundAppMessage> {
     })
 }
 
-fn slack_unsupported_media(event: &Value) -> Option<(String, String, String, &'static str)> {
+struct SlackMedia {
+    channel: String,
+    user: String,
+    id: String,
+    caption: String,
+    url: String,
+    mime: Option<String>,
+    filename: Option<String>,
+}
+
+fn slack_media(event: &Value) -> Vec<SlackMedia> {
     if event.get("type").and_then(Value::as_str) != Some("message") {
-        return None;
+        return Vec::new();
     }
     // Ignore the bot itself and subtype messages (edits, joins, etc.) to avoid loops.
     if event.get("bot_id").is_some() || event.get("subtype").is_some() {
-        return None;
+        return Vec::new();
     }
-    let has_files = event
-        .get("files")
-        .and_then(Value::as_array)
-        .is_some_and(|files| !files.is_empty());
-    if !has_files {
-        return None;
-    }
-    Some((
-        event.get("channel").and_then(Value::as_str)?.to_owned(),
-        event
-            .get("user")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
-        event.get("ts").and_then(Value::as_str)?.to_owned(),
-        "files",
-    ))
+    let Some(files) = event.get("files").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let Some(channel) = event.get("channel").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    let user = event
+        .get("user")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let caption = event
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    files
+        .iter()
+        .filter_map(|file| {
+            Some(SlackMedia {
+                channel: channel.to_owned(),
+                user: user.to_owned(),
+                id: file.get("id")?.as_str()?.to_owned(),
+                caption: caption.to_owned(),
+                url: file.get("url_private_download")?.as_str()?.to_owned(),
+                mime: file
+                    .get("mimetype")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                filename: file.get("name").and_then(Value::as_str).map(str::to_owned),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -195,19 +244,28 @@ mod tests {
     }
 
     #[test]
-    fn slack_unsupported_media_extracts_file_event() {
+    fn slack_media_extracts_downloadable_file_event() {
         let event = json!({
             "type": "message",
             "channel": "C123",
             "user": "U456",
             "ts": "1700000000.123",
-            "files": [{"id": "F1"}]
+            "text": "caption",
+            "files": [{
+                "id": "F1",
+                "name": "report.pdf",
+                "mimetype": "application/pdf",
+                "url_private_download": "https://files.slack.com/files-pri/T-F/report.pdf"
+            }]
         });
-        let media = slack_unsupported_media(&event).expect("unsupported media");
-        assert_eq!(media.0, "C123");
-        assert_eq!(media.1, "U456");
-        assert_eq!(media.2, "1700000000.123");
-        assert_eq!(media.3, "files");
+        let media = slack_media(&event);
+        assert_eq!(media.len(), 1);
+        assert_eq!(media[0].channel, "C123");
+        assert_eq!(media[0].user, "U456");
+        assert_eq!(media[0].id, "F1");
+        assert_eq!(media[0].caption, "caption");
+        assert_eq!(media[0].mime.as_deref(), Some("application/pdf"));
+        assert_eq!(media[0].filename.as_deref(), Some("report.pdf"));
     }
 }
 
@@ -284,7 +342,7 @@ impl MessageBridge for SlackApp {
                 // failures we withhold the ack, letting Slack redeliver.
                 let should_ack =
                     if envelope.get("type").and_then(Value::as_str) == Some("events_api") {
-                        Self::handle_envelope(&ctx, &envelope).await
+                        self.handle_envelope(&ctx, &envelope).await
                     } else {
                         true
                     };

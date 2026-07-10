@@ -482,12 +482,3 @@ pub(crate) async fn create_portal_strand(
     edge.submit_event(&event).await?;
     Ok(strand_id.to_string())
 }
-
-pub(crate) fn host_allowed(host: &str, allowed_hosts: &[&str]) -> bool {
-    allowed_hosts.iter().any(|allowed| {
-        host.eq_ignore_ascii_case(allowed)
-            || host
-                .to_ascii_lowercase()
-                .ends_with(&format!(".{}", allowed.to_ascii_lowercase()))
-    })
-}
