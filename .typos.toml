@@ -1,2 +1,8 @@
+[default.extend-words]
+# hyphenated prefix: mis-configured, ...
+mis = "mis"
+# constant-time comparison test literal b"abd"
+abd = "abd"
+
 [files]
 extend-exclude = ["target/**", "Cargo.lock"]
