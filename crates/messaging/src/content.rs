@@ -55,7 +55,7 @@ pub fn media_content_block(att: &Attachment) -> Result<ContentBlock> {
     if let Some(mime) = &att.media_type {
         block = block.with_field("mime_type", Value::String(mime.clone()));
     }
-    // `filename` is MUST for ck.content.file and harmless elsewhere.
+    // `filename` is MUST for ak.content.file and harmless elsewhere.
     block = block.with_field("filename", Value::String(filename));
     if let Some(size) = att.size {
         block = block.with_field("size_bytes", json!(size));

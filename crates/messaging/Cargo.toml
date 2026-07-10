@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Messaging helper layer for Arkret Applet bridges: channel/user/message mappings, ck.message.create wiring, and social bridge adapter traits."
+description = "Messaging helper layer for Arkret Applet bridges: channel/user/message mappings, ak.message.create wiring, and social bridge adapter traits."
 
 [features]
 default = ["sqlite"]

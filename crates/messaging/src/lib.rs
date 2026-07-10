@@ -88,7 +88,7 @@ pub fn json_scalar_id_string(value: &Value) -> Option<String> {
 /// for capability enforcement (BRG-01-009): the runtime rejects any pushed event
 /// whose kind is not listed. `MessageAdapter::on_arkret_event` handles exactly
 /// message creation and redaction.
-const BRIDGE_HANDLED_EVENT_KINDS: [&str; 2] = ["ak.message.create", "ck.message.redact"];
+const BRIDGE_HANDLED_EVENT_KINDS: [&str; 2] = ["ak.message.create", "ak.message.redact"];
 
 /// The strand track bridged messages write into. Applet-integration §10.1
 /// requires bridge messages to use the `discussion` track; the v1
@@ -207,7 +207,7 @@ impl MessageContext {
             .emit_bridge_error(&realm_id, msg, error, retriable)
             .await
         {
-            tracing::warn!(error = %emit_err, "failed to emit ck.applet.bridge_error event");
+            tracing::warn!(error = %emit_err, "failed to emit ak.applet.bridge_error event");
         }
     }
 
@@ -302,7 +302,7 @@ impl MessageContext {
             .emit_outbound_bridge_error(realm_id, app_channel, failed_event_id, error, retriable)
             .await
         {
-            tracing::warn!(error = %emit_err, "failed to emit outbound ck.applet.bridge_error event");
+            tracing::warn!(error = %emit_err, "failed to emit outbound ak.applet.bridge_error event");
         }
     }
 

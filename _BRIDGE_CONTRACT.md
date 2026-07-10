@@ -22,7 +22,7 @@ impl MessageContext {
     // 返回 event_id。payload 按权威 message_create_payload 组装
     // ({strand_id, track_name:"discussion", content: content_block, blob_refs[]}),
     // 外部 location 的映射单位是 (realm_id, strand_id)(applet-integration §10.1):
-    // portal strand 按「持久化映射 → projection 按 external_ref 匹配 → ck.strand.create」
+    // portal strand 按「持久化映射 → projection 按 external_ref 匹配 → ak.strand.create」
     // 顺序惰性解析并缓存在 channel_realm_mappings.portal_strand_id。
     pub async fn submit_app_message(&self, msg: InboundAppMessage) -> Result<String>;
 }

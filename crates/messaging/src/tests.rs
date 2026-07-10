@@ -115,7 +115,7 @@ fn media_kind_follows_mime_category_and_file_requires_filename() {
     att.media_type = Some("application/pdf".to_owned());
     att.filename = None;
     let block = media_content_block(&att).unwrap().to_value().unwrap();
-    // `filename` is MUST for ck.content.file even when upstream gave none.
+    // `filename` is MUST for ak.content.file even when upstream gave none.
     assert!(
         block["filename"]
             .as_str()
