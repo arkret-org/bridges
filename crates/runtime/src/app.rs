@@ -19,10 +19,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(feature = "runtime")]
-use async_trait::async_trait;
-#[cfg(feature = "runtime")]
 use arkret::Event;
 use arkret::models::EphemeralEnvelope;
+#[cfg(feature = "runtime")]
+use async_trait::async_trait;
 #[cfg(feature = "runtime")]
 use parking_lot::Mutex;
 use serde_json::Value;

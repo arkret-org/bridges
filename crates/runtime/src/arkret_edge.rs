@@ -16,8 +16,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-#[cfg(any(feature = "web", test))]
-use arkret::{DidDocumentVerificationMethodResolver, DidResolver};
 use arkret::http_client::{Auth, Client};
 use arkret::models::EphemeralEnvelope;
 #[cfg(any(feature = "web", test))]
@@ -31,6 +29,8 @@ use arkret::signatures::{
 };
 use arkret::signatures::{SignEventOptions, sign_event};
 use arkret::{AppletId, Did, Ed25519MoveSigner, Event, EventId, Hlc, HlcGenerator, RealmId};
+#[cfg(any(feature = "web", test))]
+use arkret::{DidDocumentVerificationMethodResolver, DidResolver};
 use parking_lot::Mutex;
 use serde::Serialize;
 use serde_json::Value;

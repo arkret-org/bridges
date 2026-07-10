@@ -30,10 +30,10 @@
 //!   behavior.
 
 pub mod app;
+mod arkret_edge;
 pub mod backoff;
 pub mod blocking;
 pub mod cache;
-mod arkret_edge;
 mod config;
 pub mod dead_letter;
 mod error;
@@ -53,12 +53,12 @@ use std::sync::Arc;
 pub use app::{AppletResolver, ResolvedActor, ResolvedRealm};
 #[cfg(feature = "runtime")]
 pub use app::{BridgeApp, BridgeContext};
-pub use backoff::{exponential_backoff_with_jitter, jittered_delay};
-pub use blocking::run_blocking;
-pub use cache::{PersistedToken, TokenCache, TokenStore};
 #[cfg(feature = "db")]
 pub use arkret_edge::DbSeqStore;
 pub use arkret_edge::{ArkretEdge, SeqAllocator, SeqStore};
+pub use backoff::{exponential_backoff_with_jitter, jittered_delay};
+pub use blocking::run_blocking;
+pub use cache::{PersistedToken, TokenCache, TokenStore};
 pub use config::{ChannelRealmMappingConfig, Config, DatabaseConfig, WebhookRateLimitConfig};
 #[cfg(feature = "db")]
 pub use db::{
