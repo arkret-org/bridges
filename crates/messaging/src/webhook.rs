@@ -473,6 +473,11 @@ impl JwtVerifier {
         http: reqwest::Client,
         policy: JwtVerificationPolicy,
     ) -> Self {
+        // The workspace dependency graph can enable both jsonwebtoken crypto
+        // backends, in which case the crate deliberately refuses to guess and
+        // would panic on first use. This provider is scoped to vendor JWTs; it
+        // is independent from Arkret Event signature verification.
+        let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
         Self {
             config,
             http,
