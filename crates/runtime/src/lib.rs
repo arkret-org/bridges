@@ -9,7 +9,7 @@
 //! - **Inbound async pump**: turns the SDK's synchronous `AppletHandler` transaction pushes into an
 //!   async [`arkret::Event`] stream + a background consumer ([`app::consume_inbound`]).
 //! - **Outbound mint bookkeeping**: monotonic `actor_seq`, HLC generation, `applet_id` stamping and
-//!   signing, wrapped in [`arkret_edge::CokretEdge::mint_event`] / `submit_event`.
+//!   signing, wrapped in [`arkret_edge::ArkretEdge::mint_event`] / `submit_event`.
 //! - **App-runtime scaffolding**: config loading, a diesel pool + migration runner, a salvo server
 //!   (applet routes + health/metrics + app webhooks), and the [`run_bridge`] orchestration loop.
 //!
@@ -20,7 +20,7 @@
 //!
 //! ## Cargo features
 //!
-//! - `edge` (always available): the protocol edge ([`CokretEdge`], the [`SeqStore`] trait +
+//! - `edge` (always available): the protocol edge ([`ArkretEdge`], the [`SeqStore`] trait +
 //!   [`SeqAllocator`], config, errors, cache/queue, and blob helpers) without diesel or salvo. A
 //!   host injects its own [`SeqStore`].
 //! - `db`: the diesel-backed database pool ([`db`]) and [`DbSeqStore`].
@@ -58,7 +58,7 @@ pub use blocking::run_blocking;
 pub use cache::{PersistedToken, TokenCache, TokenStore};
 #[cfg(feature = "db")]
 pub use arkret_edge::DbSeqStore;
-pub use arkret_edge::{CokretEdge, SeqAllocator, SeqStore};
+pub use arkret_edge::{ArkretEdge, SeqAllocator, SeqStore};
 pub use config::{ChannelRealmMappingConfig, Config, DatabaseConfig, WebhookRateLimitConfig};
 #[cfg(feature = "db")]
 pub use db::{
@@ -108,7 +108,7 @@ where
     // The diesel-backed restart-safe sequence store, injected into the edge.
     let seq: Arc<dyn SeqStore> = Arc::new(DbSeqStore::new(db.clone())?);
 
-    let mut edge = CokretEdge::new(config.clone(), seq, inbound_tx)?;
+    let mut edge = ArkretEdge::new(config.clone(), seq, inbound_tx)?;
     edge.set_ephemeral_sender(ephemeral_tx);
     let edge = Arc::new(edge);
 

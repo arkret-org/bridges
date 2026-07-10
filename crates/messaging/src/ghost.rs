@@ -191,7 +191,7 @@ where
 }
 
 pub(crate) async fn provision_ghost_actor(
-    edge: &runtime::CokretEdge,
+    edge: &runtime::ArkretEdge,
     config: &runtime::Config,
     protocol: &str,
     tenant: &str,
@@ -387,7 +387,7 @@ pub(crate) fn location_matches(candidate: Option<&Value>, location: &Value) -> b
 /// also records the same location in the envelope's signed top-level
 /// `external_ref`.
 pub(crate) async fn find_existing_portal_strand(
-    edge: &runtime::CokretEdge,
+    edge: &runtime::ArkretEdge,
     realm_id: &str,
     location: &Value,
 ) -> Result<Option<String>> {
@@ -449,7 +449,7 @@ pub(crate) async fn find_existing_portal_strand(
 /// external location in signed envelope/strand fields, and return the new strand
 /// id.
 pub(crate) async fn create_portal_strand(
-    edge: &runtime::CokretEdge,
+    edge: &runtime::ArkretEdge,
     app_channel: &str,
     alias: Option<&str>,
     realm_id: &str,

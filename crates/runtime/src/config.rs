@@ -14,7 +14,7 @@ use crate::error::{BridgeError, Result};
 #[derive(Clone, Debug, Deserialize)]
 pub struct Config {
     pub bridge: BridgeConfig,
-    pub arkret: CokretConfig,
+    pub arkret: ArkretConfig,
     #[serde(default)]
     pub database: DatabaseConfig,
     #[serde(default)]
@@ -149,7 +149,7 @@ impl BridgeConfig {
 /// arkret protocol-side integration parameters (server URL, service DID,
 /// applet id, signing material).
 #[derive(Clone, Deserialize)]
-pub struct CokretConfig {
+pub struct ArkretConfig {
     /// The arkret edge/home server base URL (used for events_submit / blob /
     /// directory).
     pub server_url: String,
@@ -191,9 +191,9 @@ pub struct TrustedVerificationMethodConfig {
     pub public_key: PublicKeyMaterial,
 }
 
-impl fmt::Debug for CokretConfig {
+impl fmt::Debug for ArkretConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("CokretConfig")
+        f.debug_struct("ArkretConfig")
             .field("server_url", &self.server_url)
             .field("service_did", &self.service_did)
             .field("applet_id", &self.applet_id)

@@ -7,7 +7,7 @@
 //! - Inbound (arkret -> external): the arkret server pushes transactions; the core turns them into
 //!   an async stream and calls [`BridgeApp::on_arkret_event`] with the raw [`arkret::Event`].
 //! - Outbound (external -> arkret): the adapter mints + submits events via
-//!   [`crate::arkret_edge::CokretEdge`] (any event kind, arbitrary payload).
+//!   [`crate::arkret_edge::ArkretEdge`] (any event kind, arbitrary payload).
 //!
 //! A bridge to a non-social system (IoT, ticketing, CI, …) implements
 //! [`BridgeApp`] directly. Social/chat bridges use the ergonomic helpers in the
@@ -31,7 +31,7 @@ use tokio::sync::mpsc::Receiver;
 
 // `Value` is also used below for the `external_ref` payload type.
 #[cfg(feature = "runtime")]
-use crate::arkret_edge::CokretEdge;
+use crate::arkret_edge::ArkretEdge;
 #[cfg(feature = "runtime")]
 use crate::config::Config;
 #[cfg(feature = "runtime")]
@@ -79,7 +79,7 @@ pub trait AppletResolver: Send + Sync + 'static {
 #[cfg(feature = "runtime")]
 pub struct BridgeContext {
     pub config: Arc<Config>,
-    pub edge: Arc<CokretEdge>,
+    pub edge: Arc<ArkretEdge>,
     pub db: Arc<DatabaseManager>,
     pub dead_letters: Arc<dyn OutboundDeadLetterStore>,
     pub queue: ChannelQueue,
@@ -101,7 +101,7 @@ pub struct BridgeContext {
 impl BridgeContext {
     pub fn new(
         config: Arc<Config>,
-        edge: Arc<CokretEdge>,
+        edge: Arc<ArkretEdge>,
         db: Arc<DatabaseManager>,
     ) -> Result<Self> {
         let http = reqwest::Client::builder()

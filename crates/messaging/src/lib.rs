@@ -62,7 +62,7 @@ pub use types::{
     MAX_EXTERNAL_MEDIA_BYTES, MessageBridgeCapabilities, OutboundAppMessage, SenderRenderStyle,
 };
 
-// Not a `ck.`-prefixed id: the `ck.` namespace is reserved for spec-registered
+// Not a `ak.`-prefixed id: the `ak.` namespace is reserved for spec-registered
 // protocol objects/operations/schemas. This is a bridge-private (applet-side)
 // provenance schema id, so it uses a reverse-domain product prefix to avoid
 // colliding with any future spec-defined messaging external_ref schema.

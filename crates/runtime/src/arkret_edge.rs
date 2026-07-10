@@ -1,12 +1,12 @@
 //! The arkret protocol-side edge (replaces the Matrix bridge's
 //! `MatrixAppservice`).
 //!
-//! - **Outbound (app -> arkret)**: [`CokretEdge::mint_event`] / [`CokretEdge::submit`] build and
+//! - **Outbound (app -> arkret)**: [`ArkretEdge::mint_event`] / [`ArkretEdge::submit`] build and
 //!   sign an `Event` and submit it via [`arkret::http_client::Client::events_submit`].
 //! - **Inbound (arkret → app)**: transactions pushed by the arkret server via the applet HTTP
 //!   endpoints are placed into the `inbound_tx` queue by [`BridgeAppletHandler`]; after the core
 //!   consumes them they are forwarded to the app adapter.
-//! - **Media**: [`CokretEdge::upload_blob`] / [`CokretEdge::download_blob`].
+//! - **Media**: [`ArkretEdge::upload_blob`] / [`ArkretEdge::download_blob`].
 //!
 //! The restart-safe monotonic actor-sequence allocator is abstracted behind the
 //! [`SeqStore`] trait so a host can inject a non-diesel persistence backend. The
@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 #[cfg(any(feature = "web", test))]
-use arkret::DidResolver;
+use arkret::{DidDocumentVerificationMethodResolver, DidResolver};
 use arkret::http_client::{Auth, Client};
 use arkret::models::EphemeralEnvelope;
 #[cfg(any(feature = "web", test))]
@@ -26,7 +26,9 @@ use arkret::models::{
     AppletTransactionOutcome, AppletTransactionRequestBody,
 };
 #[cfg(any(feature = "web", test))]
-use arkret::signatures::EventProofBuilder;
+use arkret::signatures::{
+    DidVerificationMethodResolver, EventProofBuilder, VerificationMethodDocument,
+};
 use arkret::signatures::{SignEventOptions, sign_event};
 use arkret::{AppletId, Did, Ed25519MoveSigner, Event, EventId, Hlc, HlcGenerator, RealmId};
 use parking_lot::Mutex;
@@ -173,7 +175,7 @@ impl SeqAllocator {
 }
 
 /// The arkret edge client.
-pub struct CokretEdge {
+pub struct ArkretEdge {
     config: Arc<Config>,
     client: Client,
     signer: Ed25519MoveSigner,
@@ -198,7 +200,7 @@ pub struct CokretEdge {
     ephemeral_tx: Option<Sender<EphemeralEnvelope>>,
 }
 
-impl CokretEdge {
+impl ArkretEdge {
     /// Build an inbound-capable edge: signs with the seed from
     /// [`Config::signing_seed`] and queues inbound events into `inbound_tx`.
     pub fn new(
@@ -832,7 +834,7 @@ impl BridgeAppletHandler {
     /// constructed with an inbound sender (the run_bridge/web path always is).
     /// `dedup` is the durable event-dedup store enforcing §7.3.
     pub fn new(
-        edge: &CokretEdge,
+        edge: &ArkretEdge,
         resolver: Option<Arc<dyn AppletResolver>>,
         dedup: Arc<dyn EventDedupStore>,
         handled_event_kinds: Option<Vec<String>>,
@@ -936,8 +938,12 @@ fn glob_suffix_match(pattern: &str, candidate: &str) -> bool {
 
 #[cfg(any(feature = "web", test))]
 impl arkret::AppletHandler for BridgeAppletHandler {
-    fn source_did_resolver(&self) -> &dyn DidResolver {
-        self.source_did_resolver.as_ref()
+    fn resolve_verification_method(
+        &self,
+        verification_method: &str,
+    ) -> arkret::Result<VerificationMethodDocument> {
+        DidDocumentVerificationMethodResolver::new(self.source_did_resolver.as_ref())
+            .resolve_verification_method(verification_method)
     }
 
     fn ping(&self) -> arkret::Result<AppletPingOutcome> {

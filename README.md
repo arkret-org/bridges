@@ -12,7 +12,7 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `arkret-bridge-
 共享层拆为两个 crate(均在 `crates/` 下,目录名与包名不同):
 
 - `crates/runtime/` ⇒ 包 **`arkret-bridge-runtime`**:与聊天无关的**通用桥运行时**——arkret 接入
-  (`CokretEdge`/`BridgeAppletHandler`)、DB 连接池、salvo web、队列/缓存、配置/日志,契约是
+  (`ArkretEdge`/`BridgeAppletHandler`)、DB 连接池、salvo web、队列/缓存、配置/日志,契约是
   泛型 trait `BridgeApp`(收发裸 `arkret::Event`)。非聊天集成(IoT/工单/CI)可直接实现它。
 - `crates/messaging/` ⇒ 包 **`arkret-bridge-messaging`**:在 runtime 之上的**消息层**——频道/
   用户/消息映射表、`ak.message.create` 转换、actor/realm 反查解析、webhook 助手,契约是
