@@ -28,6 +28,7 @@ type HmacSha1 = Hmac<Sha1>;
 
 pub const MAX_WEBHOOK_BODY_BYTES: usize = 1024 * 1024;
 const JWT_JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
+const JWT_CLOCK_SKEW: Duration = Duration::from_secs(60);
 
 /// Constant-time byte-slice equality. Use for all signature/secret comparisons
 /// to avoid leaking match position through early-exit timing.
@@ -433,10 +434,28 @@ const JWKS_MISSING_KEY_REFRESH_MIN_INTERVAL: Duration = Duration::from_secs(30);
 pub struct JwtVerifier {
     config: JwtAuthConfig,
     http: reqwest::Client,
+    policy: JwtVerificationPolicy,
     jwks: RwLock<Option<CachedJwks>>,
     /// Last time a MissingKey-triggered refresh was actually performed; used to
     /// throttle refreshes for unknown kids.
     last_missing_key_refresh: RwLock<Option<Instant>>,
+}
+
+#[derive(Clone, Copy)]
+struct JwtVerificationPolicy {
+    cache_ttl: Duration,
+    missing_key_refresh_min_interval: Duration,
+    clock_skew: Duration,
+}
+
+impl Default for JwtVerificationPolicy {
+    fn default() -> Self {
+        Self {
+            cache_ttl: JWT_JWKS_CACHE_TTL,
+            missing_key_refresh_min_interval: JWKS_MISSING_KEY_REFRESH_MIN_INTERVAL,
+            clock_skew: JWT_CLOCK_SKEW,
+        }
+    }
 }
 
 enum JwtDecodeFailure {
@@ -446,9 +465,18 @@ enum JwtDecodeFailure {
 
 impl JwtVerifier {
     pub fn new(config: JwtAuthConfig, http: reqwest::Client) -> Self {
+        Self::new_with_policy(config, http, JwtVerificationPolicy::default())
+    }
+
+    fn new_with_policy(
+        config: JwtAuthConfig,
+        http: reqwest::Client,
+        policy: JwtVerificationPolicy,
+    ) -> Self {
         Self {
             config,
             http,
+            policy,
             jwks: RwLock::new(None),
             last_missing_key_refresh: RwLock::new(None),
         }
@@ -480,7 +508,7 @@ impl JwtVerifier {
                 {
                     let last = *self.last_missing_key_refresh.read().await;
                     if let Some(last) = last
-                        && last.elapsed() < JWKS_MISSING_KEY_REFRESH_MIN_INTERVAL
+                        && last.elapsed() < self.policy.missing_key_refresh_min_interval
                     {
                         return Err("JWT kid is not present in JWKS".to_owned());
                     }
@@ -519,7 +547,7 @@ impl JwtVerifier {
         let set = Arc::new(set);
         *self.jwks.write().await = Some(CachedJwks {
             set: set.clone(),
-            expires_at: Instant::now() + JWT_JWKS_CACHE_TTL,
+            expires_at: Instant::now() + self.policy.cache_ttl,
         });
         Ok(set)
     }
@@ -540,6 +568,7 @@ impl JwtVerifier {
         let mut validation = Validation::new(Algorithm::RS256);
         validation.set_issuer(&[self.config.issuer.as_str()]);
         validation.set_audience(&[self.config.audience.as_str()]);
+        validation.leeway = self.policy.clock_skew.as_secs();
         let data = decode::<Value>(token, &key, &validation)
             .map_err(|err| JwtDecodeFailure::Invalid(format!("JWT verification failed: {err}")))?;
         Ok(data.claims)
@@ -683,7 +712,362 @@ pub fn body_text_from_json_string(raw: &str, key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc as StdArc, RwLock as StdRwLock};
+
+    use jsonwebtoken::{EncodingKey, Header, encode};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
     use super::*;
+
+    const TEST_ISSUER: &str = "https://issuer.example.test";
+    const TEST_AUDIENCE: &str = "arkret-bridge-test";
+    const KEY_1_N: &str = "rKDiIw21xx5ORuXV8vyrOqQH3O3YSokdL6E-2sr7ImoL2YkkLx5Tw1KNMDS43N-8ltmcMcM6GIqpN6p02iNAs8n8-qnBieiNUK_tzBJ1Za13uoIYfHzku3_VyoxgDbqOaHMY6fN2WdwfmvBa9aaPqwqXXk0krZ-4CKRVFF6v-rhAiHOBGmP-Nnu2G0ARe5Q2ecnXuwuI_NjT5s3oYCl4QhnJe4q_lyfvKGwM59MMIRgBHX4oOogyWfPww_EzOngq68FMXb45vFuM9PrtW72UD8-F4p_wJpYoMjhdNOA94un189LUhEEyVDa84QHZYLJcw8Jk51JV3wrrqMhHF1QGDw";
+    const KEY_2_N: &str = "wglFEPXnew686MXlI0BpFblN0DOzxvX9lkljLJ4rSLqJbMgOvHBIvPoXOr0_YiOVw802mmuVeogYCqEuaeP8_XlZudbXPGB0xvbPecfLiihZ1KnHgE_cNGyUrTzQqCwHhnXK1hDZHvTpOaWW0RpIcgorkFWOZVghKkgESfxajyJyhEmzHAPAg9UJmjeZBW3brHlw5T5yCdG0018W6EcRZnPxMNuVaTALGR65MqDVXdNC-8lB4kgGrsW5OrZWwSo_7H46t7vv7NC-OQkFWjfI6TgeYcYJ_eG-DMve1bnjDT_ce5eQEQ5T3E2RaXXrQBT5Fc7Io3CQK3fciNVRSFqQUQ";
+    const KEY_1_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCsoOIjDbXHHk5G
+5dXy/Ks6pAfc7dhKiR0voT7ayvsiagvZiSQvHlPDUo0wNLjc37yW2ZwxwzoYiqk3
+qnTaI0Czyfz6qcGJ6I1Qr+3MEnVlrXe6ghh8fOS7f9XKjGANuo5ocxjp83ZZ3B+a
+8Fr1po+rCpdeTSStn7gIpFUUXq/6uECIc4EaY/42e7YbQBF7lDZ5yde7C4j82NPm
+zehgKXhCGcl7ir+XJ+8obAzn0wwhGAEdfig6iDJZ8/DD8TM6eCrrwUxdvjm8W4z0
++u1bvZQPz4Xin/AmligyOF004D3i6fXz0tSEQTJUNrzhAdlgslzDwmTnUlXfCuuo
+yEcXVAYPAgMBAAECggEATUPRE2luhAnfdUInyZMnvJ5wWoUmOu413vyn2lvhnZyj
+YyFLzb8gNJs9UGc4mruVeFs72tYLqbJeXOjxVjVTH2V30mWql2Q74/JqV92nJ/RF
+U3gpJ4brBbUI5ph/4YUvejaR3xy2SzAIAVw1CiAby6145J9YnFGRmGSdI/nhgDC9
+lBqewSRaHbN0NLywNPXSog/Y6jqvU2pJwFUBzbg+A4Ro5cudJda7EKYCD3HmJ2me
+AtBaK4S2BCly+wO1/WMYGGj60HMMHqDDjbFgKbyOlmq9SlapF0Jt68B7p+S9QT/H
+iFLAQNzlpYx6xV1pFr+Fy0CkUfUHSHr5+d14b+lHeQKBgQDVqxd5my9R03g5qwUo
+rULMO7I6UC5ZKYqNCtxqTbRC+3Mqw1OfchzNQBmuvWN34DdqudfkI6MC/3Nw6otG
+eQEpZw73mrcuO56eBk98PF9mfX4Xigkgyb27FnWF1BsT/vjVzAKisXZpQ/VgjE/N
+zC+8cEr3JLsL1DgUa8fT9mwBOwKBgQDO1FDyXri3XYchbX2avh6pAIitn52hFp+U
+XI1PTfOyPJEqHIO56IdpO6ZqO1UYVKxH1tJJd3S4KjfTSZ4M7sSWiuRzUAc0rnP4
+jfrRjxtbwc0Fm7G9KrO+VR9iABN/zYDm+Q7pyEY6yTahxqE3A84axeVhQd4wNG71
+84flWVuBPQKBgFvgrz5+aZGhAmCh1p0QK9oQjWof0l5Ky6Yslm0rrqji4TnxNgMp
+GZN0zdZi3+PLSWkeMuSKIm2GlQhoAq2yGLrJ8xirsbsyrdk703ATsd4rdk3+8D/m
+ICzT0oNSmrY1fKDKkhONheJr85apnyNaeuhnzQSLCddjUR4O3qWZoAXDAoGBAKZu
+MrTVg84JdLNxZ6EdW46i31jXGACIM+EumIc4MuE525YHW/g9JLmJRmA1XkQ13mvw
+cUas2T9YuZNLqeK+P3LkUPB5dVLvDmLz3ODERz+Os2vP3TZbJkgCNz6k0QwGUbOK
+tnVosxqaz1teelvKtA7XL70TQ7eGecNwM+pZ/UgBAoGBAIp0xelM26g36uCDDoeh
+DG4VhrId4D4dql0oSPCWtMWdx75L3/JHyCf9JRNzJaeVChdi0ELiaTDRKzsnd54i
+I18qP+loTBeUOE7WpPS57icm4Uqi5vWOZTAH0I9Pb68VDGuAl7rS8ynvtuOTowlP
+NM3LHkJl3KcYWV4Zcp26NJty
+-----END PRIVATE KEY-----"#;
+    const KEY_2_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDCCUUQ9ed7Drzo
+xeUjQGkVuU3QM7PG9f2WSWMsnitIuolsyA68cEi8+hc6vT9iI5XDzTaaa5V6iBgK
+oS5p4/z9eVm51tc8YHTG9s95x8uKKFnUqceAT9w0bJStPNCoLAeGdcrWENke9Ok5
+pZbRGkhyCiuQVY5lWCEqSARJ/FqPInKESbMcA8CD1QmaN5kFbduseXDlPnIJ0bTT
+XxboRxFmc/Ew25VpMAsZHrkyoNVd00L7yUHiSAauxbk6tlbBKj/sfjq3u+/s0L45
+CQVaN8jpOB5hxgn94b4My97VueMNP9x7l5ARDlPcTZFpdetAFPkVzsijcJArd9yI
+1VFIWpBRAgMBAAECggEACIFIw1it/e88UU0sUSZffM3npuC/SHErnYDnvZLMxaY0
+hB3ERJb83zismDznmHUEGWYnNq9QyONKf3vHaamOQyuEpvBPdKRrNfXnS/iZl7uT
+TW6oMZv+hFc+kJXd9QMiDM8gtg+cvr5AM1BKay22X3ZJ6MyRPmi1onFv67DJpOSr
+egwjk+UrzwIC0gHlwznFT75WCOPiZHjEfWTDfPGuYuOH4bUUrC6rOz26t12gtk/c
+RYXXD/SVIcPnowsglEEMHhlSCCx2loA87pqNQbnaI9ch5UiVZbEdOcZrr9Zy9i7F
+0gPUz0QD/OWxqvyKtCJTF2UBvT+d8XH/bE9zCbGvqQKBgQDkw3X795zgEBOORzJ5
+x1XoG3l54AmC2aTOX6LCG+ZvmFsjHwS0VvjiQsLuPISlt70cxoaisVQP6ID0Kwjr
+B8x7IFbGQKnJyXHrmULteKA+rB31psMJkp5B73B67EcTryb+EEgyRi56aKcYTdES
+YsfPirDTgN6LtWjNrUzOXgUqKQKBgQDZI1jHQhmpMdvPEgjDTqqXHgaRdl7T3UVm
+Uh2uEGRj3MlMrxFLhTaCjYf3HEQgPKS09jYJoFvVUxe3+g3bWpQ4Np8EIi/yTCgw
+VW3m7mG2zWcuB4JsSCaEmhA2VsLBOxNVB9pcMNy64ZfrPWDbKnO3//aLc+zBRcBh
+HlwzRsXJ6QKBgQDHyNg6ZCZyHDgn8o/ngKnK2mu9f2ZvC0p+HVGUOi+GWEWHp6hB
+Iw+a8nkw/FNQMuYKwmqEnV9vwTsVgpv4Psha44RFAeYGX1KJUkD8CXPRKBnGFoyQ
+yKZDqSvPfpgYXcgs6+VRWq9uogUEGbm0V+Zun44MOKii1Jyhu26vb7cM+QKBgQDW
+gePHXRaKnjW+99ruTr2Z8lCczSpa9KIFtiOZ/JmgSdIXTm+wgpZaHMVwKl1m12ID
+X6P8mI2ATckFuCKOS4pXiiZHaBqjq/ab4RlkZKTleT9wKnz+ybw7jRNtCwL0745m
+lw5xutekSw7Qlt8jRGnzIQuHsmr2eBjYGK0O/uCQWQKBgCQUf/nL18b0g0WKU3qJ
+nFPUeh5erSrh7Zx66wOdDq80k2iWifIq2uOyZFeGkT+r67DiBxs2jVaGBq90Awr+
+sqI2oOQ2QiJI8XPx+cUkwk255Rlc83TXMImdWuqEJr2+4DFcqzEPKV15vwJJIpsQ
+OeQdGwud4COtqrs5f1jdPtvd
+-----END PRIVATE KEY-----"#;
+
+    struct JwksFixture {
+        url: String,
+        body: StdArc<StdRwLock<String>>,
+        requests: StdArc<AtomicUsize>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl JwksFixture {
+        async fn start(initial: Value) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let body = StdArc::new(StdRwLock::new(initial.to_string()));
+            let requests = StdArc::new(AtomicUsize::new(0));
+            let body_for_task = body.clone();
+            let requests_for_task = requests.clone();
+            let task = tokio::spawn(async move {
+                loop {
+                    let Ok((mut stream, _)) = listener.accept().await else {
+                        break;
+                    };
+                    let body = body_for_task.clone();
+                    let requests = requests_for_task.clone();
+                    tokio::spawn(async move {
+                        let mut request = [0u8; 2048];
+                        if stream.read(&mut request).await.is_err() {
+                            return;
+                        }
+                        requests.fetch_add(1, Ordering::SeqCst);
+                        let body = body.read().unwrap().clone();
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                    });
+                }
+            });
+            Self {
+                url: format!("http://{address}/jwks"),
+                body,
+                requests,
+                task,
+            }
+        }
+
+        fn replace(&self, value: Value) {
+            *self.body.write().unwrap() = value.to_string();
+        }
+
+        fn request_count(&self) -> usize {
+            self.requests.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for JwksFixture {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    fn jwks(kid: &str, modulus: &str) -> Value {
+        json!({
+            "keys": [{
+                "kty": "RSA",
+                "use": "sig",
+                "alg": "RS256",
+                "kid": kid,
+                "n": modulus,
+                "e": "AQAB"
+            }]
+        })
+    }
+
+    fn verifier(url: String, policy: JwtVerificationPolicy) -> JwtVerifier {
+        JwtVerifier::new_with_policy(
+            JwtAuthConfig {
+                issuer: TEST_ISSUER.to_owned(),
+                audience: TEST_AUDIENCE.to_owned(),
+                jwks_url: url,
+            },
+            reqwest::Client::new(),
+            policy,
+        )
+    }
+
+    fn signed_token(
+        kid: &str,
+        pem: &str,
+        issuer: &str,
+        audience: &str,
+        not_before: i64,
+        expires_at: i64,
+    ) -> String {
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(kid.to_owned());
+        encode(
+            &header,
+            &json!({
+                "iss": issuer,
+                "aud": audience,
+                "nbf": not_before,
+                "exp": expires_at,
+                "jti": format!("{kid}-{expires_at}")
+            }),
+            &EncodingKey::from_rsa_pem(pem.as_bytes()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn now_unix() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    fn default_test_policy() -> JwtVerificationPolicy {
+        JwtVerificationPolicy {
+            cache_ttl: Duration::from_secs(300),
+            missing_key_refresh_min_interval: Duration::from_secs(30),
+            clock_skew: Duration::from_secs(5),
+        }
+    }
+
+    #[tokio::test]
+    async fn jwt_contract_rotates_kid_by_refreshing_jwks_once() {
+        let fixture = JwksFixture::start(jwks("key-1", KEY_1_N)).await;
+        let verifier = verifier(fixture.url.clone(), default_test_policy());
+        let now = now_unix();
+        let token_1 = signed_token(
+            "key-1",
+            KEY_1_PEM,
+            TEST_ISSUER,
+            TEST_AUDIENCE,
+            now - 1,
+            now + 60,
+        );
+        verifier
+            .verify_authorization(Some(&format!("Bearer {token_1}")))
+            .await
+            .unwrap();
+        assert_eq!(fixture.request_count(), 1);
+
+        fixture.replace(jwks("key-2", KEY_2_N));
+        let token_2 = signed_token(
+            "key-2",
+            KEY_2_PEM,
+            TEST_ISSUER,
+            TEST_AUDIENCE,
+            now - 1,
+            now + 60,
+        );
+        verifier
+            .verify_authorization(Some(&format!("Bearer {token_2}")))
+            .await
+            .unwrap();
+        assert_eq!(fixture.request_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn jwt_contract_unknown_kid_fails_closed_and_refresh_is_throttled() {
+        let fixture = JwksFixture::start(jwks("key-1", KEY_1_N)).await;
+        let verifier = verifier(fixture.url.clone(), default_test_policy());
+        let now = now_unix();
+        let unknown = signed_token(
+            "unknown",
+            KEY_2_PEM,
+            TEST_ISSUER,
+            TEST_AUDIENCE,
+            now - 1,
+            now + 60,
+        );
+        let authorization = format!("Bearer {unknown}");
+        assert!(
+            verifier
+                .verify_authorization(Some(&authorization))
+                .await
+                .is_err()
+        );
+        assert_eq!(fixture.request_count(), 2);
+        assert!(
+            verifier
+                .verify_authorization(Some(&authorization))
+                .await
+                .is_err()
+        );
+        assert_eq!(fixture.request_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn jwt_contract_cache_expiry_refetches_jwks() {
+        let fixture = JwksFixture::start(jwks("key-1", KEY_1_N)).await;
+        let mut policy = default_test_policy();
+        policy.cache_ttl = Duration::from_millis(10);
+        let verifier = verifier(fixture.url.clone(), policy);
+        let now = now_unix();
+        let token = signed_token(
+            "key-1",
+            KEY_1_PEM,
+            TEST_ISSUER,
+            TEST_AUDIENCE,
+            now - 1,
+            now + 60,
+        );
+        let authorization = format!("Bearer {token}");
+        verifier
+            .verify_authorization(Some(&authorization))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        verifier
+            .verify_authorization(Some(&authorization))
+            .await
+            .unwrap();
+        assert_eq!(fixture.request_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn jwt_contract_enforces_issuer_audience_algorithm_and_clock_skew() {
+        let fixture = JwksFixture::start(jwks("key-1", KEY_1_N)).await;
+        let verifier = verifier(fixture.url.clone(), default_test_policy());
+        let now = now_unix();
+        for token in [
+            signed_token(
+                "key-1",
+                KEY_1_PEM,
+                "https://wrong-issuer.example.test",
+                TEST_AUDIENCE,
+                now - 1,
+                now + 60,
+            ),
+            signed_token(
+                "key-1",
+                KEY_1_PEM,
+                TEST_ISSUER,
+                "wrong-audience",
+                now - 1,
+                now + 60,
+            ),
+            signed_token(
+                "key-1",
+                KEY_1_PEM,
+                TEST_ISSUER,
+                TEST_AUDIENCE,
+                now + 10,
+                now + 60,
+            ),
+            signed_token(
+                "key-1",
+                KEY_1_PEM,
+                TEST_ISSUER,
+                TEST_AUDIENCE,
+                now - 60,
+                now - 10,
+            ),
+        ] {
+            assert!(
+                verifier
+                    .verify_authorization(Some(&format!("Bearer {token}")))
+                    .await
+                    .is_err()
+            );
+        }
+
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some("key-1".to_owned());
+        let hs256 = encode(
+            &header,
+            &json!({
+                "iss": TEST_ISSUER,
+                "aud": TEST_AUDIENCE,
+                "nbf": now - 1,
+                "exp": now + 60
+            }),
+            &EncodingKey::from_secret(b"not-an-rsa-key"),
+        )
+        .unwrap();
+        assert_eq!(
+            verifier
+                .verify_authorization(Some(&format!("Bearer {hs256}")))
+                .await
+                .unwrap_err(),
+            "JWT alg must be RS256"
+        );
+    }
 
     #[test]
     fn constant_time_eq_matches_only_identical() {

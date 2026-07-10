@@ -52,6 +52,11 @@ jobs:
         with:
           workspaces: bridges -> target
 
+      # ARC-0002 (重构计划 2026-07-10): legacy patterns must stay at zero.
+      - name: Deletion gate
+        run: bash scripts/deletion_gate.sh
+        working-directory: bridges
+
       - name: Rustfmt
         run: cargo fmt --all -- --check
         working-directory: bridges
