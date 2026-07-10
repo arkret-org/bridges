@@ -527,11 +527,9 @@ impl MessageContext {
     /// redaction. Expiry, retention and bridge-drop signals are not redactions
     /// and are returned as ignored outcomes without minting protocol events.
     ///
-    /// Status (BRG-HYG-002): this inbound-delete link is complete and unit-tested
-    /// but **no adapter constructs an [`InboundAppDelete`] yet**. Wiring it needs
-    /// a platform delete event that carries the *deleting actor* (required here
-    /// for ghost mapping) and the relevant intent subscription; tracked in
-    /// `_bridges_todos.md`.
+    /// Platform adapters construct this only for explicit user/moderator recalls
+    /// that identify the deleting actor. Expiry and retention events are kept out
+    /// of the durable redaction path by [`AppDeleteReason::redaction_reason`].
     pub async fn submit_app_delete(&self, delete: InboundAppDelete) -> Result<AppDeleteOutcome> {
         if delete.reason.redaction_reason().is_none() {
             return Ok(AppDeleteOutcome::Ignored {
