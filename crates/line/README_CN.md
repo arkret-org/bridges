@@ -10,7 +10,7 @@ Rust 实现的 **arkret ⇄ LINE** 桥接。基于共享核心
 - **入站(LINE → arkret)**:Messaging API 通过 webhook(POST,`X-Line-Signature`
   HMAC-SHA256 签名)推送事件,由 `MessageBridge::webhook_router` 暴露的路由接收
   (用 `channel_secret` 校验签名、解析 `events[]`),经 `webhook::submit` →
-  `MessageContext::submit_app_message` 构造并签名 `ck.message.create` 事件提交到 arkret;
+  `MessageContext::submit_app_message` 构造并签名 `ak.message.create` 事件提交到 arkret;
   `run` 为保活循环。
 - **出站(arkret → LINE)**:arkret server 经 applet 端点
   `POST /_arkret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`

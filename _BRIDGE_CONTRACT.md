@@ -53,7 +53,7 @@ pub trait MessageBridge: Send + Sync + 'static {
 ```
 
 下行(arkret→app)由 messaging 的 `MessageAdapter::on_arkret_event` 自动驱动 `send_to_app`,
-适配器无需自己实现 `on_arkret_event`;只转发 portal strand 上的 `ck.message.create`(§10.1 映射
+适配器无需自己实现 `on_arkret_event`;只转发 portal strand 上的 `ak.message.create`(§10.1 映射
 单位是 `(realm_id, strand_id)`),正文从 `payload.content`(content_block)解析,媒体从
 `blob_ref`/`blob_refs[]` 解析。`config.app` 放该 app 专属配置(token 等),由
 `bridge_main` 经 serde 反序列化成每桥自定义的强类型 `AppConfig`(缺字段由 serde 按字段名报错)。

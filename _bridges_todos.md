@@ -35,6 +35,6 @@
   完整删除事件(含 actor)的平台接一个示范桥;若平台不带 actor,需先定 ghost 归属规则。
 
 - **(messaging) 出站删除 `redact_in_app` / `on_ephemeral` 接线未完成**(BRG-HYG-003,
-  2026-06-29 登记):驱动链路(`on_arkret_event` 收 `ck.message.redact` → 反查
+  2026-06-29 登记):驱动链路(`on_arkret_event` 收 `ak.message.redact` → 反查
   `(app_channel, app_message_id)` → 调 `redact_in_app`)已就绪,Discord 已作为示范桥接线。
   待办:按平台能力补其余桥的 `redact_in_app`;`on_ephemeral` 同理按需 override。

@@ -89,7 +89,7 @@ pub struct BridgeContext {
     resolver: Mutex<Option<Arc<dyn AppletResolver>>>,
     /// The set of arkret event kinds this bridge actually consumes on the inbound
     /// (arkret → app) path, declared by a higher layer (e.g. messaging declares
-    /// `ck.message.create` + `ck.message.redact`). The applet handler rejects any
+    /// `ak.message.create` + `ak.message.redact`). The applet handler rejects any
     /// pushed event whose kind is not in this set as `capability_denied`
     /// (applet-integration §7/§13 capability enforcement). `None` (the generic
     /// default) is permissive: a bridge that has not declared a kind set accepts

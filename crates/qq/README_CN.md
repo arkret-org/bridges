@@ -8,7 +8,7 @@ HTTP API(go-cqhttp / NapCat / Lagrange 等)或 **QQ 官方机器人**。
 
 - **入站(QQ → arkret)**:QQ 侧消息经 OneBot webhook 上报到达,由
   `MessageBridge::webhook_router` 暴露的路由先校验 `X-Signature`,再经 `webhook::submit` →
-  `MessageContext::submit_app_message` 构造并签名 `ck.message.create` 事件 →
+  `MessageContext::submit_app_message` 构造并签名 `ak.message.create` 事件 →
   `events_submit` 提交到 arkret;`run` 为保活循环。
 - **出站(arkret → QQ)**:arkret server 经 applet 端点
   `POST /_arkret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`

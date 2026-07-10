@@ -95,13 +95,13 @@ pub(crate) fn assert_ghost_suffix_method(service_did: &Did) -> Result<()> {
     }
 }
 
-/// The spec-registered ghost provision binding: `ck.self.applet.ghost.command.provision`
+/// The spec-registered ghost provision binding: `ak.self.applet.ghost.command.provision`
 /// = `POST /_arkret/self/applets/{applet_id}/ghosts/provision`
 /// (applet-integration §9.1, `operation-registry.json`, openapi).
 fn ghost_actor_provision_path(applet_id: &str) -> Result<String> {
     if applet_id.trim().is_empty() || applet_id.contains('/') {
         return Err(BridgeError::Config(
-            "arkret.applet_id must be a non-empty path-safe ck:applet id".into(),
+            "arkret.applet_id must be a non-empty path-safe ak:applet id".into(),
         ));
     }
     Ok(format!(
@@ -266,7 +266,7 @@ pub(crate) fn require_nonempty_ref(label: &str, value: &str) -> Result<()> {
 }
 
 /// Map a `BridgeError` variant to a stable, plaintext-free `error_code` for the
-/// `ck.applet.bridge_error` payload (§16: the code is a coarse class, not the
+/// `ak.applet.bridge_error` payload (§16: the code is a coarse class, not the
 /// underlying message text, so it never leaks external content).
 pub(crate) fn bridge_error_code(error: &BridgeError) -> &'static str {
     match error {
@@ -444,7 +444,7 @@ pub(crate) async fn find_existing_portal_strand(
     Ok(earliest.map(|(_, _, strand_id)| strand_id))
 }
 
-/// §10.1 step 3: create the portal strand by submitting `ck.strand.create` under
+/// §10.1 step 3: create the portal strand by submitting `ak.strand.create` under
 /// the bridge's own signable identity (the service actor), recording the
 /// external location in signed envelope/strand fields, and return the new strand
 /// id.

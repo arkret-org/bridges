@@ -5,9 +5,9 @@
 //!
 //! - app channel/message/user mapping tables (location ↔ `(realm_id, strand_id)` per
 //!   applet-integration §10.1),
-//! - spec-shaped `ck.message.create` payload assembly (`{strand_id, track_name, content,
+//! - spec-shaped `ak.message.create` payload assembly (`{strand_id, track_name, content,
 //!   blob_refs}`) and parsing,
-//! - portal strand acquisition/creation (`ck.strand.create`),
+//! - portal strand acquisition/creation (`ak.strand.create`),
 //! - `MessageBridge` and `run_message_bridge`,
 //! - `external_ref` provenance for upstream channel/user/message ids.
 
@@ -170,10 +170,10 @@ impl MessageContext {
         TokenCache::new(self.token_store.clone(), cache_key)
     }
 
-    /// Emit a `ck.applet.bridge_error` Event for a failed inbound (app → arkret)
+    /// Emit a `ak.applet.bridge_error` Event for a failed inbound (app → arkret)
     /// submission so the failure is durable and visible to realm admins, rather
     /// than only logged (applet-integration §14 SHOULD, §16 bindings;
-    /// `ck.profile.applet_bridge.v1` "bridge error event visibility" test item).
+    /// `ak.profile.applet_bridge.v1` "bridge error event visibility" test item).
     ///
     /// Per §16 the bridge MUST NOT inline unauthorized external plaintext: the
     /// payload binds only the external `protocol`/`network_id`/`location_id` and
@@ -242,7 +242,7 @@ impl MessageContext {
     /// Collapse the three-step inbound-failure audit shared by the gateway /
     /// long-poll bridges (Discord, Telegram, Slack, Zulip): classify retriability,
     /// `warn!`-log the failure with a bridge label, and best-effort emit a durable
-    /// `ck.applet.bridge_error`. Returns whether the failure is retriable so each
+    /// `ak.applet.bridge_error`. Returns whether the failure is retriable so each
     /// adapter can signal its own upstream in the bridge-specific way (teloxide
     /// `RequestError::Io`, Slack ack suppression, Zulip poll break). The pure
     /// webhook bridges reuse the equivalent collapse inside [`webhook::submit`].
@@ -284,7 +284,7 @@ impl MessageContext {
         self.report_inbound_failure(label, &inbound, &error).await
     }
 
-    /// Emit a `ck.applet.bridge_error` Event for a failed outbound (arkret → app)
+    /// Emit a `ak.applet.bridge_error` Event for a failed outbound (arkret → app)
     /// delivery so the failure is durable and visible to realm admins, mirroring
     /// the inbound path ([`MessageContext::report_inbound_bridge_error`]). The
     /// failed arkret `event_id` is the `failed_transaction_ref`; `external_ref`
@@ -425,7 +425,7 @@ impl MessageContext {
     ///
     /// On any step failing, the shared inbound-failure audit
     /// ([`Self::report_inbound_failure`]: warn log + best-effort durable
-    /// `ck.applet.bridge_error`) has already run before the `Err` is returned —
+    /// `ak.applet.bridge_error`) has already run before the `Err` is returned —
     /// callers only translate `err.is_retriable()` into their platform's retry
     /// signal. Bridges keep only the platform-specific "resolve the download
     /// URL / credentials" step (BRG-DRY-02).
@@ -469,7 +469,7 @@ impl MessageContext {
 
     /// Resolve the portal strand for an app channel following the §10.1
     /// acquisition order: persisted mapping → projection scan over the portal
-    /// realm (match by external location) → `ck.strand.create`. The result is
+    /// realm (match by external location) → `ak.strand.create`. The result is
     /// cached in the channel↔realm mapping. Serialized per channel so
     /// concurrent first messages cannot double-create.
     pub async fn ensure_portal_strand(&self, app_channel: &str, realm_id: &str) -> Result<String> {
@@ -536,7 +536,7 @@ impl MessageContext {
         record_bridge_message(self.metrics_bridge_label(), direction, label);
     }
 
-    /// Submit an inbound text message as a `ck.message.create` event.
+    /// Submit an inbound text message as a `ak.message.create` event.
     pub async fn submit_app_message(&self, msg: InboundAppMessage) -> Result<String> {
         let content = text_content_block(&msg.body)?;
         let result = self.submit_content(&msg, content, Vec::new()).await;
@@ -1109,7 +1109,7 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
     }
 
     async fn on_arkret_event(&self, _ctx: Arc<BridgeContext>, event: Event) -> Result<()> {
-        // Deletion forwarding (arkret -> app): a `ck.message.redact` that targets
+        // Deletion forwarding (arkret -> app): a `ak.message.redact` that targets
         // an event we previously bridged is mapped to an app-side deletion via the
         // adapter's `redact_in_app`. Honors the `disable_deletion_forwarding`
         // switch.

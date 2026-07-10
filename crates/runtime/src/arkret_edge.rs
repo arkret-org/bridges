@@ -599,7 +599,7 @@ impl CokretEdge {
         self.submit_event(&event).await
     }
 
-    /// Emit a `ck.applet.bridge_error` Event so a bridging failure is durable
+    /// Emit a `ak.applet.bridge_error` Event so a bridging failure is durable
     /// and auditable rather than silently dropped (applet-integration §14/§16;
     /// SDK [`arkret::AppletBridgeErrorBuilder`]). The builder is filled with all
     /// required bindings (realm/failed_transaction_ref/retriable/visibility) by

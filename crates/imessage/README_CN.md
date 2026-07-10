@@ -10,7 +10,7 @@ AirMessage** 之类的 HTTP 网关与 iMessage 收发。
 - **入站(iMessage → arkret)**:网关 webhook 回调推送的新消息由
   `MessageBridge::webhook_router` 暴露的路由接收(必填 `webhook_secret`,请求须携带
   `x-arkret-timestamp` 与 `x-arkret-signature-256` body HMAC),经 `webhook::submit` →
-  `MessageContext::submit_app_message` 构造并签名 `ck.message.create` 事件 → `events_submit`
+  `MessageContext::submit_app_message` 构造并签名 `ak.message.create` 事件 → `events_submit`
   提交到 arkret;`run` 为保活循环。
 - **出站(arkret → iMessage)**:arkret server 经 applet 端点
   `POST /_arkret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`

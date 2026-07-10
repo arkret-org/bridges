@@ -10,7 +10,7 @@ Rust 实现的 **arkret ⇄ WhatsApp** 桥接。基于共享核心
 - **入站(WhatsApp → arkret)**:Cloud API 通过 webhook(GET 校验 + POST 接收)推送消息,
   由 `MessageBridge::webhook_router` 暴露的路由处理(GET 校验 `verify_token`、POST 解析
   前校验 `X-Hub-Signature-256` 后解析 `entry[].changes[].value.messages[]`),经 `webhook::submit` → `MessageContext::submit_app_message`
-  构造并签名 `ck.message.create` 事件提交到 arkret;`run` 为保活循环。
+  构造并签名 `ak.message.create` 事件提交到 arkret;`run` 为保活循环。
 - **出站(arkret → WhatsApp)**:arkret server 经 applet 端点
   `POST /_arkret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
   用 `ctx.http`(reqwest)以 Bearer `access_token` POST

@@ -222,7 +222,7 @@ pub struct AppMessageRef {
 /// A media attachment that already resides in arkret blob storage (referenced by
 /// `blob_ref`). Inbound: the adapter downloads app media, uploads it via
 /// [`crate::MessageContext::upload_blob`], then submits with
-/// [`crate::MessageContext::submit_media_message`]. Outbound: extracted from a `ck.message.create`
+/// [`crate::MessageContext::submit_media_message`]. Outbound: extracted from a `ak.message.create`
 /// media payload and handed to the adapter, which downloads via
 /// [`crate::MessageContext::download_blob`] and re-sends.
 #[derive(Clone, Debug)]

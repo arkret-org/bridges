@@ -8,7 +8,7 @@ REST 接口。
 
 - **入站(Zulip → arkret)**:`run` 先 `POST /api/v1/register` 建 event queue,再循环
   `GET /api/v1/events`(长轮询)拉取 `message` 事件 → `MessageContext::submit_app_message`
-  → 核心构造并签名 `ck.message.create` 事件 → `events_submit` 提交到 arkret。
+  → 核心构造并签名 `ak.message.create` 事件 → `events_submit` 提交到 arkret。
 - **出站(arkret → Zulip)**:arkret server 经 applet 端点
   `POST /_arkret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
   用 `ctx.http` `POST {site}/api/v1/messages`(HTTP basic auth:bot_email + api_key)发送。

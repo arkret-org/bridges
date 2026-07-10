@@ -591,7 +591,7 @@ pub enum SubmitOutcome {
 /// Forward one inbound app message and classify the result. A retriable error
 /// (arkret unreachable, pool exhausted) yields [`SubmitOutcome::Retry`]; success
 /// and deterministic errors yield [`SubmitOutcome::Accepted`]. On any error a
-/// `ck.applet.bridge_error` Event is best-effort emitted so the failure is
+/// `ak.applet.bridge_error` Event is best-effort emitted so the failure is
 /// auditable rather than silently logged (applet-integration §14/§16).
 pub async fn submit(
     ctx: Arc<MessageContext>,

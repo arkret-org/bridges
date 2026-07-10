@@ -9,7 +9,7 @@ Rust 实现的 **arkret ⇄ Google Chat** 桥接。基于共享核心
 - **入站(Google Chat → arkret)**:Google Chat 的 HTTP webhook 事件由
   `MessageBridge::webhook_router` 暴露的路由接收,先校验 `Authorization: Bearer <JWT>`
   (Google JWKS + issuer/audience),再经 `webhook::submit` →
-  `MessageContext::submit_app_message` 构造并签名 `ck.message.create` 事件 →
+  `MessageContext::submit_app_message` 构造并签名 `ak.message.create` 事件 →
   `events_submit` 提交到 arkret;`run` 为保活循环。
 - **出站(arkret → Google Chat)**:arkret server 经 applet 端点
   `POST /_arkret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`

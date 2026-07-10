@@ -8,7 +8,7 @@ Rust 实现的 **arkret ⇄ Slack** 桥接。基于共享核心 [`arkret-bridge-
 
 - **入站(Slack → arkret)**:先 POST `apps.connections.open` 用 `app_token`(`xapp-`)
   换取一次性 wss URL → 连接 socket mode → 读循环解析 `message` 事件 →
-  `MessageContext::submit_app_message` → 核心签名 `ck.message.create` 提交 arkret。
+  `MessageContext::submit_app_message` → 核心签名 `ak.message.create` 提交 arkret。
   socket mode 要求对每个带 `envelope_id` 的 envelope 回 ack。
 - **出站(arkret → Slack)**:arkret server 经 applet 端点
   `POST /_arkret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`

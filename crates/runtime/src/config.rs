@@ -76,7 +76,7 @@ pub struct BridgeConfig {
     /// the public network unless an operator explicitly opens them.
     #[serde(default = "default_admin_bind")]
     pub admin_bind: String,
-    /// When set, `ck.message.redact` events from arkret are not forwarded as
+    /// When set, `ak.message.redact` events from arkret are not forwarded as
     /// app-side deletions (see `MessageAdapter::on_arkret_event`).
     #[serde(default)]
     pub disable_deletion_forwarding: bool,
@@ -155,7 +155,7 @@ pub struct CokretConfig {
     pub server_url: String,
     /// The service DID of this bridge acting as an Applet.
     pub service_did: String,
-    /// This bridge's applet id (`ck:applet:<uuidv7>`).
+    /// This bridge's applet id (`ak:applet:<uuidv7>`).
     pub applet_id: String,
     /// The Bearer access token used to submit events.
     pub access_token: String,
@@ -171,15 +171,15 @@ pub struct CokretConfig {
     /// signatures and event envelope proofs on transaction pushes.
     #[serde(default)]
     pub trusted_verification_methods: Vec<TrustedVerificationMethodConfig>,
-    /// Optional `ck.edge.applet.query.describe.namespaces` override. When omitted,
+    /// Optional `ak.edge.applet.query.describe.namespaces` override. When omitted,
     /// the runtime publishes a narrow namespace derived from the bridge id and
     /// service DID.
     #[serde(default)]
     pub applet_namespaces: Option<serde_json::Value>,
-    /// Optional `ck.edge.applet.query.describe.limits` override.
+    /// Optional `ak.edge.applet.query.describe.limits` override.
     #[serde(default)]
     pub applet_limits: Option<serde_json::Value>,
-    /// Optional `ck.edge.applet.query.describe.auth` override.
+    /// Optional `ak.edge.applet.query.describe.auth` override.
     #[serde(default)]
     pub applet_auth: Option<serde_json::Value>,
 }

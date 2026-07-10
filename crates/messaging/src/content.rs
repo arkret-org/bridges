@@ -1,4 +1,4 @@
-//! Spec-shaped `ck.message.create` payload assembly and parsing.
+//! Spec-shaped `ak.message.create` payload assembly and parsing.
 //!
 //! Builds the authoritative `message_create_payload` from app-side messages and
 //! extracts displayable text / media back out of arkret-shaped content blocks
@@ -63,7 +63,7 @@ pub fn media_content_block(att: &Attachment) -> Result<ContentBlock> {
     Ok(block)
 }
 
-/// Assemble the authoritative `ck.message.create` payload
+/// Assemble the authoritative `ak.message.create` payload
 /// (`event-payload.schema.json#/$defs/message_create_payload`, closed schema:
 /// required `strand_id` + `track_name`, body in `content`, media listed in
 /// `blob_refs[]`).
@@ -81,19 +81,19 @@ pub(crate) fn build_message_create_payload(
     Ok(payload)
 }
 
-/// Extract displayable plain text from a typed `ck.message.create` payload.
+/// Extract displayable plain text from a typed `ak.message.create` payload.
 /// E2EE `encrypted_content` yields an empty string; this bridge does not join
 /// MLS groups.
 pub fn extract_plain_body(payload: &MessageCreatePayload) -> Result<String> {
     payload.plain_body().map_err(BridgeError::from)
 }
 
-/// The `strand_id` carried by a typed `ck.message.create` payload.
+/// The `strand_id` carried by a typed `ak.message.create` payload.
 pub fn extract_strand_id(payload: &MessageCreatePayload) -> &str {
     payload.strand_id.as_str()
 }
 
-/// Extract a media attachment from a typed `ck.message.create` payload.
+/// Extract a media attachment from a typed `ak.message.create` payload.
 pub fn extract_attachment(payload: &MessageCreatePayload) -> Result<Option<Attachment>> {
     Ok(payload
         .first_media_attachment()?

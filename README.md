@@ -15,7 +15,7 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `arkret-bridge-
   (`CokretEdge`/`BridgeAppletHandler`)、DB 连接池、salvo web、队列/缓存、配置/日志,契约是
   泛型 trait `BridgeApp`(收发裸 `arkret::Event`)。非聊天集成(IoT/工单/CI)可直接实现它。
 - `crates/messaging/` ⇒ 包 **`arkret-bridge-messaging`**:在 runtime 之上的**消息层**——频道/
-  用户/消息映射表、`ck.message.create` 转换、actor/realm 反查解析、webhook 助手,契约是
+  用户/消息映射表、`ak.message.create` 转换、actor/realm 反查解析、webhook 助手,契约是
   `MessageBridge`/`MessageContext`(14 个聊天桥都实现它,经 `run_message_bridge` 装配)。
 
 共享层术语对照:
@@ -28,7 +28,7 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `arkret-bridge-
 | crate(包名) | 对端 app | 应用侧技术 | 端口 |
 |---|---|---|---|
 | `arkret-bridge-runtime`(`crates/runtime`) | — | 通用桥运行时(arkret 接入/DB/web/队列) | — |
-| `arkret-bridge-messaging`(`crates/messaging`) | — | 消息层(映射/`ck.message.create`/webhook 助手) | — |
+| `arkret-bridge-messaging`(`crates/messaging`) | — | 消息层(映射/`ak.message.create`/webhook 助手) | — |
 | `arkret-bridge-discord` | Discord | serenity gateway | 9101 |
 | `arkret-bridge-telegram` | Telegram | teloxide | 9102 |
 | `arkret-bridge-slack` | Slack | tungstenite socket mode | 9103 |
@@ -53,7 +53,7 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `arkret-bridge-
   `MessageBridge::on_arkret_event` → 适配器 `send_to_app`。
 - **出站(app → arkret)**:适配器收到 app 消息(gateway/长轮询/webhook)→
   `MessageContext::submit_app_message` → runtime 构造并签名带 `external_ref` 溯源的
-  per-user Ghost Actor `ck.message.create` 事件 → `events_submit` 提交。Ghost DID 按
+  per-user Ghost Actor `ak.message.create` 事件 → `events_submit` 提交。Ghost DID 按
   `protocol/tenant/external_user_id` 生成并写入 `user_mappings`;proof 使用该 Ghost DID 的
   configured key fragment,避免写侧退回 bridge service actor。纯 HTTP 桥的入站经各自
   `MessageBridge::webhook_router` 挂到 web 服务,平台来源验签在 handler 解析 JSON 前完成。

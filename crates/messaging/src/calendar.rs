@@ -1,6 +1,6 @@
 //! Calendar-event bridge mapping guards.
 //!
-//! Calendar events are Arkret Strand profile fields plus `ck.rsvp.set`; this
+//! Calendar events are Arkret Strand profile fields plus `ak.rsvp.set`; this
 //! module intentionally rejects provider-specific preservation/downgrade fields
 //! instead of smuggling them into Strand metadata or message content.
 //!
@@ -49,7 +49,7 @@ impl fmt::Display for CalendarMapError {
 impl std::error::Error for CalendarMapError {}
 
 /// Validate external calendar schedule fields for the
-/// `ck.profile.calendar_event.v1` Strand metadata field shape. Callers must map
+/// `ak.profile.calendar_event.v1` Strand metadata field shape. Callers must map
 /// provider-specific input into SDK wire types before calling this helper; this
 /// layer does not preserve downgrade/raw provider fields.
 pub fn bridge_calendar_schedule_fields(
@@ -68,7 +68,7 @@ pub fn bridge_calendar_schedule_fields(
     Ok(fields)
 }
 
-/// Validate external RSVP data for the `ck.rsvp.set` payload shape. RSVP
+/// Validate external RSVP data for the `ak.rsvp.set` payload shape. RSVP
 /// updates do not modify schedule, attendees, or access policy.
 pub fn bridge_rsvp_payload(payload: RsvpSetPayload) -> Result<RsvpSetPayload, CalendarMapError> {
     if let Some(comment) = payload.comment.as_ref()

@@ -9,7 +9,7 @@ Rust 实现的 **arkret ⇄ 钉钉(DingTalk)** 桥接。基于共享核心
 - **入站(钉钉 → arkret)**:钉钉回调 webhook 先校验原生 `timestamp`/`sign`;由于该签名不覆盖
   请求体,实际消息入库前还必须由可信 ingress 代理补充
   `x-arkret-timestamp`/`x-arkret-signature-256` body HMAC,再经 `webhook::submit` →
-  `MessageContext::submit_app_message` 构造并签名 `ck.message.create` 事件提交到 arkret;`run`
+  `MessageContext::submit_app_message` 构造并签名 `ak.message.create` 事件提交到 arkret;`run`
   为保活循环。
 - **出站(arkret → 钉钉)**:arkret server 经 applet 端点
   `POST /_arkret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`

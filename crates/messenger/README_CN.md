@@ -10,7 +10,7 @@ Rust 实现的 **arkret ⇄ Messenger** 桥接(通用 / Facebook Messenger)。�
   `MessageBridge::webhook_router` 暴露的路由处理(含 GET `verify_token` 验证握手与
   POST `X-Hub-Signature-256` 校验),
   经 `webhook::submit` → `MessageContext::submit_app_message` 构造并签名
-  `ck.message.create` 事件 → `events_submit` 提交到 arkret;`run` 为保活循环。
+  `ak.message.create` 事件 → `events_submit` 提交到 arkret;`run` 为保活循环。
 - **出站(arkret → Messenger)**:arkret server 经 applet 端点
   `POST /_arkret/edge/applet/transactions` 推送事件 → 核心入站队列 → `send_to_app`
   用 `ctx.http` POST `https://graph.facebook.com/v20.0/me/messages`
