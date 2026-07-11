@@ -100,18 +100,18 @@ fn normalize_url(url: &str) -> String {
 mod idempotency_schema {
     diesel::table! {
         /// Transaction-level idempotency records, keyed by
-        /// `(operation_id, direction, source_service_did, destination_service_did, Idempotency-Key)`.
+        /// `(operation_id, direction, source_service_id, destination_service_id, Idempotency-Key)`.
         transaction_idempotency (
             operation_id,
             direction,
-            source_service_did,
-            destination_service_did,
+            source_service_id,
+            destination_service_id,
             idempotency_key
         ) {
             operation_id -> Text,
             direction -> Text,
-            source_service_did -> Text,
-            destination_service_did -> Text,
+            source_service_id -> Text,
+            destination_service_id -> Text,
             idempotency_key -> Text,
             body_hash -> Text,
             source_signature_anchor -> Text,
@@ -219,8 +219,8 @@ impl TransactionIdempotencyStore for DbTransactionIdempotencyStore {
             let row = dsl::transaction_idempotency
                 .filter(dsl::operation_id.eq(replay.operation_id))
                 .filter(dsl::direction.eq(replay.direction))
-                .filter(dsl::source_service_did.eq(replay.source_service_did))
-                .filter(dsl::destination_service_did.eq(replay.destination_service_did))
+                .filter(dsl::source_service_id.eq(replay.source_service_id))
+                .filter(dsl::destination_service_id.eq(replay.destination_service_id))
                 .filter(dsl::idempotency_key.eq(replay.idempotency_key))
                 .select((
                     dsl::body_hash,
@@ -259,9 +259,9 @@ impl TransactionIdempotencyStore for DbTransactionIdempotencyStore {
                             dsl::transaction_idempotency
                                 .filter(dsl::operation_id.eq(replay.operation_id))
                                 .filter(dsl::direction.eq(replay.direction))
-                                .filter(dsl::source_service_did.eq(replay.source_service_did))
+                                .filter(dsl::source_service_id.eq(replay.source_service_id))
                                 .filter(
-                                    dsl::destination_service_did.eq(replay.destination_service_did),
+                                    dsl::destination_service_id.eq(replay.destination_service_id),
                                 )
                                 .filter(dsl::idempotency_key.eq(replay.idempotency_key)),
                         )
@@ -279,8 +279,8 @@ impl TransactionIdempotencyStore for DbTransactionIdempotencyStore {
                         .values((
                             dsl::operation_id.eq(replay.operation_id),
                             dsl::direction.eq(replay.direction),
-                            dsl::source_service_did.eq(replay.source_service_did),
-                            dsl::destination_service_did.eq(replay.destination_service_did),
+                            dsl::source_service_id.eq(replay.source_service_id),
+                            dsl::destination_service_id.eq(replay.destination_service_id),
                             dsl::idempotency_key.eq(replay.idempotency_key),
                             dsl::body_hash.eq(hash),
                             dsl::source_signature_anchor.eq(source_signature_anchor),
@@ -321,8 +321,8 @@ impl TransactionIdempotencyStore for DbTransactionIdempotencyStore {
             dsl::transaction_idempotency
                 .filter(dsl::operation_id.eq(replay.operation_id))
                 .filter(dsl::direction.eq(replay.direction))
-                .filter(dsl::source_service_did.eq(replay.source_service_did))
-                .filter(dsl::destination_service_did.eq(replay.destination_service_did))
+                .filter(dsl::source_service_id.eq(replay.source_service_id))
+                .filter(dsl::destination_service_id.eq(replay.destination_service_id))
                 .filter(dsl::idempotency_key.eq(replay.idempotency_key))
                 .filter(dsl::body_hash.eq(hash))
                 .filter(dsl::source_signature_anchor.eq(source_signature_anchor)),
@@ -349,8 +349,8 @@ impl TransactionIdempotencyStore for DbTransactionIdempotencyStore {
             dsl::transaction_idempotency
                 .filter(dsl::operation_id.eq(replay.operation_id))
                 .filter(dsl::direction.eq(replay.direction))
-                .filter(dsl::source_service_did.eq(replay.source_service_did))
-                .filter(dsl::destination_service_did.eq(replay.destination_service_did))
+                .filter(dsl::source_service_id.eq(replay.source_service_id))
+                .filter(dsl::destination_service_id.eq(replay.destination_service_id))
                 .filter(dsl::idempotency_key.eq(replay.idempotency_key))
                 .filter(dsl::body_hash.eq(hash))
                 .filter(dsl::source_signature_anchor.eq(source_signature_anchor))
@@ -724,14 +724,14 @@ mod tests {
     }
 
     fn replay_key_to<'a>(
-        destination_service_did: &'a str,
+        destination_service_id: &'a str,
         idempotency_key: &'a str,
     ) -> TransactionReplayKey<'a> {
         TransactionReplayKey {
             operation_id: "ak.edge.applet.command.transaction",
             direction: "node_to_applet",
-            source_service_did: "did:webvh:server.example",
-            destination_service_did,
+            source_service_id: "did:webvh:server.example",
+            destination_service_id,
             idempotency_key,
         }
     }

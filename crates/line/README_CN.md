@@ -29,7 +29,7 @@ cargo run -p arkret-bridge-line -- --config config.yaml
 
 ## 配置要点
 
-- `arkret.*`:arkret 接入(server_url、service_did、applet_id、access_token、签名种子)。
+- `arkret.*`:arkret 接入(server_url、service_id、applet_id、access_token、签名种子)。
 - `app.channel_access_token`:LINE 推送消息令牌(Bearer)。
 - `app.channel_secret`:webhook 签名校验密钥(入站接入时使用)。
 - `database.url`:`sqlite://...` / `postgres://...` / `mysql://...`(对应 feature)。

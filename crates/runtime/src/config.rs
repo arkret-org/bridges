@@ -154,7 +154,7 @@ pub struct ArkretConfig {
     /// directory).
     pub server_url: String,
     /// The service DID of this bridge acting as an Applet.
-    pub service_did: String,
+    pub service_id: String,
     /// This bridge's applet id (`ak:applet:<uuidv7>`).
     pub applet_id: String,
     /// The Bearer access token used to submit events.
@@ -195,7 +195,7 @@ impl fmt::Debug for ArkretConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ArkretConfig")
             .field("server_url", &self.server_url)
-            .field("service_did", &self.service_did)
+            .field("service_id", &self.service_id)
             .field("applet_id", &self.applet_id)
             .field("access_token", &"<redacted>")
             .field("signing_key_seed_hex", &"<redacted>")
@@ -430,7 +430,7 @@ bridge:
   bridge_id: test
 arkret:
   server_url: "https://example.test"
-  service_did: "did:webvh:bridge.example"
+  service_id: "did:webvh:bridge.example"
   applet_id: "ak:applet:01904100-0000-7000-8000-000000000001"
   access_token: "token"
   signing_key_seed_hex: "1111111111111111111111111111111111111111111111111111111111111111"

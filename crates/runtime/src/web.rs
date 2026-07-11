@@ -42,13 +42,13 @@ const APPLET_TRANSACTION_SIGNATURE_MAX_CLOCK_SKEW_SECS: i64 = 30;
 /// into memory in full *before* signature verification, an unauthenticated
 /// memory-pressure vector on any deployment that exposes this surface.
 const MAX_APPLET_TRANSACTION_BODY_BYTES: usize = 1024 * 1024;
-const SOURCE_SERVICE_DID_HEADER: &str = "source-service-did";
-const DESTINATION_SERVICE_DID_HEADER: &str = "destination-service-did";
+const SOURCE_SERVICE_ID_HEADER: &str = "source-service-did";
+const DESTINATION_SERVICE_ID_HEADER: &str = "destination-service-did";
 
 #[derive(Clone)]
 struct OwnedTransactionReplayKey {
-    source_service_did: String,
-    destination_service_did: String,
+    source_service_id: String,
+    destination_service_id: String,
     idempotency_key: String,
 }
 
@@ -57,8 +57,8 @@ impl OwnedTransactionReplayKey {
         TransactionReplayKey {
             operation_id: APPLET_TRANSACTION_OPERATION_ID,
             direction: APPLET_TRANSACTION_DIRECTION,
-            source_service_did: &self.source_service_did,
-            destination_service_did: &self.destination_service_did,
+            source_service_id: &self.source_service_id,
+            destination_service_id: &self.destination_service_id,
             idempotency_key: &self.idempotency_key,
         }
     }
@@ -265,8 +265,8 @@ async fn record_transaction_outcome(
 }
 
 struct VerifiedAppletHttpRequest {
-    source_service_did: String,
-    destination_service_did: String,
+    source_service_id: String,
+    destination_service_id: String,
     key_id: String,
     source_key_state_digest: String,
     content_digest: Option<String>,
@@ -401,13 +401,13 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         }
     };
 
-    let source = body.source_service_did.to_string();
-    if source != verified.source_service_did {
+    let source = body.source_service_id.to_string();
+    if source != verified.source_service_id {
         record_applet_transaction("unauthorized");
         unauthorized_code(
             res,
             "http_signature_invalid",
-            "transaction source_service_did does not match signed origin service DID",
+            "transaction source_service_id does not match signed origin service DID",
         );
         return;
     }
@@ -416,15 +416,15 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         unauthorized_code(
             res,
             "http_signature_invalid",
-            "transaction source_service_did is not trusted",
+            "transaction source_service_id is not trusted",
         );
         return;
     }
 
-    let destination = verified.destination_service_did.clone();
+    let destination = verified.destination_service_id.clone();
     let replay = OwnedTransactionReplayKey {
-        source_service_did: source.clone(),
-        destination_service_did: destination,
+        source_service_id: source.clone(),
+        destination_service_id: destination,
         idempotency_key: idempotency_key.clone(),
     };
     let source_signature_anchor =
@@ -463,7 +463,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         }
         Ok(TransactionClaim::Conflict) => {
             record_applet_transaction("conflict");
-            // Same (source_service_did, Idempotency-Key) with a different body:
+            // Same (source_service_id, Idempotency-Key) with a different body:
             // applet-integration §7.3/§14 require the closed error code
             // `duplicate_conflict` (the registry has no `idempotency_conflict`).
             res.status_code(StatusCode::CONFLICT);
@@ -680,17 +680,17 @@ fn verify_http_applet_request(
         ));
     }
 
-    let origin = header_value_from(headers, SOURCE_SERVICE_DID_HEADER)
-        .ok_or_else(|| http_signature_invalid("Source-Service-DID header is required"))?;
+    let origin = header_value_from(headers, SOURCE_SERVICE_ID_HEADER)
+        .ok_or_else(|| http_signature_invalid("Source-Service-ID header is required"))?;
     if origin != config.arkret.trusted_server_did {
         return Err(http_signature_invalid(
             "HTTP signature source service DID is not trusted",
         ));
     }
 
-    let destination = header_value_from(headers, DESTINATION_SERVICE_DID_HEADER)
-        .ok_or_else(|| http_signature_invalid("Destination-Service-DID header is required"))?;
-    if destination != config.arkret.service_did {
+    let destination = header_value_from(headers, DESTINATION_SERVICE_ID_HEADER)
+        .ok_or_else(|| http_signature_invalid("Destination-Service-ID header is required"))?;
+    if destination != config.arkret.service_id {
         return Err(http_signature_invalid(
             "HTTP signature destination service DID does not match this bridge",
         ));
@@ -714,8 +714,8 @@ fn verify_http_applet_request(
         Component::Method,
         Component::TargetUri,
         Component::Authority,
-        Component::Header(SOURCE_SERVICE_DID_HEADER.to_owned()),
-        Component::Header(DESTINATION_SERVICE_DID_HEADER.to_owned()),
+        Component::Header(SOURCE_SERVICE_ID_HEADER.to_owned()),
+        Component::Header(DESTINATION_SERVICE_ID_HEADER.to_owned()),
     ];
     if require_content_digest {
         required_components.push(Component::Header("content-digest".to_owned()));
@@ -753,8 +753,8 @@ fn verify_http_applet_request(
     let created = verified.signature_input.created;
     let expires = verified.signature_input.expires;
     Ok(VerifiedAppletHttpRequest {
-        source_service_did: origin,
-        destination_service_did: destination,
+        source_service_id: origin,
+        destination_service_id: destination,
         key_id,
         source_key_state_digest,
         content_digest,
@@ -808,13 +808,13 @@ fn build_source_signature_anchor(
         "content_digest": content_digest,
         "covered_components": &verified.covered_components,
         "created": verified.created,
-        "destination_service_did": &verified.destination_service_did,
+        "destination_service_id": &verified.destination_service_id,
         "direction": APPLET_TRANSACTION_DIRECTION,
         "expires": verified.expires,
         "idempotency_key": idempotency_key,
         "operation_id": APPLET_TRANSACTION_OPERATION_ID,
         "source_key_state_digest": &verified.source_key_state_digest,
-        "source_service_did": &verified.source_service_did,
+        "source_service_id": &verified.source_service_id,
         "verification_method": &verified.key_id,
     }))
     .map_err(|err| err.to_string())

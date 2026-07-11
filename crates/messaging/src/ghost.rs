@@ -42,7 +42,7 @@ pub(crate) fn bridge_tenant(config: &runtime::Config) -> String {
         .as_deref()
         .map(normalized_external_id)
         .filter(|tenant| !tenant.is_empty())
-        .unwrap_or_else(|| normalized_external_id(&config.arkret.service_did))
+        .unwrap_or_else(|| normalized_external_id(&config.arkret.service_id))
 }
 
 fn requested_ghost_actor_id_for_user(
@@ -68,25 +68,25 @@ fn requested_ghost_actor_id_for_user(
     // the bare suffix would not even be a valid actor DID. Assert the method
     // before deriving so a misconfigured service DID fails closed here rather
     // than producing a malformed ghost id.
-    let service_did = Did::new(config.arkret.service_did.clone())?;
-    assert_ghost_suffix_method(&service_did)?;
+    let service_id = Did::new(config.arkret.service_id.clone())?;
+    assert_ghost_suffix_method(&service_id)?;
     let material =
         [protocol, tenant, external_user_id].join(&MESSAGE_MAPPING_KEY_SEPARATOR.to_string());
     let encoded = arkret::base64url_encode(material.as_bytes());
     let did = format!(
         "{}:ghost:u{encoded}",
-        service_did.as_str().trim_end_matches(':')
+        service_id.as_str().trim_end_matches(':')
     );
     Did::new(did.clone())?;
     Ok(did)
 }
 
-/// Assert that `service_did`'s method supports the `:ghost:*` suffix derivation
+/// Assert that `service_id`'s method supports the `:ghost:*` suffix derivation
 /// used for default applet namespaces and ghost actor ids. Only `did:webvh` is
 /// valid (workspace-wide webvh-only rule; the applet-integration §3.4 examples
 /// are webvh as well).
-pub(crate) fn assert_ghost_suffix_method(service_did: &Did) -> Result<()> {
-    match service_did.method() {
+pub(crate) fn assert_ghost_suffix_method(service_id: &Did) -> Result<()> {
+    match service_id.method() {
         "webvh" => Ok(()),
         other => Err(BridgeError::Config(format!(
             "service DID method `{other}` is not allowed; \
@@ -207,7 +207,7 @@ pub(crate) async fn provision_ghost_actor(
     )?)?;
     let mut request = GhostActorProvisionRequestBody::new(
         AppletId::new(config.arkret.applet_id.clone())?,
-        edge.service_did().clone(),
+        edge.service_id().clone(),
         ghost_actor_id.clone(),
         protocol,
         tenant,
@@ -461,7 +461,7 @@ pub(crate) async fn create_portal_strand(
         .filter(|alias| !alias.trim().is_empty())
         .unwrap_or(app_channel);
     let strand =
-        StrandCreateObject::new(strand_id.clone(), realm.clone(), edge.service_did().clone())
+        StrandCreateObject::new(strand_id.clone(), realm.clone(), edge.service_id().clone())
             .with_metadata_title(title)
             .with_metadata_field("external_ref", location.clone())
             .with_track(PORTAL_STRAND_TRACK, StrandTrackConfig::discussion_primary());

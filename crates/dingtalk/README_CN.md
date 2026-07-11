@@ -27,7 +27,7 @@ cargo run -p arkret-bridge-dingtalk -- --config config.yaml
 
 ## 配置要点
 
-- `arkret.*`:arkret 接入(server_url、service_did、applet_id、access_token、签名种子)。
+- `arkret.*`:arkret 接入(server_url、service_id、applet_id、access_token、签名种子)。
 - `app.app_key` / `app.app_secret`:钉钉企业内部应用凭据,用于换取 access_token。
 - `app.robot_code`:钉钉机器人编码(robotCode)。
 - `app.webhook_body_hmac_secret`:入站消息体 HMAC 密钥,必填。签名格式为

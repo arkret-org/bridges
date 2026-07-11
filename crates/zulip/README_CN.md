@@ -24,7 +24,7 @@ cargo run -p arkret-bridge-zulip -- --config config.yaml
 
 ## 配置要点
 
-- `arkret.*`:arkret 接入(server_url、service_did、applet_id、access_token、签名种子)。
+- `arkret.*`:arkret 接入(server_url、service_id、applet_id、access_token、签名种子)。
 - `app.site`:Zulip 站点基址,如 `https://your-org.zulipchat.com`(无尾斜杠)。
 - `app.bot_email` / `app.api_key`:Zulip bot 凭据(用于 register/events/messages 的 basic auth)。
 - `database.url`:`sqlite://...` / `postgres://...` / `mysql://...`(对应 feature)。

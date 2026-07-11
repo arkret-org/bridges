@@ -27,7 +27,7 @@ cargo run -p arkret-bridge-messenger -- --config config.yaml
 
 ## 配置要点
 
-- `arkret.*`:arkret 接入(server_url、service_did、applet_id、access_token、签名种子)。
+- `arkret.*`:arkret 接入(server_url、service_id、applet_id、access_token、签名种子)。
 - `app.page_access_token`:Facebook Page 访问令牌(发送鉴权)。
 - `app.verify_token`:webhook 验证令牌(GET 握手比对)。
 - `app.app_secret`:Meta App Secret,必填;POST 投递用 `X-Hub-Signature-256` 校验。

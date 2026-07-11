@@ -179,7 +179,7 @@ pub struct ArkretEdge {
     config: Arc<Config>,
     client: Client,
     signer: Ed25519MoveSigner,
-    service_did: Did,
+    service_id: Did,
     applet_id: AppletId,
     /// Store-backed, restart-safe actor sequence allocator.
     seq: SeqAllocator,
@@ -208,21 +208,21 @@ impl ArkretEdge {
         seq: Arc<dyn SeqStore>,
         inbound_tx: Sender<Event>,
     ) -> Result<Self> {
-        let service_did = Did::new(config.arkret.service_did.clone())?;
+        let service_id = Did::new(config.arkret.service_id.clone())?;
         let seed = config.signing_seed()?;
         let signer = Ed25519MoveSigner::from_did_key_seed(
             seed,
-            service_did.clone(),
+            service_id.clone(),
             config.arkret.verification_method_id.clone(),
         );
-        Self::build(config, seq, signer, service_did, seed, Some(inbound_tx))
+        Self::build(config, seq, signer, service_id, seed, Some(inbound_tx))
     }
 
     fn build(
         config: Arc<Config>,
         seq: Arc<dyn SeqStore>,
         signer: Ed25519MoveSigner,
-        service_did: Did,
+        service_id: Did,
         hlc_secret: [u8; 32],
         inbound_tx: Option<Sender<Event>>,
     ) -> Result<Self> {
@@ -249,7 +249,7 @@ impl ArkretEdge {
         // examples) mandate webvh-only service identities, so fail closed at
         // startup for any other method (including `did:web`) rather than later
         // minting a ghost DID under a non-verifiable-history identity.
-        match service_did.method() {
+        match service_id.method() {
             "webvh" => {}
             other => {
                 return Err(BridgeError::Config(format!(
@@ -268,7 +268,7 @@ impl ArkretEdge {
             config,
             client,
             signer,
-            service_did,
+            service_id,
             applet_id,
             seq,
             hlc_generators: Mutex::new(HashMap::new()),
@@ -293,8 +293,8 @@ impl ArkretEdge {
         &self.client
     }
 
-    pub fn service_did(&self) -> &Did {
-        &self.service_did
+    pub fn service_id(&self) -> &Did {
+        &self.service_id
     }
 
     /// The inbound event sender (bounded), if this edge was built with one.
@@ -386,7 +386,7 @@ impl ArkretEdge {
         let mut event = Event::new(
             kind,
             realm_id.clone(),
-            self.service_did.clone(),
+            self.service_id.clone(),
             seq,
             hlc,
             content,
@@ -406,7 +406,7 @@ impl ArkretEdge {
         let mut event = Event::new(
             kind,
             realm_id.clone(),
-            self.service_did.clone(),
+            self.service_id.clone(),
             seq,
             hlc,
             content,
@@ -419,7 +419,7 @@ impl ArkretEdge {
     /// bridge service under a durable delegated authorization.
     ///
     /// The proof verification method stays on the service DID. The envelope
-    /// carries `executed_by = service_did` and `authorization_ref`, allowing the
+    /// carries `executed_by = service_id` and `authorization_ref`, allowing the
     /// reducer to verify who actually signed while preserving the virtual
     /// actor as `actor_id`.
     pub fn mint_event_as<T>(
@@ -459,7 +459,7 @@ impl ArkretEdge {
         let seq = self.seq.alloc()?;
         let hlc = self.next_hlc(realm_id)?;
         let mut event = Event::new(kind, realm_id.clone(), actor.clone(), seq, hlc, content)?;
-        event.executed_by = Some(self.service_did.clone());
+        event.executed_by = Some(self.service_id.clone());
         event.authorization_ref = Some(authorization_ref);
         event.applet_id = Some(self.applet_id.clone());
         Ok(event)
@@ -477,7 +477,7 @@ impl ArkretEdge {
         let seq = self.seq.alloc_blocking().await?;
         let hlc = self.next_hlc(realm_id)?;
         let mut event = Event::new(kind, realm_id.clone(), actor.clone(), seq, hlc, content)?;
-        event.executed_by = Some(self.service_did.clone());
+        event.executed_by = Some(self.service_id.clone());
         event.authorization_ref = Some(authorization_ref);
         event.applet_id = Some(self.applet_id.clone());
         Ok(event)
@@ -487,7 +487,7 @@ impl ArkretEdge {
     /// Used after all signed-envelope fields are in place so the event is signed
     /// exactly once.
     fn sign_as_service(&self, event: &mut Event) -> Result<()> {
-        let verification_method = self.verification_method_for_actor(&self.service_did)?;
+        let verification_method = self.verification_method_for_actor(&self.service_id)?;
         sign_event(
             event,
             &self.signer,
@@ -759,7 +759,7 @@ fn event_content_fingerprint(event: &Event) -> i64 {
 /// inbound queue; the business forwarding is done in the core consumer loop.
 pub struct BridgeAppletHandler {
     applet_id: String,
-    service_did: Did,
+    service_id: Did,
     protocols: Vec<String>,
     namespaces: Value,
     limits: Value,
@@ -787,12 +787,12 @@ pub struct BridgeAppletHandler {
 const DESCRIBE_MAX_EVENTS_PER_TRANSACTION: usize = 8192;
 
 #[cfg(any(feature = "web", test))]
-fn default_applet_namespaces(bridge_id: &str, service_did: &Did) -> Value {
-    let service_did = service_did.as_str();
+fn default_applet_namespaces(bridge_id: &str, service_id: &Did) -> Value {
+    let service_id = service_id.as_str();
     json!({
         "actors": [{
             "exclusive": true,
-            "pattern": format!("{service_did}:ghost:*"),
+            "pattern": format!("{service_id}:ghost:*"),
         }],
         "realms": [{
             "exclusive": true,
@@ -816,11 +816,11 @@ fn default_applet_limits() -> Value {
 }
 
 #[cfg(any(feature = "web", test))]
-fn default_applet_auth(service_did: &Did, verification_method_id: &str) -> Value {
+fn default_applet_auth(service_id: &Did, verification_method_id: &str) -> Value {
     let key_ref = if verification_method_id.starts_with("did:") {
         verification_method_id.to_owned()
     } else {
-        format!("{}{}", service_did.as_str(), verification_method_id)
+        format!("{}{}", service_id.as_str(), verification_method_id)
     };
     json!({
         "type": "http_message_signature",
@@ -841,18 +841,18 @@ impl BridgeAppletHandler {
         source_did_resolver: Arc<dyn DidResolver + Send + Sync>,
     ) -> Result<Self> {
         let bridge_id = edge.config.bridge.bridge_id.clone();
-        let service_did = edge.service_did.clone();
+        let service_id = edge.service_id.clone();
         let verification_method_id = edge.config.arkret.verification_method_id.clone();
         Ok(Self {
             applet_id: edge.config.arkret.applet_id.clone(),
-            service_did: service_did.clone(),
+            service_id: service_id.clone(),
             protocols: vec![bridge_id.clone()],
             namespaces: edge
                 .config
                 .arkret
                 .applet_namespaces
                 .clone()
-                .unwrap_or_else(|| default_applet_namespaces(&bridge_id, &service_did)),
+                .unwrap_or_else(|| default_applet_namespaces(&bridge_id, &service_id)),
             limits: edge
                 .config
                 .arkret
@@ -864,7 +864,7 @@ impl BridgeAppletHandler {
                 .arkret
                 .applet_auth
                 .clone()
-                .unwrap_or_else(|| default_applet_auth(&service_did, &verification_method_id)),
+                .unwrap_or_else(|| default_applet_auth(&service_id, &verification_method_id)),
             inbound_tx: edge.inbound_sender().ok_or_else(|| {
                 BridgeError::Config("applet handler requires an inbound-enabled edge".into())
             })?,
@@ -950,7 +950,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
         Ok(AppletPingOutcome {
             ok: true,
             applet_id: self.applet_id.clone(),
-            service_did: self.service_did.clone(),
+            service_id: self.service_id.clone(),
             protocol_version: "1.0".to_owned(),
         })
     }
@@ -958,7 +958,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
     fn describe(&self) -> arkret::Result<AppletDescription> {
         Ok(AppletDescription {
             applet_id: self.applet_id.clone(),
-            service_did: self.service_did.clone(),
+            service_id: self.service_id.clone(),
             protocols: self.protocols.clone(),
             namespaces: self.namespaces.clone(),
             limits: self.limits.clone(),

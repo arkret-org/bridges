@@ -26,7 +26,7 @@ cargo run -p arkret-bridge-feishu -- --config config.yaml
 
 ## 配置要点
 
-- `arkret.*`:arkret 接入(server_url、service_did、applet_id、access_token、签名种子)。
+- `arkret.*`:arkret 接入(server_url、service_id、applet_id、access_token、签名种子)。
 - `app.app_id` / `app.app_secret`:飞书开放平台应用凭证(用于换取 tenant_access_token)。
 - `app.verification_token`:事件订阅 Verification Token,必填;challenge 与事件投递均会常量时间校验。
 - `app.encrypt_key`:**必填(生产强制)**。启用加密回调模式后,飞书对每次投递附带

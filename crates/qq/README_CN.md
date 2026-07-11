@@ -25,7 +25,7 @@ cargo run -p arkret-bridge-qq -- --config config.yaml
 
 ## 配置要点
 
-- `arkret.*`:arkret 接入(server_url、service_did、applet_id、access_token、签名种子)。
+- `arkret.*`:arkret 接入(server_url、service_id、applet_id、access_token、签名种子)。
 - `app.onebot_url`:OneBot 实现的 HTTP API 基址。
 - `app.access_token`:OneBot access_token(可选)。
 - `app.signing_secret`:OneBot `X-Signature` HMAC secret,必填。

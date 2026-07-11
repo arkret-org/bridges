@@ -28,7 +28,7 @@ cargo run -p arkret-bridge-wechat -- --config config.yaml
 
 ## 配置要点
 
-- `arkret.*`:arkret 接入(server_url、service_did、applet_id、access_token、签名种子)。
+- `arkret.*`:arkret 接入(server_url、service_id、applet_id、access_token、签名种子)。
 - `app.corp_id` / `app.corp_secret` / `app.agent_id`:企业微信应用凭证;
   公众号场景改填 `app.app_id` / `app.app_secret`。
 - `app.webhook_token`:微信回调 Token,必填;GET/POST 均校验 plaintext `signature`。

@@ -27,7 +27,7 @@ cargo run -p arkret-bridge-imessage -- --config config.yaml
 
 ## 配置要点
 
-- `arkret.*`:arkret 接入(server_url、service_did、applet_id、access_token、签名种子)。
+- `arkret.*`:arkret 接入(server_url、service_id、applet_id、access_token、签名种子)。
 - `app.gateway_url`:BlueBubbles / AirMessage 网关基址。
 - `app.password`:网关访问口令(BlueBubbles 作 `?guid=` 查询参数)。
 - `app.webhook_secret`:入站 `/webhooks/imessage` 的 HMAC 密钥,必填。签名格式为

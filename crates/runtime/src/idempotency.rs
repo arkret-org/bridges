@@ -36,8 +36,8 @@ pub const PENDING_TAKEOVER_GRACE_SECS: i64 = 300;
 pub struct TransactionReplayKey<'a> {
     pub operation_id: &'a str,
     pub direction: &'a str,
-    pub source_service_did: &'a str,
-    pub destination_service_did: &'a str,
+    pub source_service_id: &'a str,
+    pub destination_service_id: &'a str,
     pub idempotency_key: &'a str,
 }
 
@@ -155,8 +155,8 @@ fn transaction_cache_key(replay: &TransactionReplayKey<'_>) -> String {
     [
         replay.operation_id,
         replay.direction,
-        replay.source_service_did,
-        replay.destination_service_did,
+        replay.source_service_id,
+        replay.destination_service_id,
         replay.idempotency_key,
     ]
     .join("\u{1f}")
@@ -298,14 +298,14 @@ mod tests {
     }
 
     fn replay_key_to<'a>(
-        destination_service_did: &'a str,
+        destination_service_id: &'a str,
         idempotency_key: &'a str,
     ) -> TransactionReplayKey<'a> {
         TransactionReplayKey {
             operation_id: "ak.edge.applet.command.transaction",
             direction: "node_to_applet",
-            source_service_did: "did:webvh:server.example",
-            destination_service_did,
+            source_service_id: "did:webvh:server.example",
+            destination_service_id,
             idempotency_key,
         }
     }
