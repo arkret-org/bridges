@@ -42,8 +42,8 @@ const APPLET_TRANSACTION_SIGNATURE_MAX_CLOCK_SKEW_SECS: i64 = 30;
 /// into memory in full *before* signature verification, an unauthenticated
 /// memory-pressure vector on any deployment that exposes this surface.
 const MAX_APPLET_TRANSACTION_BODY_BYTES: usize = 1024 * 1024;
-const SOURCE_SERVICE_ID_HEADER: &str = "source-service-did";
-const DESTINATION_SERVICE_ID_HEADER: &str = "destination-service-did";
+const SOURCE_SERVICE_ID_HEADER: &str = "source-service-id";
+const DESTINATION_SERVICE_ID_HEADER: &str = "destination-service-id";
 
 #[derive(Clone)]
 struct OwnedTransactionReplayKey {
