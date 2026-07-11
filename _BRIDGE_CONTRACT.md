@@ -59,12 +59,15 @@ pub trait MessageBridge: Send + Sync + 'static {
 `bridge_main` 经 serde 反序列化成每桥自定义的强类型 `AppConfig`(缺字段由 serde 按字段名报错)。
 错误统一用 `BridgeError::App(String)`。
 
-> **能力就绪、尚未接线(BRG-HYG-001):** 三条删除 / ephemeral 链路在共享层(messaging)
-> 已**完整实现并有单测**,但目前**没有任何适配器接线**,运行时不会真实触达:
-> (a) 入站删除 `submit_app_delete`(app→arkret 删除)无桥构造 `InboundAppDelete`;
-> (b) 出站删除 `redact_in_app`(arkret→app 删除转发)已有 Discord 示例接线,其余桥仍默认 no-op;
-> (c) `on_ephemeral`(typing/presence/receipts 转发)在所有桥都是默认 no-op。
-> 接线计划见 [`_bridges_todos.md`](_bridges_todos.md)。读者勿误以为删除 / typing 已在所有桥生效。
+> **删除 / ephemeral 能力状态:** 三条共享链路均已实现并有单测。LINE 已把 `unsend`
+> 入站事件接到 `submit_app_delete`,并把 `ak.typing` 接到 loading indicator API;Discord 已把
+> 出站 redaction 接到原生删除 API。其余平台仍按各自 API 能力逐桥接线,未 override 的能力会
+> fail closed 或使用默认 no-op。接线余项见 [`_bridges_todos.md`](_bridges_todos.md)。
+>
+> **入站媒体状态:** `InboundMediaFetcher` 统一执行 HTTPS/host allowlist、大小上限、内容类型、
+> 流式读取、超时、重试和失败审计。Discord、Telegram、Slack、LINE、WhatsApp、Messenger
+> 已接真实平台下载入口;Google Chat、iMessage、Teams 在当前 webhook 载荷拿不到可验证的下载
+> 引用时显式报 unsupported,不会把 URL 冒充已下载媒体。
 
 ### Provenance 与回环防护(裁决记录)
 

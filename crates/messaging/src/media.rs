@@ -68,7 +68,7 @@ impl HttpInboundMediaFetcher {
     ) -> std::result::Result<DownloadedMedia, FetchFailure> {
         let parsed = reqwest::Url::parse(&reference.url)
             .map_err(|_| FetchFailure::fatal("media URL is invalid"))?;
-        if parsed.scheme() != "https" {
+        if !media_scheme_allowed(&parsed) {
             return Err(FetchFailure::fatal("media download URL must use https"));
         }
         let host = parsed
@@ -130,6 +130,26 @@ impl HttpInboundMediaFetcher {
             content_type,
         })
     }
+}
+
+fn media_scheme_allowed(url: &reqwest::Url) -> bool {
+    if url.scheme() == "https" {
+        return true;
+    }
+    #[cfg(test)]
+    {
+        if url.scheme() == "http"
+            && url.host_str().is_some_and(|host| {
+                host == "localhost"
+                    || host
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback())
+            })
+        {
+            return true;
+        }
+    }
+    false
 }
 
 #[async_trait]
@@ -203,7 +223,30 @@ fn host_allowed(host: &str, allowed_hosts: &[String]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
     use super::*;
+
+    async fn mock_provider(responses: Vec<&'static str>) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock provider");
+        let address = listener.local_addr().expect("mock provider address");
+        let task = tokio::spawn(async move {
+            for response in responses {
+                let (mut socket, _) = listener.accept().await.expect("accept mock request");
+                let mut request = [0_u8; 2048];
+                let _ = socket.read(&mut request).await.expect("read mock request");
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write mock response");
+                socket.shutdown().await.expect("close mock response");
+            }
+        });
+        (format!("http://{address}/media"), task)
+    }
 
     #[test]
     fn media_policy_defaults_are_bounded() {
@@ -220,5 +263,59 @@ mod tests {
         assert!(host_allowed("media.cdn.example.test", &allowed));
         assert!(!host_allowed("cdn.example.test.attacker.invalid", &allowed));
         assert!(!host_allowed("example.test", &allowed));
+    }
+
+    #[tokio::test]
+    async fn provider_mock_retries_rate_limit_and_preserves_content_type() {
+        let (url, provider) = mock_provider(vec![
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Type: image/png\r\nConnection: close\r\n\r\npng",
+        ])
+        .await;
+        let fetcher = HttpInboundMediaFetcher::new(reqwest::Client::new());
+        let media = fetcher
+            .fetch(
+                &InboundMediaReference {
+                    url,
+                    bearer_token: None,
+                    allowed_hosts: vec!["127.0.0.1".to_owned()],
+                },
+                InboundMediaFetchPolicy {
+                    max_bytes: 16,
+                    timeout: Duration::from_secs(2),
+                    max_attempts: 2,
+                },
+            )
+            .await
+            .expect("rate-limited fetch retries");
+        provider.await.expect("mock provider task");
+        assert_eq!(media.bytes, b"png");
+        assert_eq!(media.content_type.as_deref(), Some("image/png"));
+    }
+
+    #[tokio::test]
+    async fn provider_mock_rejects_declared_oversize_media() {
+        let (url, provider) = mock_provider(vec![
+            "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\ndata",
+        ])
+        .await;
+        let fetcher = HttpInboundMediaFetcher::new(reqwest::Client::new());
+        let error = fetcher
+            .fetch(
+                &InboundMediaReference {
+                    url,
+                    bearer_token: None,
+                    allowed_hosts: vec!["127.0.0.1".to_owned()],
+                },
+                InboundMediaFetchPolicy {
+                    max_bytes: 3,
+                    timeout: Duration::from_secs(2),
+                    max_attempts: 1,
+                },
+            )
+            .await
+            .expect_err("oversize media must fail");
+        provider.await.expect("mock provider task");
+        assert!(error.to_string().contains("limit is 3 bytes"));
     }
 }

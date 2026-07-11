@@ -18,6 +18,8 @@
 | 2026-06-29 | runtime + messaging | BRG-REL-001 启动期 fail-fast:`BridgeApp` / `MessageBridge` 新增 `expects_webhook_inbound()`(默认 `false`),`run_bridge` 在该桥声明 webhook 入站面但 `webhook_router` 返回 `None`(如 Feishu `encrypt_key` 缺失)时返回 `BridgeError::Config` 拒绝启动,而非降级为无入站面的“健康”进程。10 个纯 webhook 桥重写为 `true`,gateway 桥(discord/slack/telegram/zulip)保持默认 |
 | 2026-07-09 | messaging | `MessageBridge::redact_in_app` 回调签名改为 `(ctx, app_channel, app_message_id)`,共享层反查 redaction target 时保留 channel+message 双键,为平台删除 API 接线清掉结构性阻碍。 |
 | 2026-07-09 | discord | Discord override `redact_in_app`,用 channel id + message id 调 `delete_message`,作为出站删除接线示范。 |
+| 2026-07-11 | messaging + line | LINE `unsend` 映射为 `InboundAppDelete` 并调用 `submit_app_delete`;`ak.typing` 通过 `on_ephemeral` 映射为 LINE loading indicator。 |
+| 2026-07-11 | messaging + adapters | 新增平台无关 `InboundMediaFetcher` 和有界 HTTP 实现;Discord、Telegram、Slack、LINE、WhatsApp、Messenger 接入真实媒体下载,无可验证下载引用的平台显式拒绝。 |
 
 ## Todo(尚未落地的共享层待办)
 
@@ -28,13 +30,8 @@
   待办:确认日历事件的权威 payload/operation 形态后,先补共享层提交入口,再补至少一个桥
   (如有原生日历事件的平台)的接入示例。
 
-- **(messaging) 入站删除 `submit_app_delete` 无 adapter 接通**(BRG-HYG-002,2026-06-29 登记):
-  共享层链路完整且有单测,但没有桥构造 `InboundAppDelete` 调用它。阻碍点:
-  (a) 多数平台的删除 gateway 事件(如 Discord `message_delete`)**不带执行删除的 actor**,而
-  `submit_app_delete` 需要 `app_user` 做 ghost 映射;(b) 需要桥订阅删除事件 intent。待办:为有
-  完整删除事件(含 actor)的平台接一个示范桥;若平台不带 actor,需先定 ghost 归属规则。
-
-- **(messaging) 出站删除 `redact_in_app` / `on_ephemeral` 接线未完成**(BRG-HYG-003,
+- **(messaging) 其余平台出站删除 `redact_in_app` 接线未完成**(BRG-HYG-003,
   2026-06-29 登记):驱动链路(`on_arkret_event` 收 `ak.message.redact` → 反查
   `(app_channel, app_message_id)` → 调 `redact_in_app`)已就绪,Discord 已作为示范桥接线。
-  待办:按平台能力补其余桥的 `redact_in_app`;`on_ephemeral` 同理按需 override。
+  待办:按平台能力补其余桥的 `redact_in_app`;LINE 的 typing ephemeral 已接线,其余
+  ephemeral 类型和平台按原生能力逐桥实现。
