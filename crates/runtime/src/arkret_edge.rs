@@ -98,6 +98,7 @@ pub trait SeqStore: Send + Sync + 'static {
 /// reserved range handed out from memory. A restart resumes strictly above the
 /// last reserved block, so sequence numbers never regress (unused numbers in a
 /// partially consumed block are skipped — gaps are acceptable).
+#[derive(Clone)]
 pub struct SeqAllocator {
     store: Arc<dyn SeqStore>,
     key: String,
@@ -215,15 +216,42 @@ impl ArkretEdge {
             service_id.clone(),
             config.arkret.verification_method_id.clone(),
         );
-        Self::build(config, seq, signer, service_id, seed, Some(inbound_tx))
+        let client = default_client(&config)?;
+        Self::build(
+            config,
+            client,
+            signer,
+            service_id,
+            seed,
+            SeqAllocator::new(seq, SEQ_STATE_KEY),
+            Some(inbound_tx),
+        )
+    }
+
+    /// Build an outbound-only edge from host-managed authenticated transport,
+    /// signing material, and a reusable sequence allocator.
+    ///
+    /// This is the integration path for hosts that own authentication and key
+    /// storage. No inbound queues are allocated, and rebuilding an edge can
+    /// reuse the same allocator without discarding its current reservation.
+    pub fn new_outbound(
+        config: Arc<Config>,
+        client: Client,
+        signer: Ed25519MoveSigner,
+        seq: SeqAllocator,
+    ) -> Result<Self> {
+        let service_id = Did::new(config.arkret.service_id.clone())?;
+        let hlc_secret = signer.verifying_key().to_bytes();
+        Self::build(config, client, signer, service_id, hlc_secret, seq, None)
     }
 
     fn build(
         config: Arc<Config>,
-        seq: Arc<dyn SeqStore>,
+        client: Client,
         signer: Ed25519MoveSigner,
         service_id: Did,
         hlc_secret: [u8; 32],
+        seq: SeqAllocator,
         inbound_tx: Option<Sender<Event>>,
     ) -> Result<Self> {
         let base = url::Url::parse(&config.arkret.server_url)
@@ -239,10 +267,6 @@ impl ArkretEdge {
                 base.scheme()
             )));
         }
-        let client = Client::builder(base)
-            .auth(Auth::Bearer(config.arkret.access_token.clone()))
-            .build()?;
-
         // The default applet namespaces and ghost actor ids derive from the
         // service DID by appending a `:ghost:*` suffix (applet-integration §3.4).
         // Only `did:webvh` is accepted: the workspace-wide rule (and the §3.4
@@ -261,8 +285,6 @@ impl ArkretEdge {
 
         let applet_id = AppletId::new(config.arkret.applet_id.clone())?;
         let hlc_device_id = config.bridge.bridge_id.clone();
-
-        let seq = SeqAllocator::new(seq, SEQ_STATE_KEY);
 
         Ok(Self {
             config,
@@ -483,6 +505,27 @@ impl ArkretEdge {
         Ok(event)
     }
 
+    /// Build an unsigned delegated-actor event asynchronously.
+    ///
+    /// Hosts may mutate signed-envelope fields or replace plaintext content
+    /// with encrypted content before calling [`Self::resign_event`] once and
+    /// submitting the result.
+    pub async fn mint_event_as_unsigned_async<T>(
+        &self,
+        actor: &Did,
+        kind: &str,
+        realm_id: &RealmId,
+        content: T,
+        authorization_ref: &str,
+    ) -> Result<Event>
+    where
+        T: Serialize,
+    {
+        let content = spec_payload_value(content)?;
+        self.build_delegated_event_async(actor, kind, realm_id, content, authorization_ref)
+            .await
+    }
+
     /// Sign `event` with the service key over the current canonical envelope.
     /// Used after all signed-envelope fields are in place so the event is signed
     /// exactly once.
@@ -659,6 +702,15 @@ fn validate_authorization_ref(authorization_ref: &str) -> Result<String> {
         ));
     }
     Ok(authorization_ref.to_owned())
+}
+
+fn default_client(config: &Config) -> Result<Client> {
+    let base = url::Url::parse(&config.arkret.server_url)
+        .map_err(|e| BridgeError::Config(format!("server_url: {e}")))?;
+    Client::builder(base)
+        .auth(Auth::Bearer(config.arkret.access_token.clone()))
+        .build()
+        .map_err(Into::into)
 }
 
 fn spec_payload_value<T>(content: T) -> Result<Value>
@@ -1254,6 +1306,16 @@ mod tests {
         for (i, n) in first_block.iter().enumerate() {
             assert_eq!(*n, (i as u64) + 1);
         }
+    }
+
+    #[test]
+    fn cloned_allocator_shares_the_current_window() {
+        let store: Arc<dyn SeqStore> = Arc::new(MemSeqStore::default());
+        let first = SeqAllocator::new(store, "k");
+        let second = first.clone();
+        assert_eq!(first.alloc().unwrap(), 1);
+        assert_eq!(second.alloc().unwrap(), 2);
+        assert_eq!(first.alloc().unwrap(), 3);
     }
 
     #[test]

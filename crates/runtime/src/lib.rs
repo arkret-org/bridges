@@ -37,6 +37,7 @@ pub mod cache;
 mod config;
 pub mod dead_letter;
 mod error;
+mod file_seq_store;
 pub mod idempotency;
 pub mod logging;
 pub mod metrics;
@@ -70,6 +71,7 @@ pub use dead_letter::{
     OutboundDeadLetterStore,
 };
 pub use error::{BridgeError, Result, redact_sensitive_url_values};
+pub use file_seq_store::FileSeqStore;
 pub use idempotency::{
     DedupVerdict, EventDedupStore, MemoryEventDedupStore, MemoryTransactionIdempotencyStore,
     ReplayGuardStore, TransactionClaim, TransactionIdempotencyStore, TransactionReplayKey,
