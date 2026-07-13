@@ -82,6 +82,12 @@ pub use salvo;
 #[cfg(feature = "runtime")]
 use tokio::sync::mpsc;
 
+/// Install the workspace-default rustls provider before constructing HTTP
+/// clients. If a host already installed a provider, preserve that choice.
+pub fn install_default_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 /// Wire up and run a generic bridge: load config -> build the arkret edge ->
 /// build the database -> start the adapter and the web service.
 ///
@@ -94,6 +100,7 @@ where
     A: BridgeApp,
     F: FnOnce(Arc<BridgeContext>) -> Result<A>,
 {
+    install_default_crypto_provider();
     let config = Arc::new(config);
 
     // Events pushed by the arkret server are queued first, then forwarded to

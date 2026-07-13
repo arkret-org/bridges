@@ -11,7 +11,6 @@
 //! - `MessageBridge` and `run_message_bridge`,
 //! - `external_ref` provenance for upstream channel/user/message ids.
 
-mod calendar;
 mod content;
 mod ghost;
 mod media;
@@ -38,9 +37,6 @@ use arkret_bridge_runtime::{
     record_bridge_message, redact_sensitive_url_values,
 };
 use async_trait::async_trait;
-pub use calendar::{
-    CALENDAR_EVENT_PROFILE, CalendarMapError, bridge_calendar_schedule_fields, bridge_rsvp_payload,
-};
 pub use content::{
     extract_attachment, extract_plain_body, extract_strand_id, media_content_block,
     text_content_block,

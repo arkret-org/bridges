@@ -12,7 +12,7 @@ use arkret::signatures::http_signature::{
     SignatureVerificationPolicy, parse_signature_input, public_key_from_bytes,
     verify_signed_http_message,
 };
-use arkret::signatures::{Ed25519DetachedJwsVerifier, EventProofBuilder, PublicKeyMaterial};
+use arkret::signatures::{EventProofBuilder, PublicKeyMaterial, verify_eddsa_detached_jws_proof};
 use arkret::{
     AppletHandler, CompositeDidResolver, Did, DidKeyResolver, DidResolver, HttpDidResolver,
 };
@@ -824,7 +824,6 @@ fn verify_transaction_events(
     resolver: &CompositeDidResolver,
     body: &AppletTransactionRequestBody,
 ) -> std::result::Result<(), String> {
-    let verifier = Ed25519DetachedJwsVerifier::new();
     let builder = EventProofBuilder::new();
     for event in &body.events {
         if event.proofs.is_empty() {
@@ -853,8 +852,7 @@ fn verify_transaction_events(
                 ));
             }
             let public_key = resolve_verification_method_key(resolver, &proof.verification_method)?;
-            verifier
-                .verify_proof(proof, &canonical_bytes, &public_key)
+            verify_eddsa_detached_jws_proof(proof, &canonical_bytes, &event.actor_id, &public_key)
                 .map_err(|err| {
                     format!("event {} proof verification failed: {err}", event.event_id)
                 })?;

@@ -104,6 +104,7 @@ impl BridgeContext {
         edge: Arc<ArkretEdge>,
         db: Arc<DatabaseManager>,
     ) -> Result<Self> {
+        crate::install_default_crypto_provider();
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::none())

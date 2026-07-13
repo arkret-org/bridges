@@ -1,9 +1,5 @@
-use arkret::{
-    CalendarAttendee, CalendarEventFields, CalendarEventLocation, CalendarLocation,
-    CalendarRecurrence, Did, MessageCreatePayload, RecurrenceFrequency, RecurrenceWeekday,
-    RsvpSetPayload, RsvpStatus, StrandId,
-};
-use serde_json::{Value, json};
+use arkret::MessageCreatePayload;
+use serde_json::json;
 
 use crate::content::{
     build_message_create_payload, extract_attachment, extract_plain_body, extract_strand_id,
@@ -12,8 +8,7 @@ use crate::content::{
 use crate::ghost::{assert_ghost_suffix_method, location_matches};
 use crate::types::{AppDeleteOutcome, AppDeleteReason, Attachment};
 use crate::{
-    CALENDAR_EVENT_PROFILE, CalendarMapError, EXTERNAL_REF_SCHEMA, PORTAL_STRAND_TRACK,
-    bridge_calendar_schedule_fields, bridge_rsvp_payload, json_scalar_id_string,
+    EXTERNAL_REF_SCHEMA, PORTAL_STRAND_TRACK, json_scalar_id_string,
     redaction_payload_for_app_delete,
 };
 
@@ -217,157 +212,4 @@ fn app_delete_expiry_is_not_a_redaction() {
             reason_code: "app_delete_retention_expiry_not_redaction",
         }
     );
-}
-
-fn encrypted_comment() -> serde_json::Value {
-    json!({
-        "scheme": "mls-rfc9420",
-        "version": "1.0",
-        "group_id": "group_1",
-        "epoch": 3,
-        "content_type": "application/json",
-        "ciphertext": "abc123",
-        "aad_visibility_event_id": "hidden",
-        "aad": {
-            "realm_id": "ak:realm:01904100-0000-7000-8000-000000000001",
-            "event_kind": "ak.rsvp.set"
-        },
-        "key_ref": {
-            "algorithm": "MLS",
-            "group_state_ref": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        },
-        "aad_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "payload_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-    })
-}
-
-fn rsvp_payload(
-    status: RsvpStatus,
-    occurrence: Option<&str>,
-    comment: Option<Value>,
-) -> RsvpSetPayload {
-    RsvpSetPayload {
-        event_ref: StrandId::new(STRAND_ID).unwrap(),
-        status,
-        occurrence: occurrence.map(ToOwned::to_owned),
-        comment,
-    }
-}
-
-fn calendar_fields() -> CalendarEventFields {
-    CalendarEventFields {
-        start: "2026-07-01T10:00:00Z".to_owned(),
-        end: "2026-07-01T11:00:00Z".to_owned(),
-        timezone: "America/New_York".to_owned(),
-        all_day: false,
-        recurrence: Some(CalendarRecurrence {
-            frequency: RecurrenceFrequency::Weekly,
-            interval: Some(1),
-            by_day: vec![RecurrenceWeekday::Mo],
-            count: None,
-            expires_at: None,
-        }),
-        location: Some(CalendarEventLocation::Plaintext(CalendarLocation {
-            title: Some("Planning area".to_owned()),
-            address: None,
-            geo_uri: None,
-            url: Some("https://example.test/meet".to_owned()),
-        })),
-        call_id: None,
-        attendees: Vec::new(),
-    }
-}
-
-#[test]
-fn calendar_schedule_maps_only_profile_subset() {
-    let schedule =
-        serde_json::to_value(bridge_calendar_schedule_fields(calendar_fields()).unwrap()).unwrap();
-    assert_eq!(CALENDAR_EVENT_PROFILE, "ak.profile.calendar_event.v1");
-    assert_eq!(schedule["timezone"], "America/New_York");
-    assert_eq!(schedule["recurrence"]["frequency"], "WEEKLY");
-    assert!(schedule.get("attendees").is_none());
-    assert!(schedule.get("preserved_fields").is_none());
-}
-
-#[test]
-fn calendar_schedule_rejects_attendees() {
-    let mut fields = calendar_fields();
-    fields.attendees.push(CalendarAttendee {
-        actor_id: Did::new("did:webvh:alice.example").unwrap(),
-        role: None,
-        display_name_snapshot: None,
-    });
-    let attendees = bridge_calendar_schedule_fields(fields).unwrap_err();
-    assert_eq!(
-        attendees,
-        CalendarMapError::UnsupportedField {
-            field: "attendees".to_owned()
-        }
-    );
-}
-
-#[test]
-fn calendar_schedule_sdk_type_rejects_external_downgrade_fields() {
-    let downgrade = serde_json::from_value::<CalendarEventFields>(json!({
-        "start": "2026-07-01",
-        "end": "2026-07-01",
-        "timezone": "UTC",
-        "all_day": true,
-        "preserved_fields": {"provider_color": "blue"}
-    }))
-    .unwrap_err();
-    assert!(downgrade.to_string().contains("preserved_fields"));
-}
-
-#[test]
-fn calendar_schedule_rejects_unknown_recurrence_shape() {
-    let mut fields = calendar_fields();
-    fields.recurrence = Some(CalendarRecurrence {
-        frequency: RecurrenceFrequency::Weekly,
-        interval: None,
-        by_day: Vec::new(),
-        count: Some(2),
-        expires_at: Some("2026-12-31T00:00:00Z".to_owned()),
-    });
-    let err = bridge_calendar_schedule_fields(fields).unwrap_err();
-    assert_eq!(err.code(), "calendar_payload_invalid");
-}
-
-#[test]
-fn calendar_rsvp_maps_encrypted_comment_only() {
-    let payload = serde_json::to_value(
-        bridge_rsvp_payload(rsvp_payload(
-            RsvpStatus::Accepted,
-            None,
-            Some(encrypted_comment()),
-        ))
-        .expect("rsvp payload"),
-    )
-    .unwrap();
-    assert_eq!(payload["event_ref"], STRAND_ID);
-    assert_eq!(payload["status"], "accepted");
-    assert!(payload["comment"].get("ciphertext").is_some());
-
-    let plaintext = bridge_rsvp_payload(rsvp_payload(
-        RsvpStatus::Tentative,
-        Some("2026-07-01T10:00:00[America/New_York]"),
-        Some(Value::String("I might be late".to_owned())),
-    ))
-    .unwrap_err();
-    assert_eq!(
-        plaintext.code(),
-        "calendar_rsvp_plaintext_comment_unsupported"
-    );
-}
-
-#[test]
-fn calendar_rsvp_sdk_type_rejects_schedule_mutation_fields() {
-    let err = serde_json::from_value::<RsvpSetPayload>(json!({
-        "event_ref": STRAND_ID,
-        "status": "declined",
-        "occurrence": null,
-        "schedule": {"start": "2026-07-01T10:00:00Z"}
-    }))
-    .unwrap_err();
-    assert!(err.to_string().contains("schedule"));
 }

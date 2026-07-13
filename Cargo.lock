@@ -172,7 +172,6 @@ dependencies = [
  "arkret-core",
  "arkret-crypto",
  "arkret-ffi",
- "arkret-html",
  "arkret-http-client",
  "arkret-keystore",
  "arkret-server",
@@ -358,6 +357,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "parking_lot",
  "reqwest 0.13.4",
+ "rustls 0.23.40",
  "salvo",
  "serde",
  "serde_json",
@@ -526,15 +526,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arkret-html"
-version = "0.3.0"
-dependencies = [
- "arkret-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "arkret-http-client"
 version = "0.3.0"
 dependencies = [
@@ -557,13 +548,12 @@ dependencies = [
 name = "arkret-identifiers"
 version = "0.3.0"
 dependencies = [
+ "arkret-canonical",
  "getrandom 0.2.17",
  "getrandom 0.4.2",
- "hex",
  "salvo",
  "salvo-oapi",
  "serde",
- "sha2 0.11.0",
  "thiserror 2.0.18",
  "uuid",
 ]

@@ -272,6 +272,7 @@ mod tests {
             "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Type: image/png\r\nConnection: close\r\n\r\npng",
         ])
         .await;
+        arkret_bridge_runtime::install_default_crypto_provider();
         let fetcher = HttpInboundMediaFetcher::new(reqwest::Client::new());
         let media = fetcher
             .fetch(
@@ -299,8 +300,9 @@ mod tests {
             "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\ndata",
         ])
         .await;
+        arkret_bridge_runtime::install_default_crypto_provider();
         let fetcher = HttpInboundMediaFetcher::new(reqwest::Client::new());
-        let error = fetcher
+        let result = fetcher
             .fetch(
                 &InboundMediaReference {
                     url,
@@ -313,8 +315,11 @@ mod tests {
                     max_attempts: 1,
                 },
             )
-            .await
-            .expect_err("oversize media must fail");
+            .await;
+        let error = match result {
+            Ok(_) => panic!("oversize media must fail"),
+            Err(error) => error,
+        };
         provider.await.expect("mock provider task");
         assert!(error.to_string().contains("limit is 3 bytes"));
     }

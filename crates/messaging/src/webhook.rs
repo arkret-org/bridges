@@ -864,6 +864,7 @@ OeQdGwud4COtqrs5f1jdPtvd
     }
 
     fn verifier(url: String, policy: JwtVerificationPolicy) -> JwtVerifier {
+        arkret_bridge_runtime::install_default_crypto_provider();
         JwtVerifier::new_with_policy(
             JwtAuthConfig {
                 issuer: TEST_ISSUER.to_owned(),
