@@ -18,9 +18,9 @@ use std::sync::Arc;
 #[cfg(feature = "runtime")]
 use std::time::Duration;
 
-use arkret::models::EphemeralEnvelope;
+use arkret::ExternalRef;
 #[cfg(feature = "runtime")]
-use arkret::{Event, ExternalRef};
+use arkret::{Event, models::EphemeralEnvelope};
 #[cfg(feature = "runtime")]
 use async_trait::async_trait;
 #[cfg(feature = "runtime")]
