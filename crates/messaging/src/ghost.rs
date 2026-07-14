@@ -130,14 +130,6 @@ fn ghost_provision_idempotency_key(
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct UserExternalRef {
-    protocol: String,
-    tenant: String,
-    external_user_id: String,
-    source: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
 pub(crate) struct MessageExternalRef {
     schema: &'static str,
     protocol: String,
@@ -169,25 +161,18 @@ pub(crate) struct DeleteExternalRef {
 }
 
 fn external_ref_for_user(
-    config: &runtime::Config,
+    _config: &runtime::Config,
     protocol: &str,
     tenant: &str,
     external_user_id: &str,
-) -> UserExternalRef {
-    UserExternalRef {
+) -> arkret::ExternalRef {
+    arkret::ExternalRef {
         protocol: protocol.to_owned(),
-        tenant: tenant.to_owned(),
-        external_user_id: external_user_id.to_owned(),
-        source: config.bridge.bridge_id.clone(),
+        external_id: external_user_id.to_owned(),
+        instance_id: Some(tenant.to_owned()),
+        display_name: None,
+        url: None,
     }
-}
-
-fn external_ref_value<T>(external_ref: T) -> Result<Value>
-where
-    T: Serialize,
-{
-    serde_json::to_value(external_ref)
-        .map_err(|error| BridgeError::App(format!("external_ref serialization failed: {error}")))
 }
 
 pub(crate) async fn provision_ghost_actor(
@@ -213,12 +198,7 @@ pub(crate) async fn provision_ghost_actor(
         tenant,
         external_user_id,
         RealmId::new(realm_id.to_owned())?,
-        external_ref_value(external_ref_for_user(
-            config,
-            protocol,
-            tenant,
-            external_user_id,
-        ))?,
+        external_ref_for_user(config, protocol, tenant, external_user_id),
     );
     if let Some(display_name) = display_name {
         request = request.with_display_name(display_name);

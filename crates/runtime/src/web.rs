@@ -15,6 +15,7 @@ use arkret::signatures::http_signature::{
 use arkret::signatures::{EventProofBuilder, PublicKeyMaterial, verify_eddsa_detached_jws_proof};
 use arkret::{
     AppletHandler, CompositeDidResolver, Did, DidKeyResolver, DidResolver, HttpDidResolver,
+    RejectedItem,
 };
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use salvo::affix_state;
@@ -469,7 +470,11 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
             res.status_code(StatusCode::CONFLICT);
             res.render(Json(arkret::models::AppletTransactionOutcome {
                 ok: false,
-                rejected: vec![json!({ "reason_code": "duplicate_conflict" })],
+                rejected: vec![RejectedItem {
+                    event_id: None,
+                    reason_code: "duplicate_conflict".to_owned(),
+                    retry_after_ms: None,
+                }],
                 retry_after_ms: None,
             }));
             return;

@@ -18,18 +18,16 @@ use std::sync::Arc;
 #[cfg(feature = "runtime")]
 use std::time::Duration;
 
-#[cfg(feature = "runtime")]
-use arkret::Event;
 use arkret::models::EphemeralEnvelope;
+#[cfg(feature = "runtime")]
+use arkret::{Event, ExternalRef};
 #[cfg(feature = "runtime")]
 use async_trait::async_trait;
 #[cfg(feature = "runtime")]
 use parking_lot::Mutex;
-use serde_json::Value;
 #[cfg(feature = "runtime")]
 use tokio::sync::mpsc::Receiver;
 
-// `Value` is also used below for the `external_ref` payload type.
 #[cfg(feature = "runtime")]
 use crate::arkret_edge::ArkretEdge;
 #[cfg(feature = "runtime")]
@@ -49,8 +47,8 @@ pub struct ResolvedActor {
     /// The canonical arkret actor DID (as a string; parsed by the handler).
     pub actor_id: String,
     pub display_name: Option<String>,
-    /// Provenance back to the upstream app (e.g. `{ "app_user": "U123" }`).
-    pub external_ref: Value,
+    /// Provenance back to the upstream app.
+    pub external_ref: Option<ExternalRef>,
 }
 
 /// A resolved realm returned to the arkret server's `resolve_realm` probe.
@@ -59,8 +57,8 @@ pub struct ResolvedRealm {
     /// The canonical arkret realm id (as a string; parsed by the handler).
     pub realm_id: String,
     pub title: Option<String>,
-    /// Provenance back to the upstream app (e.g. `{ "app_channel": "C123" }`).
-    pub external_ref: Value,
+    /// Provenance back to the upstream app.
+    pub external_ref: Option<ExternalRef>,
 }
 
 /// Optional ghost/portal resolution backing the applet `resolve_actor` /

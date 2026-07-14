@@ -11,7 +11,6 @@ use arkret_bridge_runtime::db::DatabaseManager;
 use arkret_bridge_runtime::{BridgeError, Result, run_blocking};
 use diesel::prelude::*;
 use diesel_migrations::{EmbeddedMigrations, embed_migrations};
-use serde_json::json;
 
 pub use crate::models::{ChannelRealmMapping, MessageMapping, UserMapping};
 use crate::models::{NewChannelRealmMapping, NewMessageMapping, NewUserMapping};
@@ -499,10 +498,12 @@ impl AppletResolver for MessageResolver {
         Some(ResolvedActor {
             actor_id: row.arkret_actor_id,
             display_name: row.display_name,
-            external_ref: json!({
-                "protocol": row.protocol,
-                "tenant": row.tenant,
-                "external_user_id": row.external_user_id,
+            external_ref: Some(arkret::ExternalRef {
+                protocol: row.protocol,
+                external_id: row.external_user_id,
+                instance_id: Some(row.tenant),
+                display_name: None,
+                url: None,
             }),
         })
     }
@@ -516,7 +517,13 @@ impl AppletResolver for MessageResolver {
         Some(ResolvedRealm {
             realm_id: row.arkret_realm_id,
             title: row.portal_alias,
-            external_ref: json!({ "app_channel": row.app_channel_id }),
+            external_ref: Some(arkret::ExternalRef {
+                protocol: "messaging".to_owned(),
+                external_id: row.app_channel_id,
+                instance_id: None,
+                display_name: None,
+                url: None,
+            }),
         })
     }
 }

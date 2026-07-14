@@ -1023,7 +1023,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
         _idempotency_key: &str,
         req: AppletTransactionRequestBody,
     ) -> arkret::Result<AppletTransactionOutcome> {
-        let mut rejected: Vec<Value> = Vec::new();
+        let mut rejected: Vec<arkret::RejectedItem> = Vec::new();
         let mut enqueue_failed = false;
         // Set when the bounded inbound queue is full: we ask the server to retry
         // the whole batch shortly (backpressure) rather than buffering without
@@ -1038,10 +1038,11 @@ impl arkret::AppletHandler for BridgeAppletHandler {
             // redeliver, instead of growing memory without bound. Events skipped
             // here were never dedup-recorded, so the redelivery is clean.
             if queue_full {
-                rejected.push(serde_json::json!({
-                    "event_id": event_id,
-                    "reason_code": "queue_full",
-                }));
+                rejected.push(arkret::RejectedItem {
+                    event_id: Some(event.event_id.clone()),
+                    reason_code: "queue_full".to_owned(),
+                    retry_after_ms: None,
+                });
                 continue;
             }
 
@@ -1055,10 +1056,11 @@ impl arkret::AppletHandler for BridgeAppletHandler {
                     realm = %event.realm_id,
                     "rejecting event: realm is outside this applet's declared namespace"
                 );
-                rejected.push(serde_json::json!({
-                    "event_id": event_id,
-                    "reason_code": "applet_namespace_mismatch",
-                }));
+                rejected.push(arkret::RejectedItem {
+                    event_id: Some(event.event_id.clone()),
+                    reason_code: "applet_namespace_mismatch".to_owned(),
+                    retry_after_ms: None,
+                });
                 continue;
             }
 
@@ -1073,10 +1075,11 @@ impl arkret::AppletHandler for BridgeAppletHandler {
                     kind = %event.kind,
                     "rejecting event: kind is not in this applet's declared capability set"
                 );
-                rejected.push(serde_json::json!({
-                    "event_id": event_id,
-                    "reason_code": "capability_denied",
-                }));
+                rejected.push(arkret::RejectedItem {
+                    event_id: Some(event.event_id.clone()),
+                    reason_code: "capability_denied".to_owned(),
+                    retry_after_ms: None,
+                });
                 continue;
             }
 
@@ -1089,19 +1092,21 @@ impl arkret::AppletHandler for BridgeAppletHandler {
                 Ok(permit) => permit,
                 Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {
                     queue_full = true;
-                    rejected.push(serde_json::json!({
-                        "event_id": event_id,
-                        "reason_code": "queue_full",
-                    }));
+                    rejected.push(arkret::RejectedItem {
+                        event_id: Some(event.event_id.clone()),
+                        reason_code: "queue_full".to_owned(),
+                        retry_after_ms: None,
+                    });
                     continue;
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
                     enqueue_failed = true;
                     tracing::error!(%event_id, "failed to enqueue inbound event: consumer gone");
-                    rejected.push(serde_json::json!({
-                        "event_id": event_id,
-                        "reason_code": "internal_error",
-                    }));
+                    rejected.push(arkret::RejectedItem {
+                        event_id: Some(event.event_id.clone()),
+                        reason_code: "internal_error".to_owned(),
+                        retry_after_ms: None,
+                    });
                     continue;
                 }
             };
@@ -1130,19 +1135,21 @@ impl arkret::AppletHandler for BridgeAppletHandler {
                         %event_id,
                         "rejecting event: same event_id pushed with conflicting content"
                     );
-                    rejected.push(serde_json::json!({
-                        "event_id": event_id,
-                        "reason_code": "duplicate_conflict",
-                    }));
+                    rejected.push(arkret::RejectedItem {
+                        event_id: Some(event.event_id.clone()),
+                        reason_code: "duplicate_conflict".to_owned(),
+                        retry_after_ms: None,
+                    });
                     continue;
                 }
                 Err(err) => {
                     enqueue_failed = true;
                     tracing::error!(%event_id, error = %err, "event dedup store failed");
-                    rejected.push(serde_json::json!({
-                        "event_id": event_id,
-                        "reason_code": "internal_error",
-                    }));
+                    rejected.push(arkret::RejectedItem {
+                        event_id: Some(event.event_id.clone()),
+                        reason_code: "internal_error".to_owned(),
+                        retry_after_ms: None,
+                    });
                     continue;
                 }
             }
@@ -1216,7 +1223,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
             exists: false,
             actor_id: None,
             display_name: None,
-            external_ref: Value::Null,
+            external_ref: None,
         })
     }
 
@@ -1238,7 +1245,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
             exists: false,
             realm_id: None,
             title: None,
-            external_ref: Value::Null,
+            external_ref: None,
         })
     }
 
@@ -1247,7 +1254,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
             protocol: protocol.to_owned(),
             display_name: protocol.to_owned(),
             icon_blob_ref: None,
-            field_types: Value::Null,
+            field_types: Default::default(),
             instances: Vec::new(),
         })
     }
