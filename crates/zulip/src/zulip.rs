@@ -19,8 +19,8 @@ use arkret_bridge_messaging::{
     MessageBridge, MessageContext, OutboundAppMessage, SenderRenderStyle, send_json_expect,
 };
 use async_trait::async_trait;
-use quick_xml::Reader;
 use quick_xml::events::Event as XmlEvent;
+use quick_xml::{Reader, XmlVersion};
 use serde_json::Value;
 
 /// Zulip REST success flag: top-level `result == "success"`.
@@ -427,7 +427,11 @@ fn zulip_uploaded_media(site: &str, message: &Value) -> Vec<ZulipUploadedMedia> 
                 .key
                 .as_ref()
                 .eq_ignore_ascii_case(b"href")
-                .then(|| attribute.decode_and_unescape_value(decoder).ok())
+                .then(|| {
+                    attribute
+                        .decoded_and_normalized_value(XmlVersion::Implicit1_0, decoder)
+                        .ok()
+                })
                 .flatten()
                 .map(|value| value.into_owned())
         }) else {

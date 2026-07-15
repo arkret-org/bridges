@@ -210,7 +210,6 @@ dependencies = [
  "anyhow",
  "arkret-bridge-messaging",
  "async-trait",
- "chrono",
  "serde",
  "serde_json",
  "tokio",
@@ -258,7 +257,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -306,7 +304,6 @@ dependencies = [
  "hmac 0.13.0",
  "jsonwebtoken",
  "reqwest 0.13.4",
- "rustls 0.23.40",
  "salvo",
  "serde",
  "serde_json",
@@ -408,7 +405,6 @@ dependencies = [
  "serde",
  "teloxide",
  "tokio",
- "tracing",
 ]
 
 [[package]]

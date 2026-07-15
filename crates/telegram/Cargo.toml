@@ -27,4 +27,3 @@ teloxide = {workspace = true,default-features = false,features = [
     "ctrlc_handler",
 ]}
 tokio = {workspace = true}
-tracing = {workspace = true}

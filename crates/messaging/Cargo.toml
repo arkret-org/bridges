@@ -30,7 +30,6 @@ hex = {workspace = true}
 hmac = {workspace = true}
 jsonwebtoken = {workspace = true}
 reqwest = {workspace = true}
-rustls = {workspace = true}
 salvo = {workspace = true}
 serde = {workspace = true}
 serde_json = {workspace = true}

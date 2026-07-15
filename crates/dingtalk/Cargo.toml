@@ -20,7 +20,6 @@ mysql = ["arkret-bridge-messaging/mysql"]
 [dependencies]
 anyhow = {workspace = true}
 async-trait = {workspace = true}
-chrono = {workspace = true}
 arkret-bridge-messaging = {workspace = true,default-features = false}
 serde = {workspace = true}
 serde_json = {workspace = true}
