@@ -74,7 +74,8 @@ pub use error::{BridgeError, Result, redact_sensitive_url_values};
 pub use file_seq_store::FileSeqStore;
 pub use idempotency::{
     DedupVerdict, EventDedupStore, MemoryEventDedupStore, MemoryTransactionIdempotencyStore,
-    ReplayGuardStore, TransactionClaim, TransactionIdempotencyStore, TransactionReplayKey,
+    ReplayGuardStore, ReplayGuardVerdict, TransactionClaim, TransactionIdempotencyStore,
+    TransactionReplayKey,
 };
 pub use metrics::{MessageDirection, record_bridge_message};
 #[cfg(feature = "web")]

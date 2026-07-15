@@ -477,13 +477,20 @@ async fn wechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respons
         return;
     }
     // Replay-bind the authenticated (timestamp, nonce, msg_signature) triple.
-    if !state
+    match state
         .replay_window
         .check_and_record(wechat_replay_key(&sig_input))
         .await
     {
-        webhook::unauthorized(res, "WeChat callback replay");
-        return;
+        Ok(webhook::ReplayGuardVerdict::Fresh) => {}
+        Ok(webhook::ReplayGuardVerdict::Replay) => {
+            webhook::unauthorized(res, "WeChat callback replay");
+            return;
+        }
+        Err(error) => {
+            webhook::replay_guard_unavailable(res, &error);
+            return;
+        }
     }
     let inner_xml = match wechat_decrypt_safe_mode(aes_key, &state.cred_id, &encrypt) {
         Some(plain) => plain,

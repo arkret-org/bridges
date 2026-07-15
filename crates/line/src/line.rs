@@ -227,8 +227,14 @@ async fn line_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response)
                     .as_deref()
                     .unwrap_or(&delete.app_message_id)
             );
-            if !state.replay.check_and_record(replay_key.clone()).await {
-                continue;
+            match state.replay.check_and_record(replay_key.clone()).await {
+                Ok(webhook::ReplayGuardVerdict::Fresh) => {}
+                Ok(webhook::ReplayGuardVerdict::Replay) => continue,
+                Err(error) => {
+                    tracing::error!(%error, "LINE replay guard storage unavailable");
+                    retry = true;
+                    continue;
+                }
             }
             if let Err(error) = state.ctx.submit_app_delete(delete).await
                 && error.is_retriable()
@@ -288,9 +294,17 @@ async fn line_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response)
                 tracing::warn!("LINE media event missing content message id; skipping");
                 continue;
             };
-            if !state.replay.check_and_record(replay_key.clone()).await {
-                tracing::debug!(message_id = %message_id, "LINE event replayed; skipping");
-                continue;
+            match state.replay.check_and_record(replay_key.clone()).await {
+                Ok(webhook::ReplayGuardVerdict::Fresh) => {}
+                Ok(webhook::ReplayGuardVerdict::Replay) => {
+                    tracing::debug!(message_id = %message_id, "LINE event replayed; skipping");
+                    continue;
+                }
+                Err(error) => {
+                    tracing::error!(%error, "LINE replay guard storage unavailable");
+                    retry = true;
+                    continue;
+                }
             }
             let filename = webhook::string_at(event, "/message/fileName");
             match forward_line_media(state, &channel, &user, &message_id, &content_id, filename)

@@ -281,13 +281,20 @@ async fn feishu_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respons
     // Replay guard: a validly signed delivery is accepted at most once inside the
     // freshness window. Keyed on the signature (which covers timestamp+nonce+body)
     // so two distinct deliveries are never conflated.
-    if !state
+    match state
         .replay
         .check_and_record(format!("{timestamp}:{nonce}:{signature}"))
         .await
     {
-        webhook::unauthorized(res, "Feishu delivery replayed");
-        return;
+        Ok(webhook::ReplayGuardVerdict::Fresh) => {}
+        Ok(webhook::ReplayGuardVerdict::Replay) => {
+            webhook::unauthorized(res, "Feishu delivery replayed");
+            return;
+        }
+        Err(error) => {
+            webhook::replay_guard_unavailable(res, &error);
+            return;
+        }
     }
 
     let Ok(envelope) = serde_json::from_slice::<Value>(&raw) else {
@@ -497,7 +504,13 @@ mod tests {
             Duration::from_secs(300),
         );
         let key = "1700000000:nonce-xyz:deadbeef";
-        assert!(window.check_and_record(key).await);
-        assert!(!window.check_and_record(key).await);
+        assert_eq!(
+            window.check_and_record(key).await.unwrap(),
+            webhook::ReplayGuardVerdict::Fresh
+        );
+        assert_eq!(
+            window.check_and_record(key).await.unwrap(),
+            webhook::ReplayGuardVerdict::Replay
+        );
     }
 }

@@ -20,7 +20,8 @@ use crate::dead_letter::{OutboundDeadLetter, OutboundDeadLetterRecord, OutboundD
 use crate::error::{BridgeError, Result};
 use crate::idempotency::{
     DedupVerdict, EventDedupStore, IDEMPOTENCY_TTL_SECS, PENDING_TAKEOVER_GRACE_SECS,
-    ReplayGuardStore, TransactionClaim, TransactionIdempotencyStore, TransactionReplayKey,
+    ReplayGuardStore, ReplayGuardVerdict, TransactionClaim, TransactionIdempotencyStore,
+    TransactionReplayKey,
 };
 
 /// Embedded migrations for the runtime-owned tables (`transaction_idempotency`,
@@ -466,7 +467,7 @@ impl ReplayGuardStore for DbReplayGuardStore {
         Ok(seen.is_some())
     }
 
-    fn check_and_record(&self, key: &str, ttl_secs: i64) -> Result<bool> {
+    fn check_and_record(&self, key: &str, ttl_secs: i64) -> Result<ReplayGuardVerdict> {
         use idempotency_schema::webhook_replay_guard::dsl;
 
         let mut conn = self.db.conn()?;
@@ -477,13 +478,13 @@ impl ReplayGuardStore for DbReplayGuardStore {
             .values((dsl::replay_key.eq(key), dsl::expires_at.eq(now + ttl_secs)))
             .execute(&mut conn);
         match inserted {
-            Ok(_) => Ok(true),
+            Ok(_) => Ok(ReplayGuardVerdict::Fresh),
             // A concurrent writer (another replica) won the insert race, or the
             // key is already present: either way this delivery is a replay.
             Err(diesel::result::Error::DatabaseError(
                 diesel::result::DatabaseErrorKind::UniqueViolation,
                 _,
-            )) => Ok(false),
+            )) => Ok(ReplayGuardVerdict::Replay),
             Err(err) => Err(err.into()),
         }
     }
@@ -809,18 +810,36 @@ mod tests {
         db.run_migrations(MIGRATIONS).unwrap();
         let store = DbReplayGuardStore::new(db);
         assert!(!store.contains("k1").unwrap());
-        assert!(store.check_and_record("k1", 600).unwrap());
+        assert_eq!(
+            store.check_and_record("k1", 600).unwrap(),
+            ReplayGuardVerdict::Fresh
+        );
         assert!(store.contains("k1").unwrap());
-        assert!(!store.check_and_record("k1", 600).unwrap());
+        assert_eq!(
+            store.check_and_record("k1", 600).unwrap(),
+            ReplayGuardVerdict::Replay
+        );
         // An already-expired row is purged on the next probe.
-        assert!(store.check_and_record("k2", -1).unwrap());
+        assert_eq!(
+            store.check_and_record("k2", -1).unwrap(),
+            ReplayGuardVerdict::Fresh
+        );
         assert!(!store.contains("k2").unwrap());
-        assert!(store.check_and_record("k2", 600).unwrap());
-        assert!(store.check_and_record("k3", 600).unwrap());
+        assert_eq!(
+            store.check_and_record("k2", 600).unwrap(),
+            ReplayGuardVerdict::Fresh
+        );
+        assert_eq!(
+            store.check_and_record("k3", 600).unwrap(),
+            ReplayGuardVerdict::Fresh
+        );
         assert!(store.contains("k3").unwrap());
         store.forget("k3").unwrap();
         assert!(!store.contains("k3").unwrap());
-        assert!(store.check_and_record("k3", 600).unwrap());
+        assert_eq!(
+            store.check_and_record("k3", 600).unwrap(),
+            ReplayGuardVerdict::Fresh
+        );
     }
 
     #[test]

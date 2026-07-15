@@ -159,13 +159,20 @@ async fn imessage_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
         webhook::unauthorized(res, "iMessage webhook signature mismatch");
         return;
     }
-    if !state
+    match state
         .replay
         .check_and_record(format!("{timestamp}\u{1f}{signature}"))
         .await
     {
-        webhook::unauthorized(res, "iMessage webhook replay");
-        return;
+        Ok(webhook::ReplayGuardVerdict::Fresh) => {}
+        Ok(webhook::ReplayGuardVerdict::Replay) => {
+            webhook::unauthorized(res, "iMessage webhook replay");
+            return;
+        }
+        Err(error) => {
+            webhook::replay_guard_unavailable(res, &error);
+            return;
+        }
     }
     let body = match serde_json::from_slice::<Value>(&raw) {
         Ok(body) => body,

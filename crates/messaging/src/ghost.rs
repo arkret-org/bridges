@@ -457,7 +457,14 @@ pub(crate) async fn create_portal_strand(
         .mint_event_unsigned_async("ak.strand.create", &realm, payload)
         .await?;
     event.created_at = strand_created_at;
-    event.external_ref = Some(location.clone());
+    event.external_ref = Some(
+        location
+            .as_object()
+            .ok_or_else(|| BridgeError::App("portal location must be an object".to_owned()))?
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    );
     edge.resign_event(&mut event)?;
     edge.submit_event(&event).await?;
     Ok(strand_id.to_string())

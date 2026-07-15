@@ -155,6 +155,8 @@ pub struct ArkretConfig {
     pub server_url: String,
     /// The service DID of this bridge acting as an Applet.
     pub service_id: String,
+    /// Trust domain advertised by the applet service description.
+    pub trust_domain: arkret::TypedTrustDomainId,
     /// This bridge's applet id (`ak:applet:<uuidv7>`).
     pub applet_id: String,
     /// The Bearer access token used to submit events.
@@ -171,17 +173,10 @@ pub struct ArkretConfig {
     /// signatures and event envelope proofs on transaction pushes.
     #[serde(default)]
     pub trusted_verification_methods: Vec<TrustedVerificationMethodConfig>,
-    /// Optional `ak.edge.applet.query.describe.namespaces` override. When omitted,
-    /// the runtime publishes a narrow namespace derived from the bridge id and
-    /// service DID.
+    /// Optional inbound realm namespace override. When omitted, the runtime
+    /// enforces a narrow namespace derived from the bridge id and service DID.
     #[serde(default)]
     pub applet_namespaces: Option<serde_json::Value>,
-    /// Optional `ak.edge.applet.query.describe.limits` override.
-    #[serde(default)]
-    pub applet_limits: Option<serde_json::Value>,
-    /// Optional `ak.edge.applet.query.describe.auth` override.
-    #[serde(default)]
-    pub applet_auth: Option<serde_json::Value>,
 }
 
 /// A configured verification method and its Ed25519 public key material.
@@ -196,6 +191,7 @@ impl fmt::Debug for ArkretConfig {
         f.debug_struct("ArkretConfig")
             .field("server_url", &self.server_url)
             .field("service_id", &self.service_id)
+            .field("trust_domain", &self.trust_domain)
             .field("applet_id", &self.applet_id)
             .field("access_token", &"<redacted>")
             .field("signing_key_seed_hex", &"<redacted>")
@@ -206,8 +202,6 @@ impl fmt::Debug for ArkretConfig {
                 &self.trusted_verification_methods,
             )
             .field("applet_namespaces", &self.applet_namespaces)
-            .field("applet_limits", &self.applet_limits)
-            .field("applet_auth", &self.applet_auth)
             .finish()
     }
 }
@@ -431,6 +425,7 @@ bridge:
 arkret:
   server_url: "https://example.test"
   service_id: "did:webvh:bridge.example"
+  trust_domain: "ak:trust_domain:example.net"
   applet_id: "ak:applet:01904100-0000-7000-8000-000000000001"
   access_token: "token"
   signing_key_seed_hex: "1111111111111111111111111111111111111111111111111111111111111111"

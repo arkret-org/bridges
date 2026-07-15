@@ -73,9 +73,6 @@ pub(crate) fn build_message_create_payload(
     blob_refs: Vec<String>,
 ) -> Result<MessageCreatePayload> {
     let strand_id = StrandId::new(strand_id.to_owned())?;
-    let content = content
-        .to_value()
-        .map_err(|e| BridgeError::App(e.to_string()))?;
     let mut payload = MessageCreatePayload::with_content(strand_id, PORTAL_STRAND_TRACK, content);
     payload.blob_refs = blob_refs;
     Ok(payload)

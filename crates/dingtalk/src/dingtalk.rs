@@ -398,13 +398,20 @@ async fn dingtalk_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
         webhook::unauthorized(res, "DingTalk body signature mismatch");
         return;
     }
-    if !state
+    match state
         .replay_window
         .check_and_record(format!("{body_timestamp}\u{1f}{body_signature}"))
         .await
     {
-        webhook::unauthorized(res, "DingTalk callback replay");
-        return;
+        Ok(webhook::ReplayGuardVerdict::Fresh) => {}
+        Ok(webhook::ReplayGuardVerdict::Replay) => {
+            webhook::unauthorized(res, "DingTalk callback replay");
+            return;
+        }
+        Err(error) => {
+            webhook::replay_guard_unavailable(res, &error);
+            return;
+        }
     }
     let payload = match dingtalk_inbound_payload(body) {
         Ok(payload) => payload,

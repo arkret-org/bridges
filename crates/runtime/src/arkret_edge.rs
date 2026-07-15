@@ -13,15 +13,15 @@
 //! diesel-backed implementation [`DbSeqStore`] is only compiled under the `db`
 //! feature.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use arkret::http_client::{Auth, Client};
 use arkret::models::EphemeralEnvelope;
 #[cfg(any(feature = "web", test))]
 use arkret::models::{
-    AppletActorView, AppletDescription, AppletPingOutcome, AppletProtocolMetadata, AppletRealmView,
-    AppletTransactionOutcome, AppletTransactionRequestBody,
+    AppletActorView, AppletPingOutcome, AppletProtocolMetadata, AppletRealmView,
+    AppletTransactionOutcome, AppletTransactionRequestBody, ServiceDescribe,
 };
 #[cfg(any(feature = "web", test))]
 use arkret::signatures::{
@@ -60,18 +60,6 @@ pub const EPHEMERAL_QUEUE_CAPACITY: usize = 1024;
 /// Retry hint (ms) returned to the server when the inbound queue is full, so it
 /// re-pushes the unaccepted events after a short delay instead of dropping them.
 const INBOUND_QUEUE_FULL_RETRY_MS: u64 = 1000;
-
-#[cfg(any(feature = "web", test))]
-fn value_type_name(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "null",
-        Value::Bool(_) => "bool",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
-    }
-}
 
 /// How many actor sequence numbers to reserve in the store per refill. A larger
 /// block means fewer store writes at the cost of skipping more numbers on each
@@ -597,7 +585,7 @@ impl ArkretEdge {
     {
         let realm = RealmId::new(realm_id.to_owned())?;
         let content = spec_payload_value(content)?;
-        let external_ref = spec_external_ref_value(external_ref)?;
+        let external_ref = spec_external_ref_map(external_ref)?;
         // Set the signed-envelope `external_ref` before the single signature so
         // the proof covers it (no discarded first sign).
         let mut event = self
@@ -626,7 +614,7 @@ impl ArkretEdge {
     {
         let realm = RealmId::new(realm_id.to_owned())?;
         let content = spec_payload_value(content)?;
-        let external_ref = spec_external_ref_value(external_ref)?;
+        let external_ref = spec_external_ref_map(external_ref)?;
         // Set `redacts` + `external_ref` before the single signature so the proof
         // covers them (no discarded first sign).
         let mut event = self
@@ -722,13 +710,19 @@ where
     })
 }
 
-fn spec_external_ref_value<T>(external_ref: T) -> Result<Value>
+fn spec_external_ref_map<T>(external_ref: T) -> Result<BTreeMap<String, Value>>
 where
     T: Serialize,
 {
-    serde_json::to_value(external_ref).map_err(|error| {
+    let value = serde_json::to_value(external_ref).map_err(|error| {
         BridgeError::Arkret(format!("event external_ref serialization failed: {error}"))
-    })
+    })?;
+    match value {
+        Value::Object(map) => Ok(map.into_iter().collect()),
+        _ => Err(BridgeError::Arkret(
+            "event external_ref must serialize as an object".to_owned(),
+        )),
+    }
 }
 
 /// Diesel-backed [`SeqStore`]. Persists each key's high-water mark in a
@@ -812,10 +806,8 @@ fn event_content_fingerprint(event: &Event) -> i64 {
 pub struct BridgeAppletHandler {
     applet_id: String,
     service_id: Did,
-    protocols: Vec<String>,
+    trust_domain: arkret::TypedTrustDomainId,
     namespaces: Value,
-    limits: Value,
-    auth: Value,
     inbound_tx: Sender<Event>,
     ephemeral_tx: Option<Sender<EphemeralEnvelope>>,
     resolver: Option<Arc<dyn AppletResolver>>,
@@ -833,10 +825,6 @@ pub struct BridgeAppletHandler {
     /// inbound pushes (did:key / did:webvh, fail-closed).
     source_did_resolver: Arc<dyn DidResolver + Send + Sync>,
 }
-
-#[cfg(any(feature = "web", test))]
-/// Advisory per-transaction event ceiling published in `describe.limits`.
-const DESCRIBE_MAX_EVENTS_PER_TRANSACTION: usize = 8192;
 
 #[cfg(any(feature = "web", test))]
 fn default_applet_namespaces(bridge_id: &str, service_id: &Did) -> Value {
@@ -858,29 +846,6 @@ fn default_applet_namespaces(bridge_id: &str, service_id: &Did) -> Value {
 }
 
 #[cfg(any(feature = "web", test))]
-fn default_applet_limits() -> Value {
-    json!({
-        "max_events_per_transaction": DESCRIBE_MAX_EVENTS_PER_TRANSACTION,
-        "receive_events": true,
-        "receive_ephemeral": true,
-        "rate_limited": true,
-    })
-}
-
-#[cfg(any(feature = "web", test))]
-fn default_applet_auth(service_id: &Did, verification_method_id: &str) -> Value {
-    let key_ref = if verification_method_id.starts_with("did:") {
-        verification_method_id.to_owned()
-    } else {
-        format!("{}{}", service_id.as_str(), verification_method_id)
-    };
-    json!({
-        "type": "http_message_signature",
-        "key_ref": key_ref,
-    })
-}
-
-#[cfg(any(feature = "web", test))]
 impl BridgeAppletHandler {
     /// Build the handler from an inbound-capable edge. The edge must have been
     /// constructed with an inbound sender (the run_bridge/web path always is).
@@ -894,29 +859,16 @@ impl BridgeAppletHandler {
     ) -> Result<Self> {
         let bridge_id = edge.config.bridge.bridge_id.clone();
         let service_id = edge.service_id.clone();
-        let verification_method_id = edge.config.arkret.verification_method_id.clone();
         Ok(Self {
             applet_id: edge.config.arkret.applet_id.clone(),
             service_id: service_id.clone(),
-            protocols: vec![bridge_id.clone()],
+            trust_domain: edge.config.arkret.trust_domain.clone(),
             namespaces: edge
                 .config
                 .arkret
                 .applet_namespaces
                 .clone()
                 .unwrap_or_else(|| default_applet_namespaces(&bridge_id, &service_id)),
-            limits: edge
-                .config
-                .arkret
-                .applet_limits
-                .clone()
-                .unwrap_or_else(default_applet_limits),
-            auth: edge
-                .config
-                .arkret
-                .applet_auth
-                .clone()
-                .unwrap_or_else(|| default_applet_auth(&service_id, &verification_method_id)),
             inbound_tx: edge.inbound_sender().ok_or_else(|| {
                 BridgeError::Config("applet handler requires an inbound-enabled edge".into())
             })?,
@@ -1003,19 +955,27 @@ impl arkret::AppletHandler for BridgeAppletHandler {
             ok: true,
             applet_id: self.applet_id.clone(),
             service_id: self.service_id.clone(),
-            protocol_version: "1.0".to_owned(),
+            protocol_version: arkret::PROTOCOL_VERSION.to_owned(),
         })
     }
 
-    fn describe(&self) -> arkret::Result<AppletDescription> {
-        Ok(AppletDescription {
-            applet_id: self.applet_id.clone(),
-            service_id: self.service_id.clone(),
-            protocols: self.protocols.clone(),
-            namespaces: self.namespaces.clone(),
-            limits: self.limits.clone(),
-            auth: self.auth.clone(),
-        })
+    fn describe(&self) -> arkret::Result<ServiceDescribe> {
+        let mut description = ServiceDescribe::development(
+            self.service_id.clone(),
+            self.trust_domain.clone(),
+            arkret::ServiceType::AppletService.as_str(),
+        );
+        description.supported_profiles = vec![arkret::AppletPackage::BASE_PROFILE.to_owned()];
+        description.supported_operations = vec![
+            arkret::OP_APPLET_TRANSACTION.to_owned(),
+            arkret::OP_APPLET_DESCRIBE.to_owned(),
+            arkret::OP_APPLET_PING.to_owned(),
+            arkret::OP_APPLET_RESOLVE_ACTOR.to_owned(),
+            arkret::OP_APPLET_RESOLVE_REALM.to_owned(),
+            arkret::OP_APPLET_PROTOCOL_METADATA.to_owned(),
+        ];
+        description.validate()?;
+        Ok(description)
     }
 
     fn handle_transaction(
@@ -1155,39 +1115,21 @@ impl arkret::AppletHandler for BridgeAppletHandler {
             }
         }
 
-        // Forward spec-shaped ephemeral arrays one envelope at a time, parsed
-        // into the SDK `EphemeralEnvelope` wire type
-        // (`schemas/ephemeral-envelope.schema.json`). Ephemeral loss is
-        // non-fatal (best-effort) and does not affect the durable ack; an
-        // element that does not deserialize into a valid envelope is dropped
-        // rather than failing the batch.
-        if let Some(tx) = self.ephemeral_tx.as_ref() {
-            match req.ephemeral {
-                Value::Null => {}
-                Value::Array(envelopes) => {
-                    for envelope in envelopes {
-                        let envelope: EphemeralEnvelope = match serde_json::from_value(envelope) {
-                            Ok(envelope) => envelope,
-                            Err(err) => {
-                                tracing::warn!(
-                                    error = %err,
-                                    "dropping ephemeral element that is not a valid EphemeralEnvelope"
-                                );
-                                continue;
-                            }
-                        };
-                        if let Err(err) = tx.try_send(envelope) {
-                            tracing::warn!(
-                                error = %err,
-                                "dropping ephemeral envelope because the best-effort queue is full or closed"
-                            );
-                        }
-                    }
-                }
-                other => {
+        // Forward SDK-typed ephemeral envelopes one at a time. Ephemeral loss
+        // is non-fatal (best-effort) and does not affect the durable ack.
+        if let (Some(tx), Some(envelopes)) = (self.ephemeral_tx.as_ref(), req.ephemeral) {
+            for envelope in envelopes {
+                if let Err(err) = envelope.validate() {
                     tracing::warn!(
-                        payload_type = %value_type_name(&other),
-                        "dropping malformed applet transaction ephemeral payload; expected array"
+                        error = %err,
+                        "dropping invalid ephemeral envelope"
+                    );
+                    continue;
+                }
+                if let Err(err) = tx.try_send(envelope) {
+                    tracing::warn!(
+                        error = %err,
+                        "dropping ephemeral envelope because the best-effort queue is full or closed"
                     );
                 }
             }
@@ -1355,7 +1297,7 @@ mod tests {
             event_content_fingerprint(&second)
         );
 
-        second.payload = json!({ "body": "changed" });
+        second.payload = BTreeMap::from([("body".to_owned(), json!("changed"))]);
         assert_ne!(
             event_content_fingerprint(&first),
             event_content_fingerprint(&second)

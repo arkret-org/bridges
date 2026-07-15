@@ -174,32 +174,39 @@ async fn messenger_delivery(req: &mut Request, depot: &mut Depot, res: &mut Resp
     }
     for media in messenger_media(&body) {
         let replay_key = format!("messenger:media:{}", media.message_id);
-        if state.replay.check_and_record(replay_key.clone()).await {
-            let inbound = InboundAppMessage {
-                app_channel: media.channel,
-                app_user: media.user,
-                app_message_id: media.message_id.clone(),
-                body: String::new(),
-            };
-            if let Err(error) = state
-                .ctx
-                .forward_external_media(
-                    "messenger",
-                    inbound,
-                    ExternalMediaRequest {
-                        url: &media.url,
-                        authorization: None,
-                        allowed_hosts: &["fbcdn.net", "fbsbx.com"],
-                        mime_hint: media.mime,
-                        filename: media.filename,
-                    },
-                )
-                .await
-                && error.is_retriable()
-            {
+        match state.replay.check_and_record(replay_key.clone()).await {
+            Ok(webhook::ReplayGuardVerdict::Fresh) => {}
+            Ok(webhook::ReplayGuardVerdict::Replay) => continue,
+            Err(error) => {
+                tracing::error!(%error, "Messenger replay guard storage unavailable");
                 retry = true;
-                state.replay.forget(replay_key).await;
+                continue;
             }
+        }
+        let inbound = InboundAppMessage {
+            app_channel: media.channel,
+            app_user: media.user,
+            app_message_id: media.message_id.clone(),
+            body: String::new(),
+        };
+        if let Err(error) = state
+            .ctx
+            .forward_external_media(
+                "messenger",
+                inbound,
+                ExternalMediaRequest {
+                    url: &media.url,
+                    authorization: None,
+                    allowed_hosts: &["fbcdn.net", "fbsbx.com"],
+                    mime_hint: media.mime,
+                    filename: media.filename,
+                },
+            )
+            .await
+            && error.is_retriable()
+        {
+            retry = true;
+            state.replay.forget(replay_key).await;
         }
     }
     if retry {

@@ -260,9 +260,16 @@ async fn teams_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response
                 .as_deref()
                 .unwrap_or(&delete.app_message_id)
         );
-        if !state.replay.check_and_record(replay_key.clone()).await {
-            webhook::ok_json(res, json!({ "ok": true }));
-            return;
+        match state.replay.check_and_record(replay_key.clone()).await {
+            Ok(webhook::ReplayGuardVerdict::Fresh) => {}
+            Ok(webhook::ReplayGuardVerdict::Replay) => {
+                webhook::ok_json(res, json!({ "ok": true }));
+                return;
+            }
+            Err(error) => {
+                webhook::replay_guard_unavailable(res, &error);
+                return;
+            }
         }
         match state.ctx.submit_app_delete(delete).await {
             Ok(_) => webhook::ok_json(res, json!({ "ok": true })),

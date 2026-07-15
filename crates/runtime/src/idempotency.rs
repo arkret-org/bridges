@@ -102,6 +102,15 @@ pub trait EventDedupStore: Send + Sync + 'static {
     fn check_and_record(&self, event_id: &str, fingerprint: i64) -> Result<DedupVerdict>;
 }
 
+/// Outcome of atomically claiming a public-webhook replay key.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReplayGuardVerdict {
+    /// This key was absent and has now been claimed for its retention window.
+    Fresh,
+    /// This key was already present and unexpired.
+    Replay,
+}
+
 /// Persistence contract for the public-webhook replay guard (bridge contract
 /// G-4: any inbound verification scheme without a per-body nonce MUST hold a
 /// bounded replay/dedupe window).
@@ -114,10 +123,10 @@ pub trait EventDedupStore: Send + Sync + 'static {
 pub trait ReplayGuardStore: Send + Sync + 'static {
     /// Whether `key` is present and unexpired. Does not record the key.
     fn contains(&self, key: &str) -> Result<bool>;
-    /// Atomically claim `key` with `ttl_secs` retention. Returns `true` when the
-    /// key was fresh (claimed now); `false` means it was already present
-    /// (replay).
-    fn check_and_record(&self, key: &str, ttl_secs: i64) -> Result<bool>;
+    /// Atomically claim `key` with `ttl_secs` retention. Storage failures are
+    /// returned separately from a confirmed replay so callers can request
+    /// vendor redelivery instead of acknowledging a fresh webhook.
+    fn check_and_record(&self, key: &str, ttl_secs: i64) -> Result<ReplayGuardVerdict>;
     /// Release a previously claimed key after a retriable downstream failure so
     /// the vendor's redelivery can attempt the bridge submit again.
     fn forget(&self, key: &str) -> Result<()>;

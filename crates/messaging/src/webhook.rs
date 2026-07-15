@@ -1,10 +1,12 @@
 //! Small helpers for adapter-owned Salvo webhook handlers.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aes::{Aes128, Aes256};
-use arkret_bridge_runtime::{ReplayGuardStore, run_blocking};
+pub use arkret_bridge_runtime::ReplayGuardVerdict;
+use arkret_bridge_runtime::{BridgeError, ReplayGuardStore, Result as BridgeResult, run_blocking};
 use base64::Engine as _;
 use cbc::Decryptor;
 use cbc::cipher::block_padding::Pkcs7;
@@ -92,40 +94,32 @@ impl ReplayWindow {
         }
     }
 
-    /// Returns true when the key is already present in the unexpired replay
-    /// window. Does not record the key. A store failure fails closed (treated
-    /// as a replay) so a database outage cannot open the replay window.
-    pub async fn contains(&self, key: &str) -> bool {
+    /// Returns whether the key is already present in the unexpired replay
+    /// window without recording it. Store failures remain distinct so callers
+    /// do not mistake unavailable persistence for a confirmed replay.
+    pub async fn contains(&self, key: &str) -> BridgeResult<bool> {
         if key.trim().is_empty() {
-            return false;
+            return Ok(false);
         }
         let store = self.store.clone();
         let key = key.to_owned();
-        match run_blocking(move || store.contains(&key)).await {
-            Ok(seen) => seen,
-            Err(err) => {
-                tracing::warn!(error = %err, "replay guard probe failed; failing closed");
-                true
-            }
-        }
+        run_blocking(move || store.contains(&key)).await
     }
 
-    /// Returns true when the key is fresh and records it; false means replay.
-    /// A store failure fails closed (the delivery is treated as a replay).
-    pub async fn check_and_record(&self, key: impl Into<String>) -> bool {
+    /// Atomically classify and record a key as fresh or replayed. A store
+    /// failure is returned separately and must produce a retriable webhook
+    /// response, never a replay acknowledgement.
+    pub async fn check_and_record(
+        &self,
+        key: impl Into<String>,
+    ) -> BridgeResult<ReplayGuardVerdict> {
         let key = key.into();
         if key.trim().is_empty() {
-            return false;
+            return Ok(ReplayGuardVerdict::Replay);
         }
         let store = self.store.clone();
         let ttl_secs = self.ttl_secs;
-        match run_blocking(move || store.check_and_record(&key, ttl_secs)).await {
-            Ok(fresh) => fresh,
-            Err(err) => {
-                tracing::warn!(error = %err, "replay guard record failed; failing closed");
-                false
-            }
-        }
+        run_blocking(move || store.check_and_record(&key, ttl_secs)).await
     }
 
     /// Release a previously claimed key after a retriable downstream failure.
@@ -658,11 +652,31 @@ pub async fn submit_deduped(
     inbound: InboundAppMessage,
 ) -> SubmitOutcome {
     let replay_key = replay_key.into();
-    if !replay.check_and_record(replay_key.clone()).await {
-        tracing::debug!(bridge = label, replay_key = %replay_key, "webhook delivery replayed; skipping");
-        return SubmitOutcome::Accepted;
+    submit_deduped_with(label, replay, replay_key, || submit(ctx, label, inbound)).await
+}
+
+async fn submit_deduped_with<F, Fut>(
+    label: &str,
+    replay: &ReplayWindow,
+    replay_key: String,
+    submit_fresh: F,
+) -> SubmitOutcome
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = SubmitOutcome>,
+{
+    match replay.check_and_record(replay_key.clone()).await {
+        Ok(ReplayGuardVerdict::Fresh) => {}
+        Ok(ReplayGuardVerdict::Replay) => {
+            tracing::debug!(bridge = label, replay_key = %replay_key, "webhook delivery replayed; skipping");
+            return SubmitOutcome::Accepted;
+        }
+        Err(error) => {
+            tracing::error!(bridge = label, replay_key = %replay_key, %error, "replay guard storage unavailable; requesting webhook redelivery");
+            return SubmitOutcome::Retry;
+        }
     }
-    let outcome = submit(ctx, label, inbound).await;
+    let outcome = submit_fresh().await;
     if outcome == SubmitOutcome::Retry {
         replay.forget(replay_key).await;
     }
@@ -684,6 +698,14 @@ pub fn submission_retry(res: &mut Response) {
     res.render(Json(
         json!({ "ok": false, "error": "transient upstream failure; retry later" }),
     ));
+}
+
+/// Render a retriable response for a replay-guard storage failure. Hand-written
+/// adapter replay paths use this so an unavailable store is never acknowledged
+/// as a normal duplicate.
+pub fn replay_guard_unavailable(res: &mut Response, error: &BridgeError) {
+    tracing::error!(%error, "replay guard storage unavailable; requesting webhook redelivery");
+    submission_retry(res);
 }
 
 pub fn str_at<'a>(value: &'a Value, pointer: &str) -> Option<&'a str> {
@@ -719,7 +741,7 @@ pub fn body_text_from_json_string(raw: &str, key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc as StdArc, RwLock as StdRwLock};
 
     use jsonwebtoken::{EncodingKey, Header, encode};
@@ -1105,31 +1127,88 @@ OeQdGwud4COtqrs5f1jdPtvd
     #[tokio::test]
     async fn replay_window_rejects_duplicate() {
         let window = memory_replay_window(Duration::from_secs(60));
-        assert!(window.check_and_record("a").await);
-        assert!(!window.check_and_record("a").await);
-        assert!(window.check_and_record("b").await);
+        assert_eq!(
+            window.check_and_record("a").await.unwrap(),
+            ReplayGuardVerdict::Fresh
+        );
+        assert_eq!(
+            window.check_and_record("a").await.unwrap(),
+            ReplayGuardVerdict::Replay
+        );
+        assert_eq!(
+            window.check_and_record("b").await.unwrap(),
+            ReplayGuardVerdict::Fresh
+        );
         // Empty keys are never accepted.
-        assert!(!window.check_and_record("  ").await);
+        assert_eq!(
+            window.check_and_record("  ").await.unwrap(),
+            ReplayGuardVerdict::Replay
+        );
     }
 
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn replay_window_contains_does_not_record() {
         let window = memory_replay_window(Duration::from_secs(60));
-        assert!(!window.contains("a").await);
-        assert!(window.check_and_record("a").await);
-        assert!(window.contains("a").await);
+        assert!(!window.contains("a").await.unwrap());
+        assert_eq!(
+            window.check_and_record("a").await.unwrap(),
+            ReplayGuardVerdict::Fresh
+        );
+        assert!(window.contains("a").await.unwrap());
     }
 
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn replay_window_forget_releases_claim() {
         let window = memory_replay_window(Duration::from_secs(60));
-        assert!(window.check_and_record("a").await);
-        assert!(window.contains("a").await);
+        assert_eq!(
+            window.check_and_record("a").await.unwrap(),
+            ReplayGuardVerdict::Fresh
+        );
+        assert!(window.contains("a").await.unwrap());
         window.forget("a").await;
-        assert!(!window.contains("a").await);
-        assert!(window.check_and_record("a").await);
+        assert!(!window.contains("a").await.unwrap());
+        assert_eq!(
+            window.check_and_record("a").await.unwrap(),
+            ReplayGuardVerdict::Fresh
+        );
+    }
+
+    struct FailingReplayGuardStore;
+
+    impl ReplayGuardStore for FailingReplayGuardStore {
+        fn contains(&self, _key: &str) -> BridgeResult<bool> {
+            Err(BridgeError::Database("replay store unavailable".to_owned()))
+        }
+
+        fn check_and_record(&self, _key: &str, _ttl_secs: i64) -> BridgeResult<ReplayGuardVerdict> {
+            Err(BridgeError::Database("replay store unavailable".to_owned()))
+        }
+
+        fn forget(&self, _key: &str) -> BridgeResult<()> {
+            Err(BridgeError::Database("replay store unavailable".to_owned()))
+        }
+    }
+
+    #[tokio::test]
+    async fn replay_store_failure_returns_503_without_submitting() {
+        let window = ReplayWindow::new(Arc::new(FailingReplayGuardStore), Duration::from_secs(60));
+        let submitted = Arc::new(AtomicBool::new(false));
+        let submitted_in_call = submitted.clone();
+
+        let outcome =
+            submit_deduped_with("test", &window, "delivery-1".to_owned(), || async move {
+                submitted_in_call.store(true, Ordering::SeqCst);
+                SubmitOutcome::Accepted
+            })
+            .await;
+
+        assert_eq!(outcome, SubmitOutcome::Retry);
+        assert!(!submitted.load(Ordering::SeqCst));
+        let mut response = Response::new();
+        respond_submit(&mut response, outcome);
+        assert_eq!(response.status_code, Some(StatusCode::SERVICE_UNAVAILABLE));
     }
 
     #[test]

@@ -216,9 +216,17 @@ async fn whatsapp_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
                 }
 
                 if let Some((media_id, mime, filename)) = whatsapp_media_ref(message) {
-                    if !state.replay.check_and_record(replay_key.clone()).await {
-                        tracing::debug!(message_id = %message_id, "WhatsApp event replayed; skipping");
-                        continue;
+                    match state.replay.check_and_record(replay_key.clone()).await {
+                        Ok(webhook::ReplayGuardVerdict::Fresh) => {}
+                        Ok(webhook::ReplayGuardVerdict::Replay) => {
+                            tracing::debug!(message_id = %message_id, "WhatsApp event replayed; skipping");
+                            continue;
+                        }
+                        Err(error) => {
+                            tracing::error!(%error, "WhatsApp replay guard storage unavailable");
+                            retry = true;
+                            continue;
+                        }
                     }
                     match forward_whatsapp_media(
                         state,
