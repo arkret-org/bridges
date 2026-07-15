@@ -380,7 +380,7 @@ impl IMessageWebhookPayload {
         ))
     }
 
-    fn into_inbound_message(&self) -> std::result::Result<Option<InboundAppMessage>, &'static str> {
+    fn to_inbound_message(&self) -> std::result::Result<Option<InboundAppMessage>, &'static str> {
         let Some(text) = self.text_body() else {
             return Ok(None);
         };
@@ -401,7 +401,7 @@ fn imessage_inbound_message(
 ) -> std::result::Result<Option<InboundAppMessage>, &'static str> {
     serde_json::from_value::<IMessageWebhookPayload>(body.clone())
         .map_err(|_| "invalid iMessage callback shape")?
-        .into_inbound_message()
+        .to_inbound_message()
 }
 
 fn imessage_unsupported_media(

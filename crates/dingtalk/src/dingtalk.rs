@@ -318,7 +318,7 @@ impl DingTalkInboundPayload {
         ))
     }
 
-    fn into_inbound_message(&self) -> std::result::Result<Option<InboundAppMessage>, &'static str> {
+    fn to_inbound_message(&self) -> std::result::Result<Option<InboundAppMessage>, &'static str> {
         let text = self.text_body();
         let Some(text) = text else {
             return Ok(None);
@@ -427,7 +427,7 @@ async fn dingtalk_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respo
         return;
     }
 
-    let inbound = match payload.into_inbound_message() {
+    let inbound = match payload.to_inbound_message() {
         Ok(Some(inbound)) => inbound,
         Ok(None) => {
             if let Some((channel, user, message_id, media_kind)) = payload.unsupported_media_ref() {
@@ -463,7 +463,7 @@ mod tests {
             "msgId": "msg-1"
         }))
         .unwrap();
-        let inbound = payload.into_inbound_message().unwrap().expect("message");
+        let inbound = payload.to_inbound_message().unwrap().expect("message");
         assert_eq!(inbound.app_channel, "conv-1");
         assert_eq!(inbound.app_user, "staff-1");
         assert_eq!(inbound.app_message_id, "msg-1");
@@ -478,7 +478,7 @@ mod tests {
             "msgId": "msg-1"
         }))
         .unwrap();
-        let inbound = payload.into_inbound_message().unwrap().expect("message");
+        let inbound = payload.to_inbound_message().unwrap().expect("message");
         assert_eq!(inbound.app_user, "");
     }
 

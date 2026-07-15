@@ -295,11 +295,10 @@ impl MessageBridge for ZulipApp {
                                 },
                             )
                             .await
+                            && error.is_retriable()
                         {
-                            if error.is_retriable() {
-                                retry_poll = true;
-                                break;
-                            }
+                            retry_poll = true;
+                            break;
                         }
                     }
                     if retry_poll {
