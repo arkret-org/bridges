@@ -15,10 +15,12 @@ use arkret_bridge_messaging::runtime::{
     BridgeError, Result, exponential_backoff_with_jitter, redact_sensitive_url_values,
 };
 use arkret_bridge_messaging::{
-    AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
-    SenderRenderStyle, send_json_expect,
+    AppMessageRef, ExternalMediaRequest, InboundAppMessage, InboundMediaAuthorization,
+    MessageBridge, MessageContext, OutboundAppMessage, SenderRenderStyle, send_json_expect,
 };
 use async_trait::async_trait;
+use quick_xml::Reader;
+use quick_xml::events::Event as XmlEvent;
 use serde_json::Value;
 
 /// Zulip REST success flag: top-level `result == "success"`.
@@ -262,13 +264,50 @@ impl MessageBridge for ZulipApp {
                         tracing::warn!("Zulip message missing id; skipping");
                         continue;
                     };
+                    let app_user = message
+                        .get("sender_id")
+                        .and_then(|v| v.as_i64())
+                        .map(|n| n.to_string())
+                        .unwrap_or_default();
+                    for (index, media) in zulip_uploaded_media(&self.site, message)
+                        .into_iter()
+                        .enumerate()
+                    {
+                        let media_inbound = InboundAppMessage {
+                            app_channel: app_channel.clone(),
+                            app_user: app_user.clone(),
+                            app_message_id: format!("{app_message_id}:upload:{index}"),
+                            body: String::new(),
+                        };
+                        if let Err(error) = ctx
+                            .forward_external_media(
+                                "zulip",
+                                media_inbound,
+                                ExternalMediaRequest {
+                                    url: &media.url,
+                                    authorization: Some(InboundMediaAuthorization::Basic {
+                                        username: self.bot_email.clone(),
+                                        password: self.api_key.clone(),
+                                    }),
+                                    allowed_hosts: &[media.allowed_host.as_str()],
+                                    mime_hint: None,
+                                    filename: media.filename,
+                                },
+                            )
+                            .await
+                        {
+                            if error.is_retriable() {
+                                retry_poll = true;
+                                break;
+                            }
+                        }
+                    }
+                    if retry_poll {
+                        break;
+                    }
                     let inbound = InboundAppMessage {
                         app_channel,
-                        app_user: message
-                            .get("sender_id")
-                            .and_then(|v| v.as_i64())
-                            .map(|n| n.to_string())
-                            .unwrap_or_default(),
+                        app_user,
                         app_message_id,
                         body: message
                             .get("content")
@@ -340,6 +379,87 @@ impl MessageBridge for ZulipApp {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ZulipUploadedMedia {
+    url: String,
+    allowed_host: String,
+    filename: Option<String>,
+}
+
+/// Extract same-origin Zulip upload links from the server-rendered message
+/// HTML. Anchor `href` values point at the original upload; image `src` values
+/// may point at thumbnails and are deliberately ignored.
+fn zulip_uploaded_media(site: &str, message: &Value) -> Vec<ZulipUploadedMedia> {
+    let Some(content) = message.get("content").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    let Ok(site_url) = url::Url::parse(site) else {
+        return Vec::new();
+    };
+    if site_url.scheme() != "https"
+        || !site_url.username().is_empty()
+        || site_url.password().is_some()
+    {
+        return Vec::new();
+    }
+    let Some(site_host) = site_url.host_str().map(str::to_owned) else {
+        return Vec::new();
+    };
+    let mut reader = Reader::from_str(content);
+    reader.config_mut().allow_unmatched_ends = true;
+    reader.config_mut().check_end_names = false;
+    let decoder = reader.decoder();
+    let mut seen = std::collections::HashSet::new();
+    let mut media = Vec::new();
+    loop {
+        let element = match reader.read_event() {
+            Ok(XmlEvent::Start(element)) | Ok(XmlEvent::Empty(element))
+                if element.name().as_ref().eq_ignore_ascii_case(b"a") =>
+            {
+                element
+            }
+            Ok(XmlEvent::Eof) => break,
+            Ok(_) => continue,
+            Err(_) => break,
+        };
+        let Some(href) = element.attributes().flatten().find_map(|attribute| {
+            attribute
+                .key
+                .as_ref()
+                .eq_ignore_ascii_case(b"href")
+                .then(|| attribute.decode_and_unescape_value(decoder).ok())
+                .flatten()
+                .map(|value| value.into_owned())
+        }) else {
+            continue;
+        };
+        let Ok(resolved) = site_url.join(&href) else {
+            continue;
+        };
+        if resolved.scheme() != site_url.scheme()
+            || resolved.host_str() != site_url.host_str()
+            || resolved.port_or_known_default() != site_url.port_or_known_default()
+            || !resolved.username().is_empty()
+            || resolved.password().is_some()
+            || !resolved.path().starts_with("/user_uploads/")
+            || !seen.insert(resolved.as_str().to_owned())
+        {
+            continue;
+        }
+        let filename = resolved
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+            .filter(|filename| !filename.is_empty())
+            .map(str::to_owned);
+        media.push(ZulipUploadedMedia {
+            url: resolved.to_string(),
+            allowed_host: site_host.clone(),
+            filename,
+        });
+    }
+    media
+}
+
 fn zulip_app_channel(message: &Value) -> String {
     if message.get("type").and_then(|v| v.as_str()) == Some("stream") {
         let stream_id = message
@@ -386,5 +506,46 @@ mod tests {
             "sender_id": 7
         });
         assert_eq!(zulip_app_channel(&message), "pm/7");
+    }
+
+    #[test]
+    fn zulip_uploaded_media_extracts_unique_same_origin_upload_links() {
+        let message = json!({
+            "content": concat!(
+                "<p><a href=\"/user_uploads/1/ab/report.pdf\">report</a>",
+                "<a href=\"https://chat.example.test/user_uploads/1/cd/photo.png\">",
+                "<img src=\"/user_uploads/thumbnail/1/cd/photo.png\"></a>",
+                "<a href=\"/user_uploads/1/ef/archive.zip\">archive</a>",
+                "<a href=\"/user_uploads/1/ab/report.pdf\">duplicate</a>",
+                "<a href=\"https://attacker.invalid/user_uploads/1/evil\">external</a></p>"
+            )
+        });
+        let media = zulip_uploaded_media("https://chat.example.test", &message);
+        assert_eq!(media.len(), 3);
+        assert_eq!(
+            media[0],
+            ZulipUploadedMedia {
+                url: "https://chat.example.test/user_uploads/1/ab/report.pdf".to_owned(),
+                allowed_host: "chat.example.test".to_owned(),
+                filename: Some("report.pdf".to_owned()),
+            }
+        );
+        assert_eq!(media[1].filename.as_deref(), Some("photo.png"));
+        assert_eq!(media[2].filename.as_deref(), Some("archive.zip"));
+    }
+
+    #[test]
+    fn zulip_uploaded_media_ignores_non_upload_links_and_invalid_sites() {
+        let message = json!({
+            "content": concat!(
+                "<p><a href=\"/help\">help</a>",
+                "<a href=\"https://example.test/file\">file</a>",
+                "<a href=\"https://user:secret@chat.example.test/user_uploads/1/evil\">",
+                "credential URL</a></p>"
+            )
+        });
+        assert!(zulip_uploaded_media("https://chat.example.test", &message).is_empty());
+        assert!(zulip_uploaded_media("not a url", &message).is_empty());
+        assert!(zulip_uploaded_media("http://chat.example.test", &message).is_empty());
     }
 }

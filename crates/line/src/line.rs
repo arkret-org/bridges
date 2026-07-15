@@ -11,8 +11,8 @@ use arkret_bridge_messaging::salvo::prelude::*;
 use arkret_bridge_messaging::salvo::{self, affix_state};
 use arkret_bridge_messaging::{
     AppDeleteReason, AppMessageRef, EphemeralEnvelope, ExternalMediaRequest, InboundAppDelete,
-    InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage, SenderRenderStyle,
-    webhook,
+    InboundAppMessage, InboundMediaAuthorization, MessageBridge, MessageContext,
+    OutboundAppMessage, SenderRenderStyle, webhook,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -360,7 +360,9 @@ async fn forward_line_media(
             inbound,
             ExternalMediaRequest {
                 url: &url,
-                bearer_token: Some(&state.app.channel_access_token),
+                authorization: Some(InboundMediaAuthorization::Bearer(
+                    state.app.channel_access_token.clone(),
+                )),
                 allowed_hosts: &["api-data.line.me"],
                 mime_hint: None,
                 filename,

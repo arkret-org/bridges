@@ -8,8 +8,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use arkret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
 use arkret_bridge_messaging::runtime::cache::TokenCache;
+use arkret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
 use arkret_bridge_messaging::salvo::prelude::*;
 use arkret_bridge_messaging::salvo::{self, affix_state};
 use arkret_bridge_messaging::{
@@ -316,9 +316,8 @@ fn teams_activity_url(
     conversation_id: &str,
     activity_id: Option<&str>,
 ) -> Result<url::Url> {
-    let mut url = url::Url::parse(service_url).map_err(|error| {
-        BridgeError::App(format!("invalid Teams service URL: {error}"))
-    })?;
+    let mut url = url::Url::parse(service_url)
+        .map_err(|error| BridgeError::App(format!("invalid Teams service URL: {error}")))?;
     let mut segments = url.path_segments_mut().map_err(|_| {
         BridgeError::App("Teams service URL cannot be used as an API base".to_owned())
     })?;
@@ -443,11 +442,16 @@ mod tests {
             "conversation": {"id": "conversation-id"},
             "from": {"id": "user-id"}
         });
-        let delete = teams_inbound_delete(&body).unwrap().expect("message delete");
+        let delete = teams_inbound_delete(&body)
+            .unwrap()
+            .expect("message delete");
         assert_eq!(delete.app_channel, "conversation-id");
         assert_eq!(delete.app_user, "user-id");
         assert_eq!(delete.app_message_id, "deleted-activity-id");
-        assert_eq!(delete.source_event_id.as_deref(), Some("delete-activity-id"));
+        assert_eq!(
+            delete.source_event_id.as_deref(),
+            Some("delete-activity-id")
+        );
         assert_eq!(delete.reason, AppDeleteReason::AppRecall);
     }
 

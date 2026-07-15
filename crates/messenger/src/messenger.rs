@@ -188,7 +188,7 @@ async fn messenger_delivery(req: &mut Request, depot: &mut Depot, res: &mut Resp
                     inbound,
                     ExternalMediaRequest {
                         url: &media.url,
-                        bearer_token: None,
+                        authorization: None,
                         allowed_hosts: &["fbcdn.net", "fbsbx.com"],
                         mime_hint: media.mime,
                         filename: media.filename,

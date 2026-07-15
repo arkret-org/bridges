@@ -180,7 +180,7 @@ impl Handler {
                 inbound,
                 ExternalMediaRequest {
                     url: &att.url,
-                    bearer_token: None,
+                    authorization: None,
                     allowed_hosts: &["cdn.discordapp.com", "media.discordapp.net"],
                     mime_hint: att.content_type.clone(),
                     filename: Some(att.filename.clone()),

@@ -48,7 +48,8 @@ use ghost::{
     portal_location_ref, provision_ghost_actor, require_nonempty_ref,
 };
 pub use media::{
-    HttpInboundMediaFetcher, InboundMediaFetchPolicy, InboundMediaFetcher, InboundMediaReference,
+    HttpInboundMediaFetcher, InboundMediaAuthorization, InboundMediaFetchPolicy,
+    InboundMediaFetcher, InboundMediaReference,
 };
 pub use runtime::salvo;
 use serde_json::{Value, json};
@@ -347,12 +348,12 @@ impl MessageContext {
     pub async fn download_external_media(
         &self,
         url: &str,
-        bearer_token: Option<&str>,
+        authorization: Option<InboundMediaAuthorization>,
         allowed_hosts: &[&str],
     ) -> Result<DownloadedMedia> {
         let reference = InboundMediaReference {
             url: url.to_owned(),
-            bearer_token: bearer_token.map(str::to_owned),
+            authorization,
             allowed_hosts: allowed_hosts
                 .iter()
                 .map(|host| (*host).to_owned())
@@ -393,7 +394,7 @@ impl MessageContext {
         request: ExternalMediaRequest<'_>,
     ) -> Result<String> {
         let media = self
-            .download_external_media(request.url, request.bearer_token, request.allowed_hosts)
+            .download_external_media(request.url, request.authorization, request.allowed_hosts)
             .await?;
         let mime = request
             .mime_hint
@@ -830,8 +831,8 @@ impl MessageContext {
 pub struct ExternalMediaRequest<'a> {
     /// The https download URL.
     pub url: &'a str,
-    /// Optional bearer token sent with the download request.
-    pub bearer_token: Option<&'a str>,
+    /// Optional registered transport authorization sent with the request.
+    pub authorization: Option<InboundMediaAuthorization>,
     /// Host allowlist enforced on the download URL.
     pub allowed_hosts: &'a [&'a str],
     /// Platform-declared MIME type; preferred over the download response's

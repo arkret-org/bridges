@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use arkret_bridge_messaging::runtime::{BridgeError, Result, jittered_delay};
 use arkret_bridge_messaging::{
-    AppMessageRef, ExternalMediaRequest, InboundAppMessage, MessageBridge, MessageContext,
-    OutboundAppMessage, SenderRenderStyle, send_json_expect,
+    AppMessageRef, ExternalMediaRequest, InboundAppMessage, InboundMediaAuthorization,
+    MessageBridge, MessageContext, OutboundAppMessage, SenderRenderStyle, send_json_expect,
 };
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
@@ -90,7 +90,9 @@ impl SlackApp {
                         inbound,
                         ExternalMediaRequest {
                             url: &item.url,
-                            bearer_token: Some(&self.bot_token),
+                            authorization: Some(InboundMediaAuthorization::Bearer(
+                                self.bot_token.clone(),
+                            )),
                             allowed_hosts: &["files.slack.com"],
                             mime_hint: item.mime,
                             filename: item.filename,

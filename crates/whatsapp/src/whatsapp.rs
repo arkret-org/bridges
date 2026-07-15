@@ -361,7 +361,9 @@ async fn forward_whatsapp_media(
             inbound,
             ExternalMediaRequest {
                 url,
-                bearer_token: Some(token),
+                authorization: Some(arkret_bridge_messaging::InboundMediaAuthorization::Bearer(
+                    token.to_owned(),
+                )),
                 allowed_hosts: &[
                     "lookaside.fbsbx.com",
                     "lookaside.facebook.com",

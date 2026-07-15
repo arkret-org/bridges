@@ -217,7 +217,7 @@ async fn forward_media(
         inbound,
         ExternalMediaRequest {
             url: &url,
-            bearer_token: None,
+            authorization: None,
             allowed_hosts: &["api.telegram.org"],
             mime_hint: mime,
             filename,
