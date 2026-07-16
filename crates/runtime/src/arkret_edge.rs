@@ -963,16 +963,16 @@ impl arkret::AppletHandler for BridgeAppletHandler {
         let mut description = ServiceDescribe::development(
             self.service_id.clone(),
             self.trust_domain.clone(),
-            arkret::ServiceType::AppletService.as_str(),
+            arkret::ServiceType::AppletService,
         );
         description.supported_profiles = vec![arkret::AppletPackage::BASE_PROFILE.to_owned()];
         description.supported_operations = vec![
-            arkret::OP_APPLET_TRANSACTION.to_owned(),
-            arkret::OP_APPLET_DESCRIBE.to_owned(),
-            arkret::OP_APPLET_PING.to_owned(),
-            arkret::OP_APPLET_RESOLVE_ACTOR.to_owned(),
-            arkret::OP_APPLET_RESOLVE_REALM.to_owned(),
-            arkret::OP_APPLET_PROTOCOL_METADATA.to_owned(),
+            arkret::ServiceOperationId::EDGE_APPLET_COMMAND_TRANSACTION.to_owned(),
+            arkret::ServiceOperationId::EDGE_APPLET_QUERY_DESCRIBE.to_owned(),
+            arkret::ServiceOperationId::EDGE_APPLET_QUERY_PING.to_owned(),
+            arkret::ServiceOperationId::EDGE_APPLET_ACTOR_QUERY_RESOLVE.to_owned(),
+            arkret::ServiceOperationId::EDGE_APPLET_REALM_QUERY_RESOLVE.to_owned(),
+            arkret::ServiceOperationId::EDGE_APPLET_QUERY_PROTOCOL_METADATA.to_owned(),
         ];
         description.validate()?;
         Ok(description)
