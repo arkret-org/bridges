@@ -22,6 +22,7 @@
 | 2026-07-11 | messaging + adapters | 新增平台无关 `InboundMediaFetcher` 和有界 HTTP 实现;Discord、Telegram、Slack、LINE、WhatsApp、Messenger 接入真实媒体下载,无可验证下载引用的平台显式拒绝。 |
 | 2026-07-11 | runtime | `ArkretEdge` 新增注入已认证 SDK `Client`、`Ed25519MoveSigner`、可复用 `SeqAllocator` 的 outbound-only 构造路径，公开 delegated unsigned mint 以允许 host 在首次签名前加密；`SeqAllocator` 可克隆并共享预留窗口，新增通用 `FileSeqStore`，用于 Savfox applet 出站链路消除重复 mint/HLC/签名/提交实现。 |
 | 2026-07-13 | messaging | 删除从未接入 `MessageContext`、也无任何 adapter 使用的 calendar / RSVP 映射守卫；现行 calendar spec 与 Rust SDK 类型保持不变，未来有真实接入方时再随提交链路实现。 |
+| 2026-07-16 | runtime | `arkret_edge.rs` 出站传输策略注释的 `cleartext` 改为 `plaintext`，对齐 `forbidden-model-terms.json` hard_reject 条目（该条目明确覆盖 code comments）。仅注释,无行为变更。 |
 
 ## Todo(尚未落地的共享层待办)
 

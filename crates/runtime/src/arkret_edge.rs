@@ -247,7 +247,7 @@ impl ArkretEdge {
         // Outbound transport policy (spec §7, sync/api-conventions §11.2): the
         // bridge actively connects out to this address, so require TLS. A plain
         // `http://` server_url would carry the bearer access token and signed
-        // events in cleartext. Loopback over http is the one operator-controlled
+        // events in plaintext. Loopback over http is the one operator-controlled
         // dev exception. Fail closed otherwise.
         if base.scheme() != "https" && !host_is_loopback(base.host_str()) {
             return Err(BridgeError::Config(format!(
