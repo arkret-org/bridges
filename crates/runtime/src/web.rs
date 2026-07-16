@@ -34,7 +34,6 @@ use crate::idempotency::{
 use crate::run_blocking;
 
 static PROMETHEUS_HANDLE: OnceLock<std::result::Result<PrometheusHandle, String>> = OnceLock::new();
-const APPLET_TRANSACTION_OPERATION_ID: &str = "ak.edge.applet.command.transaction";
 const APPLET_TRANSACTION_DIRECTION: &str = "node_to_applet";
 const APPLET_TRANSACTION_SIGNATURE_MAX_LIFETIME_SECS: i64 = 300;
 const APPLET_TRANSACTION_SIGNATURE_MAX_CLOCK_SKEW_SECS: i64 = 30;
@@ -56,7 +55,7 @@ struct OwnedTransactionReplayKey {
 impl OwnedTransactionReplayKey {
     fn as_replay(&self) -> TransactionReplayKey<'_> {
         TransactionReplayKey {
-            operation_id: APPLET_TRANSACTION_OPERATION_ID,
+            operation_id: arkret::ServiceOperationId::EDGE_APPLET_COMMAND_TRANSACTION,
             direction: APPLET_TRANSACTION_DIRECTION,
             source_service_id: &self.source_service_id,
             destination_service_id: &self.destination_service_id,
@@ -817,7 +816,7 @@ fn build_source_signature_anchor(
         "direction": APPLET_TRANSACTION_DIRECTION,
         "expires": verified.expires,
         "idempotency_key": idempotency_key,
-        "operation_id": APPLET_TRANSACTION_OPERATION_ID,
+        "operation_id": arkret::ServiceOperationId::EDGE_APPLET_COMMAND_TRANSACTION,
         "source_key_state_digest": &verified.source_key_state_digest,
         "source_service_id": &verified.source_service_id,
         "verification_method": &verified.key_id,
