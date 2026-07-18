@@ -24,24 +24,10 @@ pub struct Config {
     /// bridge.
     #[serde(default)]
     pub app: serde_json::Value,
-    /// Static channel↔realm mappings applied (upserted) at startup. The messaging
-    /// layer requires an explicit app-channel→Realm mapping for inbound delivery;
-    /// this gives operators a supported, file-driven way to provision them
-    /// instead of writing SQL by hand.
-    #[serde(default)]
-    pub mappings: Vec<ChannelRealmMappingConfig>,
-}
-
-/// A static channel↔realm mapping entry from configuration.
-#[derive(Clone, Debug, Deserialize)]
-pub struct ChannelRealmMappingConfig {
-    /// The app-side channel identifier (e.g. a Slack channel id or LINE group id).
-    pub app_channel: String,
-    /// The arkret realm id this channel maps to.
-    pub realm_id: String,
-    /// Optional portal alias.
-    #[serde(default)]
-    pub alias: Option<String>,
+    /// Product-layer extensions retained without giving the generic runtime
+    /// ownership of their semantics.
+    #[serde(default, flatten)]
+    pub extensions: serde_json::Map<String, serde_json::Value>,
 }
 
 /// The bridge's own general configuration.
@@ -76,16 +62,15 @@ pub struct BridgeConfig {
     /// the public network unless an operator explicitly opens them.
     #[serde(default = "default_admin_bind")]
     pub admin_bind: String,
-    /// When set, `ak.message.redact` events from arkret are not forwarded as
-    /// app-side deletions (see `MessageAdapter::on_arkret_event`).
-    #[serde(default)]
-    pub disable_deletion_forwarding: bool,
     /// Per-source-IP rate limiting on the public webhook plane. Enabled by
     /// default with a deliberately generous quota; disable or widen it when a
     /// fronting reverse proxy already rate-limits, or when a platform's
     /// redelivery storms arrive from few source IPs.
     #[serde(default)]
     pub webhook_rate_limit: WebhookRateLimitConfig,
+    /// Product-layer bridge extensions retained for the owning adapter layer.
+    #[serde(default, flatten)]
+    pub extensions: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Per-source-IP rate limit settings for the public webhook plane.

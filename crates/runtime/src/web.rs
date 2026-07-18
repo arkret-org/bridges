@@ -15,7 +15,8 @@ use arkret::signatures::http_signature::{
 use arkret::signatures::{EventProofBuilder, PublicKeyMaterial, verify_eddsa_detached_jws_proof};
 use arkret::{
     AppletHandler, CompositeDidResolver, Did, DidKeyResolver, DidResolver, HttpDidResolver,
-    RejectedItem,
+    IdempotencyDirection, IdempotencyIdentity, RejectedItem, TransactionClaim,
+    TransactionIdempotencyStore,
 };
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use salvo::affix_state;
@@ -28,13 +29,10 @@ use crate::arkret_edge::BridgeAppletHandler;
 use crate::config::{Config, TrustedVerificationMethodConfig};
 use crate::db::{DbEventDedupStore, DbTransactionIdempotencyStore};
 use crate::error::{BridgeError, Result};
-use crate::idempotency::{
-    EventDedupStore, TransactionClaim, TransactionIdempotencyStore, TransactionReplayKey,
-};
+use crate::idempotency::EventDedupStore;
 use crate::run_blocking;
 
 static PROMETHEUS_HANDLE: OnceLock<std::result::Result<PrometheusHandle, String>> = OnceLock::new();
-const APPLET_TRANSACTION_DIRECTION: &str = "node_to_applet";
 const APPLET_TRANSACTION_SIGNATURE_MAX_LIFETIME_SECS: i64 = 300;
 const APPLET_TRANSACTION_SIGNATURE_MAX_CLOCK_SKEW_SECS: i64 = 30;
 /// Upper bound on the inbound edge `transactions` body, mirroring the webhook
@@ -44,25 +42,6 @@ const APPLET_TRANSACTION_SIGNATURE_MAX_CLOCK_SKEW_SECS: i64 = 30;
 const MAX_APPLET_TRANSACTION_BODY_BYTES: usize = 1024 * 1024;
 const SOURCE_SERVICE_ID_HEADER: &str = "source-service-id";
 const DESTINATION_SERVICE_ID_HEADER: &str = "destination-service-id";
-
-#[derive(Clone)]
-struct OwnedTransactionReplayKey {
-    source_service_id: String,
-    destination_service_id: String,
-    idempotency_key: String,
-}
-
-impl OwnedTransactionReplayKey {
-    fn as_replay(&self) -> TransactionReplayKey<'_> {
-        TransactionReplayKey {
-            operation_id: arkret::ServiceOperationId::EDGE_APPLET_COMMAND_TRANSACTION,
-            direction: APPLET_TRANSACTION_DIRECTION,
-            source_service_id: &self.source_service_id,
-            destination_service_id: &self.destination_service_id,
-            idempotency_key: &self.idempotency_key,
-        }
-    }
-}
 
 /// Start the web service and run it blocking. `extra` is each app adapter's
 /// webhook routes (optional).
@@ -79,8 +58,9 @@ pub async fn serve(ctx: Arc<BridgeContext>, extra: Option<Router>) -> Result<()>
     // both stores persist in the bridge database so restarts do not turn
     // server retries into duplicate deliveries.
     let dedup: Arc<dyn EventDedupStore> = Arc::new(DbEventDedupStore::new(ctx.db.clone())?);
-    let idempotency: Arc<dyn TransactionIdempotencyStore> =
-        Arc::new(DbTransactionIdempotencyStore::new(ctx.db.clone())?);
+    let idempotency: Arc<
+        dyn TransactionIdempotencyStore<AppletTransactionOutcome, Error = BridgeError>,
+    > = Arc::new(DbTransactionIdempotencyStore::new(ctx.db.clone())?);
     // The trust-root DID resolver authenticates the inbound source service DID
     // signature and every pushed Event proof. The same resolver is shared with
     // the applet handler so its `source_did_resolver()` (SDK AppletHandler
@@ -201,10 +181,6 @@ fn prometheus_handle() -> std::result::Result<&'static PrometheusHandle, String>
             "arkret_bridge_applet_transactions_total",
             "Applet transaction request count, labelled by result."
         );
-        describe_counter!(
-            crate::metrics::BRIDGE_MESSAGES_METRIC,
-            "App<->arkret bridged message count, labelled by bridge, direction (inbound/outbound/inbound_media) and result (ok/error)."
-        );
         Ok(handle)
     }) {
         Ok(handle) => Ok(handle),
@@ -220,48 +196,37 @@ fn record_applet_transaction(result: &'static str) {
 struct AppletWebState {
     handler: Arc<BridgeAppletHandler>,
     config: Arc<Config>,
-    idempotency: Arc<dyn TransactionIdempotencyStore>,
+    idempotency:
+        Arc<dyn TransactionIdempotencyStore<AppletTransactionOutcome, Error = BridgeError>>,
     event_proof_resolver: Arc<CompositeDidResolver>,
 }
 
 async fn claim_transaction(
-    store: Arc<dyn TransactionIdempotencyStore>,
-    replay: OwnedTransactionReplayKey,
+    store: Arc<dyn TransactionIdempotencyStore<AppletTransactionOutcome, Error = BridgeError>>,
+    replay: IdempotencyIdentity,
     hash: String,
     source_signature_anchor: String,
-) -> Result<TransactionClaim> {
-    run_blocking(move || {
-        let replay = replay.as_replay();
-        store.claim(&replay, &hash, &source_signature_anchor)
-    })
-    .await
+) -> Result<TransactionClaim<AppletTransactionOutcome>> {
+    run_blocking(move || store.claim(&replay, &hash, &source_signature_anchor)).await
 }
 
 async fn release_transaction_claim(
-    store: Arc<dyn TransactionIdempotencyStore>,
-    replay: OwnedTransactionReplayKey,
+    store: Arc<dyn TransactionIdempotencyStore<AppletTransactionOutcome, Error = BridgeError>>,
+    replay: IdempotencyIdentity,
     hash: String,
     source_signature_anchor: String,
 ) -> Result<()> {
-    run_blocking(move || {
-        let replay = replay.as_replay();
-        store.release(&replay, &hash, &source_signature_anchor)
-    })
-    .await
+    run_blocking(move || store.release(&replay, &hash, &source_signature_anchor)).await
 }
 
 async fn record_transaction_outcome(
-    store: Arc<dyn TransactionIdempotencyStore>,
-    replay: OwnedTransactionReplayKey,
+    store: Arc<dyn TransactionIdempotencyStore<AppletTransactionOutcome, Error = BridgeError>>,
+    replay: IdempotencyIdentity,
     hash: String,
     source_signature_anchor: String,
     response: AppletTransactionOutcome,
 ) -> Result<()> {
-    run_blocking(move || {
-        let replay = replay.as_replay();
-        store.record(&replay, &hash, &source_signature_anchor, &response)
-    })
-    .await
+    run_blocking(move || store.record(&replay, &hash, &source_signature_anchor, &response)).await
 }
 
 struct VerifiedAppletHttpRequest {
@@ -422,11 +387,12 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
     }
 
     let destination = verified.destination_service_id.clone();
-    let replay = OwnedTransactionReplayKey {
-        source_service_id: source.clone(),
-        destination_service_id: destination,
-        idempotency_key: idempotency_key.clone(),
-    };
+    let replay = IdempotencyIdentity::applet_transaction(
+        IdempotencyDirection::NodeToApplet,
+        source.clone(),
+        destination,
+        idempotency_key.clone(),
+    );
     let source_signature_anchor =
         match build_source_signature_anchor(&verified, &request_hash, &idempotency_key) {
             Ok(anchor) => anchor,
@@ -813,7 +779,7 @@ fn build_source_signature_anchor(
         "covered_components": &verified.covered_components,
         "created": verified.created,
         "destination_service_id": &verified.destination_service_id,
-        "direction": APPLET_TRANSACTION_DIRECTION,
+        "direction": IdempotencyDirection::NodeToApplet.as_str(),
         "expires": verified.expires,
         "idempotency_key": idempotency_key,
         "operation_id": arkret::ServiceOperationId::EDGE_APPLET_COMMAND_TRANSACTION,

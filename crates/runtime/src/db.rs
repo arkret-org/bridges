@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use arkret::models::AppletTransactionOutcome;
+use arkret::{IdempotencyIdentity, TransactionClaim, TransactionIdempotencyStore};
 use diesel::prelude::*;
 use diesel::r2d2::{ConnectionManager, Pool, PooledConnection};
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
@@ -20,8 +21,7 @@ use crate::dead_letter::{OutboundDeadLetter, OutboundDeadLetterRecord, OutboundD
 use crate::error::{BridgeError, Result};
 use crate::idempotency::{
     DedupVerdict, EventDedupStore, IDEMPOTENCY_TTL_SECS, PENDING_TAKEOVER_GRACE_SECS,
-    ReplayGuardStore, ReplayGuardVerdict, TransactionClaim, TransactionIdempotencyStore,
-    TransactionReplayKey,
+    ReplayGuardStore, ReplayGuardVerdict,
 };
 
 /// Embedded migrations for the runtime-owned tables (`transaction_idempotency`,
@@ -201,13 +201,15 @@ struct TransactionIdempotencyRow {
     created_at: i64,
 }
 
-impl TransactionIdempotencyStore for DbTransactionIdempotencyStore {
+impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdempotencyStore {
+    type Error = BridgeError;
+
     fn claim(
         &self,
-        replay: &TransactionReplayKey<'_>,
+        replay: &IdempotencyIdentity,
         hash: &str,
         source_signature_anchor: &str,
-    ) -> Result<TransactionClaim> {
+    ) -> Result<TransactionClaim<AppletTransactionOutcome>> {
         use idempotency_schema::transaction_idempotency::dsl;
 
         let mut conn = self.db.conn()?;
@@ -218,11 +220,11 @@ impl TransactionIdempotencyStore for DbTransactionIdempotencyStore {
         // Two attempts: a lost insert race re-reads the winner's row once.
         for _ in 0..2 {
             let row = dsl::transaction_idempotency
-                .filter(dsl::operation_id.eq(replay.operation_id))
-                .filter(dsl::direction.eq(replay.direction))
-                .filter(dsl::source_service_id.eq(replay.source_service_id))
-                .filter(dsl::destination_service_id.eq(replay.destination_service_id))
-                .filter(dsl::idempotency_key.eq(replay.idempotency_key))
+                .filter(dsl::operation_id.eq(&replay.operation_id))
+                .filter(dsl::direction.eq(replay.direction.as_str()))
+                .filter(dsl::source_service_id.eq(&replay.source_service_id))
+                .filter(dsl::destination_service_id.eq(&replay.destination_service_id))
+                .filter(dsl::idempotency_key.eq(&replay.idempotency_key))
                 .select((
                     dsl::body_hash,
                     dsl::source_signature_anchor,
@@ -258,13 +260,13 @@ impl TransactionIdempotencyStore for DbTransactionIdempotencyStore {
                     if row.created_at + PENDING_TAKEOVER_GRACE_SECS <= now {
                         diesel::update(
                             dsl::transaction_idempotency
-                                .filter(dsl::operation_id.eq(replay.operation_id))
-                                .filter(dsl::direction.eq(replay.direction))
-                                .filter(dsl::source_service_id.eq(replay.source_service_id))
+                                .filter(dsl::operation_id.eq(&replay.operation_id))
+                                .filter(dsl::direction.eq(replay.direction.as_str()))
+                                .filter(dsl::source_service_id.eq(&replay.source_service_id))
                                 .filter(
-                                    dsl::destination_service_id.eq(replay.destination_service_id),
+                                    dsl::destination_service_id.eq(&replay.destination_service_id),
                                 )
-                                .filter(dsl::idempotency_key.eq(replay.idempotency_key)),
+                                .filter(dsl::idempotency_key.eq(&replay.idempotency_key)),
                         )
                         .set((
                             dsl::created_at.eq(now),
@@ -278,11 +280,11 @@ impl TransactionIdempotencyStore for DbTransactionIdempotencyStore {
                 None => {
                     let inserted = diesel::insert_into(dsl::transaction_idempotency)
                         .values((
-                            dsl::operation_id.eq(replay.operation_id),
-                            dsl::direction.eq(replay.direction),
-                            dsl::source_service_id.eq(replay.source_service_id),
-                            dsl::destination_service_id.eq(replay.destination_service_id),
-                            dsl::idempotency_key.eq(replay.idempotency_key),
+                            dsl::operation_id.eq(&replay.operation_id),
+                            dsl::direction.eq(replay.direction.as_str()),
+                            dsl::source_service_id.eq(&replay.source_service_id),
+                            dsl::destination_service_id.eq(&replay.destination_service_id),
+                            dsl::idempotency_key.eq(&replay.idempotency_key),
                             dsl::body_hash.eq(hash),
                             dsl::source_signature_anchor.eq(source_signature_anchor),
                             dsl::status.eq(STATUS_PENDING),
@@ -308,7 +310,7 @@ impl TransactionIdempotencyStore for DbTransactionIdempotencyStore {
 
     fn record(
         &self,
-        replay: &TransactionReplayKey<'_>,
+        replay: &IdempotencyIdentity,
         hash: &str,
         source_signature_anchor: &str,
         response: &AppletTransactionOutcome,
@@ -320,11 +322,11 @@ impl TransactionIdempotencyStore for DbTransactionIdempotencyStore {
         let mut conn = self.db.conn()?;
         diesel::update(
             dsl::transaction_idempotency
-                .filter(dsl::operation_id.eq(replay.operation_id))
-                .filter(dsl::direction.eq(replay.direction))
-                .filter(dsl::source_service_id.eq(replay.source_service_id))
-                .filter(dsl::destination_service_id.eq(replay.destination_service_id))
-                .filter(dsl::idempotency_key.eq(replay.idempotency_key))
+                .filter(dsl::operation_id.eq(&replay.operation_id))
+                .filter(dsl::direction.eq(replay.direction.as_str()))
+                .filter(dsl::source_service_id.eq(&replay.source_service_id))
+                .filter(dsl::destination_service_id.eq(&replay.destination_service_id))
+                .filter(dsl::idempotency_key.eq(&replay.idempotency_key))
                 .filter(dsl::body_hash.eq(hash))
                 .filter(dsl::source_signature_anchor.eq(source_signature_anchor)),
         )
@@ -339,7 +341,7 @@ impl TransactionIdempotencyStore for DbTransactionIdempotencyStore {
 
     fn release(
         &self,
-        replay: &TransactionReplayKey<'_>,
+        replay: &IdempotencyIdentity,
         hash: &str,
         source_signature_anchor: &str,
     ) -> Result<()> {
@@ -348,11 +350,11 @@ impl TransactionIdempotencyStore for DbTransactionIdempotencyStore {
         let mut conn = self.db.conn()?;
         diesel::delete(
             dsl::transaction_idempotency
-                .filter(dsl::operation_id.eq(replay.operation_id))
-                .filter(dsl::direction.eq(replay.direction))
-                .filter(dsl::source_service_id.eq(replay.source_service_id))
-                .filter(dsl::destination_service_id.eq(replay.destination_service_id))
-                .filter(dsl::idempotency_key.eq(replay.idempotency_key))
+                .filter(dsl::operation_id.eq(&replay.operation_id))
+                .filter(dsl::direction.eq(replay.direction.as_str()))
+                .filter(dsl::source_service_id.eq(&replay.source_service_id))
+                .filter(dsl::destination_service_id.eq(&replay.destination_service_id))
+                .filter(dsl::idempotency_key.eq(&replay.idempotency_key))
                 .filter(dsl::body_hash.eq(hash))
                 .filter(dsl::source_signature_anchor.eq(source_signature_anchor))
                 .filter(dsl::status.eq(STATUS_PENDING)),
@@ -708,6 +710,8 @@ impl OutboundDeadLetterStore for DbOutboundDeadLetterStore {
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
+    use arkret::IdempotencyDirection;
+
     use super::*;
 
     fn memory_db() -> Arc<DatabaseManager> {
@@ -720,21 +724,17 @@ mod tests {
         )
     }
 
-    fn replay_key(idempotency_key: &str) -> TransactionReplayKey<'_> {
+    fn replay_key(idempotency_key: &str) -> IdempotencyIdentity {
         replay_key_to("did:webvh:bridge.example", idempotency_key)
     }
 
-    fn replay_key_to<'a>(
-        destination_service_id: &'a str,
-        idempotency_key: &'a str,
-    ) -> TransactionReplayKey<'a> {
-        TransactionReplayKey {
-            operation_id: "ak.edge.applet.command.transaction",
-            direction: "node_to_applet",
-            source_service_id: "did:webvh:server.example",
+    fn replay_key_to(destination_service_id: &str, idempotency_key: &str) -> IdempotencyIdentity {
+        IdempotencyIdentity::applet_transaction(
+            IdempotencyDirection::NodeToApplet,
+            "did:webvh:server.example",
             destination_service_id,
             idempotency_key,
-        }
+        )
     }
 
     #[test]

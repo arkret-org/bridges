@@ -40,8 +40,8 @@ mod error;
 mod file_seq_store;
 pub mod idempotency;
 pub mod logging;
-pub mod metrics;
 pub mod queue;
+pub mod telemetry;
 
 #[cfg(feature = "db")]
 pub mod db;
@@ -54,13 +54,14 @@ use std::sync::Arc;
 pub use app::{AppletResolver, ResolvedActor, ResolvedRealm};
 #[cfg(feature = "runtime")]
 pub use app::{BridgeApp, BridgeContext};
+pub use arkret::{IdempotencyIdentity, TransactionClaim, TransactionIdempotencyStore};
 #[cfg(feature = "db")]
 pub use arkret_edge::DbSeqStore;
 pub use arkret_edge::{ArkretEdge, SeqAllocator, SeqStore};
 pub use backoff::{exponential_backoff_with_jitter, jittered_delay};
 pub use blocking::run_blocking;
 pub use cache::{PersistedToken, TokenCache, TokenStore};
-pub use config::{ChannelRealmMappingConfig, Config, DatabaseConfig, WebhookRateLimitConfig};
+pub use config::{Config, DatabaseConfig, WebhookRateLimitConfig};
 #[cfg(feature = "db")]
 pub use db::{
     DbEventDedupStore, DbOutboundDeadLetterStore, DbReplayGuardStore, DbTokenStore,
@@ -74,12 +75,11 @@ pub use error::{BridgeError, Result, redact_sensitive_url_values};
 pub use file_seq_store::FileSeqStore;
 pub use idempotency::{
     DedupVerdict, EventDedupStore, MemoryEventDedupStore, MemoryTransactionIdempotencyStore,
-    ReplayGuardStore, ReplayGuardVerdict, TransactionClaim, TransactionIdempotencyStore,
-    TransactionReplayKey,
+    ReplayGuardStore, ReplayGuardVerdict,
 };
-pub use metrics::{MessageDirection, record_bridge_message};
 #[cfg(feature = "web")]
 pub use salvo;
+pub use telemetry::increment_counter;
 #[cfg(feature = "runtime")]
 use tokio::sync::mpsc;
 

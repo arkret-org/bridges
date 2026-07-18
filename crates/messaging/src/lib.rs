@@ -33,8 +33,7 @@ pub use arkret_bridge_runtime as runtime;
 use arkret_bridge_runtime::app::{BridgeApp, BridgeContext};
 use arkret_bridge_runtime::db::{DbReplayGuardStore, DbTokenStore};
 use arkret_bridge_runtime::{
-    BridgeError, MessageDirection, ReplayGuardStore, Result, TokenCache, TokenStore,
-    record_bridge_message, redact_sensitive_url_values,
+    BridgeError, ReplayGuardStore, Result, TokenCache, TokenStore, redact_sensitive_url_values,
 };
 use async_trait::async_trait;
 pub use content::{
@@ -61,6 +60,65 @@ pub use types::{
     DEFAULT_MEDIA_MIME, DownloadedMedia, InboundAppDelete, InboundAppMessage,
     MAX_EXTERNAL_MEDIA_BYTES, MessageBridgeCapabilities, OutboundAppMessage, SenderRenderStyle,
 };
+
+#[derive(Clone, Debug, serde::Deserialize)]
+struct ChannelRealmMappingConfig {
+    app_channel: String,
+    realm_id: String,
+    #[serde(default)]
+    alias: Option<String>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct MessagingConfig {
+    #[serde(default)]
+    mappings: Vec<ChannelRealmMappingConfig>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct MessagingBridgeConfig {
+    #[serde(default)]
+    disable_deletion_forwarding: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MessageDirection {
+    Inbound,
+    Outbound,
+    InboundMedia,
+}
+
+impl MessageDirection {
+    fn as_label(self) -> &'static str {
+        match self {
+            Self::Inbound => "inbound",
+            Self::Outbound => "outbound",
+            Self::InboundMedia => "inbound_media",
+        }
+    }
+}
+
+fn record_bridge_message(bridge: &str, direction: MessageDirection, result: &'static str) {
+    runtime::increment_counter(
+        "arkret_bridge_messages_total",
+        [
+            ("bridge", bridge.to_owned()),
+            ("direction", direction.as_label().to_owned()),
+            ("result", result.to_owned()),
+        ],
+    );
+}
+
+fn messaging_config(config: &runtime::Config) -> Result<MessagingConfig> {
+    serde_json::from_value(Value::Object(config.extensions.clone()))
+        .map_err(|error| BridgeError::Config(format!("invalid messaging configuration: {error}")))
+}
+
+fn messaging_bridge_config(config: &runtime::Config) -> Result<MessagingBridgeConfig> {
+    serde_json::from_value(Value::Object(config.bridge.extensions.clone())).map_err(|error| {
+        BridgeError::Config(format!("invalid messaging bridge configuration: {error}"))
+    })
+}
 
 // Not a `ak.`-prefixed id: the `ak.` namespace is reserved for spec-registered
 // protocol objects/operations/schemas. This is a bridge-private (applet-side)
@@ -1068,7 +1126,7 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
         // adapter's `redact_in_app`. Honors the `disable_deletion_forwarding`
         // switch.
         if event.kind == "ak.message.redact" {
-            if self.ctx.core().config.bridge.disable_deletion_forwarding {
+            if messaging_bridge_config(&self.ctx.core().config)?.disable_deletion_forwarding {
                 return Ok(());
             }
             let Some(target) = event.redacts.as_ref() else {
@@ -1246,9 +1304,10 @@ where
 {
     runtime::run_bridge(config, move |core_ctx: Arc<BridgeContext>| {
         let store = Arc::new(MessageStore::new(core_ctx.db.clone())?);
+        let messaging_config = messaging_config(&core_ctx.config)?;
         // Apply any static channel↔realm mappings from configuration so a bridge
         // is operable out of the box without hand-written SQL.
-        for mapping in &core_ctx.config.mappings {
+        for mapping in &messaging_config.mappings {
             store.upsert_channel_realm(
                 &mapping.app_channel,
                 &mapping.realm_id,

@@ -11,9 +11,10 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use arkret::models::AppletTransactionOutcome;
+use arkret::{IdempotencyIdentity, TransactionClaim, TransactionIdempotencyStore};
 use parking_lot::Mutex;
 
-use crate::error::Result;
+use crate::error::{BridgeError, Result};
 
 /// Retention for persisted transaction-idempotency records and event-dedup
 /// entries, in seconds.
@@ -30,55 +31,6 @@ pub const IDEMPOTENCY_TTL_SECS: i64 = 24 * 60 * 60;
 /// the key stuck in `pending` until TTL expiry, turning server retries into a
 /// permanent `retry_after_ms` loop.
 pub const PENDING_TAKEOVER_GRACE_SECS: i64 = 300;
-
-/// Channel-specific transaction replay identity. The body hash and source
-/// signature anchor are checked values for this identity, not part of the key.
-pub struct TransactionReplayKey<'a> {
-    pub operation_id: &'a str,
-    pub direction: &'a str,
-    pub source_service_id: &'a str,
-    pub destination_service_id: &'a str,
-    pub idempotency_key: &'a str,
-}
-
-/// Outcome of consulting the transaction idempotency store for one replay
-/// identity plus `(body_hash, source_signature_anchor)`.
-pub enum TransactionClaim {
-    /// First sight (or takeover of a stale pending claim) — process it.
-    Claimed,
-    /// Same key + same body is currently being processed — ask for a retry.
-    Pending,
-    /// Same key + same body already completed — replay the recorded response.
-    Duplicate(AppletTransactionOutcome),
-    /// Same key but a different body — `duplicate_conflict` (§7.3).
-    Conflict,
-}
-
-/// Persistence contract for transaction-level idempotency (§7.3: claim before
-/// any external side effect).
-pub trait TransactionIdempotencyStore: Send + Sync + 'static {
-    fn claim(
-        &self,
-        replay: &TransactionReplayKey<'_>,
-        hash: &str,
-        source_signature_anchor: &str,
-    ) -> Result<TransactionClaim>;
-    fn record(
-        &self,
-        replay: &TransactionReplayKey<'_>,
-        hash: &str,
-        source_signature_anchor: &str,
-        response: &AppletTransactionOutcome,
-    ) -> Result<()>;
-    /// Drop a pending claim after a processing failure so the server's retry
-    /// can be accepted instead of replaying a failure.
-    fn release(
-        &self,
-        replay: &TransactionReplayKey<'_>,
-        hash: &str,
-        source_signature_anchor: &str,
-    ) -> Result<()>;
-}
 
 /// Outcome of consulting the event dedup store for one `event_id`.
 pub enum DedupVerdict {
@@ -160,13 +112,13 @@ impl CachedTransaction {
     }
 }
 
-fn transaction_cache_key(replay: &TransactionReplayKey<'_>) -> String {
+fn transaction_cache_key(replay: &IdempotencyIdentity) -> String {
     [
-        replay.operation_id,
-        replay.direction,
-        replay.source_service_id,
-        replay.destination_service_id,
-        replay.idempotency_key,
+        replay.operation_id.as_str(),
+        replay.direction.as_str(),
+        replay.source_service_id.as_str(),
+        replay.destination_service_id.as_str(),
+        replay.idempotency_key.as_str(),
     ]
     .join("\u{1f}")
 }
@@ -180,13 +132,15 @@ impl MemoryTransactionIdempotencyStore {
     }
 }
 
-impl TransactionIdempotencyStore for MemoryTransactionIdempotencyStore {
+impl TransactionIdempotencyStore<AppletTransactionOutcome> for MemoryTransactionIdempotencyStore {
+    type Error = BridgeError;
+
     fn claim(
         &self,
-        replay: &TransactionReplayKey<'_>,
+        replay: &IdempotencyIdentity,
         hash: &str,
         source_signature_anchor: &str,
-    ) -> Result<TransactionClaim> {
+    ) -> Result<TransactionClaim<AppletTransactionOutcome>> {
         let cache_key = transaction_cache_key(replay);
         let now = Instant::now();
         let mut inner = self.inner.lock();
@@ -224,7 +178,7 @@ impl TransactionIdempotencyStore for MemoryTransactionIdempotencyStore {
 
     fn record(
         &self,
-        replay: &TransactionReplayKey<'_>,
+        replay: &IdempotencyIdentity,
         hash: &str,
         source_signature_anchor: &str,
         response: &AppletTransactionOutcome,
@@ -243,7 +197,7 @@ impl TransactionIdempotencyStore for MemoryTransactionIdempotencyStore {
 
     fn release(
         &self,
-        replay: &TransactionReplayKey<'_>,
+        replay: &IdempotencyIdentity,
         hash: &str,
         source_signature_anchor: &str,
     ) -> Result<()> {
@@ -300,23 +254,21 @@ impl EventDedupStore for MemoryEventDedupStore {
 
 #[cfg(test)]
 mod tests {
+    use arkret::IdempotencyDirection;
+
     use super::*;
 
-    fn replay_key(idempotency_key: &str) -> TransactionReplayKey<'_> {
+    fn replay_key(idempotency_key: &str) -> IdempotencyIdentity {
         replay_key_to("did:webvh:bridge.example", idempotency_key)
     }
 
-    fn replay_key_to<'a>(
-        destination_service_id: &'a str,
-        idempotency_key: &'a str,
-    ) -> TransactionReplayKey<'a> {
-        TransactionReplayKey {
-            operation_id: "ak.edge.applet.command.transaction",
-            direction: "node_to_applet",
-            source_service_id: "did:webvh:server.example",
+    fn replay_key_to(destination_service_id: &str, idempotency_key: &str) -> IdempotencyIdentity {
+        IdempotencyIdentity::applet_transaction(
+            IdempotencyDirection::NodeToApplet,
+            "did:webvh:server.example",
             destination_service_id,
             idempotency_key,
-        }
+        )
     }
 
     #[test]
