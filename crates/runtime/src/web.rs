@@ -1100,6 +1100,7 @@ fn map_http_signature_error(err: HttpMessageVerificationError) -> HttpSignatureR
         HttpMessageVerificationError::Policy(
             SignaturePolicyError::InvalidValidityWindow
             | SignaturePolicyError::CreatedInFuture
+            | SignaturePolicyError::CreatedTooOld
             | SignaturePolicyError::Expired,
         ) => signature_window_invalid(message),
         HttpMessageVerificationError::Policy(_) | HttpMessageVerificationError::Signature(_) => {
