@@ -178,7 +178,7 @@ dependencies = [
  "arkret-server",
  "arkret-signatures",
  "arkret-state",
- "arkret-wire-base",
+ "arkret-wire",
  "base64",
  "chacha20poly1305",
  "chrono",
@@ -475,11 +475,13 @@ version = "0.3.0"
 dependencies = [
  "arkret-canonical",
  "arkret-identifiers",
+ "arkret-models-collaboration",
+ "arkret-models-discovery",
+ "arkret-models-integration",
  "arkret-policy",
  "arkret-schema",
  "arkret-state",
- "arkret-wire-base",
- "arkret-wire-edge",
+ "arkret-wire",
  "chrono",
  "chrono-tz",
  "getrandom 0.4.2",
@@ -566,6 +568,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "arkret-models-collaboration"
+version = "0.3.0"
+dependencies = [
+ "arkret-wire",
+ "chrono",
+ "salvo",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "arkret-models-discovery"
+version = "0.3.0"
+dependencies = [
+ "arkret-wire",
+ "chrono",
+ "salvo",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "arkret-models-integration"
+version = "0.3.0"
+dependencies = [
+ "arkret-wire",
+ "chrono",
+ "salvo",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "arkret-network-policy"
 version = "0.3.0"
 dependencies = [
@@ -577,19 +613,21 @@ dependencies = [
 name = "arkret-policy"
 version = "0.3.0"
 dependencies = [
+ "arkret-models-integration",
  "arkret-schema",
- "arkret-wire-base",
+ "arkret-wire",
  "chrono",
  "chrono-tz",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "arkret-schema"
 version = "0.3.0"
 dependencies = [
- "arkret-wire-base",
+ "arkret-wire",
  "chrono",
  "regex",
  "salvo",
@@ -620,7 +658,7 @@ version = "0.3.0"
 dependencies = [
  "arkret-canonical",
  "arkret-core",
- "arkret-wire-base",
+ "arkret-wire",
  "base64",
  "chrono",
  "ed25519-dalek",
@@ -640,7 +678,7 @@ name = "arkret-state"
 version = "0.3.0"
 dependencies = [
  "arkret-canonical",
- "arkret-wire-base",
+ "arkret-wire",
  "chrono",
  "hex",
  "salvo",
@@ -650,7 +688,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "arkret-wire-base"
+name = "arkret-wire"
 version = "0.3.0"
 dependencies = [
  "arkret-canonical",
@@ -661,20 +699,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
-]
-
-[[package]]
-name = "arkret-wire-edge"
-version = "0.3.0"
-dependencies = [
- "arkret-canonical",
- "arkret-wire-base",
- "chrono",
- "salvo",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tracing",
 ]
 
 [[package]]
