@@ -55,6 +55,18 @@ impl From<arkret::identifiers::IdentifierError> for BridgeError {
     }
 }
 
+impl From<arkret::WireError> for BridgeError {
+    fn from(e: arkret::WireError) -> Self {
+        BridgeError::Arkret(e.to_string())
+    }
+}
+
+impl From<arkret::signatures::Error> for BridgeError {
+    fn from(e: arkret::signatures::Error) -> Self {
+        BridgeError::Arkret(e.to_string())
+    }
+}
+
 #[cfg(feature = "db")]
 impl From<diesel::result::Error> for BridgeError {
     fn from(e: diesel::result::Error) -> Self {

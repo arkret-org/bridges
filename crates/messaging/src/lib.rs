@@ -27,7 +27,7 @@ use std::time::Duration;
 pub use arkret::models::EphemeralEnvelope;
 use arkret::{
     AppletBridgeErrorBuilder, AppletBridgeErrorVisibility, ContentBlock, Did, Event, EventId,
-    MessageRedactPayload, RealmId,
+    EventPayloadExt, MessageRedactPayload, RealmId,
 };
 pub use arkret_bridge_runtime as runtime;
 use arkret_bridge_runtime::app::{BridgeApp, BridgeContext};

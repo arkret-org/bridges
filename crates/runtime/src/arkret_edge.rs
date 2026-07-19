@@ -330,7 +330,9 @@ impl ArkretEdge {
             .or_insert_with(|| {
                 HlcGenerator::new(realm_id.as_str(), &self.hlc_device_id, &self.hlc_secret)
             });
-        generator.try_generate().map_err(Into::into)
+        generator
+            .try_generate()
+            .map_err(|e| BridgeError::Arkret(e.to_string()))
     }
 
     /// Build and sign an event emitted by this bridge's service actor.
@@ -948,6 +950,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
     ) -> arkret::Result<VerificationMethodDocument> {
         DidDocumentVerificationMethodResolver::new(self.source_did_resolver.as_ref())
             .resolve_verification_method(verification_method)
+            .map_err(Into::into)
     }
 
     fn ping(&self) -> arkret::Result<AppletPingOutcome> {
