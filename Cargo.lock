@@ -169,14 +169,15 @@ version = "0.3.0"
 dependencies = [
  "argon2",
  "arkret-auth",
+ "arkret-bootstrap",
  "arkret-canonical",
  "arkret-core",
  "arkret-crypto",
  "arkret-egress-policy",
- "arkret-ffi",
  "arkret-http-client",
  "arkret-identity",
  "arkret-keystore",
+ "arkret-lattice-registry",
  "arkret-models-crypto",
  "arkret-policy",
  "arkret-server",
@@ -192,9 +193,8 @@ dependencies = [
  "hkdf 0.13.0",
  "hmac 0.13.0",
  "parking_lot",
- "regex",
  "reqwest 0.13.4",
- "salvo",
+ "salvo 0.95.0",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -213,6 +213,8 @@ dependencies = [
  "argon2",
  "arkret-canonical",
  "arkret-identifiers",
+ "arkret-keystore",
+ "arkret-models-collaboration",
  "arkret-models-identity",
  "arkret-signatures",
  "arkret-wire",
@@ -224,6 +226,21 @@ dependencies = [
  "subtle",
  "thiserror 2.0.18",
  "uuid",
+]
+
+[[package]]
+name = "arkret-bootstrap"
+version = "0.3.0"
+dependencies = [
+ "arkret-canonical",
+ "arkret-lattice-registry",
+ "arkret-models-collaboration",
+ "arkret-models-identity",
+ "arkret-state",
+ "arkret-wire",
+ "chrono",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -327,7 +344,7 @@ dependencies = [
  "hmac 0.13.0",
  "jsonwebtoken",
  "reqwest 0.13.4",
- "salvo",
+ "salvo 0.94.0",
  "serde",
  "serde_json",
  "sha1 0.11.0",
@@ -378,7 +395,7 @@ dependencies = [
  "parking_lot",
  "reqwest 0.13.4",
  "rustls 0.23.40",
- "salvo",
+ "salvo 0.94.0",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -500,6 +517,7 @@ dependencies = [
  "arkret-crypto",
  "arkret-event-draft",
  "arkret-hlc",
+ "arkret-http-client",
  "arkret-identifiers",
  "arkret-identity",
  "arkret-keystore",
@@ -519,8 +537,8 @@ dependencies = [
  "hex",
  "hmac 0.13.0",
  "regex",
- "salvo",
- "salvo-oapi",
+ "salvo 0.95.0",
+ "salvo-oapi 0.95.0",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -541,10 +559,13 @@ dependencies = [
  "arkret-signatures",
  "arkret-wire",
  "bip39",
+ "chacha20poly1305",
  "chrono",
  "ed25519-dalek",
+ "getrandom 0.4.2",
  "hkdf 0.13.0",
  "hpke",
+ "regex",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -568,21 +589,13 @@ dependencies = [
  "arkret-identifiers",
  "arkret-models-collaboration",
  "arkret-models-crypto",
+ "arkret-models-integration",
  "arkret-wire",
  "chrono",
- "salvo",
+ "salvo 0.95.0",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
-]
-
-[[package]]
-name = "arkret-ffi"
-version = "0.3.0"
-dependencies = [
- "arkret-core",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -591,9 +604,9 @@ version = "0.3.0"
 dependencies = [
  "arkret-canonical",
  "arkret-identifiers",
+ "arkret-wire",
  "chrono",
  "getrandom 0.4.2",
- "salvo",
  "serde",
  "thiserror 2.0.18",
 ]
@@ -602,8 +615,13 @@ dependencies = [
 name = "arkret-http-client"
 version = "0.3.0"
 dependencies = [
- "arkret-core",
+ "arkret-canonical",
+ "arkret-identity",
+ "arkret-models-collaboration",
  "arkret-models-crypto",
+ "arkret-models-discovery",
+ "arkret-models-identity",
+ "arkret-models-integration",
  "arkret-signatures",
  "arkret-state",
  "arkret-wire",
@@ -613,6 +631,7 @@ dependencies = [
  "reqwest 0.13.4",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "url",
@@ -625,8 +644,8 @@ dependencies = [
  "arkret-canonical",
  "getrandom 0.2.17",
  "getrandom 0.4.2",
- "salvo",
- "salvo-oapi",
+ "salvo 0.95.0",
+ "salvo-oapi 0.95.0",
  "serde",
  "thiserror 2.0.18",
  "uuid",
@@ -639,6 +658,7 @@ dependencies = [
  "arkret-canonical",
  "arkret-egress-policy",
  "arkret-identifiers",
+ "arkret-keystore",
  "arkret-models-identity",
  "arkret-signatures",
  "arkret-wire",
@@ -660,6 +680,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "arkret-lattice-registry"
+version = "0.3.0"
+dependencies = [
+ "arkret-models-collaboration",
+ "arkret-schema",
+ "arkret-state",
+ "arkret-wire",
+ "serde_json",
+]
+
+[[package]]
 name = "arkret-models-collaboration"
 version = "0.3.0"
 dependencies = [
@@ -671,7 +702,8 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "hmac 0.13.0",
- "salvo",
+ "regex",
+ "salvo 0.95.0",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -689,7 +721,7 @@ dependencies = [
  "chrono",
  "hex",
  "regex",
- "salvo",
+ "salvo 0.95.0",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -703,7 +735,7 @@ dependencies = [
  "arkret-models-identity",
  "arkret-wire",
  "chrono",
- "salvo",
+ "salvo 0.95.0",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -716,7 +748,7 @@ dependencies = [
  "arkret-canonical",
  "arkret-wire",
  "chrono",
- "salvo",
+ "salvo 0.95.0",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -728,9 +760,10 @@ dependencies = [
 name = "arkret-models-integration"
 version = "0.3.0"
 dependencies = [
+ "arkret-models-identity",
  "arkret-wire",
  "chrono",
- "salvo",
+ "salvo 0.95.0",
  "serde",
  "serde_json",
  "tracing",
@@ -742,11 +775,13 @@ version = "0.3.0"
 dependencies = [
  "arkret-canonical",
  "arkret-models-collaboration",
+ "arkret-models-crypto",
  "arkret-models-integration",
  "arkret-schema",
  "arkret-wire",
  "chrono",
  "chrono-tz",
+ "salvo 0.95.0",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -756,10 +791,12 @@ dependencies = [
 name = "arkret-schema"
 version = "0.3.0"
 dependencies = [
+ "arkret-canonical",
+ "arkret-identifiers",
  "arkret-wire",
  "chrono",
  "regex",
- "salvo",
+ "salvo 0.95.0",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -771,13 +808,17 @@ name = "arkret-server"
 version = "0.3.0"
 dependencies = [
  "arkret-canonical",
- "arkret-core",
+ "arkret-event-draft",
+ "arkret-models-collaboration",
+ "arkret-models-crypto",
+ "arkret-models-discovery",
+ "arkret-models-identity",
  "arkret-models-integration",
  "arkret-signatures",
  "arkret-state",
  "arkret-wire",
  "chrono",
- "salvo",
+ "salvo 0.95.0",
  "serde",
  "serde_json",
  "tokio",
@@ -813,10 +854,11 @@ dependencies = [
  "arkret-canonical",
  "arkret-identifiers",
  "arkret-models-collaboration",
+ "arkret-models-crypto",
  "arkret-wire",
  "chrono",
  "hex",
- "salvo",
+ "salvo 0.95.0",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -829,11 +871,17 @@ dependencies = [
  "arkret-canonical",
  "arkret-identifiers",
  "chrono",
+ "getrandom 0.4.2",
  "hex",
- "salvo",
+ "idna",
+ "precis-profiles",
+ "salvo 0.95.0",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "unicode-normalization",
+ "unicode-security",
+ "url",
 ]
 
 [[package]]
@@ -1274,6 +1322,20 @@ dependencies = [
  "ryu",
  "serde",
  "static_assertions",
+]
+
+[[package]]
+name = "compact_str"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "79fcda08c33bb58b97008b2cdada6622500e949e060f5913361763121abd2416"
+dependencies = [
+ "castaway",
+ "cfg-if",
+ "itoa",
+ "serde",
+ "static_assertions",
+ "zmij",
 ]
 
 [[package]]
@@ -3355,6 +3417,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "precis-core"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c2e7b31f132e0c6f8682cfb7bf4a5340dbe925b7986618d0826a56dfe0c8e56"
+dependencies = [
+ "precis-tools",
+ "ucd-parse",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "precis-profiles"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31e2768890a47af73a032af9f0cedbddce3c9d06cf8de201d5b8f2436ded7674"
+dependencies = [
+ "lazy_static",
+ "precis-core",
+ "precis-tools",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "precis-tools"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cc1eb2d5887ac7bfd2c0b745764db89edb84b856e4214e204ef48ef96d10c4a"
+dependencies = [
+ "lazy_static",
+ "regex",
+ "ucd-parse",
+]
+
+[[package]]
 name = "prettyplease"
 version = "0.2.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3596,9 +3692,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.10.1"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2e8e8bcc7961af1fdac401278c6a831614941f6164ee3bf4ce61b7edb162207"
+checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
 dependencies = [
  "chacha20 0.10.0",
  "getrandom 0.4.2",
@@ -3736,6 +3832,12 @@ dependencies = [
  "memchr",
  "regex-syntax",
 ]
+
+[[package]]
+name = "regex-lite"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
 
 [[package]]
 name = "regex-syntax"
@@ -4124,10 +4226,21 @@ version = "0.94.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e58d7158d996e7005dc9b67b0fe01bc070d500e644156ea74badc4826bb18d42"
 dependencies = [
- "salvo-oapi",
+ "salvo-oapi 0.94.0",
  "salvo-rate-limiter",
- "salvo_core",
- "salvo_extra",
+ "salvo_core 0.94.0",
+ "salvo_extra 0.94.0",
+]
+
+[[package]]
+name = "salvo"
+version = "0.95.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af2b82923e4d2d9cd15f0c822bba2c2bcefb1c8f23d82be88d7bec080149a507"
+dependencies = [
+ "salvo-oapi 0.95.0",
+ "salvo_core 0.95.0",
+ "salvo_extra 0.95.0",
 ]
 
 [[package]]
@@ -4140,7 +4253,7 @@ dependencies = [
  "base64",
  "bytes",
  "chrono",
- "compact_str",
+ "compact_str 0.9.1",
  "futures-util",
  "http",
  "indexmap 2.14.0",
@@ -4150,8 +4263,8 @@ dependencies = [
  "regex",
  "rust-embed",
  "rust_decimal",
- "salvo-oapi-macros",
- "salvo_core",
+ "salvo-oapi-macros 0.94.0",
+ "salvo_core 0.94.0",
  "serde",
  "serde_json",
  "serde_norway",
@@ -4160,7 +4273,42 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
- "ulid",
+ "ulid 1.2.1",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "salvo-oapi"
+version = "0.95.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "61e20c7d23233e09336e99efbcb02c1725ecaf5cd25519f007f27c849336e2f5"
+dependencies = [
+ "anyhow",
+ "base64",
+ "bytes",
+ "chrono",
+ "compact_str 0.10.0",
+ "futures-util",
+ "http",
+ "indexmap 2.14.0",
+ "inventory",
+ "mime-infer",
+ "parking_lot",
+ "regex",
+ "rust-embed",
+ "rust_decimal",
+ "salvo-oapi-macros 0.95.0",
+ "salvo_core 0.95.0",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "smallvec",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tracing",
+ "ulid 2.0.1",
  "url",
  "uuid",
 ]
@@ -4175,8 +4323,23 @@ dependencies = [
  "proc-macro2",
  "proc-macro2-diagnostics",
  "quote",
- "salvo-serde-util",
- "salvo_core",
+ "salvo-serde-util 0.94.0",
+ "salvo_core 0.94.0",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "salvo-oapi-macros"
+version = "0.95.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9e12028fe73db7df170ab66aba357fd1fe7efbfb1cf8adfeaa219db76a4132e"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "proc-macro2-diagnostics",
+ "quote",
+ "salvo-serde-util 0.95.0",
+ "salvo_core 0.95.0",
  "syn 2.0.117",
 ]
 
@@ -4187,7 +4350,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9cb22528d064200e5f4d492ae205e63b92bc754782b18d3d2b49eadd38e00170"
 dependencies = [
  "moka",
- "salvo_core",
+ "salvo_core 0.94.0",
  "serde",
  "time",
  "tokio",
@@ -4199,6 +4362,17 @@ name = "salvo-serde-util"
 version = "0.94.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92fa0afee41d6feb8983ee997d0827ecdb67a74ab00f3e932b6308b467630a3f"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "salvo-serde-util"
+version = "0.95.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17fcc2bbd4f0d89c7bece491f5bf6bf39343bfdf98507ace7a3ba81c24cc269a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4234,9 +4408,52 @@ dependencies = [
  "parking_lot",
  "percent-encoding",
  "pin-project",
- "rand 0.10.1",
+ "rand 0.10.2",
  "regex",
- "salvo_macros",
+ "salvo_macros 0.94.0",
+ "serde",
+ "serde-xml-rs",
+ "serde_json",
+ "sync_wrapper",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "salvo_core"
+version = "0.95.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e399ae70702e4e30a96a02851d3c3682258e6cba0dff6e0ce282d07d4d925829"
+dependencies = [
+ "async-trait",
+ "base64",
+ "bytes",
+ "chardetng",
+ "content_inspector",
+ "cookie",
+ "enumflags2",
+ "form_urlencoded",
+ "futures-channel",
+ "futures-util",
+ "headers",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "indexmap 2.14.0",
+ "mime",
+ "mime-infer",
+ "multimap",
+ "multra",
+ "parking_lot",
+ "percent-encoding",
+ "pin-project",
+ "rand 0.10.2",
+ "regex",
+ "salvo_macros 0.95.0",
  "serde",
  "serde-xml-rs",
  "serde_json",
@@ -4260,14 +4477,36 @@ dependencies = [
  "http-body-util",
  "hyper",
  "pin-project",
- "salvo_core",
+ "salvo_core 0.94.0",
  "serde",
  "serde_json",
  "tokio",
  "tokio-tungstenite 0.29.0",
  "tower",
  "tracing",
- "ulid",
+ "ulid 1.2.1",
+]
+
+[[package]]
+name = "salvo_extra"
+version = "0.95.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7fab6556b9bd76d68adb182478092be3c5e3c961c1e8acf8f65c10dbb40dadf"
+dependencies = [
+ "base64",
+ "etag",
+ "futures-util",
+ "http-body-util",
+ "hyper",
+ "pin-project",
+ "salvo_core 0.95.0",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tower",
+ "tracing",
+ "ulid 2.0.1",
 ]
 
 [[package]]
@@ -4279,7 +4518,20 @@ dependencies = [
  "proc-macro-crate",
  "proc-macro2",
  "quote",
- "salvo-serde-util",
+ "salvo-serde-util 0.94.0",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "salvo_macros"
+version = "0.95.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8efbe46212518df71518ac5d75d5400ac36cf23d162c8e68373961d1ac0d4c80"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "salvo-serde-util 0.95.0",
  "syn 2.0.117",
 ]
 
@@ -5136,6 +5388,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-tungstenite"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17a073bfed563fa236697a068031408a93cd9522e08abf9933ead3e73411bd71"
+dependencies = [
+ "futures-util",
+ "log",
+ "tokio",
+ "tungstenite 0.30.0",
+]
+
+[[package]]
 name = "tokio-util"
 version = "0.7.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5373,6 +5637,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tungstenite"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e48ac77174b19c110a50ab2128b24215ac9cb40e0e12e093fb602d175c569d22"
+dependencies = [
+ "bytes",
+ "log",
+ "rand 0.10.2",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "typemap_rev"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5385,12 +5661,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
+name = "ucd-parse"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c06ff81122fcbf4df4c1660b15f7e3336058e7aec14437c9f85c6b31a0f279b9"
+dependencies = [
+ "regex-lite",
+]
+
+[[package]]
 name = "ulid"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "470dbf6591da1b39d43c14523b2b469c86879a53e8b758c8e090a470fe7b1fbe"
 dependencies = [
  "rand 0.9.4",
+ "web-time",
+]
+
+[[package]]
+name = "ulid"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39493d572b98fe1d142e132e7a726c50c68121bce84429216a5ec20e1ad7fec5"
+dependencies = [
+ "rand 0.10.2",
  "web-time",
 ]
 
@@ -5413,6 +5708,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
 dependencies = [
  "tinyvec",
+]
+
+[[package]]
+name = "unicode-script"
+version = "0.5.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "383ad40bb927465ec0ce7720e033cb4ca06912855fc35db31b5755d0de75b1ee"
+
+[[package]]
+name = "unicode-security"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e4ddba1535dd35ed8b61c52166b7155d7f4e4b8847cec6f48e71dc66d8b5e50"
+dependencies = [
+ "unicode-normalization",
+ "unicode-script",
 ]
 
 [[package]]
