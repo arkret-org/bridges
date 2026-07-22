@@ -30,7 +30,7 @@ use arkret::signatures::{
 use arkret::signatures::{SignEventOptions, sign_event};
 use arkret::{AppletId, Did, Ed25519MoveSigner, Event, EventId, Hlc, HlcGenerator, RealmId};
 #[cfg(any(feature = "web", test))]
-use arkret::{DidDocumentVerificationMethodResolver, DidResolver};
+use arkret::{DidDocumentVerificationMethodResolver, DidResolver, WireError};
 use parking_lot::Mutex;
 use serde::Serialize;
 use serde_json::Value;
@@ -947,13 +947,13 @@ impl arkret::AppletHandler for BridgeAppletHandler {
     fn resolve_verification_method(
         &self,
         verification_method: &str,
-    ) -> arkret::Result<VerificationMethodDocument> {
+    ) -> std::result::Result<VerificationMethodDocument, WireError> {
         DidDocumentVerificationMethodResolver::new(self.source_did_resolver.as_ref())
             .resolve_verification_method(verification_method)
-            .map_err(Into::into)
+            .map_err(|error| WireError::Protocol(error.to_string()))
     }
 
-    fn ping(&self) -> arkret::Result<AppletPingOutcome> {
+    fn ping(&self) -> std::result::Result<AppletPingOutcome, WireError> {
         Ok(AppletPingOutcome {
             ok: true,
             applet_id: self.applet_id.clone(),
@@ -962,7 +962,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
         })
     }
 
-    fn describe(&self) -> arkret::Result<ServiceDescribe> {
+    fn describe(&self) -> std::result::Result<ServiceDescribe, WireError> {
         let mut description = ServiceDescribe::development(
             self.service_id.clone(),
             self.trust_domain.clone(),
@@ -985,7 +985,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
         &self,
         _idempotency_key: &str,
         req: AppletTransactionRequestBody,
-    ) -> arkret::Result<AppletTransactionOutcome> {
+    ) -> std::result::Result<AppletTransactionOutcome, WireError> {
         let mut rejected: Vec<arkret::RejectedItem> = Vec::new();
         let mut enqueue_failed = false;
         // Set when the bounded inbound queue is full: we ask the server to retry
@@ -1150,7 +1150,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
         })
     }
 
-    fn resolve_actor(&self, actor_id: &str) -> arkret::Result<AppletActorView> {
+    fn resolve_actor(&self, actor_id: &str) -> std::result::Result<AppletActorView, WireError> {
         if let Some(resolved) = self
             .resolver
             .as_ref()
@@ -1172,7 +1172,10 @@ impl arkret::AppletHandler for BridgeAppletHandler {
         })
     }
 
-    fn resolve_realm(&self, realm_id_or_alias: &str) -> arkret::Result<AppletRealmView> {
+    fn resolve_realm(
+        &self,
+        realm_id_or_alias: &str,
+    ) -> std::result::Result<AppletRealmView, WireError> {
         if let Some(resolved) = self
             .resolver
             .as_ref()
@@ -1194,7 +1197,10 @@ impl arkret::AppletHandler for BridgeAppletHandler {
         })
     }
 
-    fn resolve_protocol(&self, protocol: &str) -> arkret::Result<AppletProtocolMetadata> {
+    fn resolve_protocol(
+        &self,
+        protocol: &str,
+    ) -> std::result::Result<AppletProtocolMetadata, WireError> {
         Ok(AppletProtocolMetadata {
             protocol: protocol.to_owned(),
             display_name: protocol.to_owned(),

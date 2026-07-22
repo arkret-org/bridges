@@ -26,6 +26,7 @@ arkret = {version = "0.3.0",path = "../arkret-rust-sdk/crates/sdk",default-featu
     "applet-runtime",
     "signer",
 ]}
+arkret-event-draft = {version = "0.3.0",path = "../arkret-rust-sdk/crates/event-draft",default-features = false}
 arkret-bridge-messaging = {path = "crates/messaging",default-features = false}
 arkret-bridge-runtime = {path = "crates/runtime",default-features = false}
 diesel = {version = "2.3",default-features = false,features = ["r2d2", "chrono"]}

@@ -27,7 +27,7 @@ use std::time::Duration;
 pub use arkret::models::EphemeralEnvelope;
 use arkret::{
     AppletBridgeErrorBuilder, AppletBridgeErrorVisibility, ContentBlock, Did, Event, EventId,
-    EventPayloadExt, MessageRedactPayload, RealmId,
+    MessageRedactPayload, RealmId,
 };
 pub use arkret_bridge_runtime as runtime;
 use arkret_bridge_runtime::app::{BridgeApp, BridgeContext};
@@ -35,6 +35,7 @@ use arkret_bridge_runtime::db::{DbReplayGuardStore, DbTokenStore};
 use arkret_bridge_runtime::{
     BridgeError, ReplayGuardStore, Result, TokenCache, TokenStore, redact_sensitive_url_values,
 };
+use arkret_event_draft::EventPayloadExt;
 use async_trait::async_trait;
 pub use content::{
     extract_attachment, extract_plain_body, extract_strand_id, media_content_block,
@@ -1198,7 +1199,9 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
             Some(strand_id) => strand_id,
             None => self.ctx.ensure_portal_strand(&channel, &realm_id).await?,
         };
-        let payload = event.as_message_create()?;
+        let payload = event
+            .as_message_create()
+            .map_err(|error| BridgeError::Arkret(error.to_string()))?;
         if extract_strand_id(&payload) != portal_strand.as_str() {
             tracing::debug!(
                 realm = %realm_id,
