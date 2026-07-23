@@ -195,82 +195,6 @@ fn slack_media(event: &Value) -> Vec<SlackMedia> {
         .collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn slack_inbound_message_extracts_text_event() {
-        let event = json!({
-            "type": "message",
-            "channel": "C123",
-            "user": "U456",
-            "text": "hello",
-            "ts": "1700000000.123"
-        });
-        let inbound = slack_inbound_message(&event).expect("message");
-        assert_eq!(inbound.app_channel, "C123");
-        assert_eq!(inbound.app_user, "U456");
-        assert_eq!(inbound.app_message_id, "1700000000.123");
-        assert_eq!(inbound.body, "hello");
-    }
-
-    #[test]
-    fn slack_inbound_message_ignores_bot_and_subtype_events() {
-        assert!(
-            slack_inbound_message(&json!({
-                "type": "message",
-                "bot_id": "B1",
-                "channel": "C123",
-                "text": "loop"
-            }))
-            .is_none()
-        );
-        assert!(
-            slack_inbound_message(&json!({
-                "type": "message",
-                "subtype": "message_changed",
-                "channel": "C123",
-                "text": "edited"
-            }))
-            .is_none()
-        );
-        assert!(
-            slack_inbound_message(&json!({
-                "type": "reaction_added",
-                "channel": "C123",
-                "text": "ignored"
-            }))
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn slack_media_extracts_downloadable_file_event() {
-        let event = json!({
-            "type": "message",
-            "channel": "C123",
-            "user": "U456",
-            "ts": "1700000000.123",
-            "text": "caption",
-            "files": [{
-                "id": "F1",
-                "name": "report.pdf",
-                "mimetype": "application/pdf",
-                "url_private_download": "https://files.slack.com/files-pri/T-F/report.pdf"
-            }]
-        });
-        let media = slack_media(&event);
-        assert_eq!(media.len(), 1);
-        assert_eq!(media[0].channel, "C123");
-        assert_eq!(media[0].user, "U456");
-        assert_eq!(media[0].id, "F1");
-        assert_eq!(media[0].caption, "caption");
-        assert_eq!(media[0].mime.as_deref(), Some("application/pdf"));
-        assert_eq!(media[0].filename.as_deref(), Some("report.pdf"));
-    }
-}
-
 #[async_trait]
 impl MessageBridge for SlackApp {
     fn name(&self) -> &str {
@@ -393,5 +317,81 @@ impl MessageBridge for SlackApp {
             .unwrap_or_default()
             .to_owned();
         Ok(AppMessageRef { app_message_id: ts })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slack_inbound_message_extracts_text_event() {
+        let event = json!({
+            "type": "message",
+            "channel": "C123",
+            "user": "U456",
+            "text": "hello",
+            "ts": "1700000000.123"
+        });
+        let inbound = slack_inbound_message(&event).expect("message");
+        assert_eq!(inbound.app_channel, "C123");
+        assert_eq!(inbound.app_user, "U456");
+        assert_eq!(inbound.app_message_id, "1700000000.123");
+        assert_eq!(inbound.body, "hello");
+    }
+
+    #[test]
+    fn slack_inbound_message_ignores_bot_and_subtype_events() {
+        assert!(
+            slack_inbound_message(&json!({
+                "type": "message",
+                "bot_id": "B1",
+                "channel": "C123",
+                "text": "loop"
+            }))
+            .is_none()
+        );
+        assert!(
+            slack_inbound_message(&json!({
+                "type": "message",
+                "subtype": "message_changed",
+                "channel": "C123",
+                "text": "edited"
+            }))
+            .is_none()
+        );
+        assert!(
+            slack_inbound_message(&json!({
+                "type": "reaction_added",
+                "channel": "C123",
+                "text": "ignored"
+            }))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn slack_media_extracts_downloadable_file_event() {
+        let event = json!({
+            "type": "message",
+            "channel": "C123",
+            "user": "U456",
+            "ts": "1700000000.123",
+            "text": "caption",
+            "files": [{
+                "id": "F1",
+                "name": "report.pdf",
+                "mimetype": "application/pdf",
+                "url_private_download": "https://files.slack.com/files-pri/T-F/report.pdf"
+            }]
+        });
+        let media = slack_media(&event);
+        assert_eq!(media.len(), 1);
+        assert_eq!(media[0].channel, "C123");
+        assert_eq!(media[0].user, "U456");
+        assert_eq!(media[0].id, "F1");
+        assert_eq!(media[0].caption, "caption");
+        assert_eq!(media[0].mime.as_deref(), Some("application/pdf"));
+        assert_eq!(media[0].filename.as_deref(), Some("report.pdf"));
     }
 }

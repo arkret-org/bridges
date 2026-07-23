@@ -279,36 +279,6 @@ fn whatsapp_media_ref(message: &Value) -> Option<(String, Option<String>, Option
     None
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn whatsapp_media_ref_extracts_id_mime_and_filename() {
-        let message = json!({
-            "document": {
-                "id": "media-1",
-                "mime_type": "application/pdf",
-                "filename": "brief.pdf"
-            }
-        });
-        assert_eq!(
-            whatsapp_media_ref(&message),
-            Some((
-                "media-1".to_owned(),
-                Some("application/pdf".to_owned()),
-                Some("brief.pdf".to_owned())
-            ))
-        );
-    }
-
-    #[test]
-    fn whatsapp_media_ref_requires_media_id() {
-        assert!(whatsapp_media_ref(&json!({"image": {"mime_type": "image/jpeg"}})).is_none());
-        assert!(whatsapp_media_ref(&json!({"text": {"body": "hello"}})).is_none());
-    }
-}
-
 /// Resolve a WhatsApp media id to its download URL (platform-specific step),
 /// then hand off to the shared [`MessageContext::forward_external_media`]
 /// skeleton (download → blob upload → media message + failure audit).
@@ -383,4 +353,34 @@ async fn forward_whatsapp_media(
             },
         )
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn whatsapp_media_ref_extracts_id_mime_and_filename() {
+        let message = json!({
+            "document": {
+                "id": "media-1",
+                "mime_type": "application/pdf",
+                "filename": "brief.pdf"
+            }
+        });
+        assert_eq!(
+            whatsapp_media_ref(&message),
+            Some((
+                "media-1".to_owned(),
+                Some("application/pdf".to_owned()),
+                Some("brief.pdf".to_owned())
+            ))
+        );
+    }
+
+    #[test]
+    fn whatsapp_media_ref_requires_media_id() {
+        assert!(whatsapp_media_ref(&json!({"image": {"mime_type": "image/jpeg"}})).is_none());
+        assert!(whatsapp_media_ref(&json!({"text": {"body": "hello"}})).is_none());
+    }
 }

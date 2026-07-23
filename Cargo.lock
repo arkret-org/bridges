@@ -192,7 +192,6 @@ dependencies = [
  "arkret-state",
  "arkret-wire",
  "chrono",
- "ed25519-dalek",
  "reqwest 0.13.4",
  "salvo 0.95.0",
  "serde",
