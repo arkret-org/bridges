@@ -23,7 +23,6 @@ clap = {version = "4.6",features = ["string"]}
 arkret = {version = "0.3.0",path = "../arkret-rust-sdk/crates/sdk",default-features = false,features = [
     "client",
     "salvo",
-    "applet-runtime",
     "signer",
 ]}
 arkret-event-draft = {version = "0.3.0",path = "../arkret-rust-sdk/crates/event-draft",default-features = false}

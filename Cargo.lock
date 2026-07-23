@@ -167,11 +167,9 @@ dependencies = [
 name = "arkret"
 version = "0.3.0"
 dependencies = [
- "argon2",
  "arkret-auth",
  "arkret-bootstrap",
  "arkret-canonical",
- "arkret-core",
  "arkret-crypto",
  "arkret-egress-policy",
  "arkret-event-draft",
@@ -193,27 +191,15 @@ dependencies = [
  "arkret-signatures",
  "arkret-state",
  "arkret-wire",
- "base64",
- "chacha20poly1305",
  "chrono",
  "ed25519-dalek",
- "getrandom 0.4.2",
- "hex",
- "hkdf 0.13.0",
- "hmac 0.13.0",
- "parking_lot",
  "reqwest 0.13.4",
  "salvo 0.95.0",
  "serde",
  "serde_json",
- "sha2 0.11.0",
- "subtle",
  "thiserror 2.0.18",
  "tokio",
  "url",
- "uuid",
- "x25519-dalek",
- "zeroize",
 ]
 
 [[package]]
@@ -344,6 +330,7 @@ dependencies = [
  "arkret-bridge-runtime",
  "arkret-event-draft",
  "arkret-models-collaboration",
+ "arkret-models-integration",
  "async-trait",
  "base64",
  "cbc",
@@ -397,6 +384,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "arkret",
+ "arkret-event-draft",
  "arkret-models-collaboration",
  "arkret-models-discovery",
  "arkret-models-integration",
@@ -524,27 +512,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arkret-core"
-version = "0.3.0"
-dependencies = [
- "arkret-auth",
- "arkret-canonical",
- "arkret-event-draft",
- "arkret-identifiers",
- "arkret-identity",
- "arkret-models-collaboration",
- "arkret-models-crypto",
- "arkret-models-discovery",
- "arkret-models-identity",
- "arkret-models-integration",
- "arkret-policy",
- "arkret-schema",
- "arkret-signatures",
- "arkret-state",
- "arkret-wire",
-]
-
-[[package]]
 name = "arkret-crypto"
 version = "0.3.0"
 dependencies = [
@@ -564,6 +531,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "subtle",
  "thiserror 2.0.18",
  "zeroize",
 ]

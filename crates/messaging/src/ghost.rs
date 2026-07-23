@@ -3,11 +3,13 @@
 
 use arkret::http_client::ClientRequestOptions;
 use arkret::{
-    AppletBridgeErrorClass, AppletId, Did, EventId, GhostActorProvisionOutcome,
-    GhostActorProvisionRequestBody, Hlc, ObjectCreatePayload, RealmId, StrandCreateObject,
-    StrandId, StrandTrackConfig,
+    AppletId, Did, EventId, Hlc, ObjectCreatePayload, RealmId, StrandCreateObject, StrandId,
+    StrandTrackConfig,
 };
 use arkret_bridge_runtime::{BridgeError, Result};
+use arkret_models_integration::{
+    AppletBridgeErrorClass, GhostActorProvisionOutcome, GhostActorProvisionRequestBody,
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -402,12 +404,15 @@ pub(crate) async fn find_existing_portal_strand(
             let Some(strand_id) = object.get("id").and_then(Value::as_str) else {
                 continue;
             };
+            let Some(event_hlc) = event.hlc.as_ref() else {
+                continue;
+            };
             if earliest
                 .as_ref()
-                .is_none_or(|(hlc, event_id, _)| (&event.hlc, &event.event_id) < (hlc, event_id))
+                .is_none_or(|(hlc, event_id, _)| (event_hlc, &event.event_id) < (hlc, event_id))
             {
                 earliest = Some((
-                    event.hlc.clone(),
+                    event_hlc.clone(),
                     event.event_id.clone(),
                     strand_id.to_owned(),
                 ));

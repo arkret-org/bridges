@@ -23,6 +23,7 @@ anyhow = {workspace = true}
 async-trait = {workspace = true}
 chrono = {workspace = true}
 arkret = {workspace = true}
+arkret-event-draft = {workspace = true}
 arkret-models-collaboration = {workspace = true}
 arkret-models-discovery = {workspace = true}
 arkret-models-integration = {workspace = true}

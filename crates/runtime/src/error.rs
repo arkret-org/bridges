@@ -49,6 +49,12 @@ impl From<arkret::Error> for BridgeError {
     }
 }
 
+impl From<arkret_event_draft::EventDraftError> for BridgeError {
+    fn from(error: arkret_event_draft::EventDraftError) -> Self {
+        BridgeError::Arkret(error.to_string())
+    }
+}
+
 impl From<arkret::http_client::Error> for BridgeError {
     fn from(e: arkret::http_client::Error) -> Self {
         BridgeError::Arkret(e.to_string())

@@ -28,6 +28,7 @@ use arkret::{DidDocumentVerificationMethodResolver, DidResolver, WireError};
 use arkret_models_collaboration::events_payloads::ephemeral::EphemeralEnvelope;
 use arkret_models_collaboration::http_bodies::AppletTransactionRequestBody;
 use arkret_models_discovery::ServiceDescribe;
+use arkret_models_integration::AppletPackage;
 #[cfg(any(feature = "web", test))]
 use arkret_models_integration::{
     AppletActorView, AppletPingOutcome, AppletProtocolMetadata, AppletRealmView,
@@ -638,14 +639,14 @@ impl ArkretEdge {
 
     /// Emit a `ak.applet.bridge_error` Event so a bridging failure is durable
     /// and auditable rather than silently dropped (applet-integration §14/§16;
-    /// SDK [`arkret::AppletBridgeErrorBuilder`]). The builder is filled with all
-    /// required bindings (realm/failed_transaction_ref/retriable/visibility) by
+    /// Event Draft [`arkret_event_draft::AppletBridgeErrorBuilder`]). The builder is filled with
+    /// all required bindings (realm/failed_transaction_ref/retriable/visibility) by
     /// the caller; this allocates the actor seq + HLC, signs with the service
     /// key, and submits. Returns the new event_id.
     pub async fn submit_bridge_error(
         &self,
         realm_id: &RealmId,
-        builder: arkret::AppletBridgeErrorBuilder,
+        builder: arkret_event_draft::AppletBridgeErrorBuilder,
     ) -> Result<String> {
         let seq = self.seq.alloc_blocking().await?;
         let hlc = self.next_hlc(realm_id)?;
@@ -970,7 +971,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
             self.trust_domain.clone(),
             arkret::ServiceType::AppletService,
         );
-        description.supported_profiles = vec![arkret::AppletPackage::BASE_PROFILE.to_owned()];
+        description.supported_profiles = vec![AppletPackage::BASE_PROFILE.to_owned()];
         description.supported_operations = vec![
             arkret::ServiceOperationId::EDGE_APPLET_COMMAND_TRANSACTION.to_owned(),
             arkret::ServiceOperationId::EDGE_APPLET_QUERY_DESCRIBE.to_owned(),
@@ -1327,6 +1328,7 @@ mod tests {
             created_at: "2026-04-26T00:00:00Z".parse().unwrap(),
             domain: None,
             audience: None,
+            proof_purpose: None,
             jws: jws.to_owned(),
         }
     }

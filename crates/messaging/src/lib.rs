@@ -24,18 +24,16 @@ pub mod webhook;
 use std::sync::Arc;
 use std::time::Duration;
 
-use arkret::{
-    AppletBridgeErrorBuilder, AppletBridgeErrorVisibility, ContentBlock, Did, Event, EventId,
-    MessageRedactPayload, RealmId,
-};
+use arkret::{AppletId, ContentBlock, Did, Event, EventId, MessageRedactPayload, RealmId};
 pub use arkret_bridge_runtime as runtime;
 use arkret_bridge_runtime::app::{BridgeApp, BridgeContext};
 use arkret_bridge_runtime::db::{DbReplayGuardStore, DbTokenStore};
 use arkret_bridge_runtime::{
     BridgeError, ReplayGuardStore, Result, TokenCache, TokenStore, redact_sensitive_url_values,
 };
-use arkret_event_draft::EventPayloadExt;
+use arkret_event_draft::{AppletBridgeErrorBuilder, EventPayloadExt};
 pub use arkret_models_collaboration::events_payloads::ephemeral::EphemeralEnvelope;
+use arkret_models_integration::{AppletBridgeVisibilityScope, AppletIdentifier};
 use async_trait::async_trait;
 pub use content::{
     extract_attachment, extract_plain_body, extract_strand_id, media_content_block,
@@ -285,13 +283,13 @@ impl MessageContext {
         let external_ref = portal_location_ref(&self.inner.config, &msg.app_channel);
         let builder = AppletBridgeErrorBuilder::new(
             realm.clone(),
-            edge.applet_id().to_owned(),
+            AppletIdentifier::Cx(AppletId::new(edge.applet_id().to_owned())?),
             edge.service_id().clone(),
             failed_ref,
             bridge_error_class(error),
             bridge_error_code(error),
             retriable,
-            AppletBridgeErrorVisibility::RealmAdmins,
+            AppletBridgeVisibilityScope::RealmAdmins,
         )
         .with_external_ref(external_ref);
         edge.submit_bridge_error(&realm, builder).await?;
@@ -378,13 +376,13 @@ impl MessageContext {
         let external_ref = portal_location_ref(&self.inner.config, app_channel);
         let builder = AppletBridgeErrorBuilder::new(
             realm.clone(),
-            edge.applet_id().to_owned(),
+            AppletIdentifier::Cx(AppletId::new(edge.applet_id().to_owned())?),
             edge.service_id().clone(),
             failed_event_id.to_owned(),
             bridge_error_class(error),
             bridge_error_code(error),
             retriable,
-            AppletBridgeErrorVisibility::RealmAdmins,
+            AppletBridgeVisibilityScope::RealmAdmins,
         )
         .with_external_ref(external_ref);
         edge.submit_bridge_error(&realm, builder).await?;
