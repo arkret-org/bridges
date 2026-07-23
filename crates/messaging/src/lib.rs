@@ -655,6 +655,7 @@ impl MessageContext {
                         None => {
                             let provisioned = provision_ghost_actor(
                                 &edge,
+                                store.clone(),
                                 &config,
                                 &protocol,
                                 &tenant,
@@ -808,6 +809,7 @@ impl MessageContext {
                         None => {
                             let provisioned = provision_ghost_actor(
                                 &edge,
+                                store.clone(),
                                 &config,
                                 &protocol,
                                 &tenant,

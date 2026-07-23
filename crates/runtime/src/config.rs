@@ -144,6 +144,9 @@ pub struct ArkretConfig {
     pub trust_domain: arkret::TypedTrustDomainId,
     /// This bridge's applet id (`ak:applet:<uuidv7>`).
     pub applet_id: String,
+    /// Capability grant returned by Applet install for
+    /// `ak.applet.ghost.provision`.
+    pub ghost_provision_authorization_ref: String,
     /// The Bearer access token used to submit events.
     pub access_token: String,
     /// The event signing private key seed (32 bytes, hexadecimal).
@@ -178,6 +181,10 @@ impl fmt::Debug for ArkretConfig {
             .field("service_id", &self.service_id)
             .field("trust_domain", &self.trust_domain)
             .field("applet_id", &self.applet_id)
+            .field(
+                "ghost_provision_authorization_ref",
+                &self.ghost_provision_authorization_ref,
+            )
             .field("access_token", &"<redacted>")
             .field("signing_key_seed_hex", &"<redacted>")
             .field("verification_method_id", &self.verification_method_id)
@@ -412,6 +419,7 @@ arkret:
   service_id: "did:webvh:bridge.example"
   trust_domain: "ak:trust_domain:example.net"
   applet_id: "ak:applet:01904100-0000-7000-8000-000000000001"
+  ghost_provision_authorization_ref: "ak:grant:01904100-0000-7000-8000-000000000002"
   access_token: "token"
   signing_key_seed_hex: "1111111111111111111111111111111111111111111111111111111111111111"
   verification_method_id: "#key-1"

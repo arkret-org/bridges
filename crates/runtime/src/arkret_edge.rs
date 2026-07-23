@@ -22,9 +22,14 @@ use arkret::signatures::{
     DidVerificationMethodResolver, EventProofBuilder, VerificationMethodDocument,
 };
 use arkret::signatures::{SignEventOptions, sign_event};
-use arkret::{AppletId, Did, Ed25519MoveSigner, Event, EventId, Hlc, HlcGenerator, RealmId};
+use arkret::{
+    AppletId, Did, Ed25519MoveSigner, Event, EventId, Hlc, HlcGenerator, MoveSigner, RealmId,
+};
 #[cfg(any(feature = "web", test))]
 use arkret::{DidDocumentVerificationMethodResolver, DidResolver, WireError};
+use arkret_models_collaboration::event_sync::{
+    EventsFrontierSelector, EventsFrontierView, RealmActorFrontierView,
+};
 use arkret_models_collaboration::events_payloads::ephemeral::EphemeralEnvelope;
 use arkret_models_collaboration::http_bodies::AppletTransactionRequestBody;
 use arkret_models_discovery::ServiceDescribe;
@@ -577,6 +582,49 @@ impl ArkretEdge {
     pub fn resign_event(&self, event: &mut Event) -> Result<()> {
         event.proofs.clear();
         self.sign_as_service(event)
+    }
+
+    /// Sign an already-canonicalized payload-proof transcript with the
+    /// configured Applet service key.
+    pub fn sign_detached_jws(&self, canonical_bytes: &[u8]) -> Result<String> {
+        Ok(self.signer.sign_payload(canonical_bytes)?.jws)
+    }
+
+    /// Return the service-owned absolute verification method used by Event and
+    /// payload proofs. Configs may use a fragment-only shorthand.
+    pub fn service_verification_method(&self) -> Result<String> {
+        self.verification_method_for_actor(&self.service_id)
+    }
+
+    /// Fetch the exact Realm-scoped authoring frontier for an existing actor.
+    pub async fn realm_actor_frontier(
+        &self,
+        realm_id: &RealmId,
+        actor_id: &Did,
+    ) -> Result<Option<RealmActorFrontierView>> {
+        let state = match self
+            .client
+            .events_frontier(&EventsFrontierSelector::RealmActor {
+                realm_id: realm_id.clone(),
+                actor_id: actor_id.clone(),
+            })
+            .await
+        {
+            Ok(state) => state,
+            Err(arkret::http_client::Error::Api { status: 404, .. }) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        match state.frontier {
+            EventsFrontierView::RealmActor(frontier) => Ok(Some(frontier)),
+            _ => Err(BridgeError::Arkret(
+                "events frontier returned the wrong variant".to_owned(),
+            )),
+        }
+    }
+
+    /// Allocate the next Realm-scoped HLC for a caller-built Event.
+    pub fn next_event_hlc(&self, realm_id: &RealmId) -> Result<Hlc> {
+        self.next_hlc(realm_id)
     }
 
     /// Outbound convenience with bridge provenance and an explicit delegated

@@ -44,8 +44,20 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    /// Exact caller-signed Ghost provisioning request retained for safe
+    /// network retry and concurrent first-seen collapse.
+    prepared_ghost_provisions (id) {
+        id -> BigInt,
+        provision_key -> Text,
+        request_json -> Text,
+        created_at -> BigInt,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(
     channel_realm_mappings,
     message_mappings,
-    user_mappings
+    user_mappings,
+    prepared_ghost_provisions
 );

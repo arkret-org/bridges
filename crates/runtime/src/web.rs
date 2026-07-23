@@ -1070,9 +1070,10 @@ fn map_http_signature_error(err: HttpMessageVerificationError) -> HttpSignatureR
             | SignaturePolicyError::CreatedTooOld
             | SignaturePolicyError::Expired,
         ) => signature_window_invalid(message),
-        HttpMessageVerificationError::Policy(_) | HttpMessageVerificationError::Signature(_) => {
-            http_signature_invalid(message)
-        }
+        HttpMessageVerificationError::Policy(_)
+        | HttpMessageVerificationError::Signature(_)
+        | HttpMessageVerificationError::ContentEncodingNotAllowed
+        | HttpMessageVerificationError::NonCanonicalJson(_) => http_signature_invalid(message),
     }
 }
 

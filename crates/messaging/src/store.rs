@@ -42,6 +42,64 @@ impl MessageStore {
         Ok(Self { db })
     }
 
+    pub fn prepared_ghost_provision(&self, provision_key: &str) -> Result<Option<String>> {
+        use schema::prepared_ghost_provisions::dsl;
+
+        let mut conn = self.db.conn()?;
+        Ok(dsl::prepared_ghost_provisions
+            .filter(dsl::provision_key.eq(provision_key))
+            .select(dsl::request_json)
+            .first::<String>(&mut conn)
+            .optional()?)
+    }
+
+    pub async fn prepared_ghost_provision_async(
+        self: Arc<Self>,
+        provision_key: String,
+    ) -> Result<Option<String>> {
+        run_blocking(move || self.prepared_ghost_provision(&provision_key)).await
+    }
+
+    /// Persist the exact signed Ghost provisioning request before transport.
+    /// A concurrent writer for the same tuple wins; all callers return the
+    /// same durable bytes.
+    pub fn prepare_ghost_provision(
+        &self,
+        provision_key: &str,
+        request_json: &str,
+    ) -> Result<String> {
+        use schema::prepared_ghost_provisions::dsl;
+
+        let mut conn = self.db.conn()?;
+        let inserted = diesel::insert_into(dsl::prepared_ghost_provisions)
+            .values((
+                dsl::provision_key.eq(provision_key),
+                dsl::request_json.eq(request_json),
+                dsl::created_at.eq(now_ts()),
+            ))
+            .execute(&mut conn);
+        match inserted {
+            Ok(_) => Ok(request_json.to_owned()),
+            Err(diesel::result::Error::DatabaseError(
+                diesel::result::DatabaseErrorKind::UniqueViolation,
+                _,
+            )) => dsl::prepared_ghost_provisions
+                .filter(dsl::provision_key.eq(provision_key))
+                .select(dsl::request_json)
+                .first::<String>(&mut conn)
+                .map_err(Into::into),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub async fn prepare_ghost_provision_async(
+        self: Arc<Self>,
+        provision_key: String,
+        request_json: String,
+    ) -> Result<String> {
+        run_blocking(move || self.prepare_ghost_provision(&provision_key, &request_json)).await
+    }
+
     pub fn upsert_channel_realm(
         &self,
         app_channel: &str,
@@ -483,6 +541,31 @@ mod tests {
             .expect("mapping");
         assert_eq!(mapping.app_channel_id, "channel-1");
         assert_eq!(mapping.app_message_id, "app-message-1");
+    }
+
+    #[test]
+    fn ghost_provision_preparation_preserves_first_signed_bytes() {
+        let store = sqlite_store("ghost-provision").unwrap();
+        assert_eq!(store.prepared_ghost_provision("tuple-1").unwrap(), None);
+        assert_eq!(
+            store
+                .prepare_ghost_provision("tuple-1", "{\"event\":\"first\"}")
+                .unwrap(),
+            "{\"event\":\"first\"}"
+        );
+        assert_eq!(
+            store
+                .prepare_ghost_provision("tuple-1", "{\"event\":\"different\"}")
+                .unwrap(),
+            "{\"event\":\"first\"}"
+        );
+        assert_eq!(
+            store
+                .prepared_ghost_provision("tuple-1")
+                .unwrap()
+                .as_deref(),
+            Some("{\"event\":\"first\"}")
+        );
     }
 }
 

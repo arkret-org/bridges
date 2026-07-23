@@ -1,23 +1,32 @@
 //! Ghost actor provisioning, external_ref provenance, and portal strand
 //! acquisition helpers (applet-integration §9.1 / §10.1 / §16).
 
+use std::sync::OnceLock;
+
 use arkret::http_client::ClientRequestOptions;
 use arkret::{
-    AppletId, Did, EventId, Hlc, ObjectCreatePayload, RealmId, StrandCreateObject, StrandId,
-    StrandTrackConfig,
+    ActorProfileId, AppletId, Did, EventId, EventRef, GrantId, Hash, Hlc, ObjectCreatePayload,
+    PayloadProof, RealmId, StrandCreateObject, StrandId, StrandTrackConfig,
 };
 use arkret_bridge_runtime::{BridgeError, Result};
+use arkret_models_collaboration::governance::accountability::{
+    AccountabilityGrantPayload, AccountabilityScope, AccountabilityScopeKind,
+};
 use arkret_models_integration::{
-    AppletBridgeErrorClass, GhostActorProvisionOutcome, GhostActorProvisionRequestBody,
+    AppletBridgeErrorClass, AppletDelegatedEventAuthorization, GhostActorProvisionOutcome,
+    GhostActorProvisionRequestBody,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::store::MessageStore;
 use crate::types::{InboundAppDelete, InboundAppMessage};
 use crate::{
     EXTERNAL_REF_SCHEMA, MESSAGE_MAPPING_KEY_SEPARATOR, PORTAL_STRAND_SCAN_MAX_PAGES,
     PORTAL_STRAND_SCAN_PAGE_LIMIT, PORTAL_STRAND_TRACK, runtime,
 };
+
+static GHOST_PROVISION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 pub(crate) fn normalized_external_id(value: &str) -> String {
     value.trim().to_owned()
@@ -179,6 +188,7 @@ fn external_ref_for_user(
 
 pub(crate) async fn provision_ghost_actor(
     edge: &runtime::ArkretEdge,
+    store: std::sync::Arc<MessageStore>,
     config: &runtime::Config,
     protocol: &str,
     tenant: &str,
@@ -186,37 +196,176 @@ pub(crate) async fn provision_ghost_actor(
     display_name: Option<&str>,
     realm_id: &str,
 ) -> Result<GhostActorProvisionOutcome> {
+    // Every accountability grant advances the configured service actor's
+    // Realm frontier. Serialize frontier reads through submission so two
+    // concurrent bridge deliveries cannot prepare conflicting actor_seq values.
+    let _provision_guard = GHOST_PROVISION_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
     let ghost_actor_id = Did::new(requested_ghost_actor_id_for_user(
         config,
         protocol,
         tenant,
         external_user_id,
     )?)?;
-    let mut request = GhostActorProvisionRequestBody::new(
-        AppletId::new(config.arkret.applet_id.clone())?,
-        edge.service_id().clone(),
-        ghost_actor_id.clone(),
-        protocol,
-        tenant,
-        external_user_id,
-        RealmId::new(realm_id.to_owned())?,
-        external_ref_for_user(config, protocol, tenant, external_user_id),
-    );
-    if let Some(display_name) = display_name {
-        request = request.with_display_name(display_name);
-    }
-    let path = ghost_actor_provision_path(&config.arkret.applet_id)?;
-    let options = ClientRequestOptions::new().idempotency_key(ghost_provision_idempotency_key(
+    let idempotency_key = ghost_provision_idempotency_key(
         &config.arkret.applet_id,
         protocol,
         tenant,
         external_user_id,
-    ));
+    );
+    let request_json = match store
+        .clone()
+        .prepared_ghost_provision_async(idempotency_key.clone())
+        .await?
+    {
+        Some(request_json) => request_json,
+        None => {
+            let request = build_signed_ghost_provision_request(
+                edge,
+                config,
+                protocol,
+                tenant,
+                external_user_id,
+                display_name,
+                RealmId::new(realm_id.to_owned())?,
+                ghost_actor_id.clone(),
+            )
+            .await?;
+            let request_json = serde_json::to_string(&request).map_err(|error| {
+                BridgeError::App(format!("Ghost provision encode failed: {error}"))
+            })?;
+            store
+                .prepare_ghost_provision_async(idempotency_key.clone(), request_json)
+                .await?
+        }
+    };
+    let request: GhostActorProvisionRequestBody =
+        serde_json::from_str(&request_json).map_err(|error| {
+            BridgeError::Database(format!("stored Ghost provision invalid: {error}"))
+        })?;
+    let path = ghost_actor_provision_path(&config.arkret.applet_id)?;
+    let options = ClientRequestOptions::new().idempotency_key(idempotency_key);
     let response: GhostActorProvisionOutcome = edge
         .client()
         .post_with_options(&path, &request, &options)
         .await?;
     validate_ghost_provision_response(&ghost_actor_id, response)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_signed_ghost_provision_request(
+    edge: &runtime::ArkretEdge,
+    config: &runtime::Config,
+    protocol: &str,
+    tenant: &str,
+    external_user_id: &str,
+    display_name: Option<&str>,
+    realm_id: RealmId,
+    ghost_actor_id: Did,
+) -> Result<GhostActorProvisionRequestBody> {
+    let applet_id = AppletId::new(config.arkret.applet_id.clone())?;
+    let service_id = edge.service_id().clone();
+    let authorization_ref = GrantId::new(config.arkret.ghost_provision_authorization_ref.clone())?;
+    let created_at = chrono::DateTime::from_timestamp_millis(chrono::Utc::now().timestamp_millis())
+        .ok_or_else(|| BridgeError::Runtime("system clock is out of range".to_owned()))?;
+    let verification_method = edge.service_verification_method()?;
+    let mut grant = AccountabilityGrantPayload::new(
+        service_id.clone(),
+        ghost_actor_id.clone(),
+        AccountabilityScope::Single(AccountabilityScopeKind::ContractedService),
+        created_at - chrono::Duration::seconds(1),
+        None,
+        PayloadProof {
+            kind: "detached_jws".to_owned(),
+            alg: "EdDSA".to_owned(),
+            verification_method,
+            payload_digest: Hash::new(format!("sha256:{}", "0".repeat(64)))?,
+            created_at,
+            domain: None,
+            audience: None,
+            proof_purpose: None,
+            jws: "pending".to_owned(),
+        },
+    );
+    grant.proof.payload_digest = grant.payload_digest()?;
+    grant.proof.jws = edge.sign_detached_jws(&grant.canonical_proof_binding_bytes()?)?;
+
+    let service_frontier = edge.realm_actor_frontier(&realm_id, &service_id).await?;
+    let (service_actor_seq, service_prev_refs) = service_frontier
+        .map(|frontier| (frontier.next_actor_seq, frontier.frontier_event_ids))
+        .unwrap_or_default();
+    let mut accountability_event = arkret_event_draft::accountability_grant_event(
+        &grant,
+        realm_id.clone(),
+        service_actor_seq,
+        edge.next_event_hlc(&realm_id)?,
+        None,
+    )?;
+    accountability_event.prev_refs = service_prev_refs;
+    accountability_event.applet_id = Some(applet_id.clone());
+    accountability_event.authorization_ref = Some(authorization_ref.to_string());
+    edge.resign_event(&mut accountability_event)?;
+
+    let effective_display_name = display_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(external_user_id);
+    let profile_external_ref = json!({
+        "schema": "ak.applet.ghost_actor.external_ref.v1",
+        "protocol": protocol,
+        "tenant": tenant,
+        "external_user_id": external_user_id,
+        "realm_id": realm_id,
+        "external_ref": external_ref_for_user(config, protocol, tenant, external_user_id),
+    });
+    let profile_request = arkret_event_draft::GhostActorProfileRequest::new(
+        ActorProfileId::new(arkret::new_prefixed_uuid7("ak:actor_profile:"))?,
+        ghost_actor_id.clone(),
+        effective_display_name,
+        applet_id.clone(),
+    )
+    .with_realm_id(realm_id.clone())
+    .with_accountable_principal_ids(vec![service_id.clone()])
+    .with_external_ref(
+        serde_json::from_value(profile_external_ref).map_err(|error| {
+            BridgeError::App(format!("Ghost profile external_ref invalid: {error}"))
+        })?,
+    );
+    let delegation = AppletDelegatedEventAuthorization::new(
+        service_id.clone(),
+        authorization_ref.to_string(),
+        applet_id.clone(),
+    );
+    let mut profile_event = profile_request.profile_create_event(
+        realm_id.clone(),
+        0,
+        edge.next_event_hlc(&realm_id)?,
+        Some(&delegation),
+    )?;
+    profile_event.refs.push(EventRef::new(
+        accountability_event.event_id.as_str(),
+        "accountability",
+    ));
+    edge.resign_event(&mut profile_event)?;
+
+    let mut request = GhostActorProvisionRequestBody::new(
+        applet_id,
+        service_id,
+        ghost_actor_id,
+        protocol,
+        tenant,
+        external_user_id,
+        realm_id,
+        external_ref_for_user(config, protocol, tenant, external_user_id),
+        accountability_event,
+        profile_event,
+    );
+    if let Some(display_name) = display_name {
+        request = request.with_display_name(display_name);
+    }
+    Ok(request)
 }
 
 fn validate_ghost_provision_response(
