@@ -194,8 +194,6 @@ dependencies = [
  "arkret-wire",
  "chrono",
  "reqwest 0.13.4",
- "salvo 0.95.0",
- "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
@@ -208,13 +206,11 @@ version = "0.3.0"
 dependencies = [
  "argon2",
  "arkret-canonical",
- "arkret-identifiers",
  "arkret-keystore",
  "arkret-models-collaboration",
  "arkret-models-identity",
  "arkret-signatures",
  "arkret-wire",
- "base64",
  "chrono",
  "getrandom 0.4.2",
  "serde",
@@ -344,7 +340,7 @@ dependencies = [
  "hmac 0.13.0",
  "jsonwebtoken",
  "reqwest 0.13.4",
- "salvo 0.94.0",
+ "salvo",
  "serde",
  "serde_json",
  "sha1 0.11.0",
@@ -399,7 +395,7 @@ dependencies = [
  "parking_lot",
  "reqwest 0.13.4",
  "rustls 0.23.40",
- "salvo 0.94.0",
+ "salvo",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -557,7 +553,6 @@ dependencies = [
  "arkret-models-integration",
  "arkret-wire",
  "chrono",
- "salvo 0.95.0",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -570,9 +565,6 @@ dependencies = [
  "arkret-canonical",
  "arkret-identifiers",
  "arkret-wire",
- "chrono",
- "getrandom 0.4.2",
- "serde",
  "thiserror 2.0.18",
 ]
 
@@ -609,8 +601,6 @@ dependencies = [
  "arkret-canonical",
  "getrandom 0.2.17",
  "getrandom 0.4.2",
- "salvo 0.95.0",
- "salvo-oapi 0.95.0",
  "serde",
  "thiserror 2.0.18",
  "uuid",
@@ -627,7 +617,6 @@ dependencies = [
  "arkret-models-identity",
  "arkret-signatures",
  "arkret-wire",
- "base64",
  "chrono",
  "ed25519-dalek",
  "serde",
@@ -679,7 +668,6 @@ dependencies = [
  "chrono-tz",
  "hmac 0.13.0",
  "regex",
- "salvo 0.95.0",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -697,7 +685,6 @@ dependencies = [
  "chrono",
  "hex",
  "regex",
- "salvo 0.95.0",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -712,7 +699,6 @@ dependencies = [
  "arkret-models-identity",
  "arkret-wire",
  "chrono",
- "salvo 0.95.0",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -725,7 +711,6 @@ dependencies = [
  "arkret-canonical",
  "arkret-wire",
  "chrono",
- "salvo 0.95.0",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -741,7 +726,6 @@ dependencies = [
  "arkret-models-identity",
  "arkret-wire",
  "chrono",
- "salvo 0.95.0",
  "serde",
  "serde_json",
  "tracing",
@@ -758,7 +742,6 @@ dependencies = [
  "arkret-wire",
  "chrono",
  "chrono-tz",
- "salvo 0.95.0",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -787,7 +770,6 @@ dependencies = [
  "arkret-wire",
  "chrono",
  "regex",
- "salvo 0.95.0",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -810,10 +792,8 @@ dependencies = [
  "arkret-state",
  "arkret-wire",
  "chrono",
- "salvo 0.95.0",
  "serde",
  "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -851,7 +831,6 @@ dependencies = [
  "arkret-wire",
  "chrono",
  "hex",
- "salvo 0.95.0",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -868,7 +847,6 @@ dependencies = [
  "hex",
  "idna",
  "precis-profiles",
- "salvo 0.95.0",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -1315,20 +1293,6 @@ dependencies = [
  "ryu",
  "serde",
  "static_assertions",
-]
-
-[[package]]
-name = "compact_str"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79fcda08c33bb58b97008b2cdada6622500e949e060f5913361763121abd2416"
-dependencies = [
- "castaway",
- "cfg-if",
- "itoa",
- "serde",
- "static_assertions",
- "zmij",
 ]
 
 [[package]]
@@ -4219,21 +4183,10 @@ version = "0.94.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e58d7158d996e7005dc9b67b0fe01bc070d500e644156ea74badc4826bb18d42"
 dependencies = [
- "salvo-oapi 0.94.0",
+ "salvo-oapi",
  "salvo-rate-limiter",
- "salvo_core 0.94.0",
- "salvo_extra 0.94.0",
-]
-
-[[package]]
-name = "salvo"
-version = "0.95.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af2b82923e4d2d9cd15f0c822bba2c2bcefb1c8f23d82be88d7bec080149a507"
-dependencies = [
- "salvo-oapi 0.95.0",
- "salvo_core 0.95.0",
- "salvo_extra 0.95.0",
+ "salvo_core",
+ "salvo_extra",
 ]
 
 [[package]]
@@ -4246,7 +4199,7 @@ dependencies = [
  "base64",
  "bytes",
  "chrono",
- "compact_str 0.9.1",
+ "compact_str",
  "futures-util",
  "http",
  "indexmap 2.14.0",
@@ -4256,8 +4209,8 @@ dependencies = [
  "regex",
  "rust-embed",
  "rust_decimal",
- "salvo-oapi-macros 0.94.0",
- "salvo_core 0.94.0",
+ "salvo-oapi-macros",
+ "salvo_core",
  "serde",
  "serde_json",
  "serde_norway",
@@ -4266,42 +4219,7 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
- "ulid 1.2.1",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "salvo-oapi"
-version = "0.95.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61e20c7d23233e09336e99efbcb02c1725ecaf5cd25519f007f27c849336e2f5"
-dependencies = [
- "anyhow",
- "base64",
- "bytes",
- "chrono",
- "compact_str 0.10.0",
- "futures-util",
- "http",
- "indexmap 2.14.0",
- "inventory",
- "mime-infer",
- "parking_lot",
- "regex",
- "rust-embed",
- "rust_decimal",
- "salvo-oapi-macros 0.95.0",
- "salvo_core 0.95.0",
- "serde",
- "serde_json",
- "serde_norway",
- "smallvec",
- "thiserror 2.0.18",
- "time",
- "tokio",
- "tracing",
- "ulid 2.0.1",
+ "ulid",
  "url",
  "uuid",
 ]
@@ -4316,23 +4234,8 @@ dependencies = [
  "proc-macro2",
  "proc-macro2-diagnostics",
  "quote",
- "salvo-serde-util 0.94.0",
- "salvo_core 0.94.0",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "salvo-oapi-macros"
-version = "0.95.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9e12028fe73db7df170ab66aba357fd1fe7efbfb1cf8adfeaa219db76a4132e"
-dependencies = [
- "proc-macro-crate",
- "proc-macro2",
- "proc-macro2-diagnostics",
- "quote",
- "salvo-serde-util 0.95.0",
- "salvo_core 0.95.0",
+ "salvo-serde-util",
+ "salvo_core",
  "syn 2.0.117",
 ]
 
@@ -4343,7 +4246,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9cb22528d064200e5f4d492ae205e63b92bc754782b18d3d2b49eadd38e00170"
 dependencies = [
  "moka",
- "salvo_core 0.94.0",
+ "salvo_core",
  "serde",
  "time",
  "tokio",
@@ -4355,17 +4258,6 @@ name = "salvo-serde-util"
 version = "0.94.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92fa0afee41d6feb8983ee997d0827ecdb67a74ab00f3e932b6308b467630a3f"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "salvo-serde-util"
-version = "0.95.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17fcc2bbd4f0d89c7bece491f5bf6bf39343bfdf98507ace7a3ba81c24cc269a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4403,50 +4295,7 @@ dependencies = [
  "pin-project",
  "rand 0.10.2",
  "regex",
- "salvo_macros 0.94.0",
- "serde",
- "serde-xml-rs",
- "serde_json",
- "sync_wrapper",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "salvo_core"
-version = "0.95.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e399ae70702e4e30a96a02851d3c3682258e6cba0dff6e0ce282d07d4d925829"
-dependencies = [
- "async-trait",
- "base64",
- "bytes",
- "chardetng",
- "content_inspector",
- "cookie",
- "enumflags2",
- "form_urlencoded",
- "futures-channel",
- "futures-util",
- "headers",
- "http",
- "http-body-util",
- "hyper",
- "hyper-util",
- "indexmap 2.14.0",
- "mime",
- "mime-infer",
- "multimap",
- "multra",
- "parking_lot",
- "percent-encoding",
- "pin-project",
- "rand 0.10.2",
- "regex",
- "salvo_macros 0.95.0",
+ "salvo_macros",
  "serde",
  "serde-xml-rs",
  "serde_json",
@@ -4470,36 +4319,14 @@ dependencies = [
  "http-body-util",
  "hyper",
  "pin-project",
- "salvo_core 0.94.0",
+ "salvo_core",
  "serde",
  "serde_json",
  "tokio",
  "tokio-tungstenite 0.29.0",
  "tower",
  "tracing",
- "ulid 1.2.1",
-]
-
-[[package]]
-name = "salvo_extra"
-version = "0.95.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7fab6556b9bd76d68adb182478092be3c5e3c961c1e8acf8f65c10dbb40dadf"
-dependencies = [
- "base64",
- "etag",
- "futures-util",
- "http-body-util",
- "hyper",
- "pin-project",
- "salvo_core 0.95.0",
- "serde",
- "serde_json",
- "tokio",
- "tokio-tungstenite 0.30.0",
- "tower",
- "tracing",
- "ulid 2.0.1",
+ "ulid",
 ]
 
 [[package]]
@@ -4511,20 +4338,7 @@ dependencies = [
  "proc-macro-crate",
  "proc-macro2",
  "quote",
- "salvo-serde-util 0.94.0",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "salvo_macros"
-version = "0.95.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8efbe46212518df71518ac5d75d5400ac36cf23d162c8e68373961d1ac0d4c80"
-dependencies = [
- "proc-macro-crate",
- "proc-macro2",
- "quote",
- "salvo-serde-util 0.95.0",
+ "salvo-serde-util",
  "syn 2.0.117",
 ]
 
@@ -5381,18 +5195,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tokio-tungstenite"
-version = "0.30.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17a073bfed563fa236697a068031408a93cd9522e08abf9933ead3e73411bd71"
-dependencies = [
- "futures-util",
- "log",
- "tokio",
- "tungstenite 0.30.0",
-]
-
-[[package]]
 name = "tokio-util"
 version = "0.7.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5630,18 +5432,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tungstenite"
-version = "0.30.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e48ac77174b19c110a50ab2128b24215ac9cb40e0e12e093fb602d175c569d22"
-dependencies = [
- "bytes",
- "log",
- "rand 0.10.2",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "typemap_rev"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5669,16 +5459,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "470dbf6591da1b39d43c14523b2b469c86879a53e8b758c8e090a470fe7b1fbe"
 dependencies = [
  "rand 0.9.4",
- "web-time",
-]
-
-[[package]]
-name = "ulid"
-version = "2.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39493d572b98fe1d142e132e7a726c50c68121bce84429216a5ec20e1ad7fec5"
-dependencies = [
- "rand 0.10.2",
  "web-time",
 ]
 
