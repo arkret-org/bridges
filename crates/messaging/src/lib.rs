@@ -416,7 +416,7 @@ impl MessageContext {
                 .map(|host| (*host).to_owned())
                 .collect(),
         };
-        HttpInboundMediaFetcher::new(self.http.clone())
+        HttpInboundMediaFetcher::new()?
             .fetch(&reference, InboundMediaFetchPolicy::default())
             .await
     }

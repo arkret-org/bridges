@@ -26,6 +26,7 @@ arkret = {version = "0.3.0",path = "../arkret-rust-sdk/crates/sdk",default-featu
     "signer",
 ]}
 arkret-event-draft = {version = "0.3.0",path = "../arkret-rust-sdk/crates/event-draft",default-features = false}
+arkret-egress-policy = {version = "0.3.0",path = "../arkret-rust-sdk/crates/egress-policy"}
 arkret-models-collaboration = {version = "0.3.0",path = "../arkret-rust-sdk/crates/models-collaboration",default-features = false}
 arkret-models-discovery = {version = "0.3.0",path = "../arkret-rust-sdk/crates/models-discovery",default-features = false}
 arkret-models-integration = {version = "0.3.0",path = "../arkret-rust-sdk/crates/models-integration",default-features = false}

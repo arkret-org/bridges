@@ -1,6 +1,7 @@
 //! Platform-neutral inbound media fetch contract.
 
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -91,8 +92,13 @@ pub struct HttpInboundMediaFetcher {
 }
 
 impl HttpInboundMediaFetcher {
-    pub fn new(http: reqwest::Client) -> Self {
-        Self { http }
+    pub fn new() -> Result<Self> {
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .dns_resolver(Arc::new(PolicyDnsResolver))
+            .build()
+            .map_err(|error| BridgeError::Runtime(format!("build media HTTP client: {error}")))?;
+        Ok(Self { http })
     }
 
     async fn fetch_once(
@@ -167,9 +173,9 @@ fn validate_media_url(
     url: &reqwest::Url,
     allowed_hosts: &[String],
 ) -> std::result::Result<(), FetchFailure> {
-    if !media_scheme_allowed(url) {
-        return Err(FetchFailure::fatal("media download URL must use https"));
-    }
+    media_egress_policy()
+        .validate_url(url)
+        .map_err(|error| FetchFailure::fatal(format!("media download target denied: {error}")))?;
     let host = url
         .host_str()
         .ok_or_else(|| FetchFailure::fatal("media download URL has no host"))?;
@@ -181,24 +187,37 @@ fn validate_media_url(
     Ok(())
 }
 
-fn media_scheme_allowed(url: &reqwest::Url) -> bool {
-    if url.scheme() == "https" {
-        return true;
-    }
+fn media_egress_policy() -> arkret_egress_policy::OutboundPolicy {
     #[cfg(test)]
     {
-        if url.scheme() == "http"
-            && url.host_str().is_some_and(|host| {
-                host == "localhost"
-                    || host
-                        .parse::<std::net::IpAddr>()
-                        .is_ok_and(|ip| ip.is_loopback())
-            })
-        {
-            return true;
-        }
+        arkret_egress_policy::OutboundPolicy::local_development()
     }
-    false
+    #[cfg(not(test))]
+    {
+        arkret_egress_policy::OutboundPolicy::public_https()
+    }
+}
+
+#[derive(Debug)]
+struct PolicyDnsResolver;
+
+impl reqwest::dns::Resolve for PolicyDnsResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_owned();
+        Box::pin(async move {
+            let addresses = tokio::net::lookup_host((host.as_str(), 0))
+                .await?
+                .collect::<Vec<_>>();
+            media_egress_policy()
+                .validate_resolved_addresses(&addresses)
+                .map_err(|error| {
+                    Box::<dyn std::error::Error + Send + Sync>::from(std::io::Error::other(
+                        format!("media DNS target denied: {error}"),
+                    ))
+                })?;
+            Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
 }
 
 #[async_trait]
@@ -327,7 +346,7 @@ mod tests {
         ])
         .await;
         arkret_bridge_runtime::install_default_crypto_provider();
-        let fetcher = HttpInboundMediaFetcher::new(reqwest::Client::new());
+        let fetcher = HttpInboundMediaFetcher::new().unwrap();
         let media = fetcher
             .fetch(
                 &InboundMediaReference {
@@ -356,7 +375,7 @@ mod tests {
         ])
         .await;
         arkret_bridge_runtime::install_default_crypto_provider();
-        let fetcher = HttpInboundMediaFetcher::new(reqwest::Client::new());
+        let fetcher = HttpInboundMediaFetcher::new().unwrap();
         let result = fetcher
             .fetch(
                 &InboundMediaReference {
@@ -387,7 +406,7 @@ mod tests {
         ])
         .await;
         arkret_bridge_runtime::install_default_crypto_provider();
-        let fetcher = HttpInboundMediaFetcher::new(reqwest::Client::new());
+        let fetcher = HttpInboundMediaFetcher::new().unwrap();
         let media = fetcher
             .fetch(
                 &InboundMediaReference {

@@ -60,6 +60,9 @@ pub const INBOUND_QUEUE_CAPACITY: usize = 1024;
 /// are dropped instead of back-pressuring durable transaction delivery.
 pub const EPHEMERAL_QUEUE_CAPACITY: usize = 1024;
 
+/// Hard bound for per-Realm HLC generator state retained by one bridge process.
+const MAX_REALM_HLC_GENERATORS: usize = 4_096;
+
 /// Retry hint (ms) returned to the server when the inbound queue is full, so it
 /// re-pushes the unaccepted events after a short delay instead of dropping them.
 const INBOUND_QUEUE_FULL_RETRY_MS: u64 = 1000;
@@ -328,6 +331,13 @@ impl ArkretEdge {
     /// Generate the next Realm-scoped HLC through the SDK implementation.
     pub fn next_hlc(&self, realm_id: &RealmId) -> Result<Hlc> {
         let mut generators = self.hlc_generators.lock();
+        if !generators.contains_key(realm_id.as_str())
+            && generators.len() >= MAX_REALM_HLC_GENERATORS
+        {
+            return Err(BridgeError::Runtime(format!(
+                "realm HLC generator cache reached the {MAX_REALM_HLC_GENERATORS} realm limit"
+            )));
+        }
         let generator = generators
             .entry(realm_id.as_str().to_owned())
             .or_insert_with(|| {
