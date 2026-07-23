@@ -24,7 +24,6 @@ pub mod webhook;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub use arkret::models::EphemeralEnvelope;
 use arkret::{
     AppletBridgeErrorBuilder, AppletBridgeErrorVisibility, ContentBlock, Did, Event, EventId,
     MessageRedactPayload, RealmId,
@@ -36,6 +35,7 @@ use arkret_bridge_runtime::{
     BridgeError, ReplayGuardStore, Result, TokenCache, TokenStore, redact_sensitive_url_values,
 };
 use arkret_event_draft::EventPayloadExt;
+pub use arkret_models_collaboration::events_payloads::ephemeral::EphemeralEnvelope;
 use async_trait::async_trait;
 pub use content::{
     extract_attachment, extract_plain_body, extract_strand_id, media_content_block,

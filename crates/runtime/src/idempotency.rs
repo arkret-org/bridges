@@ -10,8 +10,8 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use arkret::models::AppletTransactionOutcome;
 use arkret::{IdempotencyIdentity, TransactionClaim, TransactionIdempotencyStore};
+use arkret_models_integration::AppletTransactionOutcome;
 use parking_lot::Mutex;
 
 use crate::error::{BridgeError, Result};

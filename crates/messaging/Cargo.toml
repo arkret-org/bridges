@@ -23,6 +23,7 @@ chrono = {workspace = true}
 clap = {workspace = true}
 arkret = {workspace = true}
 arkret-event-draft = {workspace = true}
+arkret-models-collaboration = {workspace = true}
 arkret-bridge-runtime = {workspace = true,default-features = false}
 diesel = {workspace = true}
 diesel_migrations = {workspace = true}

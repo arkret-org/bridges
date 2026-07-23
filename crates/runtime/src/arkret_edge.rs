@@ -17,12 +17,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use arkret::http_client::{Auth, Client};
-use arkret::models::EphemeralEnvelope;
-#[cfg(any(feature = "web", test))]
-use arkret::models::{
-    AppletActorView, AppletPingOutcome, AppletProtocolMetadata, AppletRealmView,
-    AppletTransactionOutcome, AppletTransactionRequestBody, ServiceDescribe,
-};
 #[cfg(any(feature = "web", test))]
 use arkret::signatures::{
     DidVerificationMethodResolver, EventProofBuilder, VerificationMethodDocument,
@@ -31,6 +25,14 @@ use arkret::signatures::{SignEventOptions, sign_event};
 use arkret::{AppletId, Did, Ed25519MoveSigner, Event, EventId, Hlc, HlcGenerator, RealmId};
 #[cfg(any(feature = "web", test))]
 use arkret::{DidDocumentVerificationMethodResolver, DidResolver, WireError};
+use arkret_models_collaboration::events_payloads::ephemeral::EphemeralEnvelope;
+use arkret_models_collaboration::http_bodies::AppletTransactionRequestBody;
+use arkret_models_discovery::ServiceDescribe;
+#[cfg(any(feature = "web", test))]
+use arkret_models_integration::{
+    AppletActorView, AppletPingOutcome, AppletProtocolMetadata, AppletRealmView,
+    AppletTransactionOutcome,
+};
 use parking_lot::Mutex;
 use serde::Serialize;
 use serde_json::Value;
@@ -665,7 +667,7 @@ impl ArkretEdge {
 
     /// Media upload: returns the blob reference string.
     pub async fn upload_blob(&self, bytes: &[u8], mime: &str) -> Result<String> {
-        let meta = arkret::models::BlobUploadMetadata {
+        let meta = arkret_models_collaboration::objects::blob::BlobUploadMetadata {
             realm_id: None,
             content_digest: None,
             size_bytes: bytes.len() as u64,
