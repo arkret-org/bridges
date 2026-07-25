@@ -53,19 +53,9 @@ mod tests {
     }
 }
 
-/// How the bridge authenticates outbound Chat API calls.
-pub enum GoogleChatAuth {
-    /// A ready OAuth2 access token. Expires (~1h) and is not auto-refreshed; kept
-    /// for back-compat / short-lived testing only.
-    StaticToken(String),
-    /// A service account that mints a fresh access token on demand and caches it
-    /// until shortly before expiry — the recommended, operable configuration.
-    ServiceAccount(Box<ServiceAccountKey>),
-}
-
 /// Google Chat bridge adapter.
 pub struct GoogleChatApp {
-    auth: GoogleChatAuth,
+    service_account: Box<ServiceAccountKey>,
     token_cache: TokenCache,
     inbound_jwt: Arc<webhook::JwtVerifier>,
 }
@@ -81,29 +71,22 @@ struct JwtBearerClaims<'a> {
 
 impl GoogleChatApp {
     pub fn new(
-        auth: GoogleChatAuth,
+        service_account: Box<ServiceAccountKey>,
         inbound_jwt: Arc<webhook::JwtVerifier>,
         token_cache: TokenCache,
     ) -> Self {
         Self {
-            auth,
+            service_account,
             token_cache,
             inbound_jwt,
         }
     }
 
-    /// Obtain an OAuth2 access token for the Chat API. Static tokens are returned
-    /// verbatim; a service account mints + caches a JWT-bearer grant so a
-    /// long-running bridge keeps working past the ~1h token lifetime.
+    /// Mint and cache an OAuth2 access token for the Chat API.
     async fn bearer_token(&self, ctx: &Arc<MessageContext>) -> Result<String> {
-        match &self.auth {
-            GoogleChatAuth::StaticToken(token) => Ok(token.clone()),
-            GoogleChatAuth::ServiceAccount(key) => {
-                self.token_cache
-                    .get_or_try_refresh(|| fetch_service_account_token(ctx, key))
-                    .await
-            }
-        }
+        self.token_cache
+            .get_or_try_refresh(|| fetch_service_account_token(ctx, self.service_account.as_ref()))
+            .await
     }
 }
 

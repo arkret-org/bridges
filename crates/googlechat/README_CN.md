@@ -20,22 +20,21 @@ Rust 实现的 **arkret ⇄ Google Chat** 桥接。基于共享核心
 
 Google Chat API 需 OAuth2 Bearer 令牌(scope `https://www.googleapis.com/auth/chat.bot`)。
 
-- 简单方式:在 `app.token` 直接填入已就绪的短期 access_token。
-- 推荐方式:在 `app.service_account_json` 填 service-account JSON 对象,由其 JWT
+- 在 `app.service_account_json` 填 service-account JSON 对象,由其 JWT
   断言向 `https://oauth2.googleapis.com/token` 换取 access_token 并缓存到过期前。
 
 ## 快速开始
 
 ```bash
 cp config/config.sample.yaml config.yaml
-# 填入 arkret.access_token / signing_key_seed_hex 与 app.token 或 service_account_json
+# 填入 arkret.access_token / signing_key_seed_hex 与 app.service_account_json
 cargo run -p arkret-bridge-googlechat -- --config config.yaml
 ```
 
 ## 配置要点
 
 - `arkret.*`:arkret 接入(server_url、service_id、applet_id、access_token、签名种子)。
-- `app.token` / `app.service_account_json`:Google Chat 鉴权,二选一;推荐 `service_account_json` 自动刷新。
+- `app.service_account_json`:Google Chat 鉴权；bridge 自动刷新 access token。
 - `app.inbound_jwt`:Google Chat webhook Bearer JWT 验签配置(`issuer`/`audience`/`jwks_url`)。
 - `database.url`:`sqlite://...` / `postgres://...` / `mysql://...`(对应 feature)。
 

@@ -48,8 +48,6 @@ app:
     client_email: "CHANGE_ME_SERVICE_ACCOUNT@CHANGE_ME_PROJECT.iam.gserviceaccount.com"
     private_key: "-----BEGIN PRIVATE KEY-----\nCHANGE_ME\n-----END PRIVATE KEY-----\n"
     token_uri: "https://oauth2.googleapis.com/token"
-  # 或:已就绪的短期 OAuth2 access_token(scope: chat.bot)。
-  # token: "CHANGE_ME_GOOGLE_OAUTH_ACCESS_TOKEN"
   inbound_jwt:
     issuer: "chat@system.gserviceaccount.com"
     audience: "CHANGE_ME_GOOGLE_CLOUD_PROJECT_NUMBER"
