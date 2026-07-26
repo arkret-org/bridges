@@ -74,10 +74,7 @@ pub use dead_letter::{
 };
 pub use error::{BridgeError, Result, redact_sensitive_url_values};
 pub use file_seq_store::FileSeqStore;
-pub use idempotency::{
-    DedupVerdict, EventDedupStore, MemoryEventDedupStore, MemoryTransactionIdempotencyStore,
-    ReplayGuardStore, ReplayGuardVerdict,
-};
+pub use idempotency::{DedupVerdict, EventDedupStore, ReplayGuardStore, ReplayGuardVerdict};
 #[cfg(feature = "web")]
 pub use salvo;
 pub use telemetry::increment_counter;
