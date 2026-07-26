@@ -1,8 +1,10 @@
 //! The arkret protocol-side edge (replaces the Matrix bridge's
 //! `MatrixAppservice`).
 //!
-//! - **Outbound (app -> arkret)**: [`ArkretEdge::mint_event`] / [`ArkretEdge::submit`] build and
-//!   sign an `Event` and submit it via [`arkret::http_client::Client::events_submit`].
+//! - **Outbound (app -> arkret)**: [`ArkretEdge::mint_event_unsigned_async`] and
+//!   [`ArkretEdge::mint_event_as_unsigned_async`] build unsigned `Event`s; callers finalize signed
+//!   envelope fields, sign once with [`ArkretEdge::resign_event`], then submit via
+//!   [`arkret::http_client::Client::events_submit`].
 //! - **Inbound (arkret → app)**: transactions pushed by the arkret server via the applet HTTP
 //!   endpoints are placed into the `inbound_tx` queue by [`BridgeAppletHandler`]; after the core
 //!   consumes them they are forwarded to the app adapter.
@@ -328,11 +330,6 @@ impl ArkretEdge {
         self.ephemeral_tx.clone()
     }
 
-    /// Allocate the next monotonic actor sequence number.
-    pub fn alloc_seq(&self) -> Result<u64> {
-        self.seq.alloc()
-    }
-
     /// Generate the next Realm-scoped HLC through the SDK implementation.
     pub fn next_hlc(&self, realm_id: &RealmId) -> Result<Hlc> {
         let mut generators = self.hlc_generators.lock();
@@ -353,35 +350,9 @@ impl ArkretEdge {
             .map_err(|e| BridgeError::Arkret(e.to_string()))
     }
 
-    /// Build and sign an event emitted by this bridge's service actor.
-    pub fn mint_event<T>(&self, kind: &str, realm_id: &RealmId, content: T) -> Result<Event>
-    where
-        T: Serialize,
-    {
-        let mut event = self.build_service_event(kind, realm_id, content)?;
-        self.sign_as_service(&mut event)?;
-        Ok(event)
-    }
-
-    /// Build an unsigned service-actor event. Callers that set signed-envelope
-    /// fields (`external_ref`, `created_at`, …) before submitting do so on the
-    /// returned event and then call [`Self::sign_as_service`] exactly once,
-    /// avoiding a discarded first signature.
-    pub fn mint_event_unsigned<T>(
-        &self,
-        kind: &str,
-        realm_id: &RealmId,
-        content: T,
-    ) -> Result<Event>
-    where
-        T: Serialize,
-    {
-        self.build_service_event(kind, realm_id, content)
-    }
-
-    /// Async variant of [`Self::mint_event_unsigned`] for runtime hot paths:
-    /// any backing-store refill for actor sequence numbers runs on the blocking
-    /// pool instead of a Tokio worker.
+    /// Build an unsigned service-actor event for runtime hot paths. Any
+    /// backing-store refill for actor sequence numbers runs on the blocking pool
+    /// instead of a Tokio worker.
     pub async fn mint_event_unsigned_async<T>(
         &self,
         kind: &str,
@@ -397,34 +368,8 @@ impl ArkretEdge {
     }
 
     /// Build an unsigned event authored by the service actor (seq + HLC
-    /// allocated, no proof).
-    ///
-    /// applet-integration §8 requires every Applet-originated write Event to
-    /// carry the top-level `applet_id` in the signed envelope, including
-    /// service-actor self-signed events (portal strand creation, audit
-    /// events), so it is stamped here. Whether `authorization_ref` applies to
-    /// service-actor self-signed events (vs. delegated ghost events, where it
-    /// references the durable authorization) is not spelled out by §8; it is
-    /// intentionally left unset pending a spec clarification.
-    fn build_service_event<T>(&self, kind: &str, realm_id: &RealmId, content: T) -> Result<Event>
-    where
-        T: Serialize,
-    {
-        let content = spec_payload_value(content)?;
-        let seq = self.seq.alloc()?;
-        let hlc = self.next_hlc(realm_id)?;
-        let mut event = Event::new(
-            kind,
-            realm_id.clone(),
-            self.service_id.clone(),
-            seq,
-            hlc,
-            content,
-        )?;
-        event.applet_id = Some(self.applet_id.clone());
-        Ok(event)
-    }
-
+    /// allocated, no proof). Applet-originated writes carry the top-level
+    /// `applet_id` in the signed envelope.
     async fn build_service_event_async(
         &self,
         kind: &str,
@@ -441,56 +386,6 @@ impl ArkretEdge {
             hlc,
             content,
         )?;
-        event.applet_id = Some(self.applet_id.clone());
-        Ok(event)
-    }
-
-    /// Build and sign an event attributed to `actor` and executed by this
-    /// bridge service under a durable delegated authorization.
-    ///
-    /// The proof verification method stays on the service DID. The envelope
-    /// carries `executed_by = service_id` and `authorization_ref`, allowing the
-    /// reducer to verify who actually signed while preserving the virtual
-    /// actor as `actor_id`.
-    pub fn mint_event_as<T>(
-        &self,
-        actor: &arkret::Did,
-        kind: &str,
-        realm_id: &RealmId,
-        content: T,
-        authorization_ref: &str,
-    ) -> Result<Event>
-    where
-        T: Serialize,
-    {
-        let mut event =
-            self.build_delegated_event(actor, kind, realm_id, content, authorization_ref)?;
-        self.sign_as_service(&mut event)?;
-        Ok(event)
-    }
-
-    /// Build an unsigned delegated-actor event (provenance fields set, no proof
-    /// yet). Callers that still need to set signed-envelope fields
-    /// (`external_ref`, `redacts`, `created_at`) do so before a single
-    /// [`Self::sign_as_service`], avoiding a discarded first signature.
-    fn build_delegated_event<T>(
-        &self,
-        actor: &arkret::Did,
-        kind: &str,
-        realm_id: &RealmId,
-        content: T,
-        authorization_ref: &str,
-    ) -> Result<Event>
-    where
-        T: Serialize,
-    {
-        let authorization_ref = validate_authorization_ref(authorization_ref)?;
-        let content = spec_payload_value(content)?;
-        let seq = self.seq.alloc()?;
-        let hlc = self.next_hlc(realm_id)?;
-        let mut event = Event::new(kind, realm_id.clone(), actor.clone(), seq, hlc, content)?;
-        event.executed_by = Some(self.service_id.clone());
-        event.authorization_ref = Some(authorization_ref);
         event.applet_id = Some(self.applet_id.clone());
         Ok(event)
     }

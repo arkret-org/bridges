@@ -805,6 +805,7 @@ dependencies = [
  "arkret-models-crypto",
  "arkret-models-discovery",
  "arkret-models-identity",
+ "arkret-state",
  "arkret-wire",
  "base64",
  "chrono",
