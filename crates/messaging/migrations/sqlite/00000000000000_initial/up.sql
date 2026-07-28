@@ -28,3 +28,9 @@ CREATE TABLE IF NOT EXISTS user_mappings (
     display_name TEXT,
     created_at BIGINT NOT NULL,
     UNIQUE(protocol, tenant, external_user_id));
+
+CREATE TABLE IF NOT EXISTS prepared_ghost_provisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provision_key TEXT NOT NULL UNIQUE,
+    request_json TEXT NOT NULL,
+    created_at BIGINT NOT NULL);

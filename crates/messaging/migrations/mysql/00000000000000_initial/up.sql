@@ -34,3 +34,9 @@ CREATE TABLE IF NOT EXISTS user_mappings (
     UNIQUE KEY user_protocol_tenant_external_id_unique
         (protocol(64), tenant(191), external_user_id(191)),
     UNIQUE KEY user_arkret_actor_id_unique (arkret_actor_id(191)));
+
+CREATE TABLE IF NOT EXISTS prepared_ghost_provisions (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    provision_key VARCHAR(191) NOT NULL UNIQUE,
+    request_json LONGTEXT NOT NULL,
+    created_at BIGINT NOT NULL);
