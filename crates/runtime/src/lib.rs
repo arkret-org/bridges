@@ -58,7 +58,7 @@ pub use app::{BridgeApp, BridgeContext};
 pub use arkret::{IdempotencyIdentity, TransactionClaim, TransactionIdempotencyStore};
 #[cfg(feature = "db")]
 pub use arkret_edge::DbSeqStore;
-pub use arkret_edge::{ArkretEdge, SeqAllocator, SeqStore};
+pub use arkret_edge::{ArkretEdge, EventInitialSubmissionProvider, SeqAllocator, SeqStore};
 pub use backoff::{exponential_backoff_with_jitter, jittered_delay};
 pub use blocking::run_blocking;
 pub use cache::{PersistedToken, TokenCache, TokenStore};
@@ -107,17 +107,17 @@ where
     // applies backpressure (the applet handler returns `retry_after_ms` when
     // full) instead of buffering without limit (BRG-02-001).
     let (inbound_tx, inbound_rx) = mpsc::channel(arkret_edge::INBOUND_QUEUE_CAPACITY);
-    // Ephemeral (typing/presence/receipts) is best-effort and may be dropped.
-    // Keep it bounded so a slow adapter cannot turn provider bursts into
+    // Encrypted Signals are best-effort and may be dropped. Keep this bounded
+    // so a slow adapter cannot turn provider bursts into
     // unbounded process memory growth.
-    let (ephemeral_tx, ephemeral_rx) = mpsc::channel(arkret_edge::EPHEMERAL_QUEUE_CAPACITY);
+    let (signal_tx, signal_rx) = mpsc::channel(arkret_edge::SIGNAL_QUEUE_CAPACITY);
 
     let db = Arc::new(db::DatabaseManager::connect(&config.database)?);
     // The diesel-backed restart-safe sequence store, injected into the edge.
     let seq: Arc<dyn SeqStore> = Arc::new(DbSeqStore::new(db.clone())?);
 
     let mut edge = ArkretEdge::new(config.clone(), seq, inbound_tx)?;
-    edge.set_ephemeral_sender(ephemeral_tx);
+    edge.set_signal_sender(signal_tx);
     let edge = Arc::new(edge);
 
     let ctx = Arc::new(BridgeContext::new(config.clone(), edge.clone(), db)?);
@@ -131,11 +131,11 @@ where
         tokio::spawn(async move { app::consume_inbound(ctx, app, inbound_rx).await })
     };
 
-    // 1b) Background: consume ephemeral -> adapter
-    let ephemeral_consumer = {
+    // 1b) Background: consume encrypted Signals -> adapter
+    let signal_consumer = {
         let ctx = ctx.clone();
         let app = app.clone();
-        tokio::spawn(async move { app::consume_ephemeral(ctx, app, ephemeral_rx).await })
+        tokio::spawn(async move { app::consume_signals(ctx, app, signal_rx).await })
     };
 
     // 1c) Background: retry persisted arkret -> adapter dead letters.
@@ -176,7 +176,7 @@ where
 
     tokio::select! {
         r = consumer => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,
-        r = ephemeral_consumer => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,
+        r = signal_consumer => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,
         r = dead_letter_replayer => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,
         r = web => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,
         r = runner => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,

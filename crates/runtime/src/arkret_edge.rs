@@ -3,8 +3,8 @@
 //!
 //! - **Outbound (app -> arkret)**: [`ArkretEdge::mint_event_unsigned_async`] and
 //!   [`ArkretEdge::mint_event_as_unsigned_async`] build unsigned `Event`s; callers finalize signed
-//!   envelope fields, sign once with [`ArkretEdge::resign_event`], then submit via
-//!   [`arkret::http_client::Client::events_submit`].
+//!   envelope fields, sign once with [`ArkretEdge::resign_event`], obtain issuer-produced
+//!   publication evidence, then submit an [`EventInitialSubmission`].
 //! - **Inbound (arkret → app)**: transactions pushed by the arkret server via the applet HTTP
 //!   endpoints are placed into the `inbound_tx` queue by [`BridgeAppletHandler`]; after the core
 //!   consumes them they are forwarded to the app adapter.
@@ -25,22 +25,27 @@ use arkret::signatures::{
 };
 use arkret::signatures::{SignEventOptions, sign_event};
 use arkret::{
-    AppletId, Did, Ed25519MoveSigner, Event, EventId, Hlc, HlcGenerator, MoveSigner, RealmId,
+    AppletId, Did, Ed25519PayloadSigner, Event, EventId, Hlc, HlcGenerator, PayloadSigner, RealmId,
+    ScopeRef,
 };
 #[cfg(any(feature = "web", test))]
 use arkret::{DidDocumentVerificationMethodResolver, DidResolver, WireError};
 use arkret_models_collaboration::event_sync::{
     EventsFrontierSelector, EventsFrontierView, RealmActorFrontierView,
 };
-use arkret_models_collaboration::events_payloads::ephemeral::EphemeralEnvelope;
+#[cfg(any(feature = "web", test))]
 use arkret_models_collaboration::http_bodies::AppletTransactionRequestBody;
+#[cfg(any(feature = "web", test))]
 use arkret_models_discovery::ServiceDescribe;
+#[cfg(any(feature = "web", test))]
 use arkret_models_integration::AppletPackage;
 #[cfg(any(feature = "web", test))]
 use arkret_models_integration::{
     AppletActorView, AppletPingOutcome, AppletProtocolMetadata, AppletRealmView,
     AppletTransactionOutcome,
 };
+use arkret_wire::{EventInitialSubmission, SignalEnvelope};
+use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde::Serialize;
 use serde_json::Value;
@@ -61,17 +66,20 @@ use crate::idempotency::{DedupVerdict, EventDedupStore};
 /// well within the server's retry window; a persistently full queue means the
 /// app side is wedged, in which case shedding load back to the server (which
 /// will redeliver) is the correct behaviour.
+#[cfg(feature = "runtime")]
 pub const INBOUND_QUEUE_CAPACITY: usize = 1024;
 
-/// Bound on the best-effort ephemeral queue. When full, new ephemeral envelopes
-/// are dropped instead of back-pressuring durable transaction delivery.
-pub const EPHEMERAL_QUEUE_CAPACITY: usize = 1024;
+/// Bound on the best-effort Signal queue. When full, new Signal envelopes are
+/// dropped instead of back-pressuring durable transaction delivery.
+#[cfg(feature = "runtime")]
+pub const SIGNAL_QUEUE_CAPACITY: usize = 1024;
 
 /// Hard bound for per-Realm HLC generator state retained by one bridge process.
 const MAX_REALM_HLC_GENERATORS: usize = 4_096;
 
 /// Retry hint (ms) returned to the server when the inbound queue is full, so it
 /// re-pushes the unaccepted events after a short delay instead of dropping them.
+#[cfg(any(feature = "web", test))]
 const INBOUND_QUEUE_FULL_RETRY_MS: u64 = 1000;
 
 /// How many actor sequence numbers to reserve in the store per refill. A larger
@@ -81,6 +89,18 @@ const SEQ_RESERVE_BLOCK: i64 = 256;
 /// The default `bridge_state` row key under which the reserved actor-seq
 /// high-water mark is persisted.
 pub const SEQ_STATE_KEY: &str = "actor_seq_reserved";
+
+/// Host integration that obtains issuer-produced publication evidence for a
+/// fully-authored, fully-signed Event.
+///
+/// A provider may use a local authority component or an authenticated remote
+/// authz service, but it must return the exact Event it was given wrapped in an
+/// [`EventInitialSubmission`]. The runtime validates both the wrapper and exact
+/// Event identity before sending it.
+#[async_trait]
+pub trait EventInitialSubmissionProvider: Send + Sync + 'static {
+    async fn initial_submission(&self, event: &Event) -> Result<EventInitialSubmission>;
+}
 
 /// Pluggable, restart-safe high-water-mark storage backing [`SeqAllocator`].
 ///
@@ -180,7 +200,11 @@ impl SeqAllocator {
 pub struct ArkretEdge {
     config: Arc<Config>,
     client: Client,
-    signer: Ed25519MoveSigner,
+    signer: Ed25519PayloadSigner,
+    /// Host-owned source of issuer-produced AuthorizationLease/CBA evidence.
+    /// None is a deliberate fail-closed state, never a request to fabricate a
+    /// lease from the bridge key or bearer token.
+    submission_provider: Mutex<Option<Arc<dyn EventInitialSubmissionProvider>>>,
     service_id: Did,
     applet_id: AppletId,
     /// Store-backed, restart-safe actor sequence allocator.
@@ -196,10 +220,11 @@ pub struct ArkretEdge {
     /// when full) instead of buffering without limit. `None` for outbound-only
     /// edges.
     inbound_tx: Option<Sender<Event>>,
-    /// Inbound ephemeral queue (typing/presence/receipts/call-signal as the SDK
-    /// [`EphemeralEnvelope`] wire type): arkret server push → core consumer loop.
+    /// Inbound encrypted Signal queue: arkret server push → core consumer loop.
+    /// Product kind and payload stay inside ciphertext; this layer only
+    /// validates and forwards the SDK [`SignalEnvelope`] wire type.
     /// `None` for outbound-only edges.
-    ephemeral_tx: Option<Sender<EphemeralEnvelope>>,
+    signal_tx: Option<Sender<SignalEnvelope>>,
 }
 
 impl ArkretEdge {
@@ -212,7 +237,7 @@ impl ArkretEdge {
     ) -> Result<Self> {
         let service_id = Did::new(config.arkret.service_id.clone())?;
         let seed = config.signing_seed()?;
-        let signer = Ed25519MoveSigner::from_did_key_seed(
+        let signer = Ed25519PayloadSigner::from_did_key_seed(
             seed,
             service_id.clone(),
             config.arkret.verification_method_id.clone(),
@@ -238,7 +263,7 @@ impl ArkretEdge {
     pub fn new_outbound(
         config: Arc<Config>,
         client: Client,
-        signer: Ed25519MoveSigner,
+        signer: Ed25519PayloadSigner,
         seq: SeqAllocator,
     ) -> Result<Self> {
         let service_id = Did::new(config.arkret.service_id.clone())?;
@@ -249,7 +274,7 @@ impl ArkretEdge {
     fn build(
         config: Arc<Config>,
         client: Client,
-        signer: Ed25519MoveSigner,
+        signer: Ed25519PayloadSigner,
         service_id: Did,
         hlc_secret: [u8; 32],
         seq: SeqAllocator,
@@ -291,6 +316,7 @@ impl ArkretEdge {
             config,
             client,
             signer,
+            submission_provider: Mutex::new(None),
             service_id,
             applet_id,
             seq,
@@ -298,14 +324,14 @@ impl ArkretEdge {
             hlc_device_id,
             hlc_secret,
             inbound_tx,
-            ephemeral_tx: None,
+            signal_tx: None,
         })
     }
 
-    /// Install the ephemeral (typing/presence/receipts) sender. Used by the
-    /// `run_bridge` path which wires a parallel queue.
-    pub fn set_ephemeral_sender(&mut self, tx: Sender<EphemeralEnvelope>) {
-        self.ephemeral_tx = Some(tx);
+    /// Install the encrypted Signal sender. Used by the `run_bridge` path which
+    /// wires a parallel best-effort queue.
+    pub fn set_signal_sender(&mut self, tx: Sender<SignalEnvelope>) {
+        self.signal_tx = Some(tx);
     }
 
     pub fn config(&self) -> &Config {
@@ -314,6 +340,16 @@ impl ArkretEdge {
 
     pub fn client(&self) -> &Client {
         &self.client
+    }
+
+    /// Install the host integration that supplies legal first-publication
+    /// evidence. This can be called during adapter factory setup after the edge
+    /// has been placed in an [`Arc`].
+    pub fn set_initial_submission_provider(
+        &self,
+        provider: Arc<dyn EventInitialSubmissionProvider>,
+    ) {
+        *self.submission_provider.lock() = Some(provider);
     }
 
     pub fn service_id(&self) -> &Did {
@@ -325,9 +361,9 @@ impl ArkretEdge {
         self.inbound_tx.clone()
     }
 
-    /// The ephemeral sender, if installed.
-    pub fn ephemeral_sender(&self) -> Option<Sender<EphemeralEnvelope>> {
-        self.ephemeral_tx.clone()
+    /// The Signal sender, if installed.
+    pub fn signal_sender(&self) -> Option<Sender<SignalEnvelope>> {
+        self.signal_tx.clone()
     }
 
     /// Generate the next Realm-scoped HLC through the SDK implementation.
@@ -380,7 +416,9 @@ impl ArkretEdge {
         let hlc = self.next_hlc(realm_id)?;
         let mut event = Event::new(
             kind,
-            realm_id.clone(),
+            ScopeRef::Realm {
+                realm_id: realm_id.clone(),
+            },
             self.service_id.clone(),
             seq,
             hlc,
@@ -401,7 +439,16 @@ impl ArkretEdge {
         let authorization_ref = validate_authorization_ref(authorization_ref)?;
         let seq = self.seq.alloc_blocking().await?;
         let hlc = self.next_hlc(realm_id)?;
-        let mut event = Event::new(kind, realm_id.clone(), actor.clone(), seq, hlc, content)?;
+        let mut event = Event::new(
+            kind,
+            ScopeRef::Realm {
+                realm_id: realm_id.clone(),
+            },
+            actor.clone(),
+            seq,
+            hlc,
+            content,
+        )?;
         event.executed_by = Some(self.service_id.clone());
         event.authorization_ref = Some(authorization_ref);
         event.applet_id = Some(self.applet_id.clone());
@@ -462,12 +509,42 @@ impl ArkretEdge {
         Ok(format!("{}#{fragment}", actor.as_str()))
     }
 
-    /// Outbound: submit an already-minted event and return its event_id.
-    /// Generic over event kind — carries no messaging assumptions.
-    pub async fn submit_event(&self, event: &Event) -> Result<String> {
-        let event_id = event.event_id.to_string();
-        self.client.events_submit(event).await?;
+    /// Submit a signed Event together with caller-supplied initial publication
+    /// evidence and return its event id.
+    ///
+    /// This boundary deliberately accepts the SDK wrapper rather than a bare
+    /// [`Event`]. The runtime cannot mint an [`arkret_wire::AuthorizationLease`]:
+    /// doing so requires the granting authority's signing keys and accepted CBA
+    /// basis.
+    pub async fn submit_initial(&self, submission: &EventInitialSubmission) -> Result<String> {
+        let event_id = submission.event.event_id.to_string();
+        submission
+            .validate_structural()
+            .map_err(|error| BridgeError::Arkret(error.to_string()))?;
+        self.client.events_submit(submission).await?;
         Ok(event_id)
+    }
+
+    /// Ask the installed host provider to wrap an exact signed Event, then
+    /// submit it. This keeps existing higher-level authoring flows operational
+    /// when the host supplies legal evidence, and fails closed before network
+    /// I/O when no provider is installed.
+    pub async fn submit_event(&self, event: &Event) -> Result<String> {
+        let provider = self.submission_provider.lock().clone().ok_or_else(|| {
+            BridgeError::Config(format!(
+                "cannot initially publish Event {} without EventInitialSubmission \
+                 authorization_lease; install an EventInitialSubmissionProvider or call \
+                 ArkretEdge::submit_initial with issuer-produced publication evidence",
+                event.event_id
+            ))
+        })?;
+        let submission = provider.initial_submission(event).await?;
+        if submission.event != *event {
+            return Err(BridgeError::Runtime(
+                "EventInitialSubmissionProvider replaced or mutated the signed Event".to_owned(),
+            ));
+        }
+        self.submit_initial(&submission).await
     }
 
     /// Re-sign an already-minted event after signed-envelope mutation (e.g.
@@ -767,7 +844,7 @@ pub struct BridgeAppletHandler {
     trust_domain: arkret::TypedTrustDomainId,
     namespaces: Value,
     inbound_tx: Sender<Event>,
-    ephemeral_tx: Option<Sender<EphemeralEnvelope>>,
+    signal_tx: Option<Sender<SignalEnvelope>>,
     resolver: Option<Arc<dyn AppletResolver>>,
     /// Event kinds this bridge consumes on the inbound path. `None` ⇒ permissive
     /// (accept all). When `Some`, a pushed event whose kind is not listed is
@@ -830,7 +907,7 @@ impl BridgeAppletHandler {
             inbound_tx: edge.inbound_sender().ok_or_else(|| {
                 BridgeError::Config("applet handler requires an inbound-enabled edge".into())
             })?,
-            ephemeral_tx: edge.ephemeral_sender(),
+            signal_tx: edge.signal_sender(),
             resolver,
             dedup,
             handled_event_kinds,
@@ -891,6 +968,7 @@ fn host_is_loopback(host: Option<&str>) -> bool {
 /// Match a spec namespace pattern against a candidate id. Supports a trailing
 /// `*` wildcard (prefix match) and exact equality otherwise; an interior `*` is
 /// treated literally (the spec only uses trailing globs for namespaces).
+#[cfg(any(feature = "web", test))]
 fn glob_suffix_match(pattern: &str, candidate: &str) -> bool {
     match pattern.strip_suffix('*') {
         Some(prefix) => candidate.starts_with(prefix),
@@ -922,7 +1000,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
         let mut description = ServiceDescribe::development(
             self.service_id.clone(),
             self.trust_domain.clone(),
-            arkret::ServiceType::AppletService,
+            arkret::ServiceKind::AppletService,
         );
         description.supported_profiles = vec![AppletPackage::BASE_PROFILE.to_owned()];
         description.supported_operations = vec![
@@ -1074,21 +1152,21 @@ impl arkret::AppletHandler for BridgeAppletHandler {
             }
         }
 
-        // Forward SDK-typed ephemeral envelopes one at a time. Ephemeral loss
-        // is non-fatal (best-effort) and does not affect the durable ack.
-        if let (Some(tx), Some(envelopes)) = (self.ephemeral_tx.as_ref(), req.ephemeral) {
+        // Forward SDK-typed encrypted Signal envelopes one at a time. Signal
+        // loss is non-fatal (best-effort) and does not affect the durable ack.
+        if let (Some(tx), Some(envelopes)) = (self.signal_tx.as_ref(), req.signals) {
             for envelope in envelopes {
-                if let Err(err) = envelope.validate() {
+                if let Err(err) = envelope.validate_structural() {
                     tracing::warn!(
                         error = %err,
-                        "dropping invalid ephemeral envelope"
+                        "dropping invalid Signal envelope"
                     );
                     continue;
                 }
                 if let Err(err) = tx.try_send(envelope) {
                     tracing::warn!(
                         error = %err,
-                        "dropping ephemeral envelope because the best-effort queue is full or closed"
+                        "dropping Signal envelope because the best-effort queue is full or closed"
                     );
                 }
             }
@@ -1161,7 +1239,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
             protocol: protocol.to_owned(),
             display_name: protocol.to_owned(),
             icon_blob_ref: None,
-            field_types: Default::default(),
+            field_definitions: Default::default(),
             instances: Vec::new(),
         })
     }
@@ -1239,7 +1317,7 @@ mod tests {
         let hlc = Hlc::new("01970e589d21-0001-a13f9c2e").unwrap();
         let mut first = Event::new(
             "ak.message.create",
-            realm,
+            ScopeRef::Realm { realm_id: realm },
             actor,
             1,
             hlc,

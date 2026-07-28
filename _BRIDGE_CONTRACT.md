@@ -59,10 +59,12 @@ pub trait MessageBridge: Send + Sync + 'static {
 `bridge_main` 经 serde 反序列化成每桥自定义的强类型 `AppConfig`(缺字段由 serde 按字段名报错)。
 错误统一用 `BridgeError::App(String)`。
 
-> **删除 / ephemeral 能力状态:** 三条共享链路均已实现并有单测。LINE 已把 `unsend`
-> 入站事件接到 `submit_app_delete`,并把 `ak.typing` 接到 loading indicator API;Discord 已把
+> **删除 / Signal 能力状态:** 删除共享链路已实现并有单测。LINE 已把 `unsend`
+> 入站事件接到 `submit_app_delete`;Discord 已把
 > 出站 redaction 接到原生删除 API。其余平台仍按各自 API 能力逐桥接线,未 override 的能力会
-> fail closed 或使用默认 no-op。接线余项见 [`_bridges_todos.md`](_bridges_todos.md)。
+> fail closed 或使用默认 no-op。现行 `SignalEnvelope` 为 encrypted-only，外层不再暴露
+> `ak.typing` kind/payload；LINE loading indicator 必须等 host 提供合法解密后的 typed Signal
+> 派发边界后再恢复。接线余项见 [`_bridges_todos.md`](_bridges_todos.md)。
 >
 > **入站媒体状态:** `InboundMediaFetcher` 统一执行 HTTPS/host allowlist、大小上限、内容类型、
 > 流式读取、超时、重试和失败审计。Discord、Telegram、Slack、LINE、WhatsApp、Messenger

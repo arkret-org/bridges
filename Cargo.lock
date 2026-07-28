@@ -324,6 +324,7 @@ dependencies = [
  "arkret-event-draft",
  "arkret-models-collaboration",
  "arkret-models-integration",
+ "arkret-wire",
  "async-trait",
  "base64",
  "cbc",
@@ -381,6 +382,7 @@ dependencies = [
  "arkret-models-collaboration",
  "arkret-models-discovery",
  "arkret-models-integration",
+ "arkret-wire",
  "async-trait",
  "chrono",
  "diesel",
@@ -518,6 +520,7 @@ dependencies = [
  "chrono",
  "ed25519-dalek",
  "getrandom 0.4.2",
+ "hex",
  "hkdf 0.13.0",
  "hpke",
  "regex",
@@ -569,6 +572,7 @@ name = "arkret-http-client"
 version = "0.3.0"
 dependencies = [
  "arkret-canonical",
+ "arkret-egress-policy",
  "arkret-identity",
  "arkret-models-collaboration",
  "arkret-models-crypto",

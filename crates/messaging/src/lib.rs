@@ -32,8 +32,8 @@ use arkret_bridge_runtime::{
     BridgeError, ReplayGuardStore, Result, TokenCache, TokenStore, redact_sensitive_url_values,
 };
 use arkret_event_draft::{AppletBridgeErrorBuilder, EventPayloadExt};
-pub use arkret_models_collaboration::events_payloads::ephemeral::EphemeralEnvelope;
 use arkret_models_integration::{AppletBridgeVisibilityScope, AppletIdentifier};
+pub use arkret_wire::SignalEnvelope;
 use async_trait::async_trait;
 pub use content::{
     extract_attachment, extract_plain_body, extract_strand_id, media_content_block,
@@ -211,6 +211,17 @@ impl MessageContext {
 
     pub fn core(&self) -> &Arc<BridgeContext> {
         &self.inner
+    }
+
+    /// Install the host-owned source of issuer-produced first-publication
+    /// evidence used by all message, redaction, portal-strand and bridge-error
+    /// submissions. The provider receives the final signed Event and must
+    /// return that exact Event inside an `EventInitialSubmission`.
+    pub fn set_initial_submission_provider(
+        &self,
+        provider: Arc<dyn runtime::EventInitialSubmissionProvider>,
+    ) {
+        self.inner.edge.set_initial_submission_provider(provider);
     }
 
     /// Build a durable webhook replay window (bridge contract G-4) with the
@@ -528,8 +539,9 @@ impl MessageContext {
             .await
     }
 
-    /// Resolve the external channel mapped to a portal Realm. Ephemeral signals
-    /// use this reverse mapping without creating durable message history.
+    /// Resolve the external channel mapped to a portal Realm. Decrypted Signal
+    /// integrations can use this reverse mapping without creating durable
+    /// message history.
     pub async fn app_channel_for_realm(&self, realm_id: &str) -> Result<Option<String>> {
         Ok(self
             .store
@@ -1026,17 +1038,12 @@ pub trait MessageBridge: Send + Sync + 'static {
         ))
     }
 
-    /// Handle an ephemeral signal (typing/presence/receipts/call-signal) pushed
-    /// alongside events, as the SDK [`EphemeralEnvelope`] wire type; defaults to
-    /// a structured rejection. Ephemeral rejection is logged by the consumer
-    /// and never converted into a durable Event.
-    async fn on_ephemeral(
-        &self,
-        _ctx: Arc<MessageContext>,
-        _ephemeral: EphemeralEnvelope,
-    ) -> Result<()> {
+    /// Handle an encrypted Signal pushed alongside events as the SDK
+    /// [`SignalEnvelope`] wire type. Product kind and payload remain encrypted;
+    /// the default is a structured rejection.
+    async fn on_signal(&self, _ctx: Arc<MessageContext>, _signal: SignalEnvelope) -> Result<()> {
         Err(BridgeError::App(
-            "ephemeral forwarding is not supported by this adapter".to_owned(),
+            "encrypted Signal forwarding is not supported by this adapter".to_owned(),
         ))
     }
 
@@ -1283,12 +1290,8 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
         Ok(())
     }
 
-    async fn on_ephemeral(
-        &self,
-        _ctx: Arc<BridgeContext>,
-        ephemeral: EphemeralEnvelope,
-    ) -> Result<()> {
-        self.user.on_ephemeral(self.ctx.clone(), ephemeral).await
+    async fn on_signal(&self, _ctx: Arc<BridgeContext>, signal: SignalEnvelope) -> Result<()> {
+        self.user.on_signal(self.ctx.clone(), signal).await
     }
 
     fn expects_webhook_inbound(&self) -> bool {

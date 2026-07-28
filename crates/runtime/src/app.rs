@@ -21,7 +21,8 @@ use std::time::Duration;
 #[cfg(feature = "runtime")]
 use arkret::Event;
 use arkret::ExternalRef;
-use arkret_models_collaboration::events_payloads::ephemeral::EphemeralEnvelope;
+#[cfg(feature = "runtime")]
+use arkret_wire::SignalEnvelope;
 #[cfg(feature = "runtime")]
 use async_trait::async_trait;
 #[cfg(feature = "runtime")]
@@ -170,15 +171,10 @@ pub trait BridgeApp: Send + Sync + 'static {
     /// what (if anything) to do with each event kind.
     async fn on_arkret_event(&self, ctx: Arc<BridgeContext>, event: Event) -> Result<()>;
 
-    /// Handle an ephemeral signal (typing/presence/receipts/call-signal) pushed
-    /// by the server alongside events, as the SDK [`EphemeralEnvelope`] wire
-    /// type (`schemas/ephemeral-envelope.schema.json`). Defaults to a no-op so
-    /// it is observed rather than dropped.
-    async fn on_ephemeral(
-        &self,
-        _ctx: Arc<BridgeContext>,
-        _ephemeral: EphemeralEnvelope,
-    ) -> Result<()> {
+    /// Handle an encrypted Signal pushed alongside events as the SDK
+    /// [`SignalEnvelope`] wire type. Product kind and payload stay encrypted;
+    /// adapters must not infer them from the server-visible outer header.
+    async fn on_signal(&self, _ctx: Arc<BridgeContext>, _signal: SignalEnvelope) -> Result<()> {
         Ok(())
     }
 
@@ -432,17 +428,16 @@ pub async fn replay_outbound_dead_letters<A: BridgeApp>(
     }
 }
 
-/// Ephemeral consumer loop: typing/presence/receipts pushed by the arkret
-/// server -> adapter.
+/// Encrypted Signal consumer loop: arkret server -> adapter.
 #[cfg(feature = "runtime")]
-pub async fn consume_ephemeral<A: BridgeApp>(
+pub async fn consume_signals<A: BridgeApp>(
     ctx: Arc<BridgeContext>,
     app: Arc<A>,
-    mut rx: Receiver<EphemeralEnvelope>,
+    mut rx: Receiver<SignalEnvelope>,
 ) -> Result<()> {
-    while let Some(ephemeral) = rx.recv().await {
-        if let Err(e) = app.on_ephemeral(ctx.clone(), ephemeral).await {
-            tracing::warn!(error = %e, "failed to forward ephemeral to adapter");
+    while let Some(signal) = rx.recv().await {
+        if let Err(e) = app.on_signal(ctx.clone(), signal).await {
+            tracing::warn!(error = %e, "failed to forward Signal to adapter");
         }
     }
     Ok(())

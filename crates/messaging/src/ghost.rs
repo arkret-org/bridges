@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use arkret::http_client::ClientRequestOptions;
 use arkret::{
     ActorProfileId, AppletId, Did, EventId, EventRef, GrantId, Hash, Hlc, ObjectCreatePayload,
-    PayloadProof, RealmId, StrandCreateObject, StrandId, StrandTrackConfig,
+    PayloadProof, RealmId, ScopeRef, StrandCreateObject, StrandId, StrandTrackConfig,
 };
 use arkret_bridge_runtime::{BridgeError, Result};
 use arkret_models_collaboration::governance::accountability::{
@@ -298,7 +298,9 @@ async fn build_signed_ghost_provision_request(
         .unwrap_or_default();
     let mut accountability_event = arkret_event_draft::accountability_grant_event(
         &grant,
-        realm_id.clone(),
+        ScopeRef::Realm {
+            realm_id: realm_id.clone(),
+        },
         service_actor_seq,
         edge.next_event_hlc(&realm_id)?,
         None,
@@ -339,7 +341,9 @@ async fn build_signed_ghost_provision_request(
         applet_id.clone(),
     );
     let mut profile_event = profile_request.profile_create_event(
-        realm_id.clone(),
+        ScopeRef::Realm {
+            realm_id: realm_id.clone(),
+        },
         0,
         edge.next_event_hlc(&realm_id)?,
         Some(&delegation),

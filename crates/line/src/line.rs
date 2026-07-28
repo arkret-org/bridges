@@ -10,9 +10,9 @@ use arkret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url
 use arkret_bridge_messaging::salvo::prelude::*;
 use arkret_bridge_messaging::salvo::{self, affix_state};
 use arkret_bridge_messaging::{
-    AppDeleteReason, AppMessageRef, EphemeralEnvelope, ExternalMediaRequest, InboundAppDelete,
-    InboundAppMessage, InboundMediaAuthorization, MessageBridge, MessageContext,
-    OutboundAppMessage, SenderRenderStyle, webhook,
+    AppDeleteReason, AppMessageRef, ExternalMediaRequest, InboundAppDelete, InboundAppMessage,
+    InboundMediaAuthorization, MessageBridge, MessageContext, OutboundAppMessage,
+    SenderRenderStyle, SignalEnvelope, webhook,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -40,51 +40,11 @@ impl MessageBridge for LineApp {
         "line"
     }
 
-    async fn on_ephemeral(
-        &self,
-        ctx: Arc<MessageContext>,
-        ephemeral: EphemeralEnvelope,
-    ) -> Result<()> {
-        if ephemeral.kind != "ak.typing" {
-            return Err(BridgeError::App(format!(
-                "LINE does not support ephemeral kind {}",
-                ephemeral.kind
-            )));
-        }
-        if ephemeral.payload.get("typing").and_then(Value::as_bool) != Some(true) {
-            return Ok(());
-        }
-        let channel = ctx
-            .app_channel_for_realm(ephemeral.realm_id.as_str())
-            .await?
-            .ok_or_else(|| {
-                BridgeError::App("LINE typing Realm has no external channel mapping".to_owned())
-            })?;
-        let ttl_ms = ephemeral
-            .payload
-            .get("ttl_ms")
-            .and_then(Value::as_u64)
-            .unwrap_or(5_000)
-            .min(15_000);
-        let loading_seconds = ttl_ms.div_ceil(1_000).clamp(5, 60);
-        let response = ctx
-            .http
-            .post("https://api.line.me/v2/bot/chat/loading/start")
-            .bearer_auth(&self.channel_access_token)
-            .json(&json!({
-                "chatId": channel,
-                "loadingSeconds": loading_seconds,
-            }))
-            .send()
-            .await
-            .map_err(|error| BridgeError::App(format!("LINE typing request failed: {error}")))?;
-        if !response.status().is_success() {
-            return Err(BridgeError::App(format!(
-                "LINE typing returned status {}",
-                response.status()
-            )));
-        }
-        Ok(())
+    async fn on_signal(&self, _ctx: Arc<MessageContext>, _signal: SignalEnvelope) -> Result<()> {
+        Err(BridgeError::App(
+            "LINE cannot interpret encrypted SignalEnvelope without a caller-supplied decryptor"
+                .to_owned(),
+        ))
     }
 
     async fn send_to_app(

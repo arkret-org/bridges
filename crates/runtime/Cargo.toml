@@ -27,6 +27,7 @@ arkret-event-draft = {workspace = true}
 arkret-models-collaboration = {workspace = true}
 arkret-models-discovery = {workspace = true}
 arkret-models-integration = {workspace = true}
+arkret-wire = {workspace = true}
 diesel = {workspace = true,optional = true}
 diesel_migrations = {workspace = true,optional = true}
 libsqlite3-sys = {workspace = true,features = ["bundled"],optional = true}

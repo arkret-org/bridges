@@ -26,6 +26,7 @@ arkret-event-draft = {workspace = true}
 arkret-egress-policy = {workspace = true}
 arkret-models-collaboration = {workspace = true}
 arkret-models-integration = {workspace = true}
+arkret-wire = {workspace = true}
 arkret-bridge-runtime = {workspace = true,default-features = false}
 diesel = {workspace = true}
 diesel_migrations = {workspace = true}

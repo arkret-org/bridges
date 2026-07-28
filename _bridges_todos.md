@@ -23,11 +23,24 @@
 | 2026-07-11 | runtime | `ArkretEdge` 新增注入已认证 SDK `Client`、`Ed25519MoveSigner`、可复用 `SeqAllocator` 的 outbound-only 构造路径，公开 delegated unsigned mint 以允许 host 在首次签名前加密；`SeqAllocator` 可克隆并共享预留窗口，新增通用 `FileSeqStore`，用于 Savfox applet 出站链路消除重复 mint/HLC/签名/提交实现。 |
 | 2026-07-13 | messaging | 删除从未接入 `MessageContext`、也无任何 adapter 使用的 calendar / RSVP 映射守卫；现行 calendar spec 与 Rust SDK 类型保持不变，未来有真实接入方时再随提交链路实现。 |
 | 2026-07-16 | runtime | `arkret_edge.rs` 出站传输策略注释的 `cleartext` 改为 `plaintext`，对齐 `forbidden-model-terms.json` hard_reject 条目（该条目明确覆盖 code comments）。仅注释,无行为变更。 |
+| 2026-07-29 | runtime + messaging | 迁移到现行 SDK wire：入站 `EphemeralEnvelope`/`req.ephemeral` 改为 encrypted-only `SignalEnvelope`/`req.signals`，队列与 adapter hook 改名为 Signal 且不再读取外层不存在的明文 kind/payload；Event authoring 改用签名 `ScopeRef`，签名器改为 `Ed25519PayloadSigner`，service kind / applet protocol field definitions 跟随现行 owner/字段名。出站新增 `submit_initial` 与 host 可注入的 `EventInitialSubmissionProvider`；旧 convenience flows 通过 provider 取得真实 wrapper，未安装 provider 时在网络请求前 fail closed，不伪造 lease。 |
 
 ## Todo(尚未落地的共享层待办)
 
 - **(messaging) 其余平台出站删除 `redact_in_app` 接线未完成**(BRG-HYG-003,
   2026-06-29 登记):驱动链路(`on_arkret_event` 收 `ak.message.redact` → 反查
   `(app_channel, app_message_id)` → 调 `redact_in_app`)已就绪,Discord 已作为示范桥接线。
-  待办:按平台能力补其余桥的 `redact_in_app`;LINE 的 typing ephemeral 已接线,其余
-  ephemeral 类型和平台按原生能力逐桥实现。
+  待办:按平台能力补其余桥的 `redact_in_app`;现行 Signal 是 encrypted-only envelope，
+  LINE typing 不能再从外层读取 kind/payload。若要恢复 loading indicator，host 必须提供
+  合法解密后的 typed Signal 派发边界，不能由桥猜测 ciphertext 内容。
+
+- **(runtime + messaging) 为标准 bridge 进程接入 publication evidence provider**
+  (2026-07-29 登记):现行 `events_submit` 只接受
+  `EventInitialSubmission { event, authorization_lease, cba_proof_bundles[] }`。runtime 已提供
+  `ArkretEdge::submit_initial` 及 `EventInitialSubmissionProvider` 注入点，message/redaction/
+  portal-strand/bridge-error convenience flows 会把最终签名 Event 交给 provider，并校验 wrapper
+  没有替换或改写 Event。当前各独立 bridge binary 尚无 issuer/authz 集成，未安装 provider 时
+  会在发送前 fail closed。待 host 提供与最终 actor/scope/action/basis 绑定且 authority-signed
+  的 lease（以及需要的 CBA bundles）后，在 adapter factory 中通过
+  `MessageContext::set_initial_submission_provider` 安装；不得由 bridge 用 access token、
+  grant ref 或本地 signing key 制造替代 lease。
