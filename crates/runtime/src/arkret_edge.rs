@@ -102,6 +102,31 @@ pub trait EventInitialSubmissionProvider: Send + Sync + 'static {
     async fn initial_submission(&self, event: &Event) -> Result<EventInitialSubmission>;
 }
 
+/// Production provider backed by the authenticated Principal Server.
+///
+/// It sends the final signed Event to the standard authorization-lease
+/// operation and returns only the issuer-produced publication wrapper.
+#[derive(Clone)]
+pub struct PrincipalServerSubmissionProvider {
+    client: Client,
+}
+
+impl PrincipalServerSubmissionProvider {
+    pub fn new(client: Client) -> Self {
+        Self { client }
+    }
+}
+
+#[async_trait]
+impl EventInitialSubmissionProvider for PrincipalServerSubmissionProvider {
+    async fn initial_submission(&self, event: &Event) -> Result<EventInitialSubmission> {
+        self.client
+            .prepare_initial_submission(event)
+            .await
+            .map_err(Into::into)
+    }
+}
+
 /// Pluggable, restart-safe high-water-mark storage backing [`SeqAllocator`].
 ///
 /// A host injects an implementation so the runtime can allocate strictly
@@ -201,10 +226,9 @@ pub struct ArkretEdge {
     config: Arc<Config>,
     client: Client,
     signer: Ed25519PayloadSigner,
-    /// Host-owned source of issuer-produced AuthorizationLease/CBA evidence.
-    /// None is a deliberate fail-closed state, never a request to fabricate a
-    /// lease from the bridge key or bearer token.
-    submission_provider: Mutex<Option<Arc<dyn EventInitialSubmissionProvider>>>,
+    /// Authority transport for issuer-produced AuthorizationLease/CBA
+    /// evidence. The default uses the authenticated Principal Server.
+    submission_provider: Mutex<Arc<dyn EventInitialSubmissionProvider>>,
     service_id: Did,
     applet_id: AppletId,
     /// Store-backed, restart-safe actor sequence allocator.
@@ -312,11 +336,13 @@ impl ArkretEdge {
         let applet_id = AppletId::new(config.arkret.applet_id.clone())?;
         let hlc_device_id = config.bridge.bridge_id.clone();
 
+        let submission_provider: Arc<dyn EventInitialSubmissionProvider> =
+            Arc::new(PrincipalServerSubmissionProvider::new(client.clone()));
         Ok(Self {
             config,
             client,
             signer,
-            submission_provider: Mutex::new(None),
+            submission_provider: Mutex::new(submission_provider),
             service_id,
             applet_id,
             seq,
@@ -342,14 +368,14 @@ impl ArkretEdge {
         &self.client
     }
 
-    /// Install the host integration that supplies legal first-publication
-    /// evidence. This can be called during adapter factory setup after the edge
-    /// has been placed in an [`Arc`].
+    /// Override the default authenticated Principal Server publication
+    /// provider. This is intended for another production authority transport;
+    /// returned wrappers are still validated before network submission.
     pub fn set_initial_submission_provider(
         &self,
         provider: Arc<dyn EventInitialSubmissionProvider>,
     ) {
-        *self.submission_provider.lock() = Some(provider);
+        *self.submission_provider.lock() = provider;
     }
 
     pub fn service_id(&self) -> &Did {
@@ -509,7 +535,7 @@ impl ArkretEdge {
         Ok(format!("{}#{fragment}", actor.as_str()))
     }
 
-    /// Submit a signed Event together with caller-supplied initial publication
+    /// Submit a signed Event together with issuer-produced initial publication
     /// evidence and return its event id.
     ///
     /// This boundary deliberately accepts the SDK wrapper rather than a bare
@@ -525,19 +551,10 @@ impl ArkretEdge {
         Ok(event_id)
     }
 
-    /// Ask the installed host provider to wrap an exact signed Event, then
-    /// submit it. This keeps existing higher-level authoring flows operational
-    /// when the host supplies legal evidence, and fails closed before network
-    /// I/O when no provider is installed.
+    /// Ask the authority provider to wrap an exact signed Event, then submit
+    /// it. The default provider calls the authenticated Principal Server.
     pub async fn submit_event(&self, event: &Event) -> Result<String> {
-        let provider = self.submission_provider.lock().clone().ok_or_else(|| {
-            BridgeError::Config(format!(
-                "cannot initially publish Event {} without EventInitialSubmission \
-                 authorization_lease; install an EventInitialSubmissionProvider or call \
-                 ArkretEdge::submit_initial with issuer-produced publication evidence",
-                event.event_id
-            ))
-        })?;
+        let provider = self.submission_provider.lock().clone();
         let submission = provider.initial_submission(event).await?;
         if submission.event != *event {
             return Err(BridgeError::Runtime(

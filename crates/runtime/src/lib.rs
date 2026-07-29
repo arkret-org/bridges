@@ -58,7 +58,10 @@ pub use app::{BridgeApp, BridgeContext};
 pub use arkret::{IdempotencyIdentity, TransactionClaim, TransactionIdempotencyStore};
 #[cfg(feature = "db")]
 pub use arkret_edge::DbSeqStore;
-pub use arkret_edge::{ArkretEdge, EventInitialSubmissionProvider, SeqAllocator, SeqStore};
+pub use arkret_edge::{
+    ArkretEdge, EventInitialSubmissionProvider, PrincipalServerSubmissionProvider, SeqAllocator,
+    SeqStore,
+};
 pub use backoff::{exponential_backoff_with_jitter, jittered_delay};
 pub use blocking::run_blocking;
 pub use cache::{PersistedToken, TokenCache, TokenStore};
