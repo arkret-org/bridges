@@ -49,59 +49,83 @@
 //!
 //! # Version / epoch dimension
 //!
-//! `VerifiedDidBindingKey.version_id` is `None` for every binding built here,
-//! with [`LimitedTrustReason::MethodHasNeitherHistoryNorVersion`] recorded as
-//! §5 demands. Two independent reasons:
+//! No binding built here pins a `history_head` or a `version_id`, so every one
+//! of them carries the per-pin `limited_trust` record §5.5 demands. Two
+//! independent reasons:
 //!
 //! 1. **No Applet registration epoch is reachable from a bridge.** `registration_epoch`
 //!    (`applet-schema.md` §1.0.1) is computed over an `AppletPackage` transcript held by the Arkret
 //!    node that installed the applet. A bridge never builds, receives or stores an `AppletPackage`,
-//!    `AppletTransactionRequestBody` carries no epoch, and there is no config field for one. For the
-//!    node → applet direction `applet-integration.md` §12 names the anchor material as "Arkret node
-//!    方向的 source service DID key-state evidence" — which is exactly
+//!    `AppletTransactionRequestBody` carries no epoch, and there is no config field for one. For
+//!    the node → applet direction `applet-integration.md` §12 names the anchor material as "Arkret
+//!    node 方向的 source service DID key-state evidence" — which is exactly
 //!    `VerifiedAppletHttpRequest::source_key_state_digest`, already recorded in the idempotency
-//!    anchor. That digest enters the binding's `evidence_digest` as the
-//!    `method.source_key_state_digest` member of the SDK
-//!    [`arkret::identity::EvidenceEnvelope`], alongside the pinned `document_digest` and the
-//!    `policy_digest`. Converging on the SDK envelope did not change this conclusion: the
-//!    envelope gives the evidence a recomputable shape, it does not make a `registration_epoch`
-//!    reachable.
-//! 2. **The resolver returns no version evidence.** `CompositeDidResolver::resolve_did` yields a
-//!    bare `DidDocument`; no `history_head` and no `version_id` are available to pin, and the
-//!    envelope's `method_proofs` is therefore empty for every resolve-backed acceptance.
+//!    anchor. That digest is a digest of the source service's published key material, and the
+//!    binding pins that same material through `document_digest`, so the acceptance still changes
+//!    exactly when the source key state does. See
+//!    [`DidAuthority::accept_configured_source_service_key`] for why the digest is no longer folded
+//!    into the evidence itself.
+//! 2. **The resolver surfaces no method evidence for these methods.** `CompositeDidResolver` here
+//!    serves `did:key` (self-describing key material, proofless by construction) and plain HTTP
+//!    `did:webvh` documents; neither yields a log head, a witness set or a controller proof bundle,
+//!    so the §5.2 evidence receipt's `method_proofs` is empty for every acceptance made here. That
+//!    is the normative degenerate form, and the pins are recorded as `method_unsupported` rather
+//!    than silently omitted.
 //!
-//! Freshness is therefore carried by `refresh_after` / `expires_at` plus the
-//! `verification_method` key dimension, and rotation is handled by explicit
-//! [`DidAuthority::invalidate_did`] (§4 row 7 "收到 rotation / deactivation /
-//! witness fork / policy-change invalidation").
+//! Freshness is therefore carried by the referenced [`inbound_freshness_profile`]
+//! plus the `verification_method` key dimension, and rotation is handled by
+//! explicit [`DidAuthority::invalidate_did`] (§4 row 7 "收到 rotation /
+//! deactivation / witness fork / policy-change invalidation").
 
 use std::sync::Arc;
 
 use arkret::identity::{
-    AcceptedDidBinding, BindingAcceptanceTerms, BindingInvalidation,
-    DeferredEvidenceResolveRequest, DidBindingPurpose, DidBindingStatus, DidDocument,
-    EvidenceEnvelope, FreshnessRequirement, InMemoryVerifiedDidBindingStore, LimitedTrustReason,
-    ResolverFailMode, ResolverPolicy, VerifiedDidBinding, VerifiedDidBindingDocumentInput,
-    VerifiedDidBindingKey, VerifiedDidBindingStore, policy_digest,
-    resolve_and_verify_binding_with_evidence,
+    AcceptedDidBinding, BindingInvalidation, BindingResolveRequest, DidBindingPurpose,
+    DidBindingStatus, DidDocument, EvidenceReceipt, FreshnessProfile, FreshnessRiskTier,
+    InMemoryVerifiedDidBindingStore, LimitedTrust, MethodEvidence, ResolverFailMode,
+    ResolverPolicy, StaleBehavior, VerifiedDidBinding, VerifiedDidBindingDocumentInput,
+    VerifiedDidBindingKey, VerifiedDidBindingStore, document_canonical_digest, policy_digest,
+    resolve_and_verify_binding,
 };
 use arkret::{
     CompositeDidResolver, Did, DidKeyResolver, DidResolver, Hash, HttpDidResolver,
     TypedTrustDomainId,
 };
 use arkret_wire::DidUrl;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 
 use crate::error::{BridgeError, Result};
 
-/// Background-refresh point for an accepted inbound binding. Crossing it only
-/// marks the binding `stale`; §5 forbids turning that into a live resolution on
-/// an ordinary request, so the ordinary path keeps consuming it.
-const BINDING_REFRESH_AFTER_SECS: i64 = 3600;
-/// Hard-expiry point. Past it the entry no longer exists for readers, so the
-/// next transaction from that signer re-enters the authority path exactly once
-/// (§4, last trigger row: "显式要求的 freshness 已过期").
-const BINDING_HARD_EXPIRY_SECS: i64 = 24 * 3600;
+/// The freshness profile every inbound DID authority call site references
+/// (`did-usage-and-verification.md` §5.4).
+///
+/// §5.4 forbids natural-language tier guessing and forbids maintaining
+/// `refresh_after` and an authority `max_age` as two separate constants — which
+/// is exactly what this module used to do (`BINDING_REFRESH_AFTER_SECS` = 1 h
+/// for `refresh_after`, `fresh_within(BINDING_HARD_EXPIRY_SECS)` = 24 h for the
+/// reuse threshold). `fresh_for_seconds` is now the single source of both.
+///
+/// Tier is `high`: establishing an inbound Event-signer or source-service
+/// acceptance is a §4 row 1/3 trust decision, so a stale binding is never
+/// consumed on this path — refresh synchronously or fail closed. The §5.4 `high`
+/// constraints hold: both windows are finite and `0 < 3600 <= 86400`, and there
+/// is no stale-consumption window.
+///
+/// This does **not** make ordinary verification stricter: ordinary per-signature
+/// checks go through [`AcceptedDidBindings`], which reads the store directly and
+/// therefore keeps consuming a binding until its hard expiry, exactly as §3
+/// requires.
+fn inbound_freshness_profile() -> FreshnessProfile {
+    FreshnessProfile {
+        freshness_profile_id: "ak.did_freshness.bridge_inbound_applet.v1".to_owned(),
+        risk_tier: FreshnessRiskTier::High,
+        did_method_selector: vec!["*".to_owned()],
+        fresh_for_seconds: Some(3_600),
+        stale_grace_seconds: None,
+        hard_expiry_seconds: Some(24 * 3_600),
+        stale_behavior: StaleBehavior::SynchronousRefreshOrFailClosed,
+    }
+}
 
 /// Upper bound on distinct accepted bindings held in memory. Inbound pushes
 /// come from one trusted node but may carry Events from many actors, so the
@@ -203,9 +227,6 @@ impl AcceptedDidBindings {
             purpose,
             policy_digest: self.policy_digest.clone(),
             verification_method: Some(verification_method.clone()),
-            // See the module docs: no history head / version evidence is
-            // reachable on the inbound applet path.
-            version_id: None,
         }
     }
 
@@ -321,19 +342,30 @@ impl DidAuthority {
     /// This is an acceptance, not a resolution: the key material comes from
     /// `arkret.trusted_verification_methods` in the bridge's own configuration,
     /// so it costs **zero** network calls and is strictly stronger than
-    /// resolving the node's DID document at runtime. `key_state_digest` is the
-    /// `source_key_state_digest` the idempotency anchor already records; it
-    /// enters the binding's `evidence_digest` as a **member of the SDK evidence
-    /// envelope** (`{document_digest, method_proofs: [], policy_digest,
-    /// method: {source_key_state_digest}}`), not as the digest itself, so the
-    /// recorded evidence commits to the pinned document and the policy as well
-    /// (see the module docs on why the key-state digest stands in for an Applet
-    /// `registration_epoch`).
+    /// resolving the node's DID document at runtime.
+    ///
+    /// # Why `source_key_state_digest` is no longer folded into the evidence
+    ///
+    /// It used to be a `method` extension member of the SDK evidence envelope.
+    /// The §5.2 [`EvidenceReceipt`] that replaced that envelope is a closed
+    /// three-member structure (`method` / `document_digest` / `method_proofs`)
+    /// with no caller-supplied extension slot — deliberately, because "the
+    /// caller supplies the evidence" is the shape the spec judges
+    /// non-conformant.
+    ///
+    /// Nothing is lost. The key-state digest is a function of
+    /// `public_key_multibase`, which is one of the two fields this document is
+    /// built from, so `document_digest` already commits to the same key
+    /// material: `web.rs::source_key_state_digest` digests the raw Ed25519
+    /// public key bytes, and `public_key_multibase` is those same bytes in
+    /// multibase form, so a different source key yields a different document,
+    /// hence a different `document_digest`, hence a different
+    /// `evidence_digest`. The binding still changes exactly when the source
+    /// key state changes, which is what the extension member was there for.
     pub fn accept_configured_source_service_key(
         &self,
         verification_method: &DidUrl,
         public_key_multibase: &str,
-        key_state_digest: &Hash,
         now: DateTime<Utc>,
     ) -> std::result::Result<AcceptedDidBinding, String> {
         let did = verification_method_did(verification_method)?;
@@ -342,12 +374,15 @@ impl DidAuthority {
             verification_method.as_str().to_owned(),
             public_key_multibase.to_owned(),
         );
-        let evidence_digest =
-            EvidenceEnvelope::for_document(&document, self.bindings.policy_digest.clone())
-                .map_err(|err| format!("source service evidence envelope failed: {err}"))?
-                .with_extension("source_key_state_digest", key_state_digest.as_str())
-                .digest()
-                .map_err(|err| format!("source service evidence digest failed: {err}"))?;
+        // A config-pinned anchor is not a resolution, so the method publishes no
+        // proofs: `MethodEvidence::none()` is the normative degenerate form, not
+        // a placeholder.
+        let receipt = EvidenceReceipt::new(
+            did.method(),
+            document_canonical_digest(&document)
+                .map_err(|err| format!("source service document digest failed: {err}"))?,
+            &MethodEvidence::none(),
+        );
         let binding = VerifiedDidBinding::from_verified_document(
             &document,
             VerifiedDidBindingDocumentInput {
@@ -356,8 +391,13 @@ impl DidAuthority {
                 verification_method: Some(verification_method.clone()),
                 history_head: None,
                 version_id: None,
-                limited_trust: Some(LimitedTrustReason::MethodHasNeitherHistoryNorVersion),
-                evidence_digest,
+                limited_trust: LimitedTrust::for_proofless_method(None, None).record_for(),
+                evidence_digest: receipt
+                    .digest()
+                    .map_err(|err| format!("source service evidence digest failed: {err}"))?,
+                evidence_dependencies: receipt
+                    .evidence_dependencies()
+                    .map_err(|err| format!("source service evidence dependencies failed: {err}"))?,
                 policy_digest: self.bindings.policy_digest.clone(),
                 verified_at: now,
                 // A config-pinned anchor never goes stale on its own: it can
@@ -368,7 +408,7 @@ impl DidAuthority {
             },
         )
         .map_err(|err| format!("source service binding rejected: {err}"))?;
-        let accepted = AcceptedDidBinding::new(binding, document)
+        let accepted = AcceptedDidBinding::new(binding, document, receipt)
             .map_err(|err| format!("source service binding/document pairing rejected: {err}"))?;
         self.bindings
             .store
@@ -389,29 +429,26 @@ impl DidAuthority {
     ///
     /// Callers MUST have checked [`AcceptedDidBindings::has_event_signer`]
     /// first, so a warm binding costs zero calls.
-    /// `resolve_and_verify_binding_with_evidence` re-checks the store itself and
-    /// then resolves **exactly once**; on a store hit the evidence closure is
-    /// not called, so a cached acceptance keeps the evidence it was made under.
+    /// [`resolve_and_verify_binding`] re-checks the store itself and then
+    /// resolves **exactly once**; on a store hit the resolver is never called,
+    /// so a cached acceptance keeps the evidence receipt it was made under.
     pub fn accept_event_signer(
         &self,
         verification_method: &DidUrl,
         now: DateTime<Utc>,
     ) -> std::result::Result<AcceptedDidBinding, String> {
         let did = verification_method_did(verification_method)?;
-        let request = DeferredEvidenceResolveRequest {
-            did,
-            trust_domain: self.bindings.trust_domain.clone(),
-            purpose: DidBindingPurpose::Principal,
-            policy_digest: self.bindings.policy_digest.clone(),
-            verification_method: Some(verification_method.clone()),
-            // Establishing a *new* acceptance: an existing entry may only be
-            // reused when it is still inside its refresh window.
-            freshness: FreshnessRequirement::fresh_within(Duration::seconds(
-                BINDING_HARD_EXPIRY_SECS,
-            )),
-            acceptance: self.resolved_document_acceptance_terms(),
-        };
-        self.resolve_with_document_evidence(&request, now)
+        self.resolve_once(
+            &BindingResolveRequest {
+                did,
+                trust_domain: self.bindings.trust_domain.clone(),
+                purpose: DidBindingPurpose::Principal,
+                policy_digest: self.bindings.policy_digest.clone(),
+                verification_method: Some(verification_method.clone()),
+                freshness: inbound_freshness_profile(),
+            },
+            now,
+        )
     }
 
     /// Resolve one verification method for the SDK
@@ -430,61 +467,44 @@ impl DidAuthority {
         if let Ok(accepted) = self.bindings.source_service(&did, verification_method, now) {
             return Ok(accepted);
         }
-        let request = DeferredEvidenceResolveRequest {
-            did,
-            trust_domain: self.bindings.trust_domain.clone(),
-            purpose: DidBindingPurpose::Service,
-            policy_digest: self.bindings.policy_digest.clone(),
-            verification_method: Some(verification_method.clone()),
-            freshness: FreshnessRequirement::fresh_within(Duration::seconds(
-                BINDING_HARD_EXPIRY_SECS,
-            )),
-            acceptance: self.resolved_document_acceptance_terms(),
-        };
-        self.resolve_with_document_evidence(&request, now)
+        self.resolve_once(
+            &BindingResolveRequest {
+                did,
+                trust_domain: self.bindings.trust_domain.clone(),
+                purpose: DidBindingPurpose::Service,
+                policy_digest: self.bindings.policy_digest.clone(),
+                verification_method: Some(verification_method.clone()),
+                freshness: inbound_freshness_profile(),
+            },
+            now,
+        )
     }
 
-    /// Acceptance terms shared by both resolve-backed paths.
+    /// Resolve **exactly once** and store the acceptance.
     ///
-    /// `version_id` / `history_head` stay `None` with an explicit limited-trust
-    /// reason: see the module docs — the resolver chain returns a bare
-    /// `DidDocument` and no Applet `registration_epoch` is reachable from a
-    /// bridge.
-    fn resolved_document_acceptance_terms(&self) -> BindingAcceptanceTerms {
-        BindingAcceptanceTerms {
-            history_head: None,
-            version_id: None,
-            limited_trust: Some(LimitedTrustReason::MethodHasNeitherHistoryNorVersion),
-            refresh_interval: Some(Duration::seconds(BINDING_REFRESH_AFTER_SECS)),
-            hard_expiry: Some(Duration::seconds(BINDING_HARD_EXPIRY_SECS)),
-        }
-    }
-
-    /// Resolve once and seal the acceptance with an evidence digest computed
-    /// over the **resolved** document.
+    /// Everything §5 calls a product of the resolution — the canonical evidence
+    /// receipt and its digest, the §5.6 dependency record, the per-pin
+    /// `limited_trust` states, `refresh_after` and `expires_at` — is derived
+    /// inside [`resolve_and_verify_binding`] from what the resolver returned and
+    /// from the referenced freshness profile. There is deliberately no seam here
+    /// where a bridge could substitute a value of its own: that seam is how this
+    /// module previously shipped a `document_evidence_placeholder`.
     ///
-    /// The evidence is the SDK envelope `{version, document_digest,
-    /// method_proofs: [], policy_digest, method: {}}` — a commitment to the
-    /// exact document this acceptance rests on *and* to the resolver policy it
-    /// was admitted under. `method_proofs` is empty because
-    /// `CompositeDidResolver::resolve_did` returns a bare `DidDocument`: no
-    /// webvh log head, witness set or controller proof bundle is exposed to
-    /// digest. Recording an empty proof set is the honest statement (§5); it is
-    /// still strictly stronger than the digest it replaces, because a policy
-    /// change now changes the evidence too, and the value can be recomputed by
-    /// an auditor from the pinned document.
-    fn resolve_with_document_evidence(
+    /// `method_proofs` stays empty for every acceptance made here, because
+    /// `CompositeDidResolver` resolves `did:key` and plain HTTP `did:webvh`
+    /// documents and surfaces no log head, witness set or controller proof
+    /// bundle. Recording an empty proof set is the normative degenerate form,
+    /// not a placeholder, and the accompanying `limited_trust` says so per pin.
+    fn resolve_once(
         &self,
-        request: &DeferredEvidenceResolveRequest,
+        request: &BindingResolveRequest,
         now: DateTime<Utc>,
     ) -> std::result::Result<AcceptedDidBinding, String> {
-        let policy_digest = self.bindings.policy_digest.clone();
         let did = request.did.clone();
-        resolve_and_verify_binding_with_evidence(
+        resolve_and_verify_binding(
             self.resolver.as_ref(),
             self.bindings.store.as_ref(),
             request,
-            move |document| Ok(EvidenceEnvelope::for_document(document, policy_digest)?.digest()?),
             now,
         )
         .map_err(|err| format!("DID authority verification failed for `{did}`: {err}"))
@@ -524,7 +544,7 @@ pub fn verification_method_did(verification_method: &DidUrl) -> std::result::Res
 
 #[cfg(test)]
 mod tests {
-    use arkret::identity::public_key_material_from_binding;
+    use arkret::identity::{ResolvedDid, public_key_material_from_binding};
 
     use super::*;
 
@@ -542,7 +562,7 @@ mod tests {
         fn resolve_did(
             &self,
             did: &Did,
-        ) -> std::result::Result<DidDocument, arkret::identity::IdentityError> {
+        ) -> std::result::Result<ResolvedDid, arkret::identity::IdentityError> {
             panic!("the accepted-binding path must never resolve `{did}`");
         }
     }
@@ -577,10 +597,6 @@ mod tests {
         arkret::ed25519_pubkey_to_did_key_multibase(&public_key_bytes(seed))
     }
 
-    fn key_state(multibase: &str) -> Hash {
-        Hash::new(arkret::canonical::canonical_digest(multibase.as_bytes())).expect("hash")
-    }
-
     /// A resolver that serves one prepared document, so an acceptance can be
     /// made for documents this module cannot build through the config path.
     #[derive(Debug)]
@@ -594,9 +610,11 @@ mod tests {
         fn resolve_did(
             &self,
             did: &Did,
-        ) -> std::result::Result<DidDocument, arkret::identity::IdentityError> {
+        ) -> std::result::Result<ResolvedDid, arkret::identity::IdentityError> {
             if did == &self.0.id {
-                Ok(self.0.clone())
+                // `did:webvh` served as a plain document: proofless, which the
+                // binding records per pin instead of pretending otherwise.
+                Ok(ResolvedDid::proofless(self.0.clone()))
             } else {
                 Err(arkret::identity::IdentityError::Protocol(format!(
                     "unknown DID `{did}`"
@@ -633,32 +651,45 @@ mod tests {
     ///
     /// The bridge previously recorded either `f(did) + two constants` (which
     /// carried no method evidence at all) or the bare `source_key_state_digest`.
-    /// Both are unrepresentable through the SDK envelope; this test states the
-    /// property the local repo relies on: the recorded value is neither of the
-    /// digests it commits to, and an auditor can recompute it.
+    /// Both are unrepresentable through the SDK evidence receipt; this test
+    /// states the property the local repo relies on: the recorded value is not
+    /// the document digest it commits to, and an auditor can recompute it from
+    /// the retained receipt.
     #[test]
-    fn accepted_evidence_is_a_recomputable_envelope_not_a_degenerate_digest() {
+    fn accepted_evidence_is_a_recomputable_receipt_not_a_degenerate_digest() {
         let authority = authority();
         let vm = DidUrl::new("did:webvh:z6mkfixture:server.example#key-1").expect("did url");
         let key = multibase(7);
-        let anchor = key_state(&key);
         let now = Utc::now();
 
         let accepted = authority
-            .accept_configured_source_service_key(&vm, &key, &anchor, now)
+            .accept_configured_source_service_key(&vm, &key, now)
             .expect("service binding accepted");
         let binding = accepted.binding();
 
+        // The degenerate `evidence_digest = document_digest` form stays
+        // unreachable: the receipt digests `{kind, method, document_digest,
+        // method_proofs}`, never the document digest alone.
         assert_ne!(binding.evidence_digest(), binding.document_digest());
-        assert_ne!(binding.evidence_digest(), &anchor);
 
-        let recomputed =
-            EvidenceEnvelope::for_document(accepted.document(), binding.policy_digest().clone())
-                .expect("envelope")
-                .with_extension("source_key_state_digest", anchor.as_str())
-                .digest()
-                .expect("evidence digest");
-        assert_eq!(binding.evidence_digest(), &recomputed);
+        // "Auditable" means "recomputable": an auditor rebuilds the retained
+        // receipt from the pinned document and gets the stored digest back.
+        let recomputed = EvidenceReceipt::new(
+            binding.did().method(),
+            document_canonical_digest(accepted.document()).expect("document digest"),
+            &MethodEvidence::none(),
+        );
+        assert_eq!(&recomputed, accepted.evidence_receipt());
+        assert_eq!(
+            binding.evidence_digest(),
+            &recomputed.digest().expect("evidence digest")
+        );
+        // A config-pinned anchor pins neither pin, and says so per pin rather
+        // than omitting the record (§5.5).
+        assert_eq!(
+            binding.limited_trust(),
+            LimitedTrust::for_proofless_method(None, None).record_for()
+        );
     }
 
     #[test]
@@ -670,7 +701,7 @@ mod tests {
         let now = Utc::now();
 
         authority
-            .accept_configured_source_service_key(&vm, &key, &key_state(&key), now)
+            .accept_configured_source_service_key(&vm, &key, now)
             .expect("service binding accepted");
 
         // The service acceptance answers the HTTP-signature lookup...
@@ -693,7 +724,7 @@ mod tests {
         let now = Utc::now();
 
         authority
-            .accept_configured_source_service_key(&vm, &key, &key_state(&key), now)
+            .accept_configured_source_service_key(&vm, &key, now)
             .expect("service binding accepted");
         let accepted = authority
             .bindings()
@@ -715,11 +746,11 @@ mod tests {
 
         let old = multibase(1);
         authority
-            .accept_configured_source_service_key(&vm, &old, &key_state(&old), now)
+            .accept_configured_source_service_key(&vm, &old, now)
             .expect("first acceptance");
         let new = multibase(2);
         authority
-            .accept_configured_source_service_key(&vm, &new, &key_state(&new), now)
+            .accept_configured_source_service_key(&vm, &new, now)
             .expect("rotated acceptance");
 
         let accepted = authority
@@ -743,7 +774,7 @@ mod tests {
 
         for vm in [&left, &right] {
             authority
-                .accept_configured_source_service_key(vm, &key, &key_state(&key), now)
+                .accept_configured_source_service_key(vm, &key, now)
                 .expect("accepted");
         }
 

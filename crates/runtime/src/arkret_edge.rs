@@ -44,8 +44,7 @@ use arkret_models_integration::{
     AppletActorView, AppletPingOutcome, AppletProtocolMetadata, AppletRealmView,
     AppletTransactionOutcome,
 };
-use arkret_wire::DidUrl;
-use arkret_wire::{EventInitialSubmission, SignalEnvelope};
+use arkret_wire::{DidUrl, EventInitialSubmission, SignalEnvelope};
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde::Serialize;
