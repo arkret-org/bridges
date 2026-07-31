@@ -44,8 +44,7 @@ use arkret_models_integration::{
     AppletActorView, AppletPingOutcome, AppletProtocolMetadata, AppletRealmView,
     AppletTransactionOutcome,
 };
-use arkret_wire::DidUrl;
-use arkret_wire::{EventInitialSubmission, SignalEnvelope};
+use arkret_wire::{DidUrl, EventInitialSubmission, ProfileId, ServiceOperationId, SignalEnvelope};
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -1032,14 +1031,14 @@ impl arkret::AppletHandler for BridgeAppletHandler {
             self.trust_domain.clone(),
             arkret::ServiceKind::AppletService,
         );
-        description.supported_profiles = vec![AppletPackage::BASE_PROFILE.to_owned()];
+        description.supported_profiles = vec![ProfileId::APPLET_SERVICE_V1.to_owned()];
         description.supported_operations = vec![
-            arkret::ServiceOperationId::EDGE_APPLET_COMMAND_TRANSACTION.to_owned(),
-            arkret::ServiceOperationId::EDGE_APPLET_QUERY_DESCRIBE.to_owned(),
-            arkret::ServiceOperationId::EDGE_APPLET_QUERY_PING.to_owned(),
-            arkret::ServiceOperationId::EDGE_APPLET_ACTOR_QUERY_RESOLVE.to_owned(),
-            arkret::ServiceOperationId::EDGE_APPLET_REALM_QUERY_RESOLVE.to_owned(),
-            arkret::ServiceOperationId::EDGE_APPLET_QUERY_PROTOCOL_METADATA.to_owned(),
+            ServiceOperationId::EDGE_APPLET_COMMAND_TRANSACTION.to_owned(),
+            ServiceOperationId::EDGE_APPLET_QUERY_DESCRIBE.to_owned(),
+            ServiceOperationId::EDGE_APPLET_QUERY_PING.to_owned(),
+            ServiceOperationId::EDGE_APPLET_ACTOR_QUERY_RESOLVE.to_owned(),
+            ServiceOperationId::EDGE_APPLET_REALM_QUERY_RESOLVE.to_owned(),
+            ServiceOperationId::EDGE_APPLET_QUERY_PROTOCOL_METADATA.to_owned(),
         ];
         description.validate()?;
         Ok(description)

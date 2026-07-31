@@ -56,16 +56,15 @@
 //! 1. **No Applet registration epoch is reachable from a bridge.** `registration_epoch`
 //!    (`applet-schema.md` §1.0.1) is computed over an `AppletPackage` transcript held by the Arkret
 //!    node that installed the applet. A bridge never builds, receives or stores an `AppletPackage`,
-//!    `AppletTransactionRequestBody` carries no epoch, and there is no config field for one. For the
-//!    node → applet direction `applet-integration.md` §12 names the anchor material as "Arkret node
-//!    方向的 source service DID key-state evidence" — which is exactly
+//!    `AppletTransactionRequestBody` carries no epoch, and there is no config field for one. For
+//!    the node → applet direction `applet-integration.md` §12 names the anchor material as "Arkret
+//!    node 方向的 source service DID key-state evidence" — which is exactly
 //!    `VerifiedAppletHttpRequest::source_key_state_digest`, already recorded in the idempotency
 //!    anchor. That digest enters the binding's `evidence_digest` as the
-//!    `method.source_key_state_digest` member of the SDK
-//!    [`arkret::identity::EvidenceEnvelope`], alongside the pinned `document_digest` and the
-//!    `policy_digest`. Converging on the SDK envelope did not change this conclusion: the
-//!    envelope gives the evidence a recomputable shape, it does not make a `registration_epoch`
-//!    reachable.
+//!    `method.source_key_state_digest` member of the SDK [`arkret::identity::EvidenceEnvelope`],
+//!    alongside the pinned `document_digest` and the `policy_digest`. Converging on the SDK
+//!    envelope did not change this conclusion: the envelope gives the evidence a recomputable
+//!    shape, it does not make a `registration_epoch` reachable.
 //! 2. **The resolver returns no version evidence.** `CompositeDidResolver::resolve_did` yields a
 //!    bare `DidDocument`; no `history_head` and no `version_id` are available to pin, and the
 //!    envelope's `method_proofs` is therefore empty for every resolve-backed acceptance.
