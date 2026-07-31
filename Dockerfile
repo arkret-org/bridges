@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-ARG RUST_VERSION=1.96
+ARG RUST_VERSION=1.97
 ARG BRIDGE_BIN=arkret-bridge-discord
 
 FROM rust:${RUST_VERSION}-bookworm AS chef

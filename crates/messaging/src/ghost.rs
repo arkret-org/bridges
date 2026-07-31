@@ -186,6 +186,10 @@ fn external_ref_for_user(
     }
 }
 
+// Ghost provisioning threads one distinct external-identity field per
+// parameter; bundling them into a struct would let two of them be swapped
+// at a call site without a type error.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn provision_ghost_actor(
     edge: &runtime::ArkretEdge,
     store: std::sync::Arc<MessageStore>,

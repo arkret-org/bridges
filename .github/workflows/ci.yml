@@ -111,8 +111,8 @@ jobs:
           path: arkret-rust-sdk
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
-      - name: Install Rust 1.96
-        uses: dtolnay/rust-toolchain@1.96
+      - name: Install Rust 1.97
+        uses: dtolnay/rust-toolchain@1.97
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
