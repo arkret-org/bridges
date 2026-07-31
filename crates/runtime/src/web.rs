@@ -5,20 +5,21 @@
 use std::sync::{Arc, OnceLock};
 
 use ::metrics::{counter, describe_counter};
-use arkret::identity::{ResolverFailMode, ResolverPolicy};
+use arkret::identity::{public_key_material_from_binding, verify_event_proof_with_binding};
+use arkret::signatures::EventProofBuilder;
 use arkret::signatures::http_signature::{
     Component, HttpMessageVerificationError, SignatureInput, SignaturePolicyError,
     SignatureVerificationPolicy, parse_signature_input, public_key_from_bytes,
     verify_signed_http_message,
 };
-use arkret::signatures::{EventProofBuilder, PublicKeyMaterial, verify_eddsa_detached_jws_proof};
 use arkret::{
-    AppletHandler, CompositeDidResolver, Did, DidKeyResolver, DidResolver, HttpDidResolver,
-    IdempotencyDirection, IdempotencyIdentity, RejectedItem, TransactionClaim,
+    AppletHandler, IdempotencyDirection, IdempotencyIdentity, RejectedItem, TransactionClaim,
     TransactionIdempotencyStore,
 };
 use arkret_models_collaboration::http_bodies::AppletTransactionRequestBody;
 use arkret_models_integration::AppletTransactionOutcome;
+use arkret_wire::DidUrl;
+use chrono::{DateTime, Utc};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use salvo::affix_state;
 use salvo::http::StatusCode;
@@ -27,8 +28,11 @@ use serde_json::{Value, json};
 
 use crate::app::BridgeContext;
 use crate::arkret_edge::BridgeAppletHandler;
-use crate::config::{Config, TrustedVerificationMethodConfig};
+use crate::config::Config;
 use crate::db::{DbEventDedupStore, DbTransactionIdempotencyStore};
+use crate::did_binding::{
+    AcceptedDidBindings, BindingLookupError, DidAuthority, verification_method_did,
+};
 use crate::error::{BridgeError, Result};
 use crate::idempotency::EventDedupStore;
 use crate::run_blocking;
@@ -62,23 +66,26 @@ pub async fn serve(ctx: Arc<BridgeContext>, extra: Option<Router>) -> Result<()>
     let idempotency: Arc<
         dyn TransactionIdempotencyStore<AppletTransactionOutcome, Error = BridgeError>,
     > = Arc::new(DbTransactionIdempotencyStore::new(ctx.db.clone())?);
-    // The trust-root DID resolver authenticates the inbound source service DID
-    // signature and every pushed Event proof. The same resolver is shared with
-    // the applet handler so its `source_did_resolver()` (SDK AppletHandler
-    // contract) and the per-event proof verification trust the same roots.
-    let event_proof_resolver = Arc::new(build_event_proof_resolver()?);
+    // DID-P1-B01: the inbound path no longer carries a bare DID resolver. It
+    // carries a `DidAuthority` (the only holder of a resolver, private field,
+    // no accessor) plus the accepted-binding store the ordinary verification
+    // path consumes. The trusted server's HTTP-signature keys are accepted from
+    // configuration at startup, so authenticating an inbound push costs zero
+    // network calls even on the very first request.
+    let did_authority = Arc::new(DidAuthority::new(ctx.config.arkret.trust_domain.clone())?);
+    seed_source_service_bindings(&did_authority, &ctx.config)?;
     let handler = Arc::new(BridgeAppletHandler::new(
         &ctx.edge,
         ctx.resolver(),
         dedup,
         ctx.handled_event_kinds(),
-        event_proof_resolver.clone(),
+        did_authority.clone(),
     )?);
     let applet = applet_router(AppletWebState {
         handler,
         config: ctx.config.clone(),
         idempotency,
-        event_proof_resolver,
+        did_authority,
     });
 
     // Internal plane: the trusted applet protocol surface
@@ -199,7 +206,9 @@ struct AppletWebState {
     config: Arc<Config>,
     idempotency:
         Arc<dyn TransactionIdempotencyStore<AppletTransactionOutcome, Error = BridgeError>>,
-    event_proof_resolver: Arc<CompositeDidResolver>,
+    /// Inbound DID authority adapter. Handlers may reach its §4 entry points;
+    /// nothing can reach the resolver it wraps.
+    did_authority: Arc<DidAuthority>,
 }
 
 async fn claim_transaction(
@@ -269,7 +278,9 @@ async fn applet_ping(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let Some(state) = applet_state(depot, res) else {
         return;
     };
-    if let Err(err) = verify_http_applet_get_request(req, &state.config) {
+    if let Err(err) =
+        verify_http_applet_get_request(req, &state.config, state.did_authority.bindings())
+    {
         unauthorized_code(res, err.code, err.message);
         return;
     }
@@ -284,7 +295,9 @@ async fn applet_describe(req: &mut Request, depot: &mut Depot, res: &mut Respons
     let Some(state) = applet_state(depot, res) else {
         return;
     };
-    if let Err(err) = verify_http_applet_get_request(req, &state.config) {
+    if let Err(err) =
+        verify_http_applet_get_request(req, &state.config, state.did_authority.bindings())
+    {
         unauthorized_code(res, err.code, err.message);
         return;
     }
@@ -332,8 +345,13 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         }
     };
 
-    let verified = match verify_http_transaction_request(req, &headers, &body_bytes, &state.config)
-    {
+    let verified = match verify_http_transaction_request(
+        req,
+        &headers,
+        &body_bytes,
+        &state.config,
+        state.did_authority.bindings(),
+    ) {
         Ok(verified) => verified,
         Err(err) => {
             record_applet_transaction("unauthorized");
@@ -453,12 +471,13 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         }
     }
 
-    let event_proof_resolver = state.event_proof_resolver.clone();
+    let did_authority = state.did_authority.clone();
     let body_for_verification = body.clone();
     let verification_result = run_blocking(move || {
-        Ok(verify_transaction_events(
-            event_proof_resolver.as_ref(),
+        Ok(authenticate_transaction_events(
+            did_authority.as_ref(),
             &body_for_verification,
+            Utc::now(),
         ))
     })
     .await;
@@ -542,7 +561,9 @@ async fn applet_actor(req: &mut Request, depot: &mut Depot, res: &mut Response) 
     let Some(state) = applet_state(depot, res) else {
         return;
     };
-    if let Err(err) = verify_http_applet_get_request(req, &state.config) {
+    if let Err(err) =
+        verify_http_applet_get_request(req, &state.config, state.did_authority.bindings())
+    {
         unauthorized_code(res, err.code, err.message);
         return;
     }
@@ -559,7 +580,9 @@ async fn applet_realm(req: &mut Request, depot: &mut Depot, res: &mut Response) 
     let Some(state) = applet_state(depot, res) else {
         return;
     };
-    if let Err(err) = verify_http_applet_get_request(req, &state.config) {
+    if let Err(err) =
+        verify_http_applet_get_request(req, &state.config, state.did_authority.bindings())
+    {
         unauthorized_code(res, err.code, err.message);
         return;
     }
@@ -576,7 +599,9 @@ async fn applet_protocol(req: &mut Request, depot: &mut Depot, res: &mut Respons
     let Some(state) = applet_state(depot, res) else {
         return;
     };
-    if let Err(err) = verify_http_applet_get_request(req, &state.config) {
+    if let Err(err) =
+        verify_http_applet_get_request(req, &state.config, state.did_authority.bindings())
+    {
         unauthorized_code(res, err.code, err.message);
         return;
     }
@@ -592,7 +617,9 @@ async fn applet_third_party_unsupported(req: &mut Request, depot: &mut Depot, re
     let Some(state) = applet_state(depot, res) else {
         return;
     };
-    if let Err(err) = verify_http_applet_get_request(req, &state.config) {
+    if let Err(err) =
+        verify_http_applet_get_request(req, &state.config, state.did_authority.bindings())
+    {
         unauthorized_code(res, err.code, err.message);
         return;
     }
@@ -617,16 +644,18 @@ fn verify_http_transaction_request(
     headers: &[(String, String)],
     body: &[u8],
     config: &Config,
+    bindings: &AcceptedDidBindings,
 ) -> std::result::Result<VerifiedAppletHttpRequest, HttpSignatureReject> {
-    verify_http_applet_request(req, headers, body, config, true)
+    verify_http_applet_request(req, headers, body, config, bindings, true)
 }
 
 fn verify_http_applet_get_request(
     req: &Request,
     config: &Config,
+    bindings: &AcceptedDidBindings,
 ) -> std::result::Result<(), HttpSignatureReject> {
     let headers = collect_headers(req);
-    verify_http_applet_request(req, &headers, &[], config, false).map(|_| ())
+    verify_http_applet_request(req, &headers, &[], config, bindings, false).map(|_| ())
 }
 
 fn verify_http_applet_request(
@@ -634,18 +663,24 @@ fn verify_http_applet_request(
     headers: &[(String, String)],
     body: &[u8],
     config: &Config,
+    bindings: &AcceptedDidBindings,
     require_content_digest: bool,
 ) -> std::result::Result<VerifiedAppletHttpRequest, HttpSignatureReject> {
     let signature_input_header = header_value_from(headers, "signature-input")
         .ok_or_else(|| http_signature_required("Signature-Input header is required"))?;
     let signature_input = parse_signature_input(&signature_input_header)
         .map_err(|err| http_signature_invalid(err.to_string()))?;
-    let now_unix_seconds = chrono::Utc::now().timestamp();
+    let now = Utc::now();
+    let now_unix_seconds = now.timestamp();
     validate_applet_signature_window(&signature_input, now_unix_seconds)?;
-    let trusted_method = trusted_verification_method(config, &signature_input.key_id)?;
-    let signer_did =
-        verification_method_did(&signature_input.key_id).map_err(http_signature_invalid)?;
-    if signer_did != config.arkret.trusted_server_did {
+    let key_id_url = DidUrl::new(signature_input.key_id.clone()).map_err(|err| {
+        http_signature_invalid(format!(
+            "HTTP signature keyid `{}` is not a valid DID URL: {err}",
+            signature_input.key_id
+        ))
+    })?;
+    let signer_did = verification_method_did(&key_id_url).map_err(http_signature_invalid)?;
+    if signer_did.as_str() != config.arkret.trusted_server_did {
         return Err(http_signature_invalid(
             "HTTP signature keyid is not owned by the trusted server DID",
         ));
@@ -667,8 +702,23 @@ fn verify_http_applet_request(
         ));
     }
 
-    let public_key_bytes = trusted_method
-        .public_key
+    // DID-P1-B01: the HTTP Message Signature is authenticated against the
+    // accepted **source service** binding, never against an Event-signer
+    // binding — the two live under different `DidBindingPurpose`s, so the store
+    // key alone makes substitution impossible. The binding was accepted from
+    // configuration at startup, so this is a pure in-memory lookup.
+    let accepted = bindings
+        .source_service(&signer_did, &key_id_url, now)
+        .map_err(|err| match err {
+            BindingLookupError::Missing => {
+                http_signature_invalid(format!("verification method {key_id_url} is not trusted"))
+            }
+            BindingLookupError::NotUsable { .. } => http_signature_invalid(format!(
+                "source service verification method {key_id_url} is no longer accepted: {err}"
+            )),
+        })?;
+    let public_key_bytes = public_key_material_from_binding(&accepted, &key_id_url)
+        .map_err(|err| http_signature_invalid(err.to_string()))?
         .ed25519_bytes()
         .map_err(|err| http_signature_invalid(err.to_string()))?;
     let source_key_state_digest = arkret::canonical::canonical_digest(&public_key_bytes);
@@ -791,11 +841,76 @@ fn build_source_signature_anchor(
     .map_err(|err| err.to_string())
 }
 
-fn verify_transaction_events(
-    resolver: &CompositeDidResolver,
+/// Outcome of one zero-network verification pass over a transaction's Events.
+#[derive(Debug, PartialEq, Eq)]
+enum EventProofVerification {
+    /// Every proof verified against an already-accepted binding.
+    Verified,
+    /// Every structural check passed, but these `verification_method`s have no
+    /// accepted binding in this trust domain yet. This is the *only* condition
+    /// that may enter the §4 authority path — and only rows 1 / 3 of the closed
+    /// trigger table ("此前未被本 trust domain 接受的 DID 首次跨越信任边界" /
+    /// "出现新的 verification_method").
+    NeedsAuthority(Vec<DidUrl>),
+}
+
+/// Authenticate every Event proof in a pushed transaction.
+///
+/// Two clearly separated counters (`did-usage-and-verification.md` §6):
+///
+/// - **signature verifications** grow with the number of proofs, always;
+/// - **authority network calls** grow only with *newly seen* signer keys.
+///
+/// A warm transaction — same signer keys as the previous one — runs exactly one
+/// [`verify_transaction_events`] pass and makes **zero** resolver calls.
+fn authenticate_transaction_events(
+    authority: &DidAuthority,
     body: &AppletTransactionRequestBody,
+    now: DateTime<Utc>,
 ) -> std::result::Result<(), String> {
+    match verify_transaction_events(authority.bindings(), body, now)? {
+        EventProofVerification::Verified => return Ok(()),
+        EventProofVerification::NeedsAuthority(verification_methods) => {
+            // §4 rows 1/3. Each miss costs exactly one resolution; the
+            // acceptance is then reusable for every later transaction under the
+            // same DID / trust domain / purpose / policy digest.
+            for verification_method in &verification_methods {
+                authority.accept_event_signer(verification_method, now)?;
+            }
+        }
+    }
+    match verify_transaction_events(authority.bindings(), body, now)? {
+        EventProofVerification::Verified => Ok(()),
+        // Fail closed: §4 forbids a "resolve once more to be safe" retry loop.
+        EventProofVerification::NeedsAuthority(verification_methods) => Err(format!(
+            "event proof signer keys are still unaccepted after DID authority verification: {}",
+            verification_methods
+                .iter()
+                .map(DidUrl::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+/// Verify every Event proof against **accepted DID bindings only**.
+///
+/// Zero network calls by construction: [`AcceptedDidBindings`] holds a binding
+/// store and nothing else, so this function has no resolver to call. That is the
+/// §6 requirement ("业务 reducer / query 只消费 verified binding … 不直接持有
+/// 通用网络 resolver") enforced by the type system rather than by review.
+///
+/// The proof's key comes from the DID document the binding pinned at acceptance
+/// time. Everything else — the §6 `event_digest` binding, the canonical proof
+/// binding object and the detached JWS itself — is still verified in full for
+/// every proof (§3: "普通签名对象仍 MUST 验证签名、canonical transcript …").
+fn verify_transaction_events(
+    bindings: &AcceptedDidBindings,
+    body: &AppletTransactionRequestBody,
+    now: DateTime<Utc>,
+) -> std::result::Result<EventProofVerification, String> {
     let builder = EventProofBuilder::new();
+    let mut unaccepted: Vec<DidUrl> = Vec::new();
     for event in &body.events {
         if event.proofs.is_empty() {
             return Err(format!("event {} has no proofs", event.event_id));
@@ -806,150 +921,111 @@ fn verify_transaction_events(
         let canonical_bytes = builder
             .envelope_bytes(event)
             .map_err(|err| format!("event {} canonicalization failed: {err}", event.event_id))?;
-        let expected_signer = event
-            .executed_by
-            .as_ref()
-            .unwrap_or(&event.actor_id)
-            .to_string();
+        let expected_signer = event.executed_by.as_ref().unwrap_or(&event.actor_id);
         for proof in &event.proofs {
             proof.validate_production().map_err(|err| {
                 format!("event {} proof is not production: {err}", event.event_id)
             })?;
             let signer_did = verification_method_did(&proof.verification_method)?;
-            if signer_did != expected_signer {
+            if &signer_did != expected_signer {
                 return Err(format!(
                     "event {} proof signer DID does not match actor/executed_by",
                     event.event_id
                 ));
             }
-            let public_key = resolve_verification_method_key(resolver, &proof.verification_method)?;
-            verify_eddsa_detached_jws_proof(proof, &canonical_bytes, &event.actor_id, &public_key)
+            let accepted = match bindings.event_signer(&signer_did, &proof.verification_method, now)
+            {
+                Ok(accepted) => accepted,
+                Err(BindingLookupError::Missing) => {
+                    if !unaccepted.contains(&proof.verification_method) {
+                        unaccepted.push(proof.verification_method.clone());
+                    }
+                    continue;
+                }
+                // `deactivated` / `quarantined` is a decision, not a gap: it
+                // MUST NOT be "repaired" by resolving again (§5).
+                Err(err @ BindingLookupError::NotUsable { .. }) => {
+                    return Err(format!(
+                        "event {} proof signer `{}` rejected: {err}",
+                        event.event_id, proof.verification_method
+                    ));
+                }
+            };
+            // The SDK's Event-proof entry point: it keeps the Event profile
+            // (`DetachedJwsProtectedHeader`, which rejects a `kid` member and
+            // requires `header.alg == proof.alg`) and additionally re-checks the
+            // binding status, the method↔issuer relation and that the pinned
+            // document still hashes to the binding's `document_digest`. Routing
+            // this through the generic JWS path would verify the wrong bytes and
+            // relax two header checks.
+            verify_event_proof_with_binding(proof, &canonical_bytes, &event.actor_id, &accepted)
                 .map_err(|err| {
                     format!("event {} proof verification failed: {err}", event.event_id)
                 })?;
         }
     }
+    if unaccepted.is_empty() {
+        Ok(EventProofVerification::Verified)
+    } else {
+        Ok(EventProofVerification::NeedsAuthority(unaccepted))
+    }
+}
+
+/// Accept the operator-configured HTTP Message Signature trust anchors as
+/// `service`-purpose bindings, once, at startup.
+///
+/// These are the *source service* keys of the pushing Arkret node. They are a
+/// completely separate acceptance from the Event-signer bindings above: a
+/// different [`arkret::identity::DidBindingPurpose`] means a different store
+/// key, so neither can ever stand in for the other even when the DIDs coincide
+/// (DID-P1-B01).
+fn seed_source_service_bindings(authority: &DidAuthority, config: &Config) -> Result<()> {
+    let now = Utc::now();
+    for method in &config.arkret.trusted_verification_methods {
+        let verification_method =
+            DidUrl::new(method.verification_method.clone()).map_err(|err| {
+                BridgeError::Config(format!(
+                    "arkret.trusted_verification_methods[].verification_method \
+                     `{}` is not a valid DID URL: {err}",
+                    method.verification_method
+                ))
+            })?;
+        // Normalize every accepted key form (raw / multibase / JWK) to the
+        // multibase representation a DID document publishes, so the pinned
+        // document is exactly what the SDK verifier expects to read back.
+        let key_bytes = method.public_key.ed25519_bytes().map_err(|err| {
+            BridgeError::Config(format!(
+                "arkret.trusted_verification_methods[] key for `{verification_method}` \
+                 is not a usable Ed25519 key: {err}"
+            ))
+        })?;
+        let key_state_digest = source_key_state_digest(&key_bytes)?;
+        authority
+            .accept_configured_source_service_key(
+                &verification_method,
+                &arkret::ed25519_pubkey_to_did_key_multibase(&key_bytes),
+                &key_state_digest,
+                now,
+            )
+            .map_err(BridgeError::Config)?;
+    }
     Ok(())
 }
 
-fn build_event_proof_resolver() -> Result<CompositeDidResolver> {
-    let policy = ResolverPolicy {
-        // Workspace-wide rule: actor/service identities are did:webvh only
-        // (did:web is not an accepted alias). did:key stays for bare
-        // verification-method keys.
-        allowed_methods: vec!["did:key:".to_owned(), "did:webvh:".to_owned()],
-        fail_mode: ResolverFailMode::FailClosed,
-        ..ResolverPolicy::default()
-    };
-    let mut resolver = CompositeDidResolver::new().with_policy(policy.clone());
-    resolver.push(DidKeyResolver::new());
-    resolver.push(HttpDidResolver::with_policy(policy)?);
-    Ok(resolver)
-}
-
-fn resolve_verification_method_key(
-    resolver: &CompositeDidResolver,
-    verification_method: &str,
-) -> std::result::Result<PublicKeyMaterial, String> {
-    let signer_did = verification_method_did(verification_method)?;
-    let did = Did::new(signer_did.clone())
-        .map_err(|err| format!("verification method DID `{signer_did}` is invalid: {err}"))?;
-    let document = resolver
-        .resolve_did(&did)
-        .map_err(|err| format!("DID resolution failed for `{signer_did}`: {err}"))?;
-    if document.id != did {
-        return Err(format!(
-            "DID document id `{}` does not match requested `{signer_did}`",
-            document.id
-        ));
-    }
-    let key_value = verification_method_value(&document.verification_methods, verification_method)
-        .ok_or_else(|| {
-            format!(
-                "verification method `{verification_method}` not found in DID document `{signer_did}`"
-            )
-        })?;
-    public_key_material_from_did_document_value(key_value)
-}
-
-fn verification_method_value<'a>(
-    verification_methods: &'a std::collections::BTreeMap<String, String>,
-    verification_method: &str,
-) -> Option<&'a str> {
-    let fragment = verification_method
-        .rsplit_once('#')
-        .map(|(_, fragment)| fragment);
-    let allow_single_key_fallback = verification_method.starts_with("did:key:");
-    verification_methods
-        .get(verification_method)
-        .or_else(|| fragment.and_then(|fragment| verification_methods.get(fragment)))
-        .or_else(|| fragment.and_then(|fragment| verification_methods.get(&format!("#{fragment}"))))
-        .or_else(|| {
-            if allow_single_key_fallback && verification_methods.len() == 1 {
-                verification_methods.values().next()
-            } else {
-                None
-            }
-        })
-        .map(String::as_str)
-}
-
-fn public_key_material_from_did_document_value(
-    value: &str,
-) -> std::result::Result<PublicKeyMaterial, String> {
-    let value = value.trim();
-    if let Some(multibase) = value.strip_prefix("did:key:") {
-        let multibase = multibase
-            .rsplit_once('#')
-            .map(|(_, fragment)| fragment)
-            .unwrap_or(multibase);
-        return Ok(PublicKeyMaterial::Ed25519Multibase {
-            value: multibase.to_owned(),
-        });
-    }
-    if value.starts_with('z') {
-        return Ok(PublicKeyMaterial::Ed25519Multibase {
-            value: value.to_owned(),
-        });
-    }
-    let parsed: Value = serde_json::from_str(value)
-        .map_err(|err| format!("DID verification method key is not multibase or JSON: {err}"))?;
-    if let Some(multibase) = parsed.get("publicKeyMultibase").and_then(Value::as_str) {
-        return Ok(PublicKeyMaterial::Ed25519Multibase {
-            value: multibase.to_owned(),
-        });
-    }
-    if let Some(jwk) = parsed.get("publicKeyJwk") {
-        return Ok(PublicKeyMaterial::Jwk { value: jwk.clone() });
-    }
-    if parsed.get("kty").is_some() && parsed.get("crv").is_some() && parsed.get("x").is_some() {
-        return Ok(PublicKeyMaterial::Jwk { value: parsed });
-    }
-    Err("DID verification method does not expose publicKeyMultibase or publicKeyJwk".to_owned())
-}
-
-fn trusted_verification_method<'a>(
-    config: &'a Config,
-    verification_method: &str,
-) -> std::result::Result<&'a TrustedVerificationMethodConfig, HttpSignatureReject> {
-    config
-        .arkret
-        .trusted_verification_methods
-        .iter()
-        .find(|method| method.verification_method == verification_method)
-        .ok_or_else(|| {
-            http_signature_invalid(format!(
-                "verification method {verification_method} is not trusted"
-            ))
-        })
-}
-
-fn verification_method_did(verification_method: &str) -> std::result::Result<String, String> {
-    verification_method
-        .rsplit_once('#')
-        .map(|(did, _)| did.to_owned())
-        .filter(|did| !did.is_empty())
-        .ok_or_else(|| format!("verification method {verification_method} has no DID fragment"))
+/// Canonical digest of the source service's signing key state.
+///
+/// `applet-integration.md` §12 names "Arkret node 方向的 source service DID
+/// key-state evidence" as the anchor material for the node → applet direction
+/// (the Applet `registration_epoch` anchors the *opposite* direction and is not
+/// reachable from a bridge — see `crate::did_binding` module docs). It is the
+/// evidence digest of the `service` binding and, unchanged from before, part of
+/// the idempotency `source_signature_anchor`.
+fn source_key_state_digest(key_bytes: &[u8]) -> Result<arkret::Hash> {
+    arkret::Hash::new(arkret::canonical::canonical_digest(key_bytes)).map_err(|err| {
+        BridgeError::Runtime(format!(
+            "source key state digest is not a valid hash: {err}"
+        ))
+    })
 }
 
 fn collect_headers(req: &Request) -> Vec<(String, String)> {
@@ -1097,59 +1173,461 @@ fn unsupported_feature(res: &mut Response, message: impl Into<String>) {
 
 #[cfg(test)]
 mod tests {
+    //! DID-P1-B02 acceptance: the inbound applet transaction path verifies
+    //! every signature it is given while adding **zero** DID authority network
+    //! calls once the bindings are accepted
+    //! (`did-usage-and-verification.md` §6, last bullet).
+    //!
+    //! Every test here drives [`DidAuthority`] with a `CountingDidResolver`, so
+    //! `resolver.calls()` is the literal `authority_network_call_count` of the
+    //! task's acceptance criteria; `signature_verify_count` is the number of
+    //! Event proofs the assertions walk through.
+
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use arkret::identity::{DidDocument, DidResolver, IdentityError};
+    use arkret::signatures::{Ed25519PayloadSigner, SignEventOptions, sign_event};
+    use arkret::{Did, Event, Hlc, RealmId, ScopeRef, TypedTrustDomainId};
 
     use super::*;
 
+    // ========================================================================
+    // Counting resolver spy (mirrors the SDK's
+    // `crates/identity/tests/binding_resolver_spy.rs`)
+    // ========================================================================
+
+    /// Serves DID documents from an in-memory table and counts every
+    /// resolution. A local binding-store lookup or a per-signature verification
+    /// must never reach this type at all.
+    #[derive(Debug, Default)]
+    struct CountingDidResolver {
+        documents: std::sync::Mutex<BTreeMap<String, DidDocument>>,
+        calls: AtomicUsize,
+    }
+
+    impl CountingDidResolver {
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+
+        fn publish(&self, did: &Did, verification_method: &DidUrl, seed: u8) {
+            let multibase = arkret::ed25519_pubkey_to_did_key_multibase(&public_key_bytes(seed));
+            self.documents.lock().expect("lock").insert(
+                did.as_str().to_owned(),
+                DidDocument::new(
+                    did.clone(),
+                    verification_method.as_str().to_owned(),
+                    multibase,
+                ),
+            );
+        }
+    }
+
+    impl DidResolver for CountingDidResolver {
+        fn supports(&self, _did: &Did) -> bool {
+            true
+        }
+
+        fn resolve_did(&self, did: &Did) -> std::result::Result<DidDocument, IdentityError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.documents
+                .lock()
+                .expect("lock")
+                .get(did.as_str())
+                .cloned()
+                .ok_or_else(|| IdentityError::Protocol(format!("unknown DID `{did}`")))
+        }
+    }
+
+    // ========================================================================
+    // Fixtures
+    // ========================================================================
+
+    fn signer(seed: u8, actor: &Did, verification_method: &DidUrl) -> Ed25519PayloadSigner {
+        Ed25519PayloadSigner::from_did_key_seed(
+            [seed; 32],
+            actor.clone(),
+            verification_method.clone(),
+        )
+    }
+
+    fn public_key_bytes(seed: u8) -> [u8; 32] {
+        signer(seed, &actor_did(), &actor_verification_method())
+            .verifying_key()
+            .to_bytes()
+    }
+
+    fn trust_domain() -> TypedTrustDomainId {
+        TypedTrustDomainId::new("ak:trust_domain:bridge.example".to_owned()).expect("trust domain")
+    }
+
+    fn actor_did() -> Did {
+        Did::new("did:webvh:z6mkfixture:alice.example".to_owned()).expect("actor did")
+    }
+
+    fn actor_verification_method() -> DidUrl {
+        DidUrl::new(format!("{}#key-1", actor_did())).expect("did url")
+    }
+
+    fn server_did() -> Did {
+        Did::new("did:webvh:z6mkfixture:server.example".to_owned()).expect("server did")
+    }
+
+    fn server_verification_method() -> DidUrl {
+        DidUrl::new(format!("{}#tx-1", server_did())).expect("did url")
+    }
+
+    fn authority_with(resolver: Arc<CountingDidResolver>) -> DidAuthority {
+        DidAuthority::with_resolver(trust_domain(), resolver).expect("authority")
+    }
+
+    /// One Event signed by `seed`'s key under `verification_method`.
+    fn signed_event(actor: &Did, verification_method: &DidUrl, seed: u8, seq: u64) -> Event {
+        let realm = RealmId::new("ak:realm:01904100-0000-7000-8000-668e2181b41d").expect("realm");
+        let hlc = Hlc::new(format!("01970e589d2{seq}-0001-a13f9c2e")).expect("hlc");
+        let mut event = Event::new(
+            "ak.message.create",
+            ScopeRef::Realm { realm_id: realm },
+            actor.clone(),
+            seq,
+            hlc,
+            json!({ "body": format!("hello {seq}") }),
+        )
+        .expect("event");
+        sign_event(
+            &mut event,
+            &signer(seed, actor, verification_method),
+            verification_method,
+            SignEventOptions::new(),
+        )
+        .expect("sign event");
+        event
+    }
+
+    fn transaction(events: Vec<Event>) -> AppletTransactionRequestBody {
+        AppletTransactionRequestBody {
+            source_service_id: server_did(),
+            events,
+            signals: None,
+        }
+    }
+
+    fn seed_source_service(authority: &DidAuthority, seed: u8, now: DateTime<Utc>) {
+        let key_bytes = public_key_bytes(seed);
+        let digest = source_key_state_digest(&key_bytes).expect("digest");
+        authority
+            .accept_configured_source_service_key(
+                &server_verification_method(),
+                &arkret::ed25519_pubkey_to_did_key_multibase(&key_bytes),
+                &digest,
+                now,
+            )
+            .expect("source service binding");
+    }
+
+    // ========================================================================
+    // B02 #1 — two transactions in the same epoch: every proof verified,
+    // resolver network delta 0.
+    // ========================================================================
+
     #[test]
-    fn verification_method_lookup_accepts_full_fragment_and_single_key_documents() {
-        let key = arkret::ed25519_pubkey_to_did_key_multibase(&[7u8; 32]);
+    fn two_transactions_under_the_same_bindings_add_zero_authority_calls() {
+        let resolver = Arc::new(CountingDidResolver::default());
+        resolver.publish(&actor_did(), &actor_verification_method(), 42);
+        let authority = authority_with(resolver.clone());
+        let now = Utc::now();
+        // The HTTP Message Signature anchor is accepted from configuration, so
+        // it never costs a resolution at all.
+        seed_source_service(&authority, 7, now);
+        assert_eq!(resolver.calls(), 0);
 
-        let mut full = BTreeMap::new();
-        full.insert("did:webvh:server.example#key-1".to_owned(), key.clone());
+        // First transaction: the actor's key is new to this trust domain, which
+        // is §4 trigger row 1 — exactly one resolution.
+        let first = transaction(vec![signed_event(
+            &actor_did(),
+            &actor_verification_method(),
+            42,
+            1,
+        )]);
+        authenticate_transaction_events(&authority, &first, now).expect("first transaction");
+        assert_eq!(resolver.calls(), 1);
+
+        // Second transaction in the same epoch: both Events verify, zero new
+        // authority calls.
+        let second = transaction(vec![
+            signed_event(&actor_did(), &actor_verification_method(), 42, 2),
+            signed_event(&actor_did(), &actor_verification_method(), 42, 3),
+        ]);
+        authenticate_transaction_events(&authority, &second, now).expect("second transaction");
         assert_eq!(
-            verification_method_value(&full, "did:webvh:server.example#key-1"),
-            Some(key.as_str())
+            resolver.calls(),
+            1,
+            "an ordinary transaction must not add a DID authority network call"
         );
 
-        let mut fragment = BTreeMap::new();
-        fragment.insert("#key-1".to_owned(), key.clone());
+        // The HTTP signature key is still served from the accepted source
+        // service binding, also with zero resolutions.
+        let accepted = authority
+            .bindings()
+            .source_service(&server_did(), &server_verification_method(), now)
+            .expect("source service binding");
         assert_eq!(
-            verification_method_value(&fragment, "did:webvh:server.example#key-1"),
-            Some(key.as_str())
+            public_key_material_from_binding(&accepted, &server_verification_method())
+                .expect("material")
+                .ed25519_bytes()
+                .expect("bytes"),
+            public_key_bytes(7)
         );
+        assert_eq!(resolver.calls(), 1);
+    }
 
-        let mut single_did_key = BTreeMap::new();
-        single_did_key.insert("unexpected-key-id".to_owned(), key.clone());
-        let did_key_method = format!("did:key:{key}#{key}");
+    // ========================================================================
+    // B02 #2 — unknown Event signer: positive and negative.
+    // ========================================================================
+
+    #[test]
+    fn an_unknown_event_signer_that_resolves_is_accepted_exactly_once() {
+        let resolver = Arc::new(CountingDidResolver::default());
+        resolver.publish(&actor_did(), &actor_verification_method(), 42);
+        let authority = authority_with(resolver.clone());
+        let now = Utc::now();
+
+        let body = transaction(vec![signed_event(
+            &actor_did(),
+            &actor_verification_method(),
+            42,
+            1,
+        )]);
         assert_eq!(
-            verification_method_value(&single_did_key, &did_key_method),
-            Some(key.as_str())
+            verify_transaction_events(authority.bindings(), &body, now).expect("pass"),
+            EventProofVerification::NeedsAuthority(vec![actor_verification_method()]),
+            "the ordinary path must report the gap, not resolve it itself"
         );
+        assert_eq!(resolver.calls(), 0);
 
-        let mut mismatched_webvh = BTreeMap::new();
-        mismatched_webvh.insert("unexpected-key-id".to_owned(), key);
+        authenticate_transaction_events(&authority, &body, now).expect("accepted");
+        assert_eq!(resolver.calls(), 1);
+    }
+
+    #[test]
+    fn an_unknown_event_signer_that_cannot_be_resolved_fails_closed() {
+        let resolver = Arc::new(CountingDidResolver::default());
+        // Nothing published: the DID does not exist for this bridge.
+        let authority = authority_with(resolver.clone());
+        let now = Utc::now();
+
+        let body = transaction(vec![signed_event(
+            &actor_did(),
+            &actor_verification_method(),
+            42,
+            1,
+        )]);
+        let err = authenticate_transaction_events(&authority, &body, now)
+            .expect_err("unknown signer must fail closed");
+        assert!(err.contains("DID authority verification failed"), "{err}");
         assert_eq!(
-            verification_method_value(&mismatched_webvh, "did:webvh:server.example#key-1"),
-            None
+            resolver.calls(),
+            1,
+            "a failure must not turn into a retry loop"
         );
     }
 
     #[test]
-    fn did_document_key_material_accepts_multibase_did_key_and_jwk_container() {
-        let multibase = arkret::ed25519_pubkey_to_did_key_multibase(&[8u8; 32]);
-        let public_key =
-            public_key_material_from_did_document_value(&format!("did:key:{multibase}")).unwrap();
-        assert_eq!(public_key.ed25519_bytes().unwrap(), [8u8; 32]);
+    fn an_event_proof_signed_by_a_key_the_document_does_not_publish_is_rejected() {
+        let resolver = Arc::new(CountingDidResolver::default());
+        // The document publishes seed 42's key; the Event is signed with 43.
+        resolver.publish(&actor_did(), &actor_verification_method(), 42);
+        let authority = authority_with(resolver.clone());
+        let now = Utc::now();
 
-        let jwk = serde_json::json!({
-            "publicKeyJwk": {
-                "kty": "OKP",
-                "crv": "Ed25519",
-                "x": arkret::base64url_encode([9u8; 32]),
-            }
-        });
-        let public_key = public_key_material_from_did_document_value(&jwk.to_string()).unwrap();
-        assert_eq!(public_key.ed25519_bytes().unwrap(), [9u8; 32]);
+        let body = transaction(vec![signed_event(
+            &actor_did(),
+            &actor_verification_method(),
+            43,
+            1,
+        )]);
+        let err = authenticate_transaction_events(&authority, &body, now)
+            .expect_err("wrong key must be rejected");
+        assert!(err.contains("proof verification failed"), "{err}");
+    }
+
+    #[test]
+    fn an_event_proof_signed_by_a_foreign_did_is_rejected_before_any_resolution() {
+        let resolver = Arc::new(CountingDidResolver::default());
+        let authority = authority_with(resolver.clone());
+        let now = Utc::now();
+
+        // The Event's `actor_id` and the proof's verification method disagree.
+        let foreign = Did::new("did:webvh:z6mkfixture:mallory.example".to_owned()).expect("did");
+        let foreign_method = DidUrl::new(format!("{foreign}#key-1")).expect("did url");
+        let mut event = signed_event(&foreign, &foreign_method, 42, 1);
+        event.actor_id = actor_did();
+
+        let err = authenticate_transaction_events(&authority, &transaction(vec![event]), now)
+            .expect_err("signer/actor mismatch must be rejected");
+        assert!(
+            err.contains("proof binding failed") || err.contains("does not match"),
+            "{err}"
+        );
+        assert_eq!(
+            resolver.calls(),
+            0,
+            "structural rejection must never reach the resolver"
+        );
+    }
+
+    // ========================================================================
+    // B01 — the two binding purposes may not substitute for each other.
+    // ========================================================================
+
+    #[test]
+    fn a_source_service_binding_cannot_authenticate_an_event_proof() {
+        let resolver = Arc::new(CountingDidResolver::default());
+        let authority = authority_with(resolver.clone());
+        let now = Utc::now();
+
+        // Accept the actor's very key as a *source service* anchor.
+        let key_bytes = public_key_bytes(42);
+        authority
+            .accept_configured_source_service_key(
+                &actor_verification_method(),
+                &arkret::ed25519_pubkey_to_did_key_multibase(&key_bytes),
+                &source_key_state_digest(&key_bytes).expect("digest"),
+                now,
+            )
+            .expect("service binding");
+
+        // The Event proof path still sees no binding: `service` cannot stand in
+        // for the Event signer purpose.
+        let body = transaction(vec![signed_event(
+            &actor_did(),
+            &actor_verification_method(),
+            42,
+            1,
+        )]);
+        assert_eq!(
+            verify_transaction_events(authority.bindings(), &body, now).expect("pass"),
+            EventProofVerification::NeedsAuthority(vec![actor_verification_method()])
+        );
+        assert_eq!(resolver.calls(), 0);
+    }
+
+    #[test]
+    fn an_event_signer_binding_cannot_authenticate_the_http_signature() {
+        let resolver = Arc::new(CountingDidResolver::default());
+        resolver.publish(&server_did(), &server_verification_method(), 7);
+        let authority = authority_with(resolver.clone());
+        let now = Utc::now();
+
+        // Accept the *node's* key, but only for the Event signer purpose.
+        authority
+            .accept_event_signer(&server_verification_method(), now)
+            .expect("event signer binding");
+        assert_eq!(resolver.calls(), 1);
+
+        // The HTTP Message Signature lookup is keyed by `service` and misses.
+        assert_eq!(
+            authority
+                .bindings()
+                .source_service(&server_did(), &server_verification_method(), now),
+            Err(BindingLookupError::Missing)
+        );
+        assert_eq!(resolver.calls(), 1);
+    }
+
+    // ========================================================================
+    // B02 #2 — source service key rotation and epoch renewal.
+    // ========================================================================
+
+    #[test]
+    fn rotating_the_source_service_key_replaces_the_http_signature_material() {
+        let resolver = Arc::new(CountingDidResolver::default());
+        let authority = authority_with(resolver.clone());
+        let now = Utc::now();
+
+        seed_source_service(&authority, 7, now);
+        let before = authority
+            .bindings()
+            .source_service(&server_did(), &server_verification_method(), now)
+            .expect("binding");
+        assert_eq!(
+            public_key_material_from_binding(&before, &server_verification_method())
+                .expect("material")
+                .ed25519_bytes()
+                .expect("bytes"),
+            public_key_bytes(7)
+        );
+
+        // Operator rotates the configured anchor.
+        seed_source_service(&authority, 8, now);
+        let after = authority
+            .bindings()
+            .source_service(&server_did(), &server_verification_method(), now)
+            .expect("binding");
+        assert_eq!(
+            public_key_material_from_binding(&after, &server_verification_method())
+                .expect("material")
+                .ed25519_bytes()
+                .expect("bytes"),
+            public_key_bytes(8),
+            "the rotated key must replace, not shadow, the previous one"
+        );
+        assert_eq!(
+            resolver.calls(),
+            0,
+            "a configured anchor rotation never touches the network"
+        );
+    }
+
+    #[test]
+    fn invalidating_an_event_signer_triggers_exactly_one_new_authority_call() {
+        let resolver = Arc::new(CountingDidResolver::default());
+        resolver.publish(&actor_did(), &actor_verification_method(), 42);
+        let authority = authority_with(resolver.clone());
+        let now = Utc::now();
+
+        let first = transaction(vec![signed_event(
+            &actor_did(),
+            &actor_verification_method(),
+            42,
+            1,
+        )]);
+        authenticate_transaction_events(&authority, &first, now).expect("first");
+        assert_eq!(resolver.calls(), 1);
+
+        // Epoch renewal / rotation: the actor re-keys under the same
+        // verification method id.
+        resolver.publish(&actor_did(), &actor_verification_method(), 43);
+        let rotated = transaction(vec![signed_event(
+            &actor_did(),
+            &actor_verification_method(),
+            43,
+            2,
+        )]);
+        // Without an invalidation the pinned binding is used and the new
+        // signature fails closed — the ordinary path never "resolves once more
+        // to be safe".
+        let err = authenticate_transaction_events(&authority, &rotated, now)
+            .expect_err("stale key must fail closed");
+        assert!(err.contains("proof verification failed"), "{err}");
+        assert_eq!(resolver.calls(), 1);
+
+        assert_eq!(authority.invalidate_did(&actor_did()), 1);
+        authenticate_transaction_events(&authority, &rotated, now).expect("after invalidation");
+        assert_eq!(
+            resolver.calls(),
+            2,
+            "invalidation must cost exactly one refresh"
+        );
+    }
+
+    #[test]
+    fn an_empty_event_list_is_authenticated_without_touching_the_resolver() {
+        let resolver = Arc::new(CountingDidResolver::default());
+        let authority = authority_with(resolver.clone());
+        authenticate_transaction_events(&authority, &transaction(Vec::new()), Utc::now())
+            .expect("empty transaction");
+        assert_eq!(resolver.calls(), 0);
     }
 }

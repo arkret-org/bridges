@@ -5,7 +5,9 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use arkret::Did;
 use arkret::signatures::PublicKeyMaterial;
+use arkret_wire::DidUrl;
 use serde::Deserialize;
 
 use crate::error::{BridgeError, Result};
@@ -165,6 +167,44 @@ pub struct ArkretConfig {
     /// enforces a narrow namespace derived from the bridge id and service DID.
     #[serde(default)]
     pub applet_namespaces: Option<serde_json::Value>,
+}
+
+impl ArkretConfig {
+    /// The `#fragment` of the configured signing verification method.
+    ///
+    /// `verification_method_id` is configured as a bare fragment (`#key-1`) so
+    /// one value works for the service DID and for every ghost actor DID the
+    /// bridge signs as.
+    pub fn verification_method_fragment(&self) -> Result<&str> {
+        let (_, fragment) = self
+            .verification_method_id
+            .rsplit_once('#')
+            .ok_or_else(|| {
+                BridgeError::Config(
+                    "verification_method_id must contain a #key fragment".to_owned(),
+                )
+            })?;
+        if fragment.trim().is_empty() {
+            return Err(BridgeError::Config(
+                "verification_method_id key fragment must not be empty".to_owned(),
+            ));
+        }
+        Ok(fragment)
+    }
+
+    /// The absolute signing DID URL for `actor`.
+    ///
+    /// `DidUrl` is the wire type for `verification_method`
+    /// (`did-usage-and-verification.md` §2.2); a bare DID or a bare `#fragment`
+    /// is rejected at construction rather than travelling as a `String`.
+    pub fn verification_method_for(&self, actor: &Did) -> Result<DidUrl> {
+        let fragment = self.verification_method_fragment()?;
+        DidUrl::new(format!("{}#{fragment}", actor.as_str())).map_err(|err| {
+            BridgeError::Config(format!(
+                "verification_method_id does not form a valid DID URL for `{actor}`: {err}"
+            ))
+        })
+    }
 }
 
 /// A configured verification method and its Ed25519 public key material.

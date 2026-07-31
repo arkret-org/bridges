@@ -18,18 +18,18 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+#[cfg(any(feature = "web", test))]
+use arkret::WireError;
 use arkret::http_client::{Auth, Client};
 #[cfg(any(feature = "web", test))]
-use arkret::signatures::{
-    DidVerificationMethodResolver, EventProofBuilder, VerificationMethodDocument,
-};
+use arkret::identity::public_key_material_from_binding;
+#[cfg(any(feature = "web", test))]
+use arkret::signatures::{EventProofBuilder, VerificationMethodDocument};
 use arkret::signatures::{SignEventOptions, sign_event};
 use arkret::{
     AppletId, Did, Ed25519PayloadSigner, Event, EventId, Hlc, HlcGenerator, PayloadSigner, RealmId,
     ScopeRef,
 };
-#[cfg(any(feature = "web", test))]
-use arkret::{DidDocumentVerificationMethodResolver, DidResolver, WireError};
 use arkret_models_collaboration::event_sync::{
     EventsFrontierSelector, EventsFrontierView, RealmActorFrontierView,
 };
@@ -44,6 +44,7 @@ use arkret_models_integration::{
     AppletActorView, AppletPingOutcome, AppletProtocolMetadata, AppletRealmView,
     AppletTransactionOutcome,
 };
+use arkret_wire::DidUrl;
 use arkret_wire::{EventInitialSubmission, SignalEnvelope};
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -56,6 +57,8 @@ use tokio::sync::mpsc::Sender;
 #[cfg(any(feature = "web", test))]
 use crate::app::AppletResolver;
 use crate::config::Config;
+#[cfg(any(feature = "web", test))]
+use crate::did_binding::DidAuthority;
 use crate::error::{BridgeError, Result};
 #[cfg(any(feature = "web", test))]
 use crate::idempotency::{DedupVerdict, EventDedupStore};
@@ -261,10 +264,14 @@ impl ArkretEdge {
     ) -> Result<Self> {
         let service_id = Did::new(config.arkret.service_id.clone())?;
         let seed = config.signing_seed()?;
+        // The signer's `kid` MUST be the absolute DID URL
+        // `<service_id>#<fragment>`; `verification_method_id` is configured as
+        // a bare fragment, so it is absolutized here instead of being handed to
+        // the signer verbatim.
         let signer = Ed25519PayloadSigner::from_did_key_seed(
             seed,
             service_id.clone(),
-            config.arkret.verification_method_id.clone(),
+            config.arkret.verification_method_for(&service_id)?,
         );
         let client = default_client(&config)?;
         Self::build(
@@ -516,23 +523,8 @@ impl ArkretEdge {
         Ok(())
     }
 
-    fn verification_method_for_actor(&self, actor: &Did) -> Result<String> {
-        let (_, fragment) = self
-            .config
-            .arkret
-            .verification_method_id
-            .rsplit_once('#')
-            .ok_or_else(|| {
-                BridgeError::Config(
-                    "verification_method_id must contain a #key fragment".to_owned(),
-                )
-            })?;
-        if fragment.trim().is_empty() {
-            return Err(BridgeError::Config(
-                "verification_method_id key fragment must not be empty".to_owned(),
-            ));
-        }
-        Ok(format!("{}#{fragment}", actor.as_str()))
+    fn verification_method_for_actor(&self, actor: &Did) -> Result<DidUrl> {
+        self.config.arkret.verification_method_for(actor)
     }
 
     /// Submit a signed Event together with issuer-produced initial publication
@@ -581,7 +573,7 @@ impl ArkretEdge {
 
     /// Return the service-owned absolute verification method used by Event and
     /// payload proofs. Configs may use a fragment-only shorthand.
-    pub fn service_verification_method(&self) -> Result<String> {
+    pub fn service_verification_method(&self) -> Result<DidUrl> {
         self.verification_method_for_actor(&self.service_id)
     }
 
@@ -870,12 +862,14 @@ pub struct BridgeAppletHandler {
     /// Durable single-event-level dedup store (applet-integration §7.3; the
     /// runtime path injects [`crate::db::DbEventDedupStore`]).
     dedup: Arc<dyn EventDedupStore>,
-    /// Trust-root DID resolver the SDK applet router uses to authenticate the
-    /// source service DID's HTTP message signature and every pushed Event proof
-    /// on the inbound `POST /_arkret/edge/applet/transactions` path
-    /// (applet-integration §7.3). Scoped to the methods this bridge accepts for
-    /// inbound pushes (did:key / did:webvh, fail-closed).
-    source_did_resolver: Arc<dyn DidResolver + Send + Sync>,
+    /// Inbound DID **authority adapter** (`did-usage-and-verification.md` §6).
+    ///
+    /// The handler holds the adapter, not a resolver: `DidAuthority` keeps its
+    /// `CompositeDidResolver` in a private field with no accessor, so the only
+    /// way to reach the network from here is one of its explicitly named §4
+    /// authority entry points. Ordinary per-signature verification consumes
+    /// [`DidAuthority::bindings`], which has no resolver at all.
+    did_authority: Arc<DidAuthority>,
 }
 
 #[cfg(any(feature = "web", test))]
@@ -907,7 +901,7 @@ impl BridgeAppletHandler {
         resolver: Option<Arc<dyn AppletResolver>>,
         dedup: Arc<dyn EventDedupStore>,
         handled_event_kinds: Option<Vec<String>>,
-        source_did_resolver: Arc<dyn DidResolver + Send + Sync>,
+        did_authority: Arc<DidAuthority>,
     ) -> Result<Self> {
         let bridge_id = edge.config.bridge.bridge_id.clone();
         let service_id = edge.service_id.clone();
@@ -928,7 +922,7 @@ impl BridgeAppletHandler {
             resolver,
             dedup,
             handled_event_kinds,
-            source_did_resolver,
+            did_authority,
         })
     }
 
@@ -995,13 +989,32 @@ fn glob_suffix_match(pattern: &str, candidate: &str) -> bool {
 
 #[cfg(any(feature = "web", test))]
 impl arkret::AppletHandler for BridgeAppletHandler {
+    /// SDK `AppletHandler` authority hook.
+    ///
+    /// This is an authority surface by definition (the SDK router calls it to
+    /// authenticate an inbound push), so it delegates to [`DidAuthority`] rather
+    /// than holding a resolver here. The adapter is store-first: an already
+    /// accepted `service`-purpose binding answers with zero network calls, and
+    /// only a genuine §4 trigger resolves — exactly once.
     fn resolve_verification_method(
         &self,
-        verification_method: &str,
+        verification_method: &DidUrl,
     ) -> std::result::Result<VerificationMethodDocument, WireError> {
-        DidDocumentVerificationMethodResolver::new(self.source_did_resolver.as_ref())
-            .resolve_verification_method(verification_method)
-            .map_err(|error| WireError::Protocol(error.to_string()))
+        let accepted = self
+            .did_authority
+            .service_verification_method(verification_method, chrono::Utc::now())
+            .map_err(WireError::Protocol)?;
+        let public_key = public_key_material_from_binding(&accepted, verification_method)
+            .map_err(|error| WireError::Protocol(error.to_string()))?;
+        let key_bytes = public_key
+            .ed25519_bytes()
+            .map_err(|error| WireError::Protocol(error.to_string()))?;
+        Ok(VerificationMethodDocument {
+            did: accepted.binding().did().clone(),
+            verification_method: verification_method.clone(),
+            public_key_multibase: arkret::ed25519_pubkey_to_did_key_multibase(&key_bytes),
+            controller: None,
+        })
     }
 
     fn ping(&self) -> std::result::Result<AppletPingOutcome, WireError> {
@@ -1368,7 +1381,8 @@ mod tests {
         arkret::Proof {
             kind: "detached_jws".to_owned(),
             alg: "EdDSA".to_owned(),
-            verification_method: "did:webvh:alice.example#key-1".to_owned(),
+            verification_method: DidUrl::new("did:webvh:alice.example#key-1")
+                .expect("fixture verification method is a valid DID URL"),
             event_digest: arkret::Hash::new(
                 "sha256:0000000000000000000000000000000000000000000000000000000000000000",
             )

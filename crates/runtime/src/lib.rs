@@ -37,6 +37,8 @@ pub mod blocking;
 pub mod cache;
 mod config;
 pub mod dead_letter;
+#[cfg(any(feature = "web", test))]
+pub mod did_binding;
 mod error;
 mod file_seq_store;
 pub mod idempotency;
