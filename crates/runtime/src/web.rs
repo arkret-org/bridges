@@ -999,33 +999,15 @@ fn seed_source_service_bindings(authority: &DidAuthority, config: &Config) -> Re
                  is not a usable Ed25519 key: {err}"
             ))
         })?;
-        let key_state_digest = source_key_state_digest(&key_bytes)?;
         authority
             .accept_configured_source_service_key(
                 &verification_method,
                 &arkret::ed25519_pubkey_to_did_key_multibase(&key_bytes),
-                &key_state_digest,
                 now,
             )
             .map_err(BridgeError::Config)?;
     }
     Ok(())
-}
-
-/// Canonical digest of the source service's signing key state.
-///
-/// `applet-integration.md` §12 names "Arkret node 方向的 source service DID
-/// key-state evidence" as the anchor material for the node → applet direction
-/// (the Applet `registration_epoch` anchors the *opposite* direction and is not
-/// reachable from a bridge — see `crate::did_binding` module docs). It is the
-/// evidence digest of the `service` binding and, unchanged from before, part of
-/// the idempotency `source_signature_anchor`.
-fn source_key_state_digest(key_bytes: &[u8]) -> Result<arkret::Hash> {
-    arkret::Hash::new(arkret::canonical::canonical_digest(key_bytes)).map_err(|err| {
-        BridgeError::Runtime(format!(
-            "source key state digest is not a valid hash: {err}"
-        ))
-    })
 }
 
 fn collect_headers(req: &Request) -> Vec<(String, String)> {
@@ -1229,13 +1211,19 @@ mod tests {
             true
         }
 
-        fn resolve_did(&self, did: &Did) -> std::result::Result<DidDocument, IdentityError> {
+        fn resolve_did(
+            &self,
+            did: &Did,
+        ) -> std::result::Result<arkret::identity::ResolvedDid, IdentityError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.documents
                 .lock()
                 .expect("lock")
                 .get(did.as_str())
                 .cloned()
+                // Plain HTTP `did:webvh` documents publish no method evidence,
+                // so the spy mirrors the production chain: proofless.
+                .map(arkret::identity::ResolvedDid::proofless)
                 .ok_or_else(|| IdentityError::Protocol(format!("unknown DID `{did}`")))
         }
     }
@@ -1315,12 +1303,10 @@ mod tests {
 
     fn seed_source_service(authority: &DidAuthority, seed: u8, now: DateTime<Utc>) {
         let key_bytes = public_key_bytes(seed);
-        let digest = source_key_state_digest(&key_bytes).expect("digest");
         authority
             .accept_configured_source_service_key(
                 &server_verification_method(),
                 &arkret::ed25519_pubkey_to_did_key_multibase(&key_bytes),
-                &digest,
                 now,
             )
             .expect("source service binding");
@@ -1493,7 +1479,6 @@ mod tests {
             .accept_configured_source_service_key(
                 &actor_verification_method(),
                 &arkret::ed25519_pubkey_to_did_key_multibase(&key_bytes),
-                &source_key_state_digest(&key_bytes).expect("digest"),
                 now,
             )
             .expect("service binding");
