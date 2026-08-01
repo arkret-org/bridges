@@ -220,6 +220,35 @@ async fn claim_transaction(
     run_blocking(move || store.claim(&replay, &hash, &source_signature_anchor)).await
 }
 
+/// Authenticate every Event before creating the durable idempotency claim.
+///
+/// The claim is the first transaction-processing side effect. Keeping proof
+/// verification ahead of it means an unauthenticated request cannot create a
+/// `pending` row and correctness never depends on a compensating release.
+async fn authenticate_and_claim_transaction(
+    authority: Arc<DidAuthority>,
+    body: AppletTransactionRequestBody,
+    store: Arc<dyn TransactionIdempotencyStore<AppletTransactionOutcome, Error = BridgeError>>,
+    replay: IdempotencyIdentity,
+    hash: String,
+    source_signature_anchor: String,
+) -> Result<std::result::Result<TransactionClaim<AppletTransactionOutcome>, String>> {
+    let authentication = run_blocking(move || {
+        Ok(authenticate_transaction_events(
+            authority.as_ref(),
+            &body,
+            Utc::now(),
+        ))
+    })
+    .await?;
+    match authentication {
+        Ok(()) => claim_transaction(store, replay, hash, source_signature_anchor)
+            .await
+            .map(Ok),
+        Err(err) => Ok(Err(err)),
+    }
+}
+
 async fn release_transaction_claim(
     store: Arc<dyn TransactionIdempotencyStore<AppletTransactionOutcome, Error = BridgeError>>,
     replay: IdempotencyIdentity,
@@ -422,9 +451,12 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
             }
         };
 
-    // §7.3: persist the idempotency claim before any side effect (the claim is
-    // a durable `pending` record; the completed outcome replaces it below).
-    match claim_transaction(
+    // Authenticate before the first transaction-processing side effect. An
+    // invalid Event proof must not leave a durable `pending` row behind. Once
+    // authenticated, §7.3 requires the claim before invoking the handler.
+    match authenticate_and_claim_transaction(
+        state.did_authority.clone(),
+        body.clone(),
         state.idempotency.clone(),
         replay.clone(),
         request_hash.clone(),
@@ -432,12 +464,12 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
     )
     .await
     {
-        Ok(TransactionClaim::Duplicate(response)) => {
+        Ok(Ok(TransactionClaim::Duplicate(response))) => {
             record_applet_transaction("duplicate");
             res.render(Json(response));
             return;
         }
-        Ok(TransactionClaim::Pending) => {
+        Ok(Ok(TransactionClaim::Pending)) => {
             record_applet_transaction("pending");
             res.render(Json(arkret_models_integration::AppletTransactionOutcome {
                 ok: false,
@@ -446,7 +478,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
             }));
             return;
         }
-        Ok(TransactionClaim::Conflict) => {
+        Ok(Ok(TransactionClaim::Conflict)) => {
             record_applet_transaction("conflict");
             // Same (source_service_id, Idempotency-Key) with a different body:
             // applet-integration §7.3/§14 require the closed error code
@@ -463,52 +495,13 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
             }));
             return;
         }
-        Ok(TransactionClaim::Claimed) => {}
-        Err(err) => {
-            record_applet_transaction("internal_error");
-            internal_error(res, err.to_string());
-            return;
-        }
-    }
-
-    let did_authority = state.did_authority.clone();
-    let body_for_verification = body.clone();
-    let verification_result = run_blocking(move || {
-        Ok(authenticate_transaction_events(
-            did_authority.as_ref(),
-            &body_for_verification,
-            Utc::now(),
-        ))
-    })
-    .await;
-    match verification_result {
-        Ok(Ok(())) => {}
+        Ok(Ok(TransactionClaim::Claimed)) => {}
         Ok(Err(err)) => {
-            if let Err(release_err) = release_transaction_claim(
-                state.idempotency.clone(),
-                replay.clone(),
-                request_hash.clone(),
-                source_signature_anchor.clone(),
-            )
-            .await
-            {
-                tracing::warn!(error = %release_err, "failed to release idempotency claim");
-            }
             record_applet_transaction("unauthorized");
             unauthorized(res, err);
             return;
         }
         Err(err) => {
-            if let Err(release_err) = release_transaction_claim(
-                state.idempotency.clone(),
-                replay.clone(),
-                request_hash.clone(),
-                source_signature_anchor.clone(),
-            )
-            .await
-            {
-                tracing::warn!(error = %release_err, "failed to release idempotency claim");
-            }
             record_applet_transaction("internal_error");
             internal_error(res, err.to_string());
             return;
@@ -1228,6 +1221,44 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct CountingIdempotencyStore {
+        claims: AtomicUsize,
+    }
+
+    impl TransactionIdempotencyStore<AppletTransactionOutcome> for CountingIdempotencyStore {
+        type Error = BridgeError;
+
+        fn claim(
+            &self,
+            _identity: &IdempotencyIdentity,
+            _body_digest: &str,
+            _source_signature_anchor: &str,
+        ) -> Result<TransactionClaim<AppletTransactionOutcome>> {
+            self.claims.fetch_add(1, Ordering::SeqCst);
+            Ok(TransactionClaim::Claimed)
+        }
+
+        fn record(
+            &self,
+            _identity: &IdempotencyIdentity,
+            _body_digest: &str,
+            _source_signature_anchor: &str,
+            _outcome: &AppletTransactionOutcome,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn release(
+            &self,
+            _identity: &IdempotencyIdentity,
+            _body_digest: &str,
+            _source_signature_anchor: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
     // ========================================================================
     // Fixtures
     // ========================================================================
@@ -1366,6 +1397,50 @@ mod tests {
             public_key_bytes(7)
         );
         assert_eq!(resolver.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_event_proof_creates_no_idempotency_record() {
+        let resolver = Arc::new(CountingDidResolver::default());
+        resolver.publish(&actor_did(), &actor_verification_method(), 42);
+        let authority = Arc::new(authority_with(resolver));
+        let now = Utc::now();
+        authority
+            .accept_event_signer(&actor_verification_method(), now)
+            .expect("accepted event signer");
+
+        // The accepted document publishes seed 42, while this proof uses 43.
+        let body = transaction(vec![signed_event(
+            &actor_did(),
+            &actor_verification_method(),
+            43,
+            1,
+        )]);
+        let store = Arc::new(CountingIdempotencyStore::default());
+        let replay = IdempotencyIdentity::applet_transaction(
+            IdempotencyDirection::NodeToApplet,
+            server_did().to_string(),
+            "did:webvh:z6mkfixture:bridge.example",
+            "invalid-proof",
+        );
+
+        let result = authenticate_and_claim_transaction(
+            authority,
+            body,
+            store.clone(),
+            replay,
+            "sha256:unused-by-counting-store".to_owned(),
+            "source-anchor".to_owned(),
+        )
+        .await
+        .expect("authentication worker");
+
+        assert!(result.is_err(), "invalid proof must fail authentication");
+        assert_eq!(
+            store.claims.load(Ordering::SeqCst),
+            0,
+            "an invalid proof must not create an idempotency record"
+        );
     }
 
     // ========================================================================

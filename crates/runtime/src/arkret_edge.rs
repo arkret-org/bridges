@@ -38,8 +38,6 @@ use arkret_models_collaboration::http_bodies::AppletTransactionRequestBody;
 #[cfg(any(feature = "web", test))]
 use arkret_models_discovery::ServiceDescribe;
 #[cfg(any(feature = "web", test))]
-use arkret_models_integration::AppletPackage;
-#[cfg(any(feature = "web", test))]
 use arkret_models_integration::{
     AppletActorView, AppletPingOutcome, AppletProtocolMetadata, AppletRealmView,
     AppletTransactionOutcome,
