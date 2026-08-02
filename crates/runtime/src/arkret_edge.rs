@@ -3,8 +3,8 @@
 //!
 //! - **Outbound (app -> arkret)**: [`ArkretEdge::mint_event_unsigned_async`] and
 //!   [`ArkretEdge::mint_event_as_unsigned_async`] build unsigned `Event`s; callers finalize signed
-//!   envelope fields, sign once with [`ArkretEdge::resign_event`], obtain issuer-produced
-//!   publication evidence, then submit an [`EventInitialSubmission`].
+//!   envelope fields, sign once with [`ArkretEdge::resign_event`], build an initial-publication
+//!   wrapper, then submit an [`EventInitialSubmission`].
 //! - **Inbound (arkret → app)**: transactions pushed by the arkret server via the applet HTTP
 //!   endpoints are placed into the `inbound_tx` queue by [`BridgeAppletHandler`]; after the core
 //!   consumes them they are forwarded to the app adapter.
@@ -42,7 +42,9 @@ use arkret_models_integration::{
     AppletActorView, AppletPingOutcome, AppletProtocolMetadata, AppletRealmView,
     AppletTransactionOutcome,
 };
-use arkret_wire::{DidUrl, EventInitialSubmission, ProfileId, ServiceOperationId, SignalEnvelope};
+use arkret_wire::{AuthorizationRef, DidUrl, EventInitialSubmission, SignalEnvelope};
+#[cfg(any(feature = "web", test))]
+use arkret_wire::{ProfileId, ServiceOperationId};
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -90,13 +92,14 @@ const SEQ_RESERVE_BLOCK: i64 = 256;
 /// high-water mark is persisted.
 pub const SEQ_STATE_KEY: &str = "actor_seq_reserved";
 
-/// Host integration that obtains issuer-produced publication evidence for a
-/// fully-authored, fully-signed Event.
+/// Host integration that wraps a fully-authored, fully-signed Event for initial
+/// publication.
 ///
-/// A provider may use a local authority component or an authenticated remote
-/// authz service, but it must return the exact Event it was given wrapped in an
-/// [`EventInitialSubmission`]. The runtime validates both the wrapper and exact
-/// Event identity before sending it.
+/// The default online path has no authorization lease. A delayed-publication
+/// provider may use a local authority component or an authenticated remote
+/// authz service to attach publication evidence. Every provider must return the
+/// exact Event it was given wrapped in an [`EventInitialSubmission`]. The
+/// runtime validates both the wrapper and exact Event identity before sending.
 #[async_trait]
 pub trait EventInitialSubmissionProvider: Send + Sync + 'static {
     async fn initial_submission(&self, event: &Event) -> Result<EventInitialSubmission>;
@@ -104,8 +107,8 @@ pub trait EventInitialSubmissionProvider: Send + Sync + 'static {
 
 /// Production provider backed by the authenticated Principal Server.
 ///
-/// It sends the final signed Event to the standard authorization-lease
-/// operation and returns only the issuer-produced publication wrapper.
+/// The default SDK path returns an online wrapper without an authorization
+/// lease. Delayed publication can install a different provider.
 #[derive(Clone)]
 pub struct PrincipalServerSubmissionProvider {
     client: Client,
@@ -524,13 +527,12 @@ impl ArkretEdge {
         self.config.arkret.verification_method_for(actor)
     }
 
-    /// Submit a signed Event together with issuer-produced initial publication
-    /// evidence and return its event id.
+    /// Submit a signed Event in an initial-publication wrapper and return its
+    /// event id.
     ///
     /// This boundary deliberately accepts the SDK wrapper rather than a bare
-    /// [`Event`]. The runtime cannot mint an [`arkret_wire::AuthorizationLease`]:
-    /// doing so requires the granting authority's signing keys and accepted CBA
-    /// basis.
+    /// [`Event`]. Online wrappers omit the lease; delayed wrappers may carry
+    /// authority-produced publication evidence.
     pub async fn submit_initial(&self, submission: &EventInitialSubmission) -> Result<String> {
         let event_id = submission.event.event_id.to_string();
         submission
@@ -723,14 +725,16 @@ impl ArkretEdge {
     }
 }
 
-fn validate_authorization_ref(authorization_ref: &str) -> Result<String> {
+fn validate_authorization_ref(authorization_ref: &str) -> Result<AuthorizationRef> {
     let authorization_ref = authorization_ref.trim();
     if authorization_ref.is_empty() {
         return Err(BridgeError::Arkret(
             "delegated actor events require authorization_ref".to_owned(),
         ));
     }
-    Ok(authorization_ref.to_owned())
+    AuthorizationRef::new(authorization_ref.to_owned()).map_err(|error| {
+        BridgeError::Arkret(format!("invalid delegated authorization_ref: {error}"))
+    })
 }
 
 fn default_client(config: &Config) -> Result<Client> {
