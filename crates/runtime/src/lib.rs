@@ -40,6 +40,7 @@ pub mod dead_letter;
 #[cfg(any(feature = "web", test))]
 pub mod did_binding;
 mod error;
+pub mod external_effect;
 mod file_seq_store;
 pub mod idempotency;
 pub mod logging;
@@ -78,6 +79,9 @@ pub use dead_letter::{
     OutboundDeadLetterStore,
 };
 pub use error::{BridgeError, Result, redact_sensitive_url_values};
+pub use external_effect::{
+    ExternalEffectExecutor, ValidatedExecutionBundle, execute_external_effect,
+};
 pub use file_seq_store::FileSeqStore;
 pub use idempotency::{DedupVerdict, EventDedupStore, ReplayGuardStore, ReplayGuardVerdict};
 #[cfg(feature = "web")]
