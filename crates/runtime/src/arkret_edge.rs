@@ -1068,7 +1068,9 @@ impl arkret::AppletHandler for BridgeAppletHandler {
             if queue_full {
                 rejected.push(arkret::RejectedItem {
                     event_id: Some(event.event_id.clone()),
-                    reason_code: "queue_full".to_owned(),
+                    reason_code: arkret_wire::ReasonCode::from_wire(
+                        arkret_wire::ReasonCode::QUEUE_FULL,
+                    ),
                     retry_after_ms: None,
                 });
                 continue;
@@ -1086,7 +1088,9 @@ impl arkret::AppletHandler for BridgeAppletHandler {
                 );
                 rejected.push(arkret::RejectedItem {
                     event_id: Some(event.event_id.clone()),
-                    reason_code: "applet_namespace_mismatch".to_owned(),
+                    reason_code: arkret_wire::ReasonCode::from_wire(
+                        arkret_wire::ReasonCode::APPLET_NAMESPACE_MISMATCH,
+                    ),
                     retry_after_ms: None,
                 });
                 continue;
@@ -1105,7 +1109,9 @@ impl arkret::AppletHandler for BridgeAppletHandler {
                 );
                 rejected.push(arkret::RejectedItem {
                     event_id: Some(event.event_id.clone()),
-                    reason_code: "capability_denied".to_owned(),
+                    reason_code: arkret_wire::ReasonCode::from_wire(
+                        arkret_wire::ErrorCode::CAPABILITY_DENIED,
+                    ),
                     retry_after_ms: None,
                 });
                 continue;
@@ -1122,7 +1128,9 @@ impl arkret::AppletHandler for BridgeAppletHandler {
                     queue_full = true;
                     rejected.push(arkret::RejectedItem {
                         event_id: Some(event.event_id.clone()),
-                        reason_code: "queue_full".to_owned(),
+                        reason_code: arkret_wire::ReasonCode::from_wire(
+                            arkret_wire::ReasonCode::QUEUE_FULL,
+                        ),
                         retry_after_ms: None,
                     });
                     continue;
@@ -1132,7 +1140,9 @@ impl arkret::AppletHandler for BridgeAppletHandler {
                     tracing::error!(%event_id, "failed to enqueue inbound event: consumer gone");
                     rejected.push(arkret::RejectedItem {
                         event_id: Some(event.event_id.clone()),
-                        reason_code: "internal_error".to_owned(),
+                        reason_code: arkret_wire::ReasonCode::from_wire(
+                            arkret_wire::ReasonCode::INTERNAL_ERROR,
+                        ),
                         retry_after_ms: None,
                     });
                     continue;
@@ -1165,7 +1175,9 @@ impl arkret::AppletHandler for BridgeAppletHandler {
                     );
                     rejected.push(arkret::RejectedItem {
                         event_id: Some(event.event_id.clone()),
-                        reason_code: "duplicate_conflict".to_owned(),
+                        reason_code: arkret_wire::ReasonCode::from_wire(
+                            arkret_wire::ReasonCode::DUPLICATE_CONFLICT,
+                        ),
                         retry_after_ms: None,
                     });
                     continue;
@@ -1175,7 +1187,9 @@ impl arkret::AppletHandler for BridgeAppletHandler {
                     tracing::error!(%event_id, error = %err, "event dedup store failed");
                     rejected.push(arkret::RejectedItem {
                         event_id: Some(event.event_id.clone()),
-                        reason_code: "internal_error".to_owned(),
+                        reason_code: arkret_wire::ReasonCode::from_wire(
+                            arkret_wire::ReasonCode::INTERNAL_ERROR,
+                        ),
                         retry_after_ms: None,
                     });
                     continue;

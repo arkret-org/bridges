@@ -488,7 +488,9 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
                 ok: false,
                 rejected: vec![RejectedItem {
                     event_id: None,
-                    reason_code: "duplicate_conflict".to_owned(),
+                    reason_code: arkret_wire::ReasonCode::from_wire(
+                        arkret_wire::ReasonCode::DUPLICATE_CONFLICT,
+                    ),
                     retry_after_ms: None,
                 }],
                 retry_after_ms: None,
