@@ -4,30 +4,203 @@
 //! SDK-owned [`ExecutionBundle`].  A bridge must never manufacture a value,
 //! infer a commit from local state, or treat delivery of a bundle as another
 //! commit point.  This module therefore accepts only the closed SDK bundle,
-//! validates it before handing it to an adapter, and exposes no raw-JSON or
-//! compatibility input path.
+//! validates it before handing it to an adapter, and exposes no alternate
+//! protocol representation.
 
-use arkret_models_collaboration::protocol_journey::ExecutionBundle;
+use arkret_models_collaboration::protocol_journey::{
+    AttemptAdvanceValue, AttemptCleanupValue, ExecutionBundle, HostTransferPrepareValue,
+    HostTransferValue, JournalValidationOutcome, JournalValidationReceipt,
+    JournalValidationRequest, OperationControlEffect, OrdinaryExternalEffect,
+};
+use arkret_wire::Did;
+use chrono::TimeDelta;
 
 use crate::error::{BridgeError, Result};
 
-/// An SDK execution bundle whose structural qDA/qCOMMIT binding has passed
-/// [`ExecutionBundle::validate`].
+fn invalid_journal(message: &str) -> BridgeError {
+    BridgeError::Arkret(format!("invalid operation-control journal: {message}"))
+}
+
+fn validate_journal_request_binding(
+    request: &JournalValidationRequest,
+    destination: &Did,
+) -> Result<()> {
+    let authorization = &request.registry_authorization;
+    let core = &request.validation_core;
+    let journal = &request.authenticated_encrypted_journal;
+    let aad = &journal.aad_core;
+
+    if &core.destination != destination || &journal.recipient_service_id != destination {
+        return Err(invalid_journal(
+            "destination does not equal the local service",
+        ));
+    }
+    if authorization.core.registry_digest != core.registry_digest
+        || authorization.core.pair_registry_id != core.pair_registry_id
+        || authorization.core.pair_key != core.pair_key
+        || authorization.core.operation_id != core.operation_id
+        || authorization.registry_statement.registry_digest != core.registry_digest
+        || authorization.registry_statement.pair_registry_id != core.pair_registry_id
+        || authorization.registry_statement.core.pair_key != core.pair_key
+    {
+        return Err(invalid_journal(
+            "registry authorization does not match the validation core",
+        ));
+    }
+    if journal.plaintext_digest != core.payload_digest
+        || aad.registry_digest != core.registry_digest
+        || aad.pair_registry_id != core.pair_registry_id
+        || aad.pair_key != core.pair_key
+        || aad.operation_id != core.operation_id
+        || aad.attempt_sequence != core.attempt_sequence
+        || aad.effect_id != core.effect_id
+        || aad.effect_digest != core.effect_digest
+        || aad.payload_digest != core.payload_digest
+        || aad.destination != core.destination
+        || aad.expected_host_service_id != core.expected_host_service_id
+        || aad.expected_host_epoch != core.expected_host_epoch
+        || aad.resulting_host_service_id != core.resulting_host_service_id
+        || aad.resulting_host_epoch != core.resulting_host_epoch
+        || aad.predecessor_head_digest != core.predecessor_head_digest
+    {
+        return Err(invalid_journal(
+            "authenticated journal AAD does not match the validation core",
+        ));
+    }
+    validate_host_fence(
+        &core.effect,
+        &core.destination,
+        &core.expected_host_service_id,
+        core.expected_host_epoch,
+        &core.resulting_host_service_id,
+        core.resulting_host_epoch,
+    )
+}
+
+fn validate_host_fence(
+    effect: &OperationControlEffect,
+    destination: &Did,
+    expected_host_service_id: &Did,
+    expected_host_epoch: u64,
+    resulting_host_service_id: &Did,
+    resulting_host_epoch: u64,
+) -> Result<()> {
+    match effect {
+        OperationControlEffect::HostTransferPrepare(effect) => {
+            if destination != &effect.to_host_service_id
+                || expected_host_service_id != &effect.from_host_service_id
+                || resulting_host_service_id != &effect.from_host_service_id
+                || expected_host_epoch != effect.from_host_epoch
+                || resulting_host_epoch != effect.from_host_epoch
+                || effect.from_host_epoch.checked_add(1) != Some(effect.to_host_epoch)
+            {
+                return Err(invalid_journal(
+                    "host-transfer prepare has an invalid host fence",
+                ));
+            }
+        }
+        OperationControlEffect::HostTransfer(effect) => {
+            if destination != &effect.to_host_service_id
+                || expected_host_service_id != &effect.from_host_service_id
+                || resulting_host_service_id != &effect.to_host_service_id
+                || expected_host_epoch != effect.from_host_epoch
+                || resulting_host_epoch != effect.to_host_epoch
+                || effect.from_host_epoch.checked_add(1) != Some(effect.to_host_epoch)
+            {
+                return Err(invalid_journal(
+                    "host transfer has an invalid host transition fence",
+                ));
+            }
+        }
+        OperationControlEffect::OrdinaryExternal(_)
+        | OperationControlEffect::AttemptCleanup(_)
+        | OperationControlEffect::AttemptAdvance(_) => {
+            if expected_host_service_id != resulting_host_service_id
+                || expected_host_epoch != resulting_host_epoch
+            {
+                return Err(invalid_journal(
+                    "non-transfer effect changes the operation host fence",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validation_receipt(outcome: &JournalValidationOutcome) -> &JournalValidationReceipt {
+    match outcome {
+        JournalValidationOutcome::Accepted { receipt }
+        | JournalValidationOutcome::Duplicate { receipt } => receipt,
+    }
+}
+
+/// Destination-side decryptor and schema validator for qDA preflight.
+///
+/// Implementations must authenticate the committed registry authorization,
+/// recompute the journal root and AAD digest, decrypt with the exact referenced
+/// key, validate the selected SDK plaintext schema and recompute every typed
+/// effect digest before signing the receipt.  Preflight must not execute or
+/// reserve the effect.
+pub trait OperationControlJournalValidator {
+    fn destination_service_id(&self) -> &Did;
+
+    fn validate_journal(
+        &self,
+        request: &JournalValidationRequest,
+    ) -> Result<JournalValidationOutcome>;
+}
+
+/// Validate a journal without executing it and bind the returned receipt to
+/// the exact request.
+pub fn preflight_operation_control_journal<V>(
+    request: JournalValidationRequest,
+    validator: &V,
+) -> Result<JournalValidationOutcome>
+where
+    V: OperationControlJournalValidator,
+{
+    validate_journal_request_binding(&request, validator.destination_service_id())?;
+    let outcome = validator.validate_journal(&request)?;
+    let receipt = validation_receipt(&outcome);
+    let core = &request.validation_core;
+    let journal = &request.authenticated_encrypted_journal;
+    let lifetime = receipt
+        .expires_at
+        .signed_duration_since(receipt.validated_at);
+    if receipt.validation_request_id != request.validation_request_id
+        || receipt.journal_root != core.journal_root
+        || receipt.effect_digest != core.effect_digest
+        || receipt.payload_digest != core.payload_digest
+        || receipt.destination != core.destination
+        || receipt.issuer != core.destination
+        || receipt.recipient_key_ref != journal.recipient_key_ref
+        || lifetime <= TimeDelta::zero()
+        || lifetime > TimeDelta::minutes(5)
+    {
+        return Err(invalid_journal(
+            "validation receipt does not bind the exact live request",
+        ));
+    }
+    Ok(outcome)
+}
+
+/// An SDK execution bundle whose structure and protocol authority have passed
+/// validation.
 ///
 /// Construction is deliberately private: bridge adapters can execute only a
-/// bundle admitted by [`execute_external_effect`] or
-/// [`ValidatedExecutionBundle::try_from_bundle`].  Signature/replica
-/// authority is still the responsibility of the SDK/service authority that
-/// supplied the bundle; this runtime does not recreate that verifier.
+/// bundle admitted by [`execute_operation_control_effect`].
 #[derive(Clone, Debug)]
-pub struct ValidatedExecutionBundle(ExecutionBundle);
+pub struct VerifiedExecutionBundle(ExecutionBundle);
 
-impl ValidatedExecutionBundle {
-    /// Validate and retain an exact SDK-owned execution bundle.
-    pub fn try_from_bundle(bundle: ExecutionBundle) -> Result<Self> {
+impl VerifiedExecutionBundle {
+    fn verify<V>(bundle: ExecutionBundle, verifier: &V) -> Result<Self>
+    where
+        V: ExecutionBundleAuthorityVerifier,
+    {
         bundle
             .validate()
             .map_err(|error| BridgeError::Arkret(format!("invalid execution bundle: {error}")))?;
+        verifier.verify_authority(&bundle)?;
         Ok(Self(bundle))
     }
 
@@ -36,18 +209,113 @@ impl ValidatedExecutionBundle {
     pub fn bundle(&self) -> &ExecutionBundle {
         &self.0
     }
+
+    /// The exact closed effect selected by the q-committed value.
+    pub fn effect(&self) -> &OperationControlEffect {
+        &self.0.value_core.effect
+    }
 }
 
-/// App-specific external-effect adapter.
+fn validate_destination_binding(bundle: &ExecutionBundle, destination: &Did) -> Result<()> {
+    let value = &bundle.value_core;
+    let journal = &bundle.authenticated_encrypted_journal;
+    let receipt = &bundle.journal_validation_receipt;
+    let aad = &journal.aad_core;
+
+    if &value.destination != destination
+        || &journal.recipient_service_id != destination
+        || &receipt.destination != destination
+        || &receipt.issuer != destination
+        || receipt.recipient_key_ref != journal.recipient_key_ref
+        || receipt.journal_root != value.journal_root
+        || receipt.effect_digest != value.effect_digest
+        || receipt.payload_digest != value.payload_digest
+        || journal.plaintext_digest != value.payload_digest
+        || aad.registry_digest != value.registry_digest
+        || aad.pair_registry_id != value.pair_registry_id
+        || aad.pair_key != value.pair_key
+        || aad.operation_id != value.operation_id
+        || aad.attempt_sequence != value.attempt_sequence
+        || aad.effect_id != value.effect_id
+        || aad.effect_digest != value.effect_digest
+        || aad.payload_digest != value.payload_digest
+        || aad.destination != value.destination
+        || aad.expected_host_service_id != value.expected_host_service_id
+        || aad.expected_host_epoch != value.expected_host_epoch
+        || aad.resulting_host_service_id != value.resulting_host_service_id
+        || aad.resulting_host_epoch != value.resulting_host_epoch
+        || aad.predecessor_head_digest != value.predecessor_head_digest
+    {
+        return Err(BridgeError::Arkret(
+            "execution bundle journal is not bound to the committed value and local destination"
+                .to_owned(),
+        ));
+    }
+
+    validate_host_fence(
+        &value.effect,
+        &value.destination,
+        &value.expected_host_service_id,
+        value.expected_host_epoch,
+        &value.resulting_host_service_id,
+        value.resulting_host_epoch,
+    )
+}
+
+/// Trust-store-backed verifier for all signatures and historical authority in
+/// an SDK execution bundle.
+///
+/// Implementations must verify the committed registry authorization, the live
+/// destination journal-validation receipt, every qDA/PBFT witness and every
+/// certificate in the per-view ancestry.  Structural validation alone is not
+/// authority validation and cannot implement this trait correctly.
+pub trait ExecutionBundleAuthorityVerifier {
+    fn verify_authority(&self, bundle: &ExecutionBundle) -> Result<()>;
+}
+
+/// Destination adapter for the closed operation-control effect set.
 ///
 /// Implementations must make exact replay of the same effect id idempotent
-/// and obtain destination-signed terminal evidence through their owning
-/// service.  This boundary supplies no alternate persistence or protocol
-/// representation.
-pub trait ExternalEffectExecutor {
+/// and return destination-signed terminal evidence through their owning
+/// service.  Separate required methods prevent an administrative effect from
+/// falling through to an ordinary external-operation handler.  Each method
+/// must decrypt the exact journal and recheck its SDK schema and payload digest
+/// before mutating destination state.
+pub trait OperationControlEffectExecutor {
     type Output;
 
-    fn execute(&self, bundle: &ValidatedExecutionBundle) -> Result<Self::Output>;
+    /// The local service identity allowed to decrypt and execute the bundle.
+    fn destination_service_id(&self) -> &Did;
+
+    fn execute_ordinary_external(
+        &self,
+        bundle: &VerifiedExecutionBundle,
+        effect: &OrdinaryExternalEffect,
+    ) -> Result<Self::Output>;
+
+    fn execute_attempt_cleanup(
+        &self,
+        bundle: &VerifiedExecutionBundle,
+        effect: &AttemptCleanupValue,
+    ) -> Result<Self::Output>;
+
+    fn execute_attempt_advance(
+        &self,
+        bundle: &VerifiedExecutionBundle,
+        effect: &AttemptAdvanceValue,
+    ) -> Result<Self::Output>;
+
+    fn execute_host_transfer_prepare(
+        &self,
+        bundle: &VerifiedExecutionBundle,
+        effect: &HostTransferPrepareValue,
+    ) -> Result<Self::Output>;
+
+    fn execute_host_transfer(
+        &self,
+        bundle: &VerifiedExecutionBundle,
+        effect: &HostTransferValue,
+    ) -> Result<Self::Output>;
 }
 
 /// Validate a closed SDK bundle, then invoke an app-specific executor.
@@ -56,193 +324,32 @@ pub trait ExternalEffectExecutor {
 /// never reaches the executor.  Calling this function does not create a new
 /// protocol point of no return; it only acts after the bundle's qCOMMIT has
 /// been validated by the SDK.
-pub fn execute_external_effect<E>(bundle: ExecutionBundle, executor: &E) -> Result<E::Output>
+pub fn execute_operation_control_effect<E, V>(
+    bundle: ExecutionBundle,
+    verifier: &V,
+    executor: &E,
+) -> Result<E::Output>
 where
-    E: ExternalEffectExecutor,
+    E: OperationControlEffectExecutor,
+    V: ExecutionBundleAuthorityVerifier,
 {
-    let bundle = ValidatedExecutionBundle::try_from_bundle(bundle)?;
-    executor.execute(&bundle)
-}
-
-#[cfg(test)]
-mod tests {
-    use std::cell::Cell;
-
-    use arkret_models_collaboration::protocol_journey::{
-        ConsensusEnvelope, ConsensusEnvelopeDomain, ConsensusPhase, EffectValueCore,
-        ExecutionBundle, PerViewCertificate, PreparedCertificate, PreparedCertificateDomain,
-        PreparedCertificateKind, ProtocolOpaqueId, ProtocolOperationId, ProtocolSignature,
-        QcommitCertificate, QdaCertificate, QdaReceipt, QdaReceiptDomain,
-    };
-    use arkret_wire::{Base64UrlString, Did, DidUrl, Hash};
-    use chrono::{TimeZone, Utc};
-
-    use super::{ExternalEffectExecutor, ValidatedExecutionBundle, execute_external_effect};
-    use crate::Result;
-
-    fn hash(nibble: char) -> Hash {
-        Hash::new(format!("sha256:{}", nibble.to_string().repeat(64))).unwrap()
-    }
-
-    fn did(name: &str) -> Did {
-        Did::new(format!("did:webvh:{name}.example")).unwrap()
-    }
-
-    fn signature(name: &str) -> ProtocolSignature {
-        ProtocolSignature {
-            verification_method: DidUrl::new(format!("did:webvh:{name}.example#key-1")).unwrap(),
-            created_at: Utc.with_ymd_and_hms(2026, 8, 3, 0, 0, 0).unwrap(),
-            jws: Base64UrlString::new("AQ".to_owned()).unwrap(),
+    let bundle = VerifiedExecutionBundle::verify(bundle, verifier)?;
+    validate_destination_binding(bundle.bundle(), executor.destination_service_id())?;
+    match bundle.effect() {
+        OperationControlEffect::OrdinaryExternal(effect) => {
+            executor.execute_ordinary_external(&bundle, effect)
         }
-    }
-
-    fn bundle() -> ExecutionBundle {
-        let pair_registry_id = ProtocolOpaqueId::new("registry".to_owned()).unwrap();
-        let operation_id =
-            ProtocolOperationId::new("ak:operation:external-effect".to_owned()).unwrap();
-        let effect_id = ProtocolOpaqueId::new("effect".to_owned()).unwrap();
-        let pair_key = hash('1');
-        let journal_root = hash('2');
-        let destination = did("destination");
-        let value = EffectValueCore {
-            pair_registry_id: pair_registry_id.clone(),
-            pair_key: pair_key.clone(),
-            operation_id: operation_id.clone(),
-            attempt_sequence: 1,
-            effect_id: effect_id.clone(),
-            effect_digest: hash('3'),
-            destination: destination.clone(),
-            expected_host_epoch: 7,
-            predecessor_head_digest: hash('4'),
-            journal_root: journal_root.clone(),
-        };
-        let value_digest = value.value_digest().unwrap();
-        let receipts = ["replica-a", "replica-b", "replica-c"]
-            .into_iter()
-            .map(|name| QdaReceipt {
-                domain: QdaReceiptDomain::V1,
-                pair_registry_id: pair_registry_id.clone(),
-                pair_key: pair_key.clone(),
-                operation_id: operation_id.clone(),
-                attempt_sequence: 1,
-                effect_id: effect_id.clone(),
-                value_digest: value_digest.clone(),
-                journal_root: journal_root.clone(),
-                destination: destination.clone(),
-                expected_host_epoch: 7,
-                replica_id: did(name),
-                signature: signature(name),
-            })
-            .collect();
-        let qda_certificate = QdaCertificate {
-            pair_registry_id: pair_registry_id.clone(),
-            pair_key: pair_key.clone(),
-            operation_id: operation_id.clone(),
-            attempt_sequence: 1,
-            effect_id,
-            value_digest: value_digest.clone(),
-            journal_root,
-            destination,
-            expected_host_epoch: 7,
-            n: 4,
-            f: 1,
-            quorum: 3,
-            receipts,
-        };
-        let qda_certificate_digest = qda_certificate.digest().unwrap();
-        let commits = ["replica-a", "replica-b", "replica-c"]
-            .into_iter()
-            .map(|name| ConsensusEnvelope {
-                domain: ConsensusEnvelopeDomain::V1,
-                pair_registry_id: pair_registry_id.clone(),
-                pair_key: pair_key.clone(),
-                operation_id: operation_id.clone(),
-                attempt_sequence: 1,
-                view: 1,
-                phase: ConsensusPhase::Commit,
-                value_digest: value_digest.clone(),
-                qda_certificate_digest: qda_certificate_digest.clone(),
-                prepared_certificate_digest: None,
-                replica_id: did(name),
-                signature: signature(name),
-            })
-            .collect::<Vec<_>>();
-        let prepares = commits
-            .iter()
-            .cloned()
-            .map(|mut envelope| {
-                envelope.phase = ConsensusPhase::Prepare;
-                envelope
-            })
-            .collect();
-        ExecutionBundle {
-            value_core: value,
-            qda_certificate,
-            per_view_certificates: vec![PerViewCertificate::Prepared(PreparedCertificate {
-                certificate_kind: PreparedCertificateKind::Prepared,
-                domain: PreparedCertificateDomain::V1,
-                pair_registry_id: pair_registry_id.clone(),
-                pair_key: pair_key.clone(),
-                operation_id: operation_id.clone(),
-                attempt_sequence: 1,
-                view: 1,
-                value_digest: value_digest.clone(),
-                qda_certificate_digest: qda_certificate_digest.clone(),
-                n: 4,
-                f: 1,
-                quorum: 3,
-                prepares,
-            })],
-            qcommit_certificate: QcommitCertificate {
-                pair_registry_id,
-                pair_key,
-                operation_id,
-                attempt_sequence: 1,
-                view: 1,
-                value_digest,
-                qda_certificate_digest,
-                n: 4,
-                f: 1,
-                quorum: 3,
-                commits,
-            },
-            authenticated_encrypted_journal_bytes: Base64UrlString::new("AQ".to_owned()).unwrap(),
+        OperationControlEffect::AttemptCleanup(effect) => {
+            executor.execute_attempt_cleanup(&bundle, effect)
         }
-    }
-
-    struct RecordingExecutor(Cell<u8>);
-
-    impl ExternalEffectExecutor for RecordingExecutor {
-        type Output = ();
-
-        fn execute(&self, _bundle: &ValidatedExecutionBundle) -> Result<Self::Output> {
-            self.0.set(self.0.get() + 1);
-            Ok(())
+        OperationControlEffect::AttemptAdvance(effect) => {
+            executor.execute_attempt_advance(&bundle, effect)
         }
-    }
-
-    #[test]
-    fn valid_qcommit_bundle_reaches_executor_once() {
-        let executor = RecordingExecutor(Cell::new(0));
-        execute_external_effect(bundle(), &executor).unwrap();
-        assert_eq!(executor.0.get(), 1);
-    }
-
-    #[test]
-    fn missing_per_view_ancestry_never_reaches_executor() {
-        let executor = RecordingExecutor(Cell::new(0));
-        let mut invalid = bundle();
-        invalid.per_view_certificates.clear();
-        assert!(execute_external_effect(invalid, &executor).is_err());
-        assert_eq!(executor.0.get(), 0);
-    }
-
-    #[test]
-    fn qda_mismatch_never_reaches_executor() {
-        let executor = RecordingExecutor(Cell::new(0));
-        let mut invalid = bundle();
-        invalid.qda_certificate.value_digest = hash('f');
-        assert!(execute_external_effect(invalid, &executor).is_err());
-        assert_eq!(executor.0.get(), 0);
+        OperationControlEffect::HostTransferPrepare(effect) => {
+            executor.execute_host_transfer_prepare(&bundle, effect)
+        }
+        OperationControlEffect::HostTransfer(effect) => {
+            executor.execute_host_transfer(&bundle, effect)
+        }
     }
 }

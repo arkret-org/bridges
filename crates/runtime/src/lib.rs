@@ -80,7 +80,9 @@ pub use dead_letter::{
 };
 pub use error::{BridgeError, Result, redact_sensitive_url_values};
 pub use external_effect::{
-    ExternalEffectExecutor, ValidatedExecutionBundle, execute_external_effect,
+    ExecutionBundleAuthorityVerifier, OperationControlEffectExecutor,
+    OperationControlJournalValidator, VerifiedExecutionBundle, execute_operation_control_effect,
+    preflight_operation_control_journal,
 };
 pub use file_seq_store::FileSeqStore;
 pub use idempotency::{DedupVerdict, EventDedupStore, ReplayGuardStore, ReplayGuardVerdict};
