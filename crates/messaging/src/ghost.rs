@@ -5,8 +5,9 @@ use std::sync::OnceLock;
 
 use arkret::http_client::ClientRequestOptions;
 use arkret::{
-    ActorProfileId, AppletId, Did, EventId, EventRef, GrantId, Hash, Hlc, ObjectCreatePayload,
-    PayloadProof, RealmId, ScopeRef, StrandCreateObject, StrandId, StrandTrackConfig,
+    ActorProfileId, AppletId, AuthorizationRef, Did, EventId, EventRef, GrantId, Hash, Hlc,
+    ObjectCreatePayload, PayloadProof, RealmId, ScopeRef, StrandCreateObject, StrandId,
+    StrandTrackConfig,
 };
 use arkret_bridge_runtime::{BridgeError, Result};
 use arkret_models_collaboration::governance::accountability::{
@@ -271,7 +272,8 @@ async fn build_signed_ghost_provision_request(
 ) -> Result<GhostActorProvisionRequestBody> {
     let applet_id = AppletId::new(config.arkret.applet_id.clone())?;
     let service_id = edge.service_id().clone();
-    let authorization_ref = GrantId::new(config.arkret.ghost_provision_authorization_ref.clone())?;
+    let authorization_ref: AuthorizationRef =
+        GrantId::new(config.arkret.ghost_provision_authorization_ref.clone())?.into();
     let created_at = chrono::DateTime::from_timestamp_millis(chrono::Utc::now().timestamp_millis())
         .ok_or_else(|| BridgeError::Runtime("system clock is out of range".to_owned()))?;
     let verification_method = edge.service_verification_method()?;
@@ -311,7 +313,7 @@ async fn build_signed_ghost_provision_request(
     )?;
     accountability_event.prev_refs = service_prev_refs;
     accountability_event.applet_id = Some(applet_id.clone());
-    accountability_event.authorization_ref = Some(authorization_ref.to_string());
+    accountability_event.authorization_ref = Some(authorization_ref.clone());
     edge.resign_event(&mut accountability_event)?;
 
     let effective_display_name = display_name
@@ -341,7 +343,7 @@ async fn build_signed_ghost_provision_request(
     );
     let delegation = AppletDelegatedEventAuthorization::new(
         service_id.clone(),
-        authorization_ref.to_string(),
+        authorization_ref,
         applet_id.clone(),
     );
     let mut profile_event = profile_request.profile_create_event(
