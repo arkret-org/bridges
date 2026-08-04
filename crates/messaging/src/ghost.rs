@@ -285,7 +285,7 @@ async fn build_signed_ghost_provision_request(
         None,
         PayloadProof {
             kind: "detached_jws".to_owned(),
-            alg: "EdDSA".to_owned(),
+            alg: "Ed25519".to_owned(),
             verification_method,
             payload_digest: Hash::new(format!("sha256:{}", "0".repeat(64)))?,
             created_at,
