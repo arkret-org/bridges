@@ -7,7 +7,7 @@
 //! validates it before handing it to an adapter, and exposes no alternate
 //! protocol representation.
 
-use arkret_models_collaboration::protocol_journey::{
+use arkret_models_collaboration::operation_control::{
     AttemptAdvanceValue, AttemptCleanupValue, ExecutionBundle, HostTransferPrepareValue,
     HostTransferValue, JournalValidationOutcome, JournalValidationReceipt,
     JournalValidationRequest, OperationControlEffect, OrdinaryExternalEffect,
