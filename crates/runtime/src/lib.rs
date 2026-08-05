@@ -40,7 +40,6 @@ pub mod dead_letter;
 #[cfg(any(feature = "web", test))]
 pub mod did_binding;
 mod error;
-pub mod external_effect;
 mod file_seq_store;
 pub mod idempotency;
 pub mod logging;
@@ -79,11 +78,10 @@ pub use dead_letter::{
     OutboundDeadLetterStore,
 };
 pub use error::{BridgeError, Result, redact_sensitive_url_values};
-pub use external_effect::{
-    ExecutionBundleAuthorityVerifier, OperationControlEffectExecutor,
-    OperationControlJournalValidator, VerifiedExecutionBundle, execute_operation_control_effect,
-    preflight_operation_control_journal,
-};
+// `external_effect` is gone: it adapted the Direct Conversation
+// operation-control model (PairSlot / PBFT journal) that the SDK retired in
+// `fafb429c`. Nothing outside the module used it, so the adapter is removed
+// rather than kept as a stub against types that no longer exist.
 pub use file_seq_store::FileSeqStore;
 pub use idempotency::{DedupVerdict, EventDedupStore, ReplayGuardStore, ReplayGuardVerdict};
 #[cfg(feature = "web")]

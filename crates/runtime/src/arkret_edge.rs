@@ -1395,7 +1395,6 @@ mod tests {
     fn test_proof(jws: &str) -> arkret::Proof {
         arkret::Proof {
             kind: "detached_jws".to_owned(),
-            alg: "Ed25519".to_owned(),
             verification_method: DidUrl::new("did:webvh:alice.example#key-1")
                 .expect("fixture verification method is a valid DID URL"),
             event_digest: arkret::Hash::new(

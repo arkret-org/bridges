@@ -285,7 +285,6 @@ async fn build_signed_ghost_provision_request(
         None,
         PayloadProof {
             kind: "detached_jws".to_owned(),
-            alg: "Ed25519".to_owned(),
             verification_method,
             payload_digest: Hash::new(format!("sha256:{}", "0".repeat(64)))?,
             created_at,
@@ -605,7 +604,7 @@ pub(crate) async fn create_portal_strand(
         .filter(|alias| !alias.trim().is_empty())
         .unwrap_or(app_channel);
     let strand =
-        StrandCreateObject::new(strand_id.clone(), realm.clone(), edge.service_id().clone())
+        StrandCreateObject::new(realm.clone(), edge.service_id().clone())
             .with_metadata_title(title)
             .with_metadata_field("external_ref", location.clone())
             .with_track(PORTAL_STRAND_TRACK, StrandTrackConfig::discussion_primary());
