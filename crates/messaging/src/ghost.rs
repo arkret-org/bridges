@@ -327,8 +327,9 @@ async fn build_signed_ghost_provision_request(
         "realm_id": realm_id,
         "external_ref": external_ref_for_user(config, protocol, tenant, external_user_id),
     });
+    // No profile id: it is derived from the `ak.profile.create` Event this
+    // payload rides on (spec `zh/models/common-fields.md` section 6.0).
     let profile_request = arkret_event_draft::GhostActorProfileRequest::new(
-        ActorProfileId::new(arkret::new_prefixed_uuid7("ak:actor_profile:"))?,
         ghost_actor_id.clone(),
         effective_display_name,
         applet_id.clone(),
