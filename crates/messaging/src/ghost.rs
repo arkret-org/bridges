@@ -604,11 +604,10 @@ pub(crate) async fn create_portal_strand(
     let title = alias
         .filter(|alias| !alias.trim().is_empty())
         .unwrap_or(app_channel);
-    let strand =
-        StrandCreateObject::new(realm.clone(), edge.service_id().clone())
-            .with_metadata_title(title)
-            .with_metadata_field("external_ref", location.clone())
-            .with_track(PORTAL_STRAND_TRACK, StrandTrackConfig::discussion_primary());
+    let strand = StrandCreateObject::new(realm.clone(), edge.service_id().clone())
+        .with_metadata_title(title)
+        .with_metadata_field("external_ref", location.clone())
+        .with_track(PORTAL_STRAND_TRACK, StrandTrackConfig::discussion_primary());
     let strand_created_at = strand.created_at;
     let payload = ObjectCreatePayload::new(strand)
         .to_value()
