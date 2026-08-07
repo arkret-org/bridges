@@ -531,7 +531,7 @@ mod tests {
                 "app-message-1",
                 "sender-1",
                 "ak:event:01904100-0000-7000-8000-000000000123",
-                "ak:realm:01904100-0000-7000-8000-000000000001",
+                "ak:realm:AfF-hFqRoMbajXkPapH-xaq0xwK-UKt2ph2zTs9JZRAO",
             )
             .unwrap();
 

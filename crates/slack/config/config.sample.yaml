@@ -39,7 +39,7 @@ logging:
 # closed unless their app channel is mapped to a Realm.
 # mappings:
 #   - app_channel: "CHANGE_ME_APP_CHANNEL"
-#     realm_id: "ak:realm:01904100-0000-7000-8000-000000000001"
+#     realm_id: "ak:realm:AfF-hFqRoMbajXkPapH-xaq0xwK-UKt2ph2zTs9JZRAO"
 #     alias: "main"
 # Slack 适配器专属
 app:

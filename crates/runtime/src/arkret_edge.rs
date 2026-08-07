@@ -1357,7 +1357,7 @@ mod tests {
 
     #[test]
     fn event_fingerprint_ignores_unsigned_and_proofs() {
-        let realm = RealmId::new("ak:realm:01904100-0000-7000-8000-668e2181b41d").unwrap();
+        let realm = RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").unwrap();
         let actor = Did::new("did:webvh:alice.example").unwrap();
         let hlc = Hlc::new("01970e589d21-0001-a13f9c2e").unwrap();
         let mut first = Event::new(
