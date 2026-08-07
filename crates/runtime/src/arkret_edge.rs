@@ -1036,11 +1036,11 @@ impl arkret::AppletHandler for BridgeAppletHandler {
         description.supported_profiles = vec![ProfileId::APPLET_SERVICE_V1.to_owned()];
         description.supported_operations = vec![
             ServiceOperationId::EDGE_APPLET_COMMAND_TRANSACTION.to_owned(),
-            ServiceOperationId::EDGE_APPLET_QUERY_DESCRIBE.to_owned(),
-            ServiceOperationId::EDGE_APPLET_QUERY_PING.to_owned(),
-            ServiceOperationId::EDGE_APPLET_ACTOR_QUERY_RESOLVE.to_owned(),
-            ServiceOperationId::EDGE_APPLET_REALM_QUERY_RESOLVE.to_owned(),
-            ServiceOperationId::EDGE_APPLET_QUERY_PROTOCOL_METADATA.to_owned(),
+            ServiceOperationId::EDGE_APPLET_READ_DESCRIBE.to_owned(),
+            ServiceOperationId::EDGE_APPLET_READ_PING.to_owned(),
+            ServiceOperationId::EDGE_APPLET_ACTOR_READ_RESOLVE.to_owned(),
+            ServiceOperationId::EDGE_APPLET_REALM_READ_RESOLVE.to_owned(),
+            ServiceOperationId::EDGE_APPLET_READ_PROTOCOL_METADATA.to_owned(),
         ];
         description.validate()?;
         Ok(description)
