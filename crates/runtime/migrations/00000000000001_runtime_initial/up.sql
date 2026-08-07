@@ -8,8 +8,8 @@ CREATE TABLE IF NOT EXISTS transaction_idempotency (
     source_signature_anchor TEXT NOT NULL,
     status TEXT NOT NULL,
     outcome TEXT,
-    created_at BIGINT NOT NULL,
     expires_at BIGINT NOT NULL,
+    created_at BIGINT NOT NULL,
     PRIMARY KEY (
         operation_id,
         direction,

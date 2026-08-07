@@ -1305,7 +1305,8 @@ mod tests {
 
     /// One Event signed by `seed`'s key under `verification_method`.
     fn signed_event(actor: &Did, verification_method: &DidUrl, seed: u8, seq: u64) -> Event {
-        let realm = RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").expect("realm");
+        let realm =
+            RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").expect("realm");
         let hlc = Hlc::new(format!("01970e589d2{seq}-0001-a13f9c2e")).expect("hlc");
         let mut event = Event::new(
             "ak.message.create",

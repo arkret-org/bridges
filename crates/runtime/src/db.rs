@@ -25,14 +25,9 @@ use crate::idempotency::{
 };
 
 /// Embedded migrations for the runtime-owned tables (`transaction_idempotency`,
-/// `event_dedup`, `bridge_state`). The backend dialect is selected at compile
-/// time via the active connection feature, matching [`DbConnection`].
-#[cfg(feature = "sqlite")]
-pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
-#[cfg(all(feature = "postgres", not(feature = "sqlite")))]
-pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/postgres");
-#[cfg(all(feature = "mysql", not(feature = "sqlite"), not(feature = "postgres")))]
-pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/mysql");
+/// `event_dedup`, `bridge_state`). The SQL uses the common subset supported by
+/// SQLite, PostgreSQL, and MySQL, so every backend embeds the same migration.
+pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
 /// The backend connection type (selected by feature, exactly one).
 #[cfg(feature = "sqlite")]
@@ -118,8 +113,8 @@ mod idempotency_schema {
             source_signature_anchor -> Text,
             status -> Text,
             outcome -> Nullable<Text>,
-            created_at -> BigInt,
             expires_at -> BigInt,
+            created_at -> BigInt,
         }
     }
 
