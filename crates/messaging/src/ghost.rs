@@ -5,9 +5,8 @@ use std::sync::OnceLock;
 
 use arkret::http_client::ClientRequestOptions;
 use arkret::{
-    ActorProfileId, AppletId, AuthorizationRef, Did, EventId, EventRef, GrantId, Hash, Hlc,
-    ObjectCreatePayload, PayloadProof, RealmId, ScopeRef, StrandCreateObject, StrandId,
-    StrandTrackConfig,
+    AppletId, AuthorizationRef, Did, EventId, EventRef, GrantId, Hash, Hlc, ObjectCreatePayload,
+    PayloadProof, RealmId, ScopeRef, StrandCreateObject, StrandId, StrandTrackConfig,
 };
 use arkret_bridge_runtime::{BridgeError, Result};
 use arkret_models_collaboration::governance::accountability::{
@@ -542,12 +541,13 @@ pub(crate) async fn find_existing_portal_strand(
     for _ in 0..PORTAL_STRAND_SCAN_MAX_PAGES {
         let page = edge
             .client()
-            .events_query(
+            .events_read_outcome(
                 realm_id,
                 cursor.as_deref(),
                 None,
                 None,
                 Some(PORTAL_STRAND_SCAN_PAGE_LIMIT),
+                None,
             )
             .await?;
         for event in &page.events {
