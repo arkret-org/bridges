@@ -530,13 +530,13 @@ mod tests {
                 "channel-1",
                 "app-message-1",
                 "sender-1",
-                "ak:event:01904100-0000-7000-8000-000000000123",
+                "ak:event:AcuTkvesoi9I-a82lRObr46_TuorpNOfeSLt8XCCajYY",
                 "ak:realm:AfF-hFqRoMbajXkPapH-xaq0xwK-UKt2ph2zTs9JZRAO",
             )
             .unwrap();
 
         let mapping = store
-            .app_message_for_event("ak:event:01904100-0000-7000-8000-000000000123")
+            .app_message_for_event("ak:event:AcuTkvesoi9I-a82lRObr46_TuorpNOfeSLt8XCCajYY")
             .unwrap()
             .expect("mapping");
         assert_eq!(mapping.app_channel_id, "channel-1");

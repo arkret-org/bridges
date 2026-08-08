@@ -878,18 +878,18 @@ mod tests {
         let store = DbOutboundDeadLetterStore::new(db);
         store
             .record(OutboundDeadLetterRecord {
-                event_id: "ak:event:01904100-0000-7000-8000-000000000101".to_owned(),
+                event_id: "ak:event:AZYV_itSkJCtJoO-pBKwQZKbDZWvoTeETPflKYEPv5Lj".to_owned(),
                 realm_id: "ak:realm:AWQecQmcKsfSGVm4lyJ7Zfbdg_SWLo-soLmh0S34ECwx".to_owned(),
                 kind: "ak.message.create".to_owned(),
                 attempts: 4,
                 retriable: true,
                 last_error: "first failure".to_owned(),
-                event_json: r#"{"event_id":"ak:event:01904100-0000-7000-8000-000000000101"}"#
+                event_json: r#"{"event_id":"ak:event:AZYV_itSkJCtJoO-pBKwQZKbDZWvoTeETPflKYEPv5Lj"}"#
                     .to_owned(),
             })
             .unwrap();
         let first = store
-            .load("ak:event:01904100-0000-7000-8000-000000000101")
+            .load("ak:event:AZYV_itSkJCtJoO-pBKwQZKbDZWvoTeETPflKYEPv5Lj")
             .unwrap()
             .unwrap();
         assert_eq!(first.attempts, 4);
@@ -904,7 +904,7 @@ mod tests {
                 retriable: false,
                 last_error: "deterministic failure".to_owned(),
                 event_json:
-                    r#"{"event_id":"ak:event:01904100-0000-7000-8000-000000000101","retry":2}"#
+                    r#"{"event_id":"ak:event:AZYV_itSkJCtJoO-pBKwQZKbDZWvoTeETPflKYEPv5Lj","retry":2}"#
                         .to_owned(),
             })
             .unwrap();

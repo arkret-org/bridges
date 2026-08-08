@@ -12,7 +12,7 @@ use crate::{
     redaction_payload_for_app_delete,
 };
 
-const STRAND_ID: &str = "ak:strand:01904100-0000-7000-8000-000000000001";
+const STRAND_ID: &str = "ak:strand:AbrgMKK4KXMpRsGsFrsEQEsjo207metUd4zt8yjzB-UH";
 
 #[test]
 fn json_scalar_id_string_accepts_string_and_integer_ids() {
@@ -179,7 +179,7 @@ fn location_match_requires_protocol_network_and_location() {
 
 #[test]
 fn app_delete_recall_builds_message_redact_payload() {
-    let target_event_id = "ak:event:01904100-0000-7000-8000-000000000123";
+    let target_event_id = "ak:event:AcuTkvesoi9I-a82lRObr46_TuorpNOfeSLt8XCCajYY";
     let payload = redaction_payload_for_app_delete(target_event_id, AppDeleteReason::UserDeleted)
         .expect("redaction payload result")
         .expect("redaction payload");
@@ -194,7 +194,7 @@ fn app_delete_recall_builds_message_redact_payload() {
 fn app_delete_expiry_is_not_a_redaction() {
     assert!(
         redaction_payload_for_app_delete(
-            "ak:event:01904100-0000-7000-8000-000000000123",
+            "ak:event:AcuTkvesoi9I-a82lRObr46_TuorpNOfeSLt8XCCajYY",
             AppDeleteReason::DisappearingExpiry,
         )
         .expect("redaction payload result")

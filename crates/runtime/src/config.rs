@@ -459,7 +459,7 @@ arkret:
   service_id: "did:webvh:bridge.example"
   trust_domain: "ak:trust_domain:example.net"
   applet_id: "ak:applet:01904100-0000-7000-8000-000000000001"
-  ghost_provision_authorization_ref: "ak:grant:01904100-0000-7000-8000-000000000002"
+  ghost_provision_authorization_ref: "ak:grant:Ae5vV8Lwlft2Dp8x2y6Dv4NysvsHJwrADG-6PXdUz1Sl"
   access_token: "token"
   signing_key_seed_hex: "1111111111111111111111111111111111111111111111111111111111111111"
   verification_method_id: "#key-1"
