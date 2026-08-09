@@ -605,13 +605,7 @@ pub(crate) async fn create_portal_strand(
     let title = alias
         .filter(|alias| !alias.trim().is_empty())
         .unwrap_or(app_channel);
-    let mut strand = Strand::new(
-        StrandId::new(arkret::new_prefixed_uuid7("ak:strand:"))?,
-        realm.clone(),
-        title,
-        edge.service_id().clone(),
-    );
-    strand.id = None;
+    let mut strand = Strand::new_create(realm.clone(), title, edge.service_id().clone());
     strand
         .metadata
         .get_or_insert_default()
