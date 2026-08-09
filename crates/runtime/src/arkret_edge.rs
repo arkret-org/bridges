@@ -30,9 +30,11 @@ use arkret::{
     AppletId, Did, Ed25519PayloadSigner, Event, EventId, Hlc, HlcGenerator, PayloadSigner, RealmId,
     ScopeRef,
 };
+use arkret_event_draft::{EventSpec, TypedEventDraft};
 use arkret_models_collaboration::event_sync::{
     EventsFrontierSelector, EventsFrontierView, RealmActorFrontierView,
 };
+use arkret_models_collaboration::events_payloads::MessageRedactPayload;
 #[cfg(any(feature = "web", test))]
 use arkret_models_collaboration::http_bodies::AppletTransactionRequestBody;
 #[cfg(any(feature = "web", test))]
@@ -42,7 +44,7 @@ use arkret_models_integration::{
     AppletActorView, AppletPingOutcome, AppletProtocolMetadata, AppletRealmView,
     AppletTransactionOutcome,
 };
-use arkret_wire::{AuthorizationRef, DidUrl, EventInitialSubmission, SignalEnvelope};
+use arkret_wire::{AuthorizationRef, DidUrl, EventInitialSubmission, SignalEnvelope, event_spec};
 #[cfg(any(feature = "web", test))]
 use arkret_wire::{ProfileId, ServiceOperationId};
 use async_trait::async_trait;
@@ -422,70 +424,65 @@ impl ArkretEdge {
     /// Build an unsigned service-actor event for runtime hot paths. Any
     /// backing-store refill for actor sequence numbers runs on the blocking pool
     /// instead of a Tokio worker.
-    pub async fn mint_event_unsigned_async<T>(
+    pub async fn mint_event_unsigned_async<K>(
         &self,
-        kind: &str,
         realm_id: &RealmId,
-        content: T,
+        content: K::Payload,
     ) -> Result<Event>
     where
-        T: Serialize,
+        K: EventSpec,
     {
-        let content = spec_payload_value(content)?;
-        self.build_service_event_async(kind, realm_id, content)
-            .await
+        self.build_service_event_async::<K>(realm_id, content).await
     }
 
     /// Build an unsigned event authored by the service actor (seq + HLC
     /// allocated, no proof). Applet-originated writes carry the top-level
     /// `applet_id` in the signed envelope.
-    async fn build_service_event_async(
+    async fn build_service_event_async<K>(
         &self,
-        kind: &str,
         realm_id: &RealmId,
-        content: Value,
-    ) -> Result<Event> {
+        content: K::Payload,
+    ) -> Result<Event>
+    where
+        K: EventSpec,
+    {
         let seq = self.seq.alloc_blocking().await?;
         let hlc = self.next_hlc(realm_id)?;
-        let mut event = Event::new(
-            kind,
+        Ok(TypedEventDraft::<K>::new(
             ScopeRef::Realm {
                 realm_id: realm_id.clone(),
             },
             self.service_id.clone(),
-            seq,
-            hlc,
             content,
-        )?;
-        event.applet_id = Some(self.applet_id.clone());
-        Ok(event)
+        )?
+        .with_applet_id(self.applet_id.clone())
+        .author_now(seq, hlc)?)
     }
 
-    async fn build_delegated_event_async(
+    async fn build_delegated_event_async<K>(
         &self,
         actor: &arkret::Did,
-        kind: &str,
         realm_id: &RealmId,
-        content: Value,
+        content: K::Payload,
         authorization_ref: &str,
-    ) -> Result<Event> {
+    ) -> Result<Event>
+    where
+        K: EventSpec,
+    {
         let authorization_ref = validate_authorization_ref(authorization_ref)?;
         let seq = self.seq.alloc_blocking().await?;
         let hlc = self.next_hlc(realm_id)?;
-        let mut event = Event::new(
-            kind,
+        Ok(TypedEventDraft::<K>::new(
             ScopeRef::Realm {
                 realm_id: realm_id.clone(),
             },
             actor.clone(),
-            seq,
-            hlc,
             content,
-        )?;
-        event.executed_by = Some(self.service_id.clone());
-        event.authorization_ref = Some(authorization_ref);
-        event.applet_id = Some(self.applet_id.clone());
-        Ok(event)
+        )?
+        .with_executed_by(self.service_id.clone())
+        .with_authorization_ref(authorization_ref)
+        .with_applet_id(self.applet_id.clone())
+        .author_now(seq, hlc)?)
     }
 
     /// Build an unsigned delegated-actor event asynchronously.
@@ -493,19 +490,17 @@ impl ArkretEdge {
     /// Hosts may mutate signed-envelope fields or replace plaintext content
     /// with encrypted content before calling [`Self::resign_event`] once and
     /// submitting the result.
-    pub async fn mint_event_as_unsigned_async<T>(
+    pub async fn mint_event_as_unsigned_async<K>(
         &self,
         actor: &Did,
-        kind: &str,
         realm_id: &RealmId,
-        content: T,
+        content: K::Payload,
         authorization_ref: &str,
     ) -> Result<Event>
     where
-        T: Serialize,
+        K: EventSpec,
     {
-        let content = spec_payload_value(content)?;
-        self.build_delegated_event_async(actor, kind, realm_id, content, authorization_ref)
+        self.build_delegated_event_async::<K>(actor, realm_id, content, authorization_ref)
             .await
     }
 
@@ -613,26 +608,24 @@ impl ArkretEdge {
     ///
     /// applet-integration §8 requires the signed Event Envelope top-level
     /// `external_ref` for bridge-originated events.
-    pub async fn submit_with_external_ref_as<T, E>(
+    pub async fn submit_with_external_ref_as<K, E>(
         &self,
         actor: &Did,
         realm_id: &str,
-        kind: &str,
-        content: T,
+        content: K::Payload,
         external_ref: E,
         authorization_ref: &str,
     ) -> Result<String>
     where
-        T: Serialize,
+        K: EventSpec,
         E: Serialize,
     {
         let realm = RealmId::new(realm_id.to_owned())?;
-        let content = spec_payload_value(content)?;
         let external_ref = spec_external_ref_map(external_ref)?;
         // Set the signed-envelope `external_ref` before the single signature so
         // the proof covers it (no discarded first sign).
         let mut event = self
-            .build_delegated_event_async(actor, kind, &realm, content, authorization_ref)
+            .build_delegated_event_async::<K>(actor, &realm, content, authorization_ref)
             .await?;
         event.external_ref = Some(external_ref);
         self.sign_as_service(&mut event)?;
@@ -642,28 +635,25 @@ impl ArkretEdge {
     /// Submit a message redaction attributed to a delegated app actor while
     /// setting the signed envelope `redacts` target. External app expiry or
     /// retention drops must be filtered by callers before reaching this helper.
-    pub async fn submit_redaction_with_external_ref_as<T, E>(
+    pub async fn submit_redaction_with_external_ref_as<E>(
         &self,
         actor: &Did,
         realm_id: &str,
         target_event_id: &str,
-        content: T,
+        content: MessageRedactPayload,
         external_ref: E,
         authorization_ref: &str,
     ) -> Result<String>
     where
-        T: Serialize,
         E: Serialize,
     {
         let realm = RealmId::new(realm_id.to_owned())?;
-        let content = spec_payload_value(content)?;
         let external_ref = spec_external_ref_map(external_ref)?;
         // Set `redacts` + `external_ref` before the single signature so the proof
         // covers them (no discarded first sign).
         let mut event = self
-            .build_delegated_event_async(
+            .build_delegated_event_async::<event_spec::MessageRedact>(
                 actor,
-                "ak.message.redact",
                 &realm,
                 content,
                 authorization_ref,
@@ -744,15 +734,6 @@ fn default_client(config: &Config) -> Result<Client> {
         .auth(Auth::Bearer(config.arkret.access_token.clone()))
         .build()
         .map_err(Into::into)
-}
-
-fn spec_payload_value<T>(content: T) -> Result<Value>
-where
-    T: Serialize,
-{
-    serde_json::to_value(content).map_err(|error| {
-        BridgeError::Arkret(format!("event payload serialization failed: {error}"))
-    })
 }
 
 fn spec_external_ref_map<T>(external_ref: T) -> Result<BTreeMap<String, Value>>
@@ -1360,7 +1341,7 @@ mod tests {
         let realm = RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").unwrap();
         let actor = Did::new("did:webvh:alice.example").unwrap();
         let hlc = Hlc::new("01970e589d21-0001-a13f9c2e").unwrap();
-        let mut first = Event::new(
+        let mut first = arkret_wire::test_support::raw_event(
             "ak.message.create",
             ScopeRef::Realm { realm_id: realm },
             actor,

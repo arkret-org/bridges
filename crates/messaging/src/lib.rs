@@ -871,10 +871,9 @@ impl MessageContext {
                     require_nonempty_ref("authorization_ref", &mapping.authorization_ref)?;
                     let actor = Did::new(mapping.arkret_actor_id)?;
                     let event_id = edge
-                        .submit_with_external_ref_as(
+                        .submit_with_external_ref_as::<arkret_wire::event_spec::MessageCreate, _>(
                             &actor,
                             &realm_for_submit,
-                            "ak.message.create",
                             payload,
                             external_ref,
                             &mapping.authorization_ref,

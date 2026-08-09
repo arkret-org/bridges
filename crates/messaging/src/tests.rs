@@ -1,4 +1,4 @@
-use arkret::MessageCreatePayload;
+use arkret::{ContentBlockKind, MessageCreatePayload};
 use serde_json::json;
 
 use crate::content::{
@@ -98,13 +98,19 @@ fn media_payload_uses_blob_refs_and_forbidden_field_names_are_absent() {
 
 #[test]
 fn media_kind_follows_mime_category_and_file_requires_filename() {
-    assert_eq!(media_content_kind(Some("video/mp4")), "ak.content.video");
-    assert_eq!(media_content_kind(Some("audio/ogg")), "ak.content.audio");
+    assert_eq!(
+        media_content_kind(Some("video/mp4")),
+        ContentBlockKind::Video
+    );
+    assert_eq!(
+        media_content_kind(Some("audio/ogg")),
+        ContentBlockKind::Audio
+    );
     assert_eq!(
         media_content_kind(Some("application/pdf")),
-        "ak.content.file"
+        ContentBlockKind::File
     );
-    assert_eq!(media_content_kind(None), "ak.content.file");
+    assert_eq!(media_content_kind(None), ContentBlockKind::File);
 
     let mut att = media_attachment();
     att.media_type = Some("application/pdf".to_owned());

@@ -5,13 +5,15 @@ use std::sync::OnceLock;
 
 use arkret::http_client::ClientRequestOptions;
 use arkret::{
-    AppletId, AuthorizationRef, Did, EventId, EventRef, GrantId, Hash, Hlc, ObjectCreatePayload,
-    PayloadProof, RealmId, ScopeRef, StrandCreateObject, StrandId, StrandTrackConfig,
+    AppletId, AuthorizationRef, Did, EventId, EventRef, GrantId, Hash, Hlc, PayloadProof, RealmId,
+    ScopeRef, StrandId, StrandTrackConfig,
 };
 use arkret_bridge_runtime::{BridgeError, Result};
+use arkret_models_collaboration::events_payloads::StrandCreatePayload;
 use arkret_models_collaboration::governance::accountability::{
     AccountabilityGrantPayload, AccountabilityScope, AccountabilityScopeKind,
 };
+use arkret_models_collaboration::objects::strand::Strand;
 use arkret_models_integration::{
     AppletBridgeErrorClass, AppletDelegatedEventAuthorization, GhostActorProvisionOutcome,
     GhostActorProvisionRequestBody,
@@ -600,24 +602,37 @@ pub(crate) async fn create_portal_strand(
     location: &Value,
 ) -> Result<String> {
     let realm = RealmId::new(realm_id.to_owned())?;
-    let strand_id = StrandId::new(arkret::new_prefixed_uuid7("ak:strand:"))?;
     let title = alias
         .filter(|alias| !alias.trim().is_empty())
         .unwrap_or(app_channel);
-    let strand = StrandCreateObject::new(realm.clone(), edge.service_id().clone())
-        .with_metadata_title(title)
-        .with_metadata_field("external_ref", location.clone())
-        .with_track(PORTAL_STRAND_TRACK, StrandTrackConfig::discussion_primary());
+    let mut strand = Strand::new(
+        StrandId::new(arkret::new_prefixed_uuid7("ak:strand:"))?,
+        realm.clone(),
+        title,
+        edge.service_id().clone(),
+    );
+    strand.id = None;
+    strand
+        .metadata
+        .get_or_insert_default()
+        .fields
+        .insert("external_ref".to_owned(), location.clone());
+    strand.tracks.clear();
+    strand.tracks.insert(
+        PORTAL_STRAND_TRACK.to_owned(),
+        StrandTrackConfig::discussion_primary(),
+    );
     let strand_created_at = strand.created_at;
-    let payload = ObjectCreatePayload::new(strand)
-        .to_value()
-        .map_err(|e| BridgeError::App(e.to_string()))?;
+    let payload = StrandCreatePayload {
+        object: strand,
+        initial_relations: None,
+    };
     // Build unsigned, set the signed-envelope fields, then sign once (no
     // discarded first signature). strand_create_payload semantic validation
     // requires object.created_by == actor_id (both are the service DID here) and
     // object.created_at == the envelope created_at.
     let mut event = edge
-        .mint_event_unsigned_async("ak.strand.create", &realm, payload)
+        .mint_event_unsigned_async::<arkret_wire::event_spec::StrandCreate>(&realm, payload)
         .await?;
     event.created_at = strand_created_at;
     event.external_ref = Some(
@@ -630,5 +645,5 @@ pub(crate) async fn create_portal_strand(
     );
     edge.resign_event(&mut event)?;
     edge.submit_event(&event).await?;
-    Ok(strand_id.to_string())
+    Ok(StrandId::from_event_id(&event.event_id).to_string())
 }

@@ -5,8 +5,8 @@
 //! (`zh/models/content-types.md`).
 
 use arkret::{
-    BlobRef, CONTENT_KIND_AUDIO, CONTENT_KIND_FILE, CONTENT_KIND_IMAGE, CONTENT_KIND_VIDEO,
-    ContentBlock, ContentBlockMediaAttachment, MessageCreatePayload, StrandId,
+    BlobRef, ContentBlock, ContentBlockKind, ContentBlockMediaAttachment, MessageCreatePayload,
+    StrandId,
 };
 use arkret_bridge_runtime::{BridgeError, Result};
 use serde_json::{Value, json};
@@ -22,12 +22,12 @@ pub fn text_content_block(body: &str) -> Result<ContentBlock> {
 
 /// Map a MIME type to the spec media content kind
 /// (`zh/models/content-types.md` §4.2–§4.5).
-pub(crate) fn media_content_kind(media_type: Option<&str>) -> &'static str {
+pub(crate) fn media_content_kind(media_type: Option<&str>) -> ContentBlockKind {
     match media_type.and_then(|mime| mime.split('/').next()) {
-        Some("image") => CONTENT_KIND_IMAGE,
-        Some("video") => CONTENT_KIND_VIDEO,
-        Some("audio") => CONTENT_KIND_AUDIO,
-        _ => CONTENT_KIND_FILE,
+        Some("image") => ContentBlockKind::Image,
+        Some("video") => ContentBlockKind::Video,
+        Some("audio") => ContentBlockKind::Audio,
+        _ => ContentBlockKind::File,
     }
 }
 

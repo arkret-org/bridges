@@ -1308,7 +1308,7 @@ mod tests {
         let realm =
             RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").expect("realm");
         let hlc = Hlc::new(format!("01970e589d2{seq}-0001-a13f9c2e")).expect("hlc");
-        let mut event = Event::new(
+        let mut event = arkret_wire::test_support::raw_event(
             "ak.message.create",
             ScopeRef::Realm { realm_id: realm },
             actor.clone(),

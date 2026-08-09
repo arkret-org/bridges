@@ -16,7 +16,24 @@ use arkret_bridge_messaging::{
     OutboundAppMessage, SenderRenderStyle, send_json_expect_status, webhook,
 };
 use async_trait::async_trait;
+use serde::Serialize;
 use serde_json::{Value, json};
+
+#[derive(Serialize)]
+struct WhatsAppTextRequest<'a> {
+    messaging_product: &'static str,
+    recipient_type: &'static str,
+    to: &'a str,
+    #[serde(rename = "type")]
+    message_type: &'static str,
+    text: WhatsAppText<'a>,
+}
+
+#[derive(Serialize)]
+struct WhatsAppText<'a> {
+    preview_url: bool,
+    body: &'a str,
+}
 
 /// WhatsApp bridge adapter.
 pub struct WhatsAppApp {
@@ -71,16 +88,16 @@ impl MessageBridge for WhatsAppApp {
         let text = msg.rendered_body(SenderRenderStyle::Plain);
 
         // app_channel is treated as the recipient WhatsApp number (E.164, without +).
-        let body = json!({
-            "messaging_product": "whatsapp",
-            "recipient_type": "individual",
-            "to": msg.app_channel,
-            "type": "text",
-            "text": {
-                "preview_url": false,
-                "body": text,
+        let body = WhatsAppTextRequest {
+            messaging_product: "whatsapp",
+            recipient_type: "individual",
+            to: &msg.app_channel,
+            message_type: "text",
+            text: WhatsAppText {
+                preview_url: false,
+                body: &text,
             },
-        });
+        };
 
         let value = send_json_expect_status(
             ctx.http

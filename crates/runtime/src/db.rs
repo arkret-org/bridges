@@ -884,8 +884,9 @@ mod tests {
                 attempts: 4,
                 retriable: true,
                 last_error: "first failure".to_owned(),
-                event_json: r#"{"event_id":"ak:event:AZYV_itSkJCtJoO-pBKwQZKbDZWvoTeETPflKYEPv5Lj"}"#
-                    .to_owned(),
+                event_json:
+                    r#"{"event_id":"ak:event:AZYV_itSkJCtJoO-pBKwQZKbDZWvoTeETPflKYEPv5Lj"}"#
+                        .to_owned(),
             })
             .unwrap();
         let first = store
