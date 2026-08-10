@@ -331,19 +331,19 @@ async fn build_signed_ghost_provision_request(
     // No profile id: it is derived from the `ak.profile.create` Event this
     // payload rides on (spec `zh/models/common-fields.md` section 6.0).
     let profile_request = arkret_event_draft::GhostActorProfileRequest::new(
-        ghost_actor_id.clone(),
+        arkret::project_full_id_to_core_id(&ghost_actor_id)?,
         effective_display_name,
         applet_id.clone(),
     )
     .with_realm_id(realm_id.clone())
-    .with_accountable_principal_ids(vec![service_id.clone()])
+    .with_accountable_principal_ids(vec![edge.service_actor_id().clone().into()])
     .with_external_ref(
         serde_json::from_value(profile_external_ref).map_err(|error| {
             BridgeError::App(format!("Ghost profile external_ref invalid: {error}"))
         })?,
     );
     let delegation = AppletDelegatedEventAuthorization::new(
-        service_id.clone(),
+        edge.service_actor_id().clone(),
         authorization_ref,
         applet_id.clone(),
     );
@@ -608,7 +608,7 @@ pub(crate) async fn create_portal_strand(
     let title = alias
         .filter(|alias| !alias.trim().is_empty())
         .unwrap_or(app_channel);
-    let mut strand = Strand::new_create(realm.clone(), title, edge.service_id().clone());
+    let mut strand = Strand::new_create(realm.clone(), title, edge.service_actor_id().clone());
     strand
         .metadata
         .get_or_insert_default()

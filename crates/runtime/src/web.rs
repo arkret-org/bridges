@@ -922,7 +922,11 @@ fn verify_transaction_events(
                 format!("event {} proof is not production: {err}", event.event_id)
             })?;
             let signer_did = verification_method_did(&proof.verification_method)?;
-            if &signer_did != expected_signer {
+            let signer_actor_id = arkret::ActorId::from(
+                arkret::project_full_id_to_core_id(&signer_did)
+                    .map_err(|error| error.to_string())?,
+            );
+            if &signer_actor_id != expected_signer {
                 return Err(format!(
                     "event {} proof signer DID does not match actor/executed_by",
                     event.event_id
@@ -1165,7 +1169,7 @@ mod tests {
 
     use arkret::identity::{DidDocument, DidResolver, IdentityError};
     use arkret::signatures::{Ed25519PayloadSigner, SignEventOptions, sign_event};
-    use arkret::{Did, Event, Hlc, RealmId, ScopeRef, TypedTrustDomainId};
+    use arkret::{ActorId, Did, Event, Hlc, RealmId, ScopeRef, TypedTrustDomainId};
 
     use super::*;
 
@@ -1291,6 +1295,10 @@ mod tests {
         DidUrl::new(format!("{}#key-1", actor_did())).expect("did url")
     }
 
+    fn actor_id(did: &Did) -> ActorId {
+        ActorId::from(arkret::project_full_id_to_core_id(did).expect("actor core id"))
+    }
+
     fn server_did() -> Did {
         Did::new("did:webvh:z6mkfixture:server.example".to_owned()).expect("server did")
     }
@@ -1311,7 +1319,7 @@ mod tests {
         let mut event = arkret_wire::test_support::raw_event(
             "ak.message.create",
             ScopeRef::Realm { realm_id: realm },
-            actor.clone(),
+            actor_id(actor),
             seq,
             hlc,
             json!({ "body": format!("hello {seq}") }),
@@ -1523,10 +1531,10 @@ mod tests {
         let now = Utc::now();
 
         // The Event's `actor_id` and the proof's verification method disagree.
-        let foreign = Did::new("did:webvh:z6mkfixture:mallory.example".to_owned()).expect("did");
+        let foreign = Did::new("did:webvh:z6mkmallory:mallory.example".to_owned()).expect("did");
         let foreign_method = DidUrl::new(format!("{foreign}#key-1")).expect("did url");
         let mut event = signed_event(&foreign, &foreign_method, 42, 1);
-        event.actor_id = actor_did();
+        event.actor_id = actor_id(&actor_did());
 
         let err = authenticate_transaction_events(&authority, &transaction(vec![event]), now)
             .expect_err("signer/actor mismatch must be rejected");

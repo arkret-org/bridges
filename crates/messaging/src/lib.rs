@@ -295,7 +295,7 @@ impl MessageContext {
         let builder = AppletBridgeErrorBuilder::new(
             realm.clone(),
             AppletIdentifier::Cx(AppletId::new(edge.applet_id().to_owned())?),
-            edge.service_id().clone(),
+            edge.service_actor_id().clone(),
             failed_ref,
             bridge_error_class(error),
             bridge_error_code(error),
@@ -388,7 +388,7 @@ impl MessageContext {
         let builder = AppletBridgeErrorBuilder::new(
             realm.clone(),
             AppletIdentifier::Cx(AppletId::new(edge.applet_id().to_owned())?),
-            edge.service_id().clone(),
+            edge.service_actor_id().clone(),
             failed_event_id.to_owned(),
             bridge_error_class(error),
             bridge_error_code(error),
@@ -1167,10 +1167,10 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
         // actor events are authored by the service DID itself.
         // Both checks are independent of local DB state, so a server push
         // racing ahead of our own mapping write cannot bypass them.
-        if event.executed_by.as_ref() == Some(self.ctx.core().edge.service_id()) {
+        if event.executed_by.as_ref() == Some(self.ctx.core().edge.service_actor_id()) {
             return Ok(());
         }
-        if &event.actor_id == self.ctx.core().edge.service_id() {
+        if &event.actor_id == self.ctx.core().edge.service_actor_id() {
             return Ok(());
         }
         let event_id = event.event_id.to_string();

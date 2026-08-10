@@ -27,8 +27,8 @@ use arkret::identity::public_key_material_from_binding;
 use arkret::signatures::{EventProofBuilder, VerificationMethodDocument};
 use arkret::signatures::{SignEventOptions, sign_event};
 use arkret::{
-    AppletId, Did, Ed25519PayloadSigner, Event, EventId, Hlc, HlcGenerator, PayloadSigner, RealmId,
-    ScopeRef,
+    ActorId, AppletId, Did, Ed25519PayloadSigner, Event, EventId, Hlc, HlcGenerator, PayloadSigner,
+    RealmId, ScopeRef, project_full_id_to_core_id,
 };
 use arkret_event_draft::{EventSpec, TypedEventDraft};
 use arkret_models_collaboration::event_sync::{
@@ -234,7 +234,10 @@ pub struct ArkretEdge {
     /// Authority transport for issuer-produced AuthorizationLease/CBA
     /// evidence. The default uses the authenticated Principal Server.
     submission_provider: Mutex<Arc<dyn EventInitialSubmissionProvider>>,
+    /// Resolvable full DID used for key lookup and proof `verification_method`.
     service_id: Did,
+    /// Stable service actor core written into Event envelopes.
+    service_actor_id: ActorId,
     applet_id: AppletId,
     /// Store-backed, restart-safe actor sequence allocator.
     seq: SeqAllocator,
@@ -343,6 +346,7 @@ impl ArkretEdge {
         }
 
         let applet_id = AppletId::new(config.arkret.applet_id.clone())?;
+        let service_actor_id = ActorId::from(project_full_id_to_core_id(&service_id)?);
         let hlc_device_id = config.bridge.bridge_id.clone();
 
         let submission_provider: Arc<dyn EventInitialSubmissionProvider> =
@@ -353,6 +357,7 @@ impl ArkretEdge {
             signer,
             submission_provider: Mutex::new(submission_provider),
             service_id,
+            service_actor_id,
             applet_id,
             seq,
             hlc_generators: Mutex::new(HashMap::new()),
@@ -389,6 +394,13 @@ impl ArkretEdge {
 
     pub fn service_id(&self) -> &Did {
         &self.service_id
+    }
+
+    /// Stable service actor core used in Event envelopes. The full service DID
+    /// remains available through [`Self::service_id`] for resolution and proof
+    /// verification-method construction.
+    pub fn service_actor_id(&self) -> &ActorId {
+        &self.service_actor_id
     }
 
     /// The inbound event sender (bounded), if this edge was built with one.
@@ -452,7 +464,7 @@ impl ArkretEdge {
             ScopeRef::Realm {
                 realm_id: realm_id.clone(),
             },
-            self.service_id.clone(),
+            self.service_actor_id.clone(),
             content,
         )?
         .with_applet_id(self.applet_id.clone())
@@ -472,14 +484,15 @@ impl ArkretEdge {
         let authorization_ref = validate_authorization_ref(authorization_ref)?;
         let seq = self.seq.alloc_blocking().await?;
         let hlc = self.next_hlc(realm_id)?;
+        let actor_id = ActorId::from(project_full_id_to_core_id(actor)?);
         Ok(TypedEventDraft::<K>::new(
             ScopeRef::Realm {
                 realm_id: realm_id.clone(),
             },
-            actor.clone(),
+            actor_id,
             content,
         )?
-        .with_executed_by(self.service_id.clone())
+        .with_executed_by(self.service_actor_id.clone())
         .with_authorization_ref(authorization_ref)
         .with_applet_id(self.applet_id.clone())
         .author_now(seq, hlc)?)
@@ -581,7 +594,7 @@ impl ArkretEdge {
             .client
             .events_frontier(&EventsFrontierSelector::RealmActor {
                 realm_id: realm_id.clone(),
-                actor_id: actor_id.clone(),
+                actor_id: ActorId::from(project_full_id_to_core_id(actor_id)?),
             })
             .await
         {
@@ -1339,7 +1352,10 @@ mod tests {
     #[test]
     fn event_fingerprint_ignores_unsigned_and_proofs() {
         let realm = RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").unwrap();
-        let actor = Did::new("did:webvh:alice.example").unwrap();
+        let actor = ActorId::from(
+            project_full_id_to_core_id(&Did::new("did:webvh:z6mkfixture:alice.example").unwrap())
+                .unwrap(),
+        );
         let hlc = Hlc::new("01970e589d21-0001-a13f9c2e").unwrap();
         let mut first = arkret_wire::test_support::raw_event(
             "ak.message.create",
@@ -1376,7 +1392,7 @@ mod tests {
     fn test_proof(jws: &str) -> arkret::Proof {
         arkret::Proof {
             kind: "detached_jws".to_owned(),
-            verification_method: DidUrl::new("did:webvh:alice.example#key-1")
+            verification_method: DidUrl::new("did:webvh:z6mkfixture:alice.example#key-1")
                 .expect("fixture verification method is a valid DID URL"),
             event_digest: arkret::Hash::new(
                 "sha256:0000000000000000000000000000000000000000000000000000000000000000",
