@@ -552,7 +552,10 @@ pub(crate) async fn find_existing_portal_strand(
                 None,
             )
             .await?;
-        for event in &page.events {
+        for row in &page.events {
+            let Some(event) = row.event() else {
+                continue;
+            };
             if event.kind.as_str() != "ak.strand.create" {
                 continue;
             }
