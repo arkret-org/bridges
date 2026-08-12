@@ -211,6 +211,7 @@ dependencies = [
  "arkret-signatures",
  "arkret-state",
  "arkret-wire",
+ "chrono",
  "serde_json",
  "thiserror 2.0.18",
  "url",
