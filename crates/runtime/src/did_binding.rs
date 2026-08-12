@@ -88,7 +88,7 @@ use arkret::identity::{
     resolve_and_verify_binding,
 };
 use arkret::{
-    CompositeDidResolver, Did, DidKeyResolver, DidResolver, Hash, HttpDidResolver,
+    CompositeDidResolver, DidFullId, DidKeyResolver, DidResolver, Hash, HttpDidResolver,
     TypedTrustDomainId,
 };
 use arkret_wire::DidUrl;
@@ -217,7 +217,7 @@ impl AcceptedDidBindings {
     /// this trust domain and under this policy revision.
     fn key(
         &self,
-        did: &Did,
+        did: &DidFullId,
         purpose: DidBindingPurpose,
         verification_method: &DidUrl,
     ) -> VerifiedDidBindingKey {
@@ -232,7 +232,7 @@ impl AcceptedDidBindings {
 
     fn get(
         &self,
-        did: &Did,
+        did: &DidFullId,
         purpose: DidBindingPurpose,
         verification_method: &DidUrl,
         now: DateTime<Utc>,
@@ -254,7 +254,7 @@ impl AcceptedDidBindings {
     /// HTTP Message Signature. Never usable for an Event proof.
     pub fn source_service(
         &self,
-        did: &Did,
+        did: &DidFullId,
         verification_method: &DidUrl,
         now: DateTime<Utc>,
     ) -> std::result::Result<AcceptedDidBinding, BindingLookupError> {
@@ -265,7 +265,7 @@ impl AcceptedDidBindings {
     /// Never usable for the HTTP Message Signature.
     pub fn event_signer(
         &self,
-        did: &Did,
+        did: &DidFullId,
         verification_method: &DidUrl,
         now: DateTime<Utc>,
     ) -> std::result::Result<AcceptedDidBinding, BindingLookupError> {
@@ -275,7 +275,7 @@ impl AcceptedDidBindings {
     /// Whether an Event-signer acceptance already exists (zero network).
     pub fn has_event_signer(
         &self,
-        did: &Did,
+        did: &DidFullId,
         verification_method: &DidUrl,
         now: DateTime<Utc>,
     ) -> bool {
@@ -513,17 +513,9 @@ impl DidAuthority {
     /// Drop every acceptance for `did` (§5: rotation / deactivation / witness
     /// fork / revocation MUST invalidate the affected bindings). Scoped to this
     /// bridge's trust domain so an unrelated domain is never touched.
-    pub fn invalidate_did(&self, did: &Did) -> usize {
+    pub fn invalidate_did(&self, did: &DidFullId) -> usize {
         self.bindings.store.invalidate(
             &BindingInvalidation::for_did(did.clone())
-                .with_trust_domain(self.bindings.trust_domain.clone()),
-        )
-    }
-
-    /// Drop the acceptance for one concrete verification method (key rotation).
-    pub fn invalidate_verification_method(&self, verification_method: &DidUrl) -> usize {
-        self.bindings.store.invalidate(
-            &BindingInvalidation::for_verification_method(verification_method.clone())
                 .with_trust_domain(self.bindings.trust_domain.clone()),
         )
     }
@@ -533,12 +525,14 @@ impl DidAuthority {
 ///
 /// `DidUrl` already guarantees a non-empty `#fragment` and rejects `?query`, so
 /// this only has to split.
-pub fn verification_method_did(verification_method: &DidUrl) -> std::result::Result<Did, String> {
+pub fn verification_method_did(
+    verification_method: &DidUrl,
+) -> std::result::Result<DidFullId, String> {
     let (did, _) = verification_method
         .as_str()
         .rsplit_once('#')
         .ok_or_else(|| format!("verification method `{verification_method}` has no `#fragment`"))?;
-    Did::new(did.to_owned())
+    DidFullId::new(did.to_owned())
         .map_err(|err| format!("verification method DID `{did}` is invalid: {err}"))
 }
 
@@ -555,13 +549,13 @@ mod tests {
     struct NeverResolvingDidResolver;
 
     impl DidResolver for NeverResolvingDidResolver {
-        fn supports(&self, _did: &Did) -> bool {
+        fn supports(&self, _did: &DidFullId) -> bool {
             true
         }
 
         fn resolve_did(
             &self,
-            did: &Did,
+            did: &DidFullId,
         ) -> std::result::Result<ResolvedDid, arkret::identity::IdentityError> {
             panic!("the accepted-binding path must never resolve `{did}`");
         }
@@ -586,7 +580,7 @@ mod tests {
     fn public_key_bytes(seed: u8) -> [u8; 32] {
         arkret::Ed25519PayloadSigner::from_did_key_seed(
             [seed; 32],
-            Did::new("did:webvh:z6mkfixture:seed.example".to_owned()).expect("did"),
+            DidFullId::new("did:webvh:z6mkfixture:seed.example".to_owned()).expect("did"),
             DidUrl::new("did:webvh:z6mkfixture:seed.example#key-1").expect("did url"),
         )
         .verifying_key()
@@ -603,13 +597,13 @@ mod tests {
     struct OneDocumentDidResolver(DidDocument);
 
     impl DidResolver for OneDocumentDidResolver {
-        fn supports(&self, _did: &Did) -> bool {
+        fn supports(&self, _did: &DidFullId) -> bool {
             true
         }
 
         fn resolve_did(
             &self,
-            did: &Did,
+            did: &DidFullId,
         ) -> std::result::Result<ResolvedDid, arkret::identity::IdentityError> {
             if did == &self.0.id {
                 // `did:webvh` served as a plain document: proofless, which the
@@ -628,7 +622,7 @@ mod tests {
         // DID Core 1.0 §3.1 allows `verificationMethod[].id` to be relative, and
         // `DidDocument` keeps the wire spelling verbatim. Both `#key-1` and the
         // absolute form must find the same key.
-        let did = Did::new("did:webvh:z6mkfixture:relative.example".to_owned()).expect("did");
+        let did = DidFullId::new("did:webvh:z6mkfixture:relative.example".to_owned()).expect("did");
         let vm = DidUrl::new(format!("{did}#key-1")).expect("did url");
         let document = DidDocument::new(did.clone(), "#key-1", multibase(5));
         let authority =

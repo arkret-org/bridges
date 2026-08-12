@@ -27,8 +27,8 @@ use arkret::identity::public_key_material_from_binding;
 use arkret::signatures::{EventProofBuilder, VerificationMethodDocument};
 use arkret::signatures::{SignEventOptions, sign_event};
 use arkret::{
-    ActorId, AppletId, Did, Ed25519PayloadSigner, Event, EventId, Hlc, HlcGenerator, PayloadSigner,
-    RealmId, ScopeRef, project_full_id_to_core_id,
+    AppletId, DidCoreId, DidFullId, Ed25519PayloadSigner, Event, EventId, Hlc, HlcGenerator,
+    PayloadSigner, RealmId, ScopeRef, project_full_id_to_core_id,
 };
 use arkret_event_draft::{EventSpec, TypedEventDraft};
 use arkret_models_collaboration::event_sync::{
@@ -235,9 +235,9 @@ pub struct ArkretEdge {
     /// evidence. The default uses the authenticated Principal Server.
     submission_provider: Mutex<Arc<dyn EventInitialSubmissionProvider>>,
     /// Resolvable full DID used for key lookup and proof `verification_method`.
-    service_id: Did,
+    service_id: DidFullId,
     /// Stable service actor core written into Event envelopes.
-    service_actor_id: ActorId,
+    service_actor_id: DidCoreId,
     applet_id: AppletId,
     /// Store-backed, restart-safe actor sequence allocator.
     seq: SeqAllocator,
@@ -267,7 +267,7 @@ impl ArkretEdge {
         seq: Arc<dyn SeqStore>,
         inbound_tx: Sender<Event>,
     ) -> Result<Self> {
-        let service_id = Did::new(config.arkret.service_id.clone())?;
+        let service_id = DidFullId::new(config.arkret.service_id.clone())?;
         let seed = config.signing_seed()?;
         // The signer's `kid` MUST be the absolute DID URL
         // `<service_id>#<fragment>`; `verification_method_id` is configured as
@@ -302,7 +302,7 @@ impl ArkretEdge {
         signer: Ed25519PayloadSigner,
         seq: SeqAllocator,
     ) -> Result<Self> {
-        let service_id = Did::new(config.arkret.service_id.clone())?;
+        let service_id = DidFullId::new(config.arkret.service_id.clone())?;
         let hlc_secret = signer.verifying_key().to_bytes();
         Self::build(config, client, signer, service_id, hlc_secret, seq, None)
     }
@@ -311,7 +311,7 @@ impl ArkretEdge {
         config: Arc<Config>,
         client: Client,
         signer: Ed25519PayloadSigner,
-        service_id: Did,
+        service_id: DidFullId,
         hlc_secret: [u8; 32],
         seq: SeqAllocator,
         inbound_tx: Option<Sender<Event>>,
@@ -346,7 +346,7 @@ impl ArkretEdge {
         }
 
         let applet_id = AppletId::new(config.arkret.applet_id.clone())?;
-        let service_actor_id = ActorId::from(project_full_id_to_core_id(&service_id)?);
+        let service_actor_id = project_full_id_to_core_id(&service_id)?;
         let hlc_device_id = config.bridge.bridge_id.clone();
 
         let submission_provider: Arc<dyn EventInitialSubmissionProvider> =
@@ -392,14 +392,14 @@ impl ArkretEdge {
         *self.submission_provider.lock() = provider;
     }
 
-    pub fn service_id(&self) -> &Did {
+    pub fn service_id(&self) -> &DidFullId {
         &self.service_id
     }
 
     /// Stable service actor core used in Event envelopes. The full service DID
     /// remains available through [`Self::service_id`] for resolution and proof
     /// verification-method construction.
-    pub fn service_actor_id(&self) -> &ActorId {
+    pub fn service_actor_id(&self) -> &DidCoreId {
         &self.service_actor_id
     }
 
@@ -473,7 +473,7 @@ impl ArkretEdge {
 
     async fn build_delegated_event_async<K>(
         &self,
-        actor: &arkret::Did,
+        actor: &arkret::DidFullId,
         realm_id: &RealmId,
         content: K::Payload,
         authorization_ref: &str,
@@ -484,7 +484,7 @@ impl ArkretEdge {
         let authorization_ref = validate_authorization_ref(authorization_ref)?;
         let seq = self.seq.alloc_blocking().await?;
         let hlc = self.next_hlc(realm_id)?;
-        let actor_id = ActorId::from(project_full_id_to_core_id(actor)?);
+        let actor_id = project_full_id_to_core_id(actor)?;
         Ok(TypedEventDraft::<K>::new(
             ScopeRef::Realm {
                 realm_id: realm_id.clone(),
@@ -505,7 +505,7 @@ impl ArkretEdge {
     /// submitting the result.
     pub async fn mint_event_as_unsigned_async<K>(
         &self,
-        actor: &Did,
+        actor: &DidFullId,
         realm_id: &RealmId,
         content: K::Payload,
         authorization_ref: &str,
@@ -531,7 +531,7 @@ impl ArkretEdge {
         Ok(())
     }
 
-    fn verification_method_for_actor(&self, actor: &Did) -> Result<DidUrl> {
+    fn verification_method_for_actor(&self, actor: &DidFullId) -> Result<DidUrl> {
         self.config.arkret.verification_method_for(actor)
     }
 
@@ -588,13 +588,13 @@ impl ArkretEdge {
     pub async fn realm_actor_frontier(
         &self,
         realm_id: &RealmId,
-        actor_id: &Did,
+        actor_id: &DidFullId,
     ) -> Result<Option<RealmActorFrontierView>> {
         let state = match self
             .client
             .events_frontier(&EventsFrontierSelector::RealmActor {
                 realm_id: realm_id.clone(),
-                actor_id: ActorId::from(project_full_id_to_core_id(actor_id)?),
+                actor_id: project_full_id_to_core_id(actor_id)?,
             })
             .await
         {
@@ -623,7 +623,7 @@ impl ArkretEdge {
     /// `external_ref` for bridge-originated events.
     pub async fn submit_with_external_ref_as<K, E>(
         &self,
-        actor: &Did,
+        actor: &DidFullId,
         realm_id: &str,
         content: K::Payload,
         external_ref: E,
@@ -650,7 +650,7 @@ impl ArkretEdge {
     /// retention drops must be filtered by callers before reaching this helper.
     pub async fn submit_redaction_with_external_ref_as<E>(
         &self,
-        actor: &Did,
+        actor: &DidFullId,
         realm_id: &str,
         target_event_id: &str,
         content: MessageRedactPayload,
@@ -844,7 +844,7 @@ fn event_content_fingerprint(event: &Event) -> i64 {
 /// inbound queue; the business forwarding is done in the core consumer loop.
 pub struct BridgeAppletHandler {
     applet_id: String,
-    service_id: Did,
+    service_id: DidFullId,
     trust_domain: arkret::TypedTrustDomainId,
     namespaces: Value,
     inbound_tx: Sender<Event>,
@@ -868,7 +868,7 @@ pub struct BridgeAppletHandler {
 }
 
 #[cfg(any(feature = "web", test))]
-fn default_applet_namespaces(bridge_id: &str, service_id: &Did) -> Value {
+fn default_applet_namespaces(bridge_id: &str, service_id: &DidFullId) -> Value {
     let service_id = service_id.as_str();
     json!({
         "actors": [{
@@ -1016,7 +1016,11 @@ impl arkret::AppletHandler for BridgeAppletHandler {
         Ok(AppletPingOutcome {
             ok: true,
             applet_id: self.applet_id.clone(),
-            service_id: self.service_id.clone(),
+            // The wire field is the stable identity core; the configured
+            // resolvable DID is projected through the registered method
+            // adapter rather than re-spelled.
+            service_id: project_full_id_to_core_id(&self.service_id)
+                .map_err(|error| WireError::Protocol(error.to_string()))?,
             protocol_version: arkret::PROTOCOL_VERSION.to_owned(),
         })
     }
@@ -1224,15 +1228,21 @@ impl arkret::AppletHandler for BridgeAppletHandler {
     }
 
     fn resolve_actor(&self, actor_id: &str) -> std::result::Result<AppletActorView, WireError> {
+        // `ResolvedActor::actor_id` carries the resolvable ghost DID that was
+        // persisted at provisioning time. The wire view answers with the
+        // stable identity core, so the string is parsed as a full DID and
+        // projected; either step failing means the mapping row cannot be
+        // vouched for and the probe answers `exists: false`.
         if let Some(resolved) = self
             .resolver
             .as_ref()
             .and_then(|r| r.resolve_actor(actor_id))
-            && let Ok(did) = Did::new(resolved.actor_id)
+            && let Ok(did) = DidFullId::new(resolved.actor_id)
+            && let Ok(core_id) = project_full_id_to_core_id(&did)
         {
             return Ok(AppletActorView {
                 exists: true,
-                actor_id: Some(did),
+                actor_id: Some(core_id),
                 display_name: resolved.display_name,
                 external_ref: resolved.external_ref,
             });
@@ -1352,10 +1362,10 @@ mod tests {
     #[test]
     fn event_fingerprint_ignores_unsigned_and_proofs() {
         let realm = RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").unwrap();
-        let actor = ActorId::from(
-            project_full_id_to_core_id(&Did::new("did:webvh:z6mkfixture:alice.example").unwrap())
-                .unwrap(),
-        );
+        let actor = project_full_id_to_core_id(
+            &DidFullId::new("did:webvh:z6mkfixture:alice.example").unwrap(),
+        )
+        .unwrap();
         let hlc = Hlc::new("01970e589d21-0001-a13f9c2e").unwrap();
         let mut first = arkret_wire::test_support::raw_event(
             "ak.message.create",

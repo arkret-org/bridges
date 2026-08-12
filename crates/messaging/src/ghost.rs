@@ -5,8 +5,8 @@ use std::sync::OnceLock;
 
 use arkret::http_client::ClientRequestOptions;
 use arkret::{
-    AppletId, AuthorizationRef, Did, EventId, EventRef, GrantId, Hash, Hlc, PayloadProof, RealmId,
-    ScopeRef, StrandId, StrandTrackConfig,
+    AppletId, AuthorizationRef, DidFullId, EventId, EventKind, EventRef, GrantId, Hash, Hlc,
+    PayloadProof, RealmId, ScopeRef, StrandId, StrandTrackConfig,
 };
 use arkret_bridge_runtime::{BridgeError, Result};
 use arkret_models_collaboration::events_payloads::StrandCreatePayload;
@@ -81,7 +81,7 @@ fn requested_ghost_actor_id_for_user(
     // the bare suffix would not even be a valid actor DID. Assert the method
     // before deriving so a misconfigured service DID fails closed here rather
     // than producing a malformed ghost id.
-    let service_id = Did::new(config.arkret.service_id.clone())?;
+    let service_id = DidFullId::new(config.arkret.service_id.clone())?;
     assert_ghost_suffix_method(&service_id)?;
     let material =
         [protocol, tenant, external_user_id].join(&MESSAGE_MAPPING_KEY_SEPARATOR.to_string());
@@ -90,7 +90,7 @@ fn requested_ghost_actor_id_for_user(
         "{}:ghost:u{encoded}",
         service_id.as_str().trim_end_matches(':')
     );
-    Did::new(did.clone())?;
+    DidFullId::new(did.clone())?;
     Ok(did)
 }
 
@@ -98,7 +98,7 @@ fn requested_ghost_actor_id_for_user(
 /// used for default applet namespaces and ghost actor ids. Only `did:webvh` is
 /// valid (workspace-wide webvh-only rule; the applet-integration §3.4 examples
 /// are webvh as well).
-pub(crate) fn assert_ghost_suffix_method(service_id: &Did) -> Result<()> {
+pub(crate) fn assert_ghost_suffix_method(service_id: &DidFullId) -> Result<()> {
     match service_id.method() {
         "webvh" => Ok(()),
         other => Err(BridgeError::Config(format!(
@@ -188,6 +188,19 @@ fn external_ref_for_user(
     }
 }
 
+/// A completed Ghost provisioning: the Principal Server's outcome plus the
+/// resolvable Ghost DID this bridge authored for the same subject.
+///
+/// The two are bound by [`validate_ghost_provision_response`], which requires
+/// the server's stable `ghost_actor_id` core to be exactly the projection of
+/// `full_id`. Callers that need the resolvable form (event signing, DID
+/// resolution) therefore carry it forward as verified evidence instead of
+/// reconstructing a full DID from the core id, which is never permitted.
+pub(crate) struct ProvisionedGhostActor {
+    pub(crate) full_id: DidFullId,
+    pub(crate) outcome: GhostActorProvisionOutcome,
+}
+
 // Ghost provisioning threads one distinct external-identity field per
 // parameter; bundling them into a struct would let two of them be swapped
 // at a call site without a type error.
@@ -201,7 +214,7 @@ pub(crate) async fn provision_ghost_actor(
     external_user_id: &str,
     display_name: Option<&str>,
     realm_id: &str,
-) -> Result<GhostActorProvisionOutcome> {
+) -> Result<ProvisionedGhostActor> {
     // Every accountability grant advances the configured service actor's
     // Realm frontier. Serialize frontier reads through submission so two
     // concurrent bridge deliveries cannot prepare conflicting actor_seq values.
@@ -209,7 +222,7 @@ pub(crate) async fn provision_ghost_actor(
         .get_or_init(|| tokio::sync::Mutex::new(()))
         .lock()
         .await;
-    let ghost_actor_id = Did::new(requested_ghost_actor_id_for_user(
+    let ghost_actor_id = DidFullId::new(requested_ghost_actor_id_for_user(
         config,
         protocol,
         tenant,
@@ -257,7 +270,12 @@ pub(crate) async fn provision_ghost_actor(
         .client()
         .post_with_options(&path, &request, &options)
         .await?;
-    validate_ghost_provision_response(&ghost_actor_id, response)
+    let requested_core_id = arkret::project_full_id_to_core_id(&ghost_actor_id)?;
+    let outcome = validate_ghost_provision_response(&requested_core_id, response)?;
+    Ok(ProvisionedGhostActor {
+        full_id: ghost_actor_id,
+        outcome,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -269,18 +287,22 @@ async fn build_signed_ghost_provision_request(
     external_user_id: &str,
     display_name: Option<&str>,
     realm_id: RealmId,
-    ghost_actor_id: Did,
+    ghost_actor_id: DidFullId,
 ) -> Result<GhostActorProvisionRequestBody> {
     let applet_id = AppletId::new(config.arkret.applet_id.clone())?;
+    // `service_id` stays the resolvable DID for the frontier read; the wire
+    // bodies below carry the stable identity cores.
     let service_id = edge.service_id().clone();
+    let service_core_id = edge.service_actor_id().clone();
+    let ghost_actor_core_id = arkret::project_full_id_to_core_id(&ghost_actor_id)?;
     let authorization_ref: AuthorizationRef =
         GrantId::new(config.arkret.ghost_provision_authorization_ref.clone())?.into();
     let created_at = chrono::DateTime::from_timestamp_millis(chrono::Utc::now().timestamp_millis())
         .ok_or_else(|| BridgeError::Runtime("system clock is out of range".to_owned()))?;
     let verification_method = edge.service_verification_method()?;
     let mut grant = AccountabilityGrantPayload::new(
-        service_id.clone(),
-        ghost_actor_id.clone(),
+        service_core_id.clone(),
+        ghost_actor_core_id.clone(),
         AccountabilityScope::Single(AccountabilityScopeKind::ContractedService),
         created_at - chrono::Duration::seconds(1),
         None,
@@ -331,12 +353,12 @@ async fn build_signed_ghost_provision_request(
     // No profile id: it is derived from the `ak.profile.create` Event this
     // payload rides on (spec `zh/models/common-fields.md` section 6.0).
     let profile_request = arkret_event_draft::GhostActorProfileRequest::new(
-        arkret::project_full_id_to_core_id(&ghost_actor_id)?,
+        ghost_actor_core_id.clone(),
         effective_display_name,
         applet_id.clone(),
     )
     .with_realm_id(realm_id.clone())
-    .with_accountable_principal_ids(vec![edge.service_actor_id().clone().into()])
+    .with_accountable_principal_ids(vec![edge.service_actor_id().clone()])
     .with_external_ref(
         serde_json::from_value(profile_external_ref).map_err(|error| {
             BridgeError::App(format!("Ghost profile external_ref invalid: {error}"))
@@ -363,8 +385,8 @@ async fn build_signed_ghost_provision_request(
 
     let mut request = GhostActorProvisionRequestBody::new(
         applet_id,
-        service_id,
-        ghost_actor_id,
+        service_core_id,
+        ghost_actor_core_id,
         protocol,
         tenant,
         external_user_id,
@@ -380,7 +402,7 @@ async fn build_signed_ghost_provision_request(
 }
 
 fn validate_ghost_provision_response(
-    requested_actor: &Did,
+    requested_actor: &arkret::DidCoreId,
     response: GhostActorProvisionOutcome,
 ) -> Result<GhostActorProvisionOutcome> {
     if &response.ghost_actor_id != requested_actor {
@@ -556,7 +578,7 @@ pub(crate) async fn find_existing_portal_strand(
             let Some(event) = row.event() else {
                 continue;
             };
-            if event.kind.as_str() != "ak.strand.create" {
+            if event.kind != EventKind::StrandCreate {
                 continue;
             }
             let Some(object) = event.payload.get("object") else {

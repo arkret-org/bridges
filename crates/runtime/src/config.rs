@@ -5,7 +5,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use arkret::Did;
+use arkret::DidFullId;
 use arkret::signatures::PublicKeyMaterial;
 use arkret_wire::DidUrl;
 use serde::Deserialize;
@@ -197,7 +197,7 @@ impl ArkretConfig {
     /// `DidUrl` is the wire type for `verification_method`
     /// (`did-usage-and-verification.md` §2.2); a bare DID or a bare `#fragment`
     /// is rejected at construction rather than travelling as a `String`.
-    pub fn verification_method_for(&self, actor: &Did) -> Result<DidUrl> {
+    pub fn verification_method_for(&self, actor: &DidFullId) -> Result<DidUrl> {
         let fragment = self.verification_method_fragment()?;
         DidUrl::new(format!("{}#{fragment}", actor.as_str())).map_err(|err| {
             BridgeError::Config(format!(

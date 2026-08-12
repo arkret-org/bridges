@@ -36,16 +36,16 @@ fn json_scalar_id_string_rejects_empty_or_non_scalar_ids() {
 
 #[test]
 fn ghost_suffix_method_is_webvh_only() {
-    use arkret::Did;
+    use arkret::DidFullId;
 
     // Workspace-wide rule: bridge service identities are did:webvh only.
-    let webvh = Did::new("did:webvh:bridge.example").unwrap();
+    let webvh = DidFullId::new("did:webvh:bridge.example").unwrap();
     assert!(assert_ghost_suffix_method(&webvh).is_ok());
     // Negative fixtures: did:web (not an accepted alias) and did:key (no
     // path-structured suffix form) are both rejected fail-closed.
-    let web = Did::new("did:web:bridge.example").unwrap();
+    let web = DidFullId::new("did:web:bridge.example").unwrap();
     assert!(assert_ghost_suffix_method(&web).is_err());
-    let key = Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap();
+    let key = DidFullId::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap();
     assert!(assert_ghost_suffix_method(&key).is_err());
 }
 

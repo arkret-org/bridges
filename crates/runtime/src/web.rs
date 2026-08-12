@@ -922,10 +922,8 @@ fn verify_transaction_events(
                 format!("event {} proof is not production: {err}", event.event_id)
             })?;
             let signer_did = verification_method_did(&proof.verification_method)?;
-            let signer_actor_id = arkret::ActorId::from(
-                arkret::project_full_id_to_core_id(&signer_did)
-                    .map_err(|error| error.to_string())?,
-            );
+            let signer_actor_id = arkret::project_full_id_to_core_id(&signer_did)
+                .map_err(|error| error.to_string())?;
             if &signer_actor_id != expected_signer {
                 return Err(format!(
                     "event {} proof signer DID does not match actor/executed_by",
@@ -1169,7 +1167,7 @@ mod tests {
 
     use arkret::identity::{DidDocument, DidResolver, IdentityError};
     use arkret::signatures::{Ed25519PayloadSigner, SignEventOptions, sign_event};
-    use arkret::{ActorId, Did, Event, Hlc, RealmId, ScopeRef, TypedTrustDomainId};
+    use arkret::{DidCoreId, DidFullId, Event, Hlc, RealmId, ScopeRef, TypedTrustDomainId};
 
     use super::*;
 
@@ -1192,7 +1190,7 @@ mod tests {
             self.calls.load(Ordering::SeqCst)
         }
 
-        fn publish(&self, did: &Did, verification_method: &DidUrl, seed: u8) {
+        fn publish(&self, did: &DidFullId, verification_method: &DidUrl, seed: u8) {
             let multibase = arkret::ed25519_pubkey_to_did_key_multibase(&public_key_bytes(seed));
             self.documents.lock().expect("lock").insert(
                 did.as_str().to_owned(),
@@ -1206,13 +1204,13 @@ mod tests {
     }
 
     impl DidResolver for CountingDidResolver {
-        fn supports(&self, _did: &Did) -> bool {
+        fn supports(&self, _did: &DidFullId) -> bool {
             true
         }
 
         fn resolve_did(
             &self,
-            did: &Did,
+            did: &DidFullId,
         ) -> std::result::Result<arkret::identity::ResolvedDid, IdentityError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.documents
@@ -1269,7 +1267,7 @@ mod tests {
     // Fixtures
     // ========================================================================
 
-    fn signer(seed: u8, actor: &Did, verification_method: &DidUrl) -> Ed25519PayloadSigner {
+    fn signer(seed: u8, actor: &DidFullId, verification_method: &DidUrl) -> Ed25519PayloadSigner {
         Ed25519PayloadSigner::from_did_key_seed(
             [seed; 32],
             actor.clone(),
@@ -1287,20 +1285,20 @@ mod tests {
         TypedTrustDomainId::new("ak:trust_domain:bridge.example".to_owned()).expect("trust domain")
     }
 
-    fn actor_did() -> Did {
-        Did::new("did:webvh:z6mkfixture:alice.example".to_owned()).expect("actor did")
+    fn actor_did() -> DidFullId {
+        DidFullId::new("did:webvh:z6mkfixture:alice.example".to_owned()).expect("actor did")
     }
 
     fn actor_verification_method() -> DidUrl {
         DidUrl::new(format!("{}#key-1", actor_did())).expect("did url")
     }
 
-    fn actor_id(did: &Did) -> ActorId {
-        ActorId::from(arkret::project_full_id_to_core_id(did).expect("actor core id"))
+    fn actor_id(did: &DidFullId) -> DidCoreId {
+        arkret::project_full_id_to_core_id(did).expect("actor core id")
     }
 
-    fn server_did() -> Did {
-        Did::new("did:webvh:z6mkfixture:server.example".to_owned()).expect("server did")
+    fn server_did() -> DidFullId {
+        DidFullId::new("did:webvh:z6mkfixture:server.example".to_owned()).expect("server did")
     }
 
     fn server_verification_method() -> DidUrl {
@@ -1312,7 +1310,7 @@ mod tests {
     }
 
     /// One Event signed by `seed`'s key under `verification_method`.
-    fn signed_event(actor: &Did, verification_method: &DidUrl, seed: u8, seq: u64) -> Event {
+    fn signed_event(actor: &DidFullId, verification_method: &DidUrl, seed: u8, seq: u64) -> Event {
         let realm =
             RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").expect("realm");
         let hlc = Hlc::new(format!("01970e589d2{seq}-0001-a13f9c2e")).expect("hlc");
@@ -1337,7 +1335,8 @@ mod tests {
 
     fn transaction(events: Vec<Event>) -> AppletTransactionRequestBody {
         AppletTransactionRequestBody {
-            source_service_id: server_did(),
+            source_service_id: arkret::project_full_id_to_core_id(&server_did())
+                .expect("server core id"),
             events,
             signals: None,
         }
@@ -1531,7 +1530,8 @@ mod tests {
         let now = Utc::now();
 
         // The Event's `actor_id` and the proof's verification method disagree.
-        let foreign = Did::new("did:webvh:z6mkmallory:mallory.example".to_owned()).expect("did");
+        let foreign =
+            DidFullId::new("did:webvh:z6mkmallory:mallory.example".to_owned()).expect("did");
         let foreign_method = DidUrl::new(format!("{foreign}#key-1")).expect("did url");
         let mut event = signed_event(&foreign, &foreign_method, 42, 1);
         event.actor_id = actor_id(&actor_did());

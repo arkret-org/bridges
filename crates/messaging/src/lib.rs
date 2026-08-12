@@ -24,7 +24,9 @@ pub mod webhook;
 use std::sync::Arc;
 use std::time::Duration;
 
-use arkret::{AppletId, ContentBlock, Did, Event, EventId, MessageRedactPayload, RealmId};
+use arkret::{
+    AppletId, ContentBlock, DidFullId, Event, EventId, EventKind, MessageRedactPayload, RealmId,
+};
 pub use arkret_bridge_runtime as runtime;
 use arkret_bridge_runtime::app::{BridgeApp, BridgeContext};
 use arkret_bridge_runtime::db::{DbReplayGuardStore, DbTokenStore};
@@ -145,7 +147,8 @@ pub fn json_scalar_id_string(value: &Value) -> Option<String> {
 /// for capability enforcement (BRG-01-009): the runtime rejects any pushed event
 /// whose kind is not listed. `MessageAdapter::on_arkret_event` handles exactly
 /// message creation and redaction.
-const BRIDGE_HANDLED_EVENT_KINDS: [&str; 2] = ["ak.message.create", "ak.message.redact"];
+const BRIDGE_HANDLED_EVENT_KINDS: [EventKind; 2] =
+    [EventKind::MessageCreate, EventKind::MessageRedact];
 
 /// The strand track bridged messages write into. Applet-integration §10.1
 /// requires bridge messages to use the `discussion` track; the v1
@@ -539,18 +542,6 @@ impl MessageContext {
             .await
     }
 
-    /// Resolve the external channel mapped to a portal Realm. Decrypted Signal
-    /// integrations can use this reverse mapping without creating durable
-    /// message history.
-    pub async fn app_channel_for_realm(&self, realm_id: &str) -> Result<Option<String>> {
-        Ok(self
-            .store
-            .clone()
-            .channel_for_realm_async(realm_id.to_owned())
-            .await?
-            .map(|mapping| mapping.app_channel_id))
-    }
-
     /// The metrics `bridge` label for this context (the configured bridge id).
     fn metrics_bridge_label(&self) -> &str {
         &self.inner.config.bridge.bridge_id
@@ -676,8 +667,13 @@ impl MessageContext {
                                 &realm_for_submit,
                             )
                             .await?;
-                            let actor_id = provisioned.ghost_actor_id.to_string();
+                            // The DB mapping stores the resolvable Ghost DID:
+                            // outbound submission signs with it. The server's
+                            // stable core id was checked against this exact
+                            // full DID during provisioning.
+                            let actor_id = provisioned.full_id.to_string();
                             let display_name = provisioned
+                                .outcome
                                 .display_name
                                 .as_deref()
                                 .or(Some(external_actor_id.as_str()));
@@ -688,9 +684,9 @@ impl MessageContext {
                                     tenant.clone(),
                                     external_actor_id.clone(),
                                     actor_id,
-                                    provisioned.profile_event_ref.clone(),
-                                    provisioned.accountability_grant_ref.clone(),
-                                    provisioned.authorization_ref.clone(),
+                                    provisioned.outcome.profile_event_ref.clone(),
+                                    provisioned.outcome.accountability_grant_ref.clone(),
+                                    provisioned.outcome.authorization_ref.clone(),
                                     display_name.map(str::to_owned),
                                 )
                                 .await?;
@@ -715,7 +711,7 @@ impl MessageContext {
                         &mapping.accountability_grant_ref,
                     )?;
                     require_nonempty_ref("authorization_ref", &mapping.authorization_ref)?;
-                    let actor = Did::new(mapping.arkret_actor_id)?;
+                    let actor = DidFullId::new(mapping.arkret_actor_id)?;
                     let payload =
                         redaction_payload_for_app_delete(&target_event_id, delete.reason)?
                             .expect("delete reason was checked before queue submission");
@@ -830,8 +826,13 @@ impl MessageContext {
                                 &realm_for_submit,
                             )
                             .await?;
-                            let actor_id = provisioned.ghost_actor_id.to_string();
+                            // The DB mapping stores the resolvable Ghost DID:
+                            // outbound submission signs with it. The server's
+                            // stable core id was checked against this exact
+                            // full DID during provisioning.
+                            let actor_id = provisioned.full_id.to_string();
                             let display_name = provisioned
+                                .outcome
                                 .display_name
                                 .as_deref()
                                 .or(Some(external_user_id.as_str()));
@@ -842,9 +843,9 @@ impl MessageContext {
                                     tenant.clone(),
                                     external_user_id.clone(),
                                     actor_id,
-                                    provisioned.profile_event_ref.clone(),
-                                    provisioned.accountability_grant_ref.clone(),
-                                    provisioned.authorization_ref.clone(),
+                                    provisioned.outcome.profile_event_ref.clone(),
+                                    provisioned.outcome.accountability_grant_ref.clone(),
+                                    provisioned.outcome.authorization_ref.clone(),
                                     display_name.map(str::to_owned),
                                 )
                                 .await?;
@@ -869,7 +870,7 @@ impl MessageContext {
                         &mapping.accountability_grant_ref,
                     )?;
                     require_nonempty_ref("authorization_ref", &mapping.authorization_ref)?;
-                    let actor = Did::new(mapping.arkret_actor_id)?;
+                    let actor = DidFullId::new(mapping.arkret_actor_id)?;
                     let event_id = edge
                         .submit_with_external_ref_as::<arkret_wire::event_spec::MessageCreate, _>(
                             &actor,
@@ -1132,7 +1133,7 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
         // an event we previously bridged is mapped to an app-side deletion via the
         // adapter's `redact_in_app`. Honors the `disable_deletion_forwarding`
         // switch.
-        if event.kind == "ak.message.redact" {
+        if event.kind == EventKind::MessageRedact {
             if messaging_bridge_config(&self.ctx.core().config)?.disable_deletion_forwarding {
                 return Ok(());
             }
@@ -1157,7 +1158,7 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
                 .await?;
             return Ok(());
         }
-        if event.kind != "ak.message.create" {
+        if event.kind != EventKind::MessageCreate {
             return Ok(());
         }
         // Loop prevention: skip events this bridge itself submitted (app ->
@@ -1326,7 +1327,7 @@ where
         // Declare the inbound event kinds this messaging bridge consumes so the
         // applet handler rejects anything else as `capability_denied`
         // (BRG-01-009). `MessageAdapter::on_arkret_event` handles exactly these.
-        core_ctx.set_handled_event_kinds(BRIDGE_HANDLED_EVENT_KINDS);
+        core_ctx.set_handled_event_kinds(BRIDGE_HANDLED_EVENT_KINDS.iter().map(EventKind::as_str));
         let ctx = Arc::new(MessageContext::new(core_ctx, store));
         let user = Arc::new(factory(ctx.clone())?);
         Ok(MessageAdapter { user, ctx })
