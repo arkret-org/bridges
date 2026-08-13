@@ -215,9 +215,9 @@ async fn claim_transaction(
     store: Arc<dyn TransactionIdempotencyStore<AppletTransactionOutcome, Error = BridgeError>>,
     replay: IdempotencyIdentity,
     hash: String,
-    source_signature_anchor: String,
+    delivery_authentication_record_digest: String,
 ) -> Result<TransactionClaim<AppletTransactionOutcome>> {
-    run_blocking(move || store.claim(&replay, &hash, &source_signature_anchor)).await
+    run_blocking(move || store.claim(&replay, &hash, &delivery_authentication_record_digest)).await
 }
 
 /// Authenticate every Event before creating the durable idempotency claim.
@@ -231,7 +231,7 @@ async fn authenticate_and_claim_transaction(
     store: Arc<dyn TransactionIdempotencyStore<AppletTransactionOutcome, Error = BridgeError>>,
     replay: IdempotencyIdentity,
     hash: String,
-    source_signature_anchor: String,
+    delivery_authentication_record_digest: String,
 ) -> Result<std::result::Result<TransactionClaim<AppletTransactionOutcome>, String>> {
     let authentication = run_blocking(move || {
         Ok(authenticate_transaction_events(
@@ -242,7 +242,7 @@ async fn authenticate_and_claim_transaction(
     })
     .await?;
     match authentication {
-        Ok(()) => claim_transaction(store, replay, hash, source_signature_anchor)
+        Ok(()) => claim_transaction(store, replay, hash, delivery_authentication_record_digest)
             .await
             .map(Ok),
         Err(err) => Ok(Err(err)),
@@ -253,19 +253,28 @@ async fn release_transaction_claim(
     store: Arc<dyn TransactionIdempotencyStore<AppletTransactionOutcome, Error = BridgeError>>,
     replay: IdempotencyIdentity,
     hash: String,
-    source_signature_anchor: String,
+    delivery_authentication_record_digest: String,
 ) -> Result<()> {
-    run_blocking(move || store.release(&replay, &hash, &source_signature_anchor)).await
+    run_blocking(move || store.release(&replay, &hash, &delivery_authentication_record_digest))
+        .await
 }
 
 async fn record_transaction_outcome(
     store: Arc<dyn TransactionIdempotencyStore<AppletTransactionOutcome, Error = BridgeError>>,
     replay: IdempotencyIdentity,
     hash: String,
-    source_signature_anchor: String,
+    delivery_authentication_record_digest: String,
     response: AppletTransactionOutcome,
 ) -> Result<()> {
-    run_blocking(move || store.record(&replay, &hash, &source_signature_anchor, &response)).await
+    run_blocking(move || {
+        store.record(
+            &replay,
+            &hash,
+            &delivery_authentication_record_digest,
+            &response,
+        )
+    })
+    .await
 }
 
 struct VerifiedAppletHttpRequest {
@@ -441,15 +450,18 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         destination,
         idempotency_key.clone(),
     );
-    let source_signature_anchor =
-        match build_source_signature_anchor(&verified, &request_hash, &idempotency_key) {
-            Ok(anchor) => anchor,
-            Err(err) => {
-                record_applet_transaction("internal_error");
-                internal_error(res, err);
-                return;
-            }
-        };
+    let delivery_authentication_record_digest = match build_delivery_authentication_record_digest(
+        &verified,
+        &request_hash,
+        &idempotency_key,
+    ) {
+        Ok(anchor) => anchor,
+        Err(err) => {
+            record_applet_transaction("internal_error");
+            internal_error(res, err);
+            return;
+        }
+    };
 
     // Authenticate before the first transaction-processing side effect. An
     // invalid Event proof must not leave a durable `pending` row behind. Once
@@ -460,7 +472,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         state.idempotency.clone(),
         replay.clone(),
         request_hash.clone(),
-        source_signature_anchor.clone(),
+        delivery_authentication_record_digest.clone(),
     )
     .await
     {
@@ -524,7 +536,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
                 state.idempotency.clone(),
                 replay,
                 request_hash,
-                source_signature_anchor,
+                delivery_authentication_record_digest,
                 response.clone(),
             )
             .await
@@ -539,7 +551,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
                 state.idempotency.clone(),
                 replay,
                 request_hash,
-                source_signature_anchor,
+                delivery_authentication_record_digest,
             )
             .await
             {
@@ -809,7 +821,7 @@ fn validate_applet_signature_window(
     Ok(())
 }
 
-fn build_source_signature_anchor(
+fn build_delivery_authentication_record_digest(
     verified: &VerifiedAppletHttpRequest,
     canonical_body_digest: &str,
     idempotency_key: &str,
@@ -1237,7 +1249,7 @@ mod tests {
             &self,
             _identity: &IdempotencyIdentity,
             _body_digest: &str,
-            _source_signature_anchor: &str,
+            _delivery_authentication_record_digest: &str,
         ) -> Result<TransactionClaim<AppletTransactionOutcome>> {
             self.claims.fetch_add(1, Ordering::SeqCst);
             Ok(TransactionClaim::Claimed)
@@ -1247,7 +1259,7 @@ mod tests {
             &self,
             _identity: &IdempotencyIdentity,
             _body_digest: &str,
-            _source_signature_anchor: &str,
+            _delivery_authentication_record_digest: &str,
             _outcome: &AppletTransactionOutcome,
         ) -> Result<()> {
             Ok(())
@@ -1257,7 +1269,7 @@ mod tests {
             &self,
             _identity: &IdempotencyIdentity,
             _body_digest: &str,
-            _source_signature_anchor: &str,
+            _delivery_authentication_record_digest: &str,
         ) -> Result<()> {
             Ok(())
         }

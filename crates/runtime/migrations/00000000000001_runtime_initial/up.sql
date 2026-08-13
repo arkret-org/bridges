@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS transaction_idempotency (
     destination_service_id VARCHAR(191) NOT NULL,
     idempotency_key VARCHAR(191) NOT NULL,
     body_hash TEXT NOT NULL,
-    source_signature_anchor TEXT NOT NULL,
+    delivery_authentication_record_digest TEXT NOT NULL,
     status TEXT NOT NULL,
     outcome TEXT,
     expires_at BIGINT NOT NULL,

@@ -110,7 +110,7 @@ mod idempotency_schema {
             destination_service_id -> Text,
             idempotency_key -> Text,
             body_hash -> Text,
-            source_signature_anchor -> Text,
+            delivery_authentication_record_digest -> Text,
             status -> Text,
             outcome -> Nullable<Text>,
             expires_at -> BigInt,
@@ -171,7 +171,7 @@ const STATUS_PENDING: &str = "pending";
 const STATUS_COMPLETED: &str = "completed";
 
 /// Diesel-backed [`TransactionIdempotencyStore`]: persists the channel-specific
-/// replay identity plus `(body_hash, source_signature_anchor, outcome)` so
+/// replay identity plus `(body_hash, delivery_authentication_record_digest, outcome)` so
 /// transaction
 /// idempotency survives restarts (applet-integration §13 MUST).
 pub struct DbTransactionIdempotencyStore {
@@ -190,7 +190,7 @@ impl DbTransactionIdempotencyStore {
 #[derive(Queryable)]
 struct TransactionIdempotencyRow {
     body_hash: String,
-    source_signature_anchor: String,
+    delivery_authentication_record_digest: String,
     status: String,
     outcome: Option<String>,
     created_at: i64,
@@ -203,7 +203,7 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
         &self,
         replay: &IdempotencyIdentity,
         hash: &str,
-        source_signature_anchor: &str,
+        delivery_authentication_record_digest: &str,
     ) -> Result<TransactionClaim<AppletTransactionOutcome>> {
         use idempotency_schema::transaction_idempotency::dsl;
 
@@ -222,7 +222,7 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
                 .filter(dsl::idempotency_key.eq(&replay.idempotency_key))
                 .select((
                     dsl::body_hash,
-                    dsl::source_signature_anchor,
+                    dsl::delivery_authentication_record_digest,
                     dsl::status,
                     dsl::outcome,
                     dsl::created_at,
@@ -232,7 +232,8 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
             match row {
                 Some(row)
                     if row.body_hash != hash
-                        || row.source_signature_anchor != source_signature_anchor =>
+                        || row.delivery_authentication_record_digest
+                            != delivery_authentication_record_digest =>
                 {
                     return Ok(TransactionClaim::Conflict);
                 }
@@ -281,7 +282,8 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
                             dsl::destination_service_id.eq(&replay.destination_service_id),
                             dsl::idempotency_key.eq(&replay.idempotency_key),
                             dsl::body_hash.eq(hash),
-                            dsl::source_signature_anchor.eq(source_signature_anchor),
+                            dsl::delivery_authentication_record_digest
+                                .eq(delivery_authentication_record_digest),
                             dsl::status.eq(STATUS_PENDING),
                             dsl::outcome.eq(None::<String>),
                             dsl::created_at.eq(now),
@@ -307,7 +309,7 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
         &self,
         replay: &IdempotencyIdentity,
         hash: &str,
-        source_signature_anchor: &str,
+        delivery_authentication_record_digest: &str,
         response: &AppletTransactionOutcome,
     ) -> Result<()> {
         use idempotency_schema::transaction_idempotency::dsl;
@@ -323,7 +325,10 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
                 .filter(dsl::destination_service_id.eq(&replay.destination_service_id))
                 .filter(dsl::idempotency_key.eq(&replay.idempotency_key))
                 .filter(dsl::body_hash.eq(hash))
-                .filter(dsl::source_signature_anchor.eq(source_signature_anchor)),
+                .filter(
+                    dsl::delivery_authentication_record_digest
+                        .eq(delivery_authentication_record_digest),
+                ),
         )
         .set((
             dsl::status.eq(STATUS_COMPLETED),
@@ -338,7 +343,7 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
         &self,
         replay: &IdempotencyIdentity,
         hash: &str,
-        source_signature_anchor: &str,
+        delivery_authentication_record_digest: &str,
     ) -> Result<()> {
         use idempotency_schema::transaction_idempotency::dsl;
 
@@ -351,7 +356,10 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
                 .filter(dsl::destination_service_id.eq(&replay.destination_service_id))
                 .filter(dsl::idempotency_key.eq(&replay.idempotency_key))
                 .filter(dsl::body_hash.eq(hash))
-                .filter(dsl::source_signature_anchor.eq(source_signature_anchor))
+                .filter(
+                    dsl::delivery_authentication_record_digest
+                        .eq(delivery_authentication_record_digest),
+                )
                 .filter(dsl::status.eq(STATUS_PENDING)),
         )
         .execute(&mut conn)?;
