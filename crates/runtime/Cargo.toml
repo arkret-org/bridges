@@ -18,6 +18,9 @@ mysql    = ["db", "diesel/mysql"]
 web      = ["dep:metrics", "dep:metrics-exporter-prometheus", "dep:salvo"]
 runtime  = ["db", "web"]
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow = {workspace = true}
 async-trait = {workspace = true}

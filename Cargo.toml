@@ -10,6 +10,15 @@ rust-version = "1.97"
 authors = ["Arkret Team <chris@acroidea.com>"]
 license = "Apache-2.0"
 
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+mem_forget = "deny"
+todo = "deny"
+unimplemented = "deny"
+
 [workspace.dependencies]
 # Local arkret SDK (protocol side). Path is relative to the workspace root.
 # Applet bridge runtime and chat/social helper layer.

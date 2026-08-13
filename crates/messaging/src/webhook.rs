@@ -406,6 +406,7 @@ pub fn payload_too_large(res: &mut Response, message: impl Into<String>) {
 /// Configuration for webhook sources that authenticate with a Bearer JWT whose
 /// signing keys are published as JWKS.
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct JwtAuthConfig {
     pub issuer: String,
     pub audience: String,
@@ -896,6 +897,19 @@ OeQdGwud4COtqrs5f1jdPtvd
             reqwest::Client::new(),
             policy,
         )
+    }
+
+    #[test]
+    fn jwt_auth_config_rejects_unknown_keys() {
+        let error = serde_json::from_value::<JwtAuthConfig>(json!({
+            "issuer": TEST_ISSUER,
+            "audience": TEST_AUDIENCE,
+            "jwks_url": "https://issuer.example/jwks",
+            "jwks_uri": "https://issuer.example/typo"
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unknown field `jwks_uri`"));
     }
 
     fn signed_token(

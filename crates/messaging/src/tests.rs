@@ -8,11 +8,23 @@ use crate::content::{
 use crate::ghost::{assert_ghost_suffix_method, location_matches};
 use crate::types::{AppDeleteOutcome, AppDeleteReason, Attachment};
 use crate::{
-    EXTERNAL_REF_SCHEMA, PORTAL_STRAND_TRACK, json_scalar_id_string,
+    ChannelRealmMappingConfig, EXTERNAL_REF_SCHEMA, PORTAL_STRAND_TRACK, json_scalar_id_string,
     redaction_payload_for_app_delete,
 };
 
 const STRAND_ID: &str = "ak:strand:AbrgMKK4KXMpRsGsFrsEQEsjo207metUd4zt8yjzB-UH";
+
+#[test]
+fn channel_mapping_config_rejects_unknown_keys() {
+    let error = serde_json::from_value::<ChannelRealmMappingConfig>(json!({
+        "app_channel": "room-1",
+        "realm_id": "ak:realm:0196419b-0000-7000-8000-000000000000",
+        "allias": "typo-must-not-be-ignored"
+    }))
+    .unwrap_err();
+
+    assert!(error.to_string().contains("unknown field `allias`"));
+}
 
 #[test]
 fn json_scalar_id_string_accepts_string_and_integer_ids() {

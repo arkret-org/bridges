@@ -13,6 +13,9 @@ sqlite = ["arkret-bridge-runtime/runtime", "arkret-bridge-runtime/sqlite"]
 postgres = ["arkret-bridge-runtime/runtime", "arkret-bridge-runtime/postgres"]
 mysql = ["arkret-bridge-runtime/runtime", "arkret-bridge-runtime/mysql"]
 
+[lints]
+workspace = true
+
 [dependencies]
 aes = {workspace = true}
 anyhow = {workspace = true}

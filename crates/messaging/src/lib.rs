@@ -63,6 +63,7 @@ pub use types::{
 };
 
 #[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ChannelRealmMappingConfig {
     app_channel: String,
     realm_id: String,

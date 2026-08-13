@@ -17,6 +17,9 @@ sqlite = ["arkret-bridge-messaging/sqlite"]
 postgres = ["arkret-bridge-messaging/postgres"]
 mysql = ["arkret-bridge-messaging/mysql"]
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow = {workspace = true}
 async-trait = {workspace = true}
