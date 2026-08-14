@@ -81,11 +81,10 @@ use std::sync::Arc;
 
 use arkret::identity::{
     AcceptedDidBinding, BindingInvalidation, BindingResolveRequest, DidBindingPurpose,
-    DidBindingStatus, DidDocument, EvidenceReceipt, FreshnessProfile, FreshnessRiskTier,
+    DidBindingStatus, DidDocument, EvidenceReceipt, FreshnessProfile,
     InMemoryVerifiedDidBindingStore, LimitedTrust, MethodEvidence, ResolverFailMode,
-    ResolverPolicy, StaleBehavior, VerifiedDidBinding, VerifiedDidBindingDocumentInput,
-    VerifiedDidBindingKey, VerifiedDidBindingStore, document_canonical_digest, policy_digest,
-    resolve_and_verify_binding,
+    ResolverPolicy, VerifiedDidBinding, VerifiedDidBindingDocumentInput, VerifiedDidBindingKey,
+    VerifiedDidBindingStore, document_canonical_digest, policy_digest, resolve_and_verify_binding,
 };
 use arkret::{
     CompositeDidResolver, DidFullId, DidKeyResolver, DidResolver, Hash, HttpDidResolver,
@@ -106,25 +105,29 @@ use crate::error::{BridgeError, Result};
 /// reuse threshold). `fresh_for_seconds` is now the single source of both.
 ///
 /// Tier is `high`: establishing an inbound Event-signer or source-service
-/// acceptance is a §4 row 1/3 trust decision, so a stale binding is never
-/// consumed on this path — refresh synchronously or fail closed. The §5.4 `high`
-/// constraints hold: both windows are finite and `0 < 3600 <= 86400`, and there
-/// is no stale-consumption window.
+/// acceptance is a trust decision, so a stale binding is never consumed on this
+/// path — refresh synchronously or fail closed. The §5.4 `high` constraints
+/// hold: both windows are finite and `0 < 3600 <= 86400`, and there is no
+/// stale-consumption window.
+///
+/// The id is `unregistered_fail_closed`, and deliberately so. §5.4 forbids an
+/// implementation inventing a `freshness_profile_id`, and
+/// `ak.edge.applet.transactions.command.submit` carries no `did_authority` row
+/// that would name a better one — so the registry's own declared fallback is
+/// the only id this call site may reference. Registering the applet edge call
+/// site is tracked in
+/// `review/spec-open/2026-08-14-2126-service-local-did-authority-call-sites.md`.
 ///
 /// This does **not** make ordinary verification stricter: ordinary per-signature
 /// checks go through [`AcceptedDidBindings`], which reads the store directly and
 /// therefore keeps consuming a binding until its hard expiry, exactly as §3
 /// requires.
 fn inbound_freshness_profile() -> FreshnessProfile {
-    FreshnessProfile {
-        freshness_profile_id: "ak.did_freshness.bridge_inbound_applet.v1".to_owned(),
-        risk_tier: FreshnessRiskTier::High,
-        did_method_selector: vec!["*".to_owned()],
-        fresh_for_seconds: Some(3_600),
-        stale_grace_seconds: None,
-        hard_expiry_seconds: Some(24 * 3_600),
-        stale_behavior: StaleBehavior::SynchronousRefreshOrFailClosed,
-    }
+    FreshnessProfile::high_tier(
+        arkret_wire::DidFreshnessProfileId::UnregisteredFailClosedV1,
+        chrono::Duration::seconds(3_600),
+        Some(chrono::Duration::seconds(24 * 3_600)),
+    )
 }
 
 /// Upper bound on distinct accepted bindings held in memory. Inbound pushes

@@ -1,21 +1,17 @@
 //! Platform-neutral inbound media fetch contract.
 
 use std::fmt;
-use std::sync::Arc;
 use std::time::Duration;
 
+use arkret_egress_reqwest::EgressGuard;
 use async_trait::async_trait;
 use futures::StreamExt;
 
-use crate::runtime::{
-    BridgeError, Result, exponential_backoff_with_jitter, redact_sensitive_url_values,
-};
+use crate::runtime::{BridgeError, Result, bridge_retry_delay, redact_sensitive_url_values};
 use crate::{DownloadedMedia, MAX_EXTERNAL_MEDIA_BYTES};
 
 const DEFAULT_MEDIA_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_MEDIA_FETCH_ATTEMPTS: u32 = 3;
-const MEDIA_RETRY_BASE: Duration = Duration::from_millis(250);
-const MEDIA_RETRY_MAX: Duration = Duration::from_secs(2);
 
 /// Authentication attached to a platform-resolved media reference.
 ///
@@ -93,9 +89,9 @@ pub struct HttpInboundMediaFetcher {
 
 impl HttpInboundMediaFetcher {
     pub fn new() -> Result<Self> {
-        let http = reqwest::Client::builder()
+        let http = media_egress_guard()
+            .apply_to_client_builder(reqwest::Client::builder())
             .redirect(reqwest::redirect::Policy::none())
-            .dns_resolver(Arc::new(PolicyDnsResolver))
             .build()
             .map_err(|error| BridgeError::Runtime(format!("build media HTTP client: {error}")))?;
         Ok(Self { http })
@@ -173,9 +169,9 @@ fn validate_media_url(
     url: &reqwest::Url,
     allowed_hosts: &[String],
 ) -> std::result::Result<(), FetchFailure> {
-    media_egress_policy()
-        .validate_url(url)
-        .map_err(|error| FetchFailure::fatal(format!("media download target denied: {error}")))?;
+    media_egress_guard()
+        .validate_url(url, "media download target")
+        .map_err(|error| FetchFailure::fatal(error.to_string()))?;
     let host = url
         .host_str()
         .ok_or_else(|| FetchFailure::fatal("media download URL has no host"))?;
@@ -187,36 +183,20 @@ fn validate_media_url(
     Ok(())
 }
 
-fn media_egress_policy() -> arkret_egress_policy::OutboundPolicy {
+/// Outbound posture for vendor media downloads.
+///
+/// The whole parse/judge/resolve/bind sequence — including the connect-time
+/// resolver installed by `apply_to_client_builder` — lives in
+/// `arkret-egress-reqwest`; the test build relaxes only to loopback so the
+/// mock-provider tests can reach `127.0.0.1`.
+fn media_egress_guard() -> EgressGuard {
     #[cfg(test)]
     {
-        arkret_egress_policy::OutboundPolicy::local_development()
+        EgressGuard::local_development()
     }
     #[cfg(not(test))]
     {
-        arkret_egress_policy::OutboundPolicy::public_https()
-    }
-}
-
-#[derive(Debug)]
-struct PolicyDnsResolver;
-
-impl reqwest::dns::Resolve for PolicyDnsResolver {
-    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-        let host = name.as_str().to_owned();
-        Box::pin(async move {
-            let addresses = tokio::net::lookup_host((host.as_str(), 0))
-                .await?
-                .collect::<Vec<_>>();
-            media_egress_policy()
-                .validate_resolved_addresses(&addresses)
-                .map_err(|error| {
-                    Box::<dyn std::error::Error + Send + Sync>::from(std::io::Error::other(
-                        format!("media DNS target denied: {error}"),
-                    ))
-                })?;
-            Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
-        })
+        EgressGuard::public_https()
     }
 }
 
@@ -243,12 +223,7 @@ impl InboundMediaFetcher for HttpInboundMediaFetcher {
                 Err(_) => last_error = Some("media download timed out".to_owned()),
             }
             if attempt + 1 < policy.max_attempts {
-                tokio::time::sleep(exponential_backoff_with_jitter(
-                    attempt,
-                    MEDIA_RETRY_BASE,
-                    MEDIA_RETRY_MAX,
-                ))
-                .await;
+                tokio::time::sleep(bridge_retry_delay(attempt)).await;
             }
         }
         Err(BridgeError::App(

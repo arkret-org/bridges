@@ -342,14 +342,22 @@ async fn build_signed_ghost_provision_request(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(external_user_id);
-    let profile_external_ref = json!({
-        "schema": "ak.applet.ghost_actor.external_ref.v1",
-        "protocol": protocol,
-        "tenant": tenant,
-        "external_user_id": external_user_id,
-        "realm_id": realm_id,
-        "external_ref": external_ref_for_user(config, protocol, tenant, external_user_id),
-    });
+    // The profile's `external_ref` is the *same* external provenance the
+    // provision request carries, so it is built from the same typed
+    // `arkret::ExternalRef` rather than hand-written. Hand-writing it produced
+    // an `ak.`-namespaced `schema` id the spec never registered plus keys
+    // (`tenant`, `external_user_id`, a nested `external_ref`) outside the
+    // `event-envelope.schema.json#/$defs/external_ref` vocabulary — and because
+    // that def is an open object, nothing rejected it at runtime. `realm_id` is
+    // dropped here: it is already a signed envelope field of the Event this
+    // payload rides on.
+    let profile_external_ref = serde_json::to_value(external_ref_for_user(
+        config,
+        protocol,
+        tenant,
+        external_user_id,
+    ))
+    .map_err(|error| BridgeError::App(format!("Ghost profile external_ref invalid: {error}")))?;
     // No profile id: it is derived from the `ak.profile.create` Event this
     // payload rides on (spec `zh/models/common-fields.md` section 6.0).
     let profile_request = arkret_event_draft::GhostActorProfileRequest::new(

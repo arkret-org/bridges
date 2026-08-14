@@ -64,7 +64,7 @@ pub use arkret_edge::{
     ArkretEdge, EventInitialSubmissionProvider, PrincipalServerSubmissionProvider, SeqAllocator,
     SeqStore,
 };
-pub use backoff::{exponential_backoff_with_jitter, jittered_delay};
+pub use backoff::{BRIDGE_RETRY, bridge_retry_delay, jittered_delay};
 pub use blocking::run_blocking;
 pub use cache::{PersistedToken, TokenCache, TokenStore};
 pub use config::{Config, DatabaseConfig, WebhookRateLimitConfig};

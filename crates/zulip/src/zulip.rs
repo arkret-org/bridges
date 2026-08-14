@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use arkret_bridge_messaging::runtime::{
-    BridgeError, Result, exponential_backoff_with_jitter, redact_sensitive_url_values,
+    BridgeError, Result, bridge_retry_delay, redact_sensitive_url_values,
 };
 use arkret_bridge_messaging::{
     AppMessageRef, ExternalMediaRequest, InboundAppMessage, InboundMediaAuthorization,
@@ -28,10 +28,6 @@ fn zulip_result_ok(payload: &Value) -> bool {
     payload.get("result").and_then(Value::as_str) == Some("success")
 }
 
-/// Base delay for the long-poll failure backoff.
-const ZULIP_BACKOFF_BASE: std::time::Duration = std::time::Duration::from_secs(2);
-/// Ceiling for the long-poll failure backoff.
-const ZULIP_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(60);
 /// Consecutive long-poll failures after which the event queue is re-registered
 /// (a persistently malformed/erroring queue is most likely stale or gone).
 const ZULIP_REREGISTER_AFTER_FAILURES: u32 = 5;
@@ -49,8 +45,7 @@ async fn zulip_poll_backoff(failures: &mut u32, context: &str, detail: &str) -> 
         );
         return true;
     }
-    let delay =
-        exponential_backoff_with_jitter(*failures - 1, ZULIP_BACKOFF_BASE, ZULIP_BACKOFF_MAX);
+    let delay = bridge_retry_delay(*failures - 1);
     tracing::warn!(
         failures = *failures,
         delay_ms = delay.as_millis() as u64,
@@ -138,11 +133,7 @@ impl MessageBridge for ZulipApp {
             let (queue_id, mut last_event_id) = match self.register(&ctx).await {
                 Ok(queue) => queue,
                 Err(e) => {
-                    let delay = exponential_backoff_with_jitter(
-                        register_attempt,
-                        ZULIP_BACKOFF_BASE,
-                        ZULIP_BACKOFF_MAX,
-                    );
+                    let delay = bridge_retry_delay(register_attempt);
                     register_attempt = register_attempt.saturating_add(1);
                     tracing::warn!(error = %e, delay_ms = delay.as_millis() as u64, "Zulip queue registration failed, retrying");
                     tokio::time::sleep(delay).await;

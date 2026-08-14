@@ -1,46 +1,45 @@
-//! Shared retry-delay helpers for bridge receive loops.
+//! Retry-delay helpers for bridge receive loops.
+//!
+//! The curve, the jitter span and the `Retry-After` semantics all come from
+//! [`arkret_retry`]; this module only binds them to the bridges' wall-clock
+//! jitter seed. `sync/api-conventions.md` §9 is the normative source: first
+//! wait at least 1,000 ms, factor 2, ceiling at least 60,000 ms, 0–20% jitter.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const DEFAULT_JITTER_RATIO: f64 = 0.25;
-const NANOS_PER_SECOND: f64 = 1_000_000_000.0;
-const MAX_BACKOFF_SHIFT: u32 = 16;
+use arkret_retry::{Jitter, RetryPolicy, SPEC_JITTER_RATIO};
 
-fn jitter_fraction() -> f64 {
+/// The reconnect / retry curve every bridge loop uses.
+pub const BRIDGE_RETRY: RetryPolicy = RetryPolicy::arkret_default();
+
+/// Seed the jitter mixer from sub-second clock nanoseconds.
+///
+/// This intentionally avoids a `rand` dependency: the sub-second sample is
+/// enough to de-correlate retry timing across a reconnecting bridge fleet, and
+/// jitter is never a security boundary.
+fn jitter() -> Jitter {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    f64::from(nanos) / NANOS_PER_SECOND
+        .map_or(0, |elapsed| u64::from(elapsed.subsec_nanos()));
+    Jitter::from_seed(nanos)
 }
 
-fn jittered_delay_from_fraction(base: Duration, fraction: f64) -> Duration {
-    let factor = 1.0 - DEFAULT_JITTER_RATIO + fraction.clamp(0.0, 1.0) * DEFAULT_JITTER_RATIO * 2.0;
-    base.mul_f64(factor)
-}
-
-/// Apply +/-25% process-local jitter to a delay so reconnecting bridge fleets
-/// do not retry in lockstep. This intentionally avoids a `rand` dependency:
-/// sub-second clock nanoseconds are enough to de-correlate retry timing.
+/// Add the spec's 0–20% jitter to a fixed delay so reconnecting bridge fleets
+/// do not retry in lockstep.
+#[must_use]
 pub fn jittered_delay(base: Duration) -> Duration {
-    jittered_delay_from_fraction(base, jitter_fraction())
+    arkret_retry::apply_jitter(base, SPEC_JITTER_RATIO, &mut jitter())
 }
 
-fn exponential_backoff_with_jitter_from_fraction(
-    attempt: u32,
-    base: Duration,
-    max: Duration,
-    fraction: f64,
-) -> Duration {
-    let exponent = attempt.min(MAX_BACKOFF_SHIFT);
-    let scaled = base.saturating_mul(1u32 << exponent).min(max);
-    jittered_delay_from_fraction(scaled, fraction).min(max)
-}
-
-/// Exponential backoff (`base * 2^attempt`) capped at `max`, with +/-25%
-/// process-local jitter applied to the capped delay.
-pub fn exponential_backoff_with_jitter(attempt: u32, base: Duration, max: Duration) -> Duration {
-    exponential_backoff_with_jitter_from_fraction(attempt, base, max, jitter_fraction())
+/// The delay before retry number `attempt` (0-based) on the shared bridge
+/// curve, with the spec's 0–20% jitter added on top of the capped delay.
+///
+/// The jitter is deliberately *not* re-clamped into the ceiling: clamping would
+/// collapse the jitter window to zero exactly once the ladder saturates, which
+/// is when a fleet most needs de-correlating.
+#[must_use]
+pub fn bridge_retry_delay(attempt: u32) -> Duration {
+    BRIDGE_RETRY.delay(attempt, &mut jitter())
 }
 
 #[cfg(test)]
@@ -48,53 +47,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn jittered_delay_uses_expected_window() {
+    fn jitter_only_ever_lengthens_a_fixed_delay() {
         let base = Duration::from_secs(4);
-
-        assert_eq!(
-            jittered_delay_from_fraction(base, 0.0),
-            Duration::from_secs(3)
-        );
-        assert_eq!(
-            jittered_delay_from_fraction(base, 0.5),
-            Duration::from_secs(4)
-        );
-        assert_eq!(
-            jittered_delay_from_fraction(base, 1.0),
-            Duration::from_secs(5)
-        );
+        for _ in 0..64 {
+            let delay = jittered_delay(base);
+            assert!(delay >= base, "{delay:?} fell below the base delay");
+            assert!(delay <= Duration::from_millis(4_800), "{delay:?}");
+        }
     }
 
     #[test]
-    fn exponential_backoff_scales_and_caps_final_delay() {
-        let base = Duration::from_secs(2);
-        let max = Duration::from_secs(60);
-
-        assert_eq!(
-            exponential_backoff_with_jitter_from_fraction(0, base, max, 0.5),
-            Duration::from_secs(2)
-        );
-        assert_eq!(
-            exponential_backoff_with_jitter_from_fraction(3, base, max, 0.5),
-            Duration::from_secs(16)
-        );
-        assert_eq!(
-            exponential_backoff_with_jitter_from_fraction(20, base, max, 1.0),
-            max
-        );
+    fn bridge_ladder_scales_and_saturates() {
+        assert_eq!(BRIDGE_RETRY.base_delay(0), Duration::from_secs(1));
+        assert_eq!(BRIDGE_RETRY.base_delay(3), Duration::from_secs(8));
+        assert_eq!(BRIDGE_RETRY.base_delay(20), Duration::from_secs(60));
     }
 
     #[test]
-    fn jitter_fraction_inputs_are_clamped() {
-        let base = Duration::from_secs(4);
+    fn saturated_ladder_still_carries_jitter() {
+        for _ in 0..64 {
+            let delay = bridge_retry_delay(20);
+            assert!(delay >= Duration::from_secs(60), "{delay:?}");
+            assert!(delay <= Duration::from_secs(72), "{delay:?}");
+        }
+    }
 
-        assert_eq!(
-            jittered_delay_from_fraction(base, -1.0),
-            Duration::from_secs(3)
-        );
-        assert_eq!(
-            jittered_delay_from_fraction(base, 2.0),
-            Duration::from_secs(5)
-        );
+    #[test]
+    fn bridge_retry_curve_is_the_spec_default() {
+        assert_eq!(BRIDGE_RETRY.initial_delay(), Duration::from_secs(1));
+        assert_eq!(BRIDGE_RETRY.max_delay(), Duration::from_secs(60));
+        assert_eq!(BRIDGE_RETRY.factor(), 2);
     }
 }
