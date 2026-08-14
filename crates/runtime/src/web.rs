@@ -929,7 +929,18 @@ fn verify_transaction_events(
             .envelope_bytes(event)
             .map_err(|err| format!("event {} canonicalization failed: {err}", event.event_id))?;
         let expected_signer = event.executed_by.as_ref().unwrap_or(&event.actor_id);
-        for proof in &event.proofs {
+        let producer_proofs = event
+            .proofs
+            .iter()
+            .filter_map(arkret_wire::EventProof::as_producer)
+            .collect::<Vec<_>>();
+        if producer_proofs.len() != 1 {
+            return Err(format!(
+                "event {} must carry exactly one producer proof",
+                event.event_id
+            ));
+        }
+        for proof in producer_proofs {
             proof.validate_production().map_err(|err| {
                 format!("event {} proof is not production: {err}", event.event_id)
             })?;
@@ -1095,11 +1106,11 @@ fn applet_error(res: &mut Response, status: StatusCode, code: &str, message: imp
 }
 
 fn bad_request(res: &mut Response, message: impl Into<String>) {
-    applet_error(res, StatusCode::BAD_REQUEST, "bad_json", message);
+    applet_error(res, StatusCode::BAD_REQUEST, "json_invalid", message);
 }
 
 fn unauthorized(res: &mut Response, message: impl Into<String>) {
-    applet_error(res, StatusCode::UNAUTHORIZED, "invalid_signature", message);
+    applet_error(res, StatusCode::UNAUTHORIZED, "signature_invalid", message);
 }
 
 fn unauthorized_code(res: &mut Response, code: &'static str, message: impl Into<String>) {
@@ -1330,6 +1341,7 @@ mod tests {
             "ak.message.create",
             ScopeRef::Realm { realm_id: realm },
             actor_id(actor),
+            arkret::project_full_id_to_core_id(&server_did()).expect("server core id"),
             seq,
             hlc,
             json!({ "body": format!("hello {seq}") }),

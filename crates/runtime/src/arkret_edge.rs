@@ -465,6 +465,7 @@ impl ArkretEdge {
                 realm_id: realm_id.clone(),
             },
             self.service_actor_id.clone(),
+            self.service_actor_id.clone(),
             content,
         )?
         .with_applet_id(self.applet_id.clone())
@@ -490,6 +491,7 @@ impl ArkretEdge {
                 realm_id: realm_id.clone(),
             },
             actor_id,
+            self.service_actor_id.clone(),
             content,
         )?
         .with_executed_by(self.service_actor_id.clone())
@@ -1370,6 +1372,7 @@ mod tests {
         let mut first = arkret_wire::test_support::raw_event(
             "ak.message.create",
             ScopeRef::Realm { realm_id: realm },
+            actor.clone(),
             actor,
             1,
             hlc,
@@ -1384,8 +1387,12 @@ mod tests {
         second
             .unsigned
             .insert("delivery".to_owned(), json!({ "attempt": 2 }));
-        first.proofs.push(test_proof("header.payload.signature-a"));
-        second.proofs.push(test_proof("header.payload.signature-b"));
+        first
+            .proofs
+            .push(test_proof("header.payload.signature-a").into());
+        second
+            .proofs
+            .push(test_proof("header.payload.signature-b").into());
 
         assert_eq!(
             event_content_fingerprint(&first),
