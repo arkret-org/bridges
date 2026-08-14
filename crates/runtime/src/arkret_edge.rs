@@ -290,23 +290,6 @@ impl ArkretEdge {
         )
     }
 
-    /// Build an outbound-only edge from host-managed authenticated transport,
-    /// signing material, and a reusable sequence allocator.
-    ///
-    /// This is the integration path for hosts that own authentication and key
-    /// storage. No inbound queues are allocated, and rebuilding an edge can
-    /// reuse the same allocator without discarding its current reservation.
-    pub fn new_outbound(
-        config: Arc<Config>,
-        client: Client,
-        signer: Ed25519PayloadSigner,
-        seq: SeqAllocator,
-    ) -> Result<Self> {
-        let service_id = DidFullId::new(config.arkret.service_id.clone())?;
-        let hlc_secret = signer.verifying_key().to_bytes();
-        Self::build(config, client, signer, service_id, hlc_secret, seq, None)
-    }
-
     fn build(
         config: Arc<Config>,
         client: Client,
