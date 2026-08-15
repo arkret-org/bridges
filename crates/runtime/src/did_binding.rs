@@ -1,134 +1,76 @@
 //! Accepted DID bindings for the inbound applet transaction path
 //! (`identity/did-usage-and-verification.md` §3 / §4 / §5 / §6).
 //!
-//! # Why this module exists
+//! # Why this module holds no resolver
 //!
-//! Before DID-P1-B01 the inbound `POST /_arkret/edge/applet/transactions`
-//! handler held one `Arc<CompositeDidResolver>` and re-resolved **every** Event
-//! proof's `verification_method` on **every** transaction. That violates §3
-//! ("验证签名不等于重新验证 DID") and §6 ("业务 reducer、projection、query、UI
-//! 与 routing 代码只消费 verified binding 或 accepted auth-state，不直接持有
-//! 通用网络 resolver").
+//! A bridge has exactly one DID authority need: authenticating the RFC 9421
+//! HTTP Message Signature of the Arkret node that pushes to it. That key is an
+//! operator-configured trust anchor, so the acceptance is made from
+//! configuration at startup and costs zero network calls — forever.
 //!
-//! The split here is a **type-level** one, not a convention:
+//! Inbound Event `proofs[]` are deliberately **not** authenticated here. §4's
+//! exclusion list already says an ordinary or high-risk Event write does not
+//! create a DID authority call, and that a device key MUST come from an
+//! accepted PCR authorization chain. A bridge structurally cannot reach that
+//! chain: `applet-integration.md` §12 fixes the node → applet anchoring
+//! material as the source service DID key-state evidence, and
+//! `AppletTransactionRequestBody` carries no PCR material at all. Resolving an
+//! Event proof's `verification_method` here would therefore only establish
+//! "this key appears in some DID document" — far weaker than admission — while
+//! reading to a maintainer as if the signer had been independently verified.
+//! The signer authority of an inbound Event is carried by the source Arkret
+//! node that already completed admission and vouches for the push with its
+//! HTTP signature.
 //!
-//! | type | holds a resolver? | who uses it |
-//! | --- | --- | --- |
-//! | [`AcceptedDidBindings`] | no — structurally impossible | ordinary per-signature verification |
-//! | [`DidAuthority`] | yes, in a private field | the §4 authority triggers only |
-//!
-//! `AcceptedDidBindings` has no resolver field and no way to obtain one, so
-//! `crate::web::verify_transaction_events` — which takes exactly that type —
-//! cannot make a network call even by mistake.
-//!
-//! # Purpose isolation (DID-P1-B01)
-//!
-//! The HTTP Message Signature of the pushing Arkret node and the Event proofs it
-//! carries are authenticated against **different** bindings that can never
-//! substitute for each other, because [`DidBindingPurpose`] is part of the store
-//! key:
+//! So there is no `Principal`-purpose acceptance and no resolver anywhere on
+//! this path: [`DidAuthority`] owns a binding store and nothing else, and a
+//! missing or unusable `Service` binding fails closed rather than triggering a
+//! lookup.
 //!
 //! | material | purpose | DID | source of the acceptance |
 //! | --- | --- | --- | --- |
 //! | RFC 9421 HTTP signature | [`DidBindingPurpose::Service`] | `arkret.trusted_server_did` | [`DidAuthority::accept_configured_source_service_key`] (config trust anchor, zero network) |
-//! | Event `proofs[]` | [`DidBindingPurpose::Principal`] | the Event's `executed_by` / `actor_id` | [`DidAuthority::accept_event_signer`] (§4 row 1/3, exactly one resolve) |
-//!
-//! A `Service` acceptance for the node DID therefore cannot authorize an Event
-//! proof, and an Event-signer acceptance cannot authorize the HTTP signature,
-//! even when the two DIDs coincide.
-//!
-//! ## Why `Principal` and not `DeviceSigner` / `AgentSigner`
-//!
-//! What a bridge actually verifies about an Event proof is that
-//! `proof.verification_method` is published by the *actor's own* DID document
-//! and that its DID part equals `executed_by` / `actor_id`. Bridges never sees
-//! device-authorization or agent-signer-epoch evidence, so claiming
-//! `DeviceSigner` / `AgentSigner` would record an acceptance it did not make.
-//! §5 requires the binding to state what was actually verified, so the honest
-//! closed purpose is `Principal` (actor identity control).
 //!
 //! # Version / epoch dimension
 //!
 //! No binding built here pins a `history_head` or a `version_id`, so every one
-//! of them carries the per-pin `limited_trust` record §5.5 demands. Two
-//! independent reasons:
+//! of them carries the per-pin `limited_trust` record §5.5 demands. No Applet
+//! registration epoch is reachable from a bridge: `registration_epoch`
+//! (`applet-schema.md` §1.0.1) is computed over an `AppletPackage` transcript
+//! held by the Arkret node that installed the applet, a bridge never builds,
+//! receives or stores an `AppletPackage`, `AppletTransactionRequestBody`
+//! carries no epoch, and there is no config field for one. For the node →
+//! applet direction `applet-integration.md` §12 names the anchor material as
+//! "Arkret node 方向的 source service DID key-state evidence" — which is
+//! exactly `VerifiedAppletHttpRequest::source_key_state_digest`, already
+//! recorded in the idempotency anchor. That digest is a digest of the source
+//! service's published key material, and the binding pins that same material
+//! through `document_digest`, so the acceptance still changes exactly when the
+//! source key state does. See
+//! [`DidAuthority::accept_configured_source_service_key`] for why the digest is
+//! no longer folded into the evidence itself.
 //!
-//! 1. **No Applet registration epoch is reachable from a bridge.** `registration_epoch`
-//!    (`applet-schema.md` §1.0.1) is computed over an `AppletPackage` transcript held by the Arkret
-//!    node that installed the applet. A bridge never builds, receives or stores an `AppletPackage`,
-//!    `AppletTransactionRequestBody` carries no epoch, and there is no config field for one. For
-//!    the node → applet direction `applet-integration.md` §12 names the anchor material as "Arkret
-//!    node 方向的 source service DID key-state evidence" — which is exactly
-//!    `VerifiedAppletHttpRequest::source_key_state_digest`, already recorded in the idempotency
-//!    anchor. That digest is a digest of the source service's published key material, and the
-//!    binding pins that same material through `document_digest`, so the acceptance still changes
-//!    exactly when the source key state does. See
-//!    [`DidAuthority::accept_configured_source_service_key`] for why the digest is no longer folded
-//!    into the evidence itself.
-//! 2. **The resolver surfaces no method evidence for these methods.** `CompositeDidResolver` here
-//!    serves `did:key` (self-describing key material, proofless by construction) and plain HTTP
-//!    `did:webvh` documents; neither yields a log head, a witness set or a controller proof bundle,
-//!    so the §5.2 evidence receipt's `method_proofs` is empty for every acceptance made here. That
-//!    is the normative degenerate form, and the pins are recorded as `method_unsupported` rather
-//!    than silently omitted.
-//!
-//! Freshness is therefore carried by the referenced [`inbound_freshness_profile`]
-//! plus the `verification_method` key dimension, and rotation is handled by
-//! explicit [`DidAuthority::invalidate_did`] (§4 row 7 "收到 rotation /
-//! deactivation / witness fork / policy-change invalidation").
+//! A config-pinned anchor publishes no method proofs, so the §5.2 evidence
+//! receipt's `method_proofs` is empty for every acceptance made here. That is
+//! the normative degenerate form, and the pins are recorded as
+//! `method_unsupported` rather than silently omitted. Rotation is handled by an
+//! operator config change and by explicit [`DidAuthority::invalidate_did`]
+//! (§4 row 7 "收到 rotation / deactivation / witness fork / policy-change
+//! invalidation").
 
 use std::sync::Arc;
 
 use arkret::identity::{
-    AcceptedDidBinding, BindingInvalidation, BindingResolveRequest, DidBindingPurpose,
-    DidBindingStatus, DidDocument, EvidenceReceipt, FreshnessProfile,
-    InMemoryVerifiedDidBindingStore, LimitedTrust, MethodEvidence, ResolverFailMode,
-    ResolverPolicy, VerifiedDidBinding, VerifiedDidBindingDocumentInput, VerifiedDidBindingKey,
-    VerifiedDidBindingStore, document_canonical_digest, policy_digest, resolve_and_verify_binding,
+    AcceptedDidBinding, BindingInvalidation, DidBindingPurpose, DidBindingStatus, DidDocument,
+    EvidenceReceipt, InMemoryVerifiedDidBindingStore, LimitedTrust, MethodEvidence,
+    ResolverFailMode, ResolverPolicy, VerifiedDidBinding, VerifiedDidBindingDocumentInput,
+    VerifiedDidBindingKey, VerifiedDidBindingStore, document_canonical_digest, policy_digest,
 };
-use arkret::{
-    CompositeDidResolver, DidFullId, DidKeyResolver, DidResolver, Hash, HttpDidResolver,
-    TypedTrustDomainId,
-};
+use arkret::{DidFullId, Hash, TypedTrustDomainId};
 use arkret_wire::DidUrl;
 use chrono::{DateTime, Utc};
 
 use crate::error::{BridgeError, Result};
-
-/// The freshness profile every inbound DID authority call site references
-/// (`did-usage-and-verification.md` §5.4).
-///
-/// §5.4 forbids natural-language tier guessing and forbids maintaining
-/// `refresh_after` and an authority `max_age` as two separate constants — which
-/// is exactly what this module used to do (`BINDING_REFRESH_AFTER_SECS` = 1 h
-/// for `refresh_after`, `fresh_within(BINDING_HARD_EXPIRY_SECS)` = 24 h for the
-/// reuse threshold). `fresh_for_seconds` is now the single source of both.
-///
-/// Tier is `high`: establishing an inbound Event-signer or source-service
-/// acceptance is a trust decision, so a stale binding is never consumed on this
-/// path — refresh synchronously or fail closed. The §5.4 `high` constraints
-/// hold: both windows are finite and `0 < 3600 <= 86400`, and there is no
-/// stale-consumption window.
-///
-/// The id is `unregistered_fail_closed`, and deliberately so. §5.4 forbids an
-/// implementation inventing a `freshness_profile_id`, and
-/// `ak.edge.applet.transactions.command.submit` carries no `did_authority` row
-/// that would name a better one — so the registry's own declared fallback is
-/// the only id this call site may reference. Registering the applet edge call
-/// site is tracked in
-/// `review/spec-open/2026-08-14-2126-service-local-did-authority-call-sites.md`.
-///
-/// This does **not** make ordinary verification stricter: ordinary per-signature
-/// checks go through [`AcceptedDidBindings`], which reads the store directly and
-/// therefore keeps consuming a binding until its hard expiry, exactly as §3
-/// requires.
-fn inbound_freshness_profile() -> FreshnessProfile {
-    FreshnessProfile::high_tier(
-        arkret_wire::DidFreshnessProfileId::UnregisteredFailClosedV1,
-        chrono::Duration::seconds(3_600),
-        Some(chrono::Duration::seconds(24 * 3_600)),
-    )
-}
 
 /// Upper bound on distinct accepted bindings held in memory. Inbound pushes
 /// come from one trusted node but may carry Events from many actors, so the
@@ -136,12 +78,15 @@ fn inbound_freshness_profile() -> FreshnessProfile {
 /// unbounded.
 const BINDING_STORE_CAPACITY: usize = 4096;
 
-/// The resolver policy every inbound DID acceptance is made under.
+/// The acceptance policy every inbound DID binding is made under.
 ///
+/// There is no resolver on this path, but the policy is still the
+/// `policy_digest` dimension of a [`VerifiedDidBindingKey`]: it records which
+/// DID methods a binding was accepted for and that the path is fail-closed.
 /// Workspace-wide rule: actor / service identities are `did:webvh` only
 /// (`did:web` is not an accepted alias); `did:key` stays for bare
 /// verification-method keys.
-fn inbound_resolver_policy() -> ResolverPolicy {
+fn inbound_binding_policy() -> ResolverPolicy {
     ResolverPolicy {
         allowed_methods: vec!["did:key:".to_owned(), "did:webvh:".to_owned()],
         fail_mode: ResolverFailMode::FailClosed,
@@ -149,7 +94,7 @@ fn inbound_resolver_policy() -> ResolverPolicy {
     }
 }
 
-/// Canonical digest of the effective resolver policy.
+/// Canonical digest of the effective acceptance policy.
 ///
 /// This is the `policy_digest` dimension of [`VerifiedDidBindingKey`]: a policy
 /// revision changes the digest, which changes the key, so a binding accepted
@@ -162,12 +107,10 @@ fn inbound_resolver_policy() -> ResolverPolicy {
 /// [`ResolverPolicy`] must derive the same key dimension, and a hand-written
 /// `fail_mode` mapping (or a `Debug` rendering of it) silently forked that value
 /// per repo. There are no deployment-local admissibility switches here beyond
-/// the policy itself — `DidAuthority::new` hands exactly this policy to both
-/// `CompositeDidResolver` and `HttpDidResolver` — so the bare
-/// `policy_digest` (no [`arkret::identity::PolicyDigestInput`] extensions) is
-/// the complete input.
-fn resolver_policy_digest(policy: &ResolverPolicy) -> std::result::Result<Hash, String> {
-    policy_digest(policy).map_err(|err| format!("resolver policy digest failed: {err}"))
+/// the policy itself, so the bare `policy_digest` (no
+/// [`arkret::identity::PolicyDigestInput`] extensions) is the complete input.
+fn binding_policy_digest(policy: &ResolverPolicy) -> std::result::Result<Hash, String> {
+    policy_digest(policy).map_err(|err| format!("binding policy digest failed: {err}"))
 }
 
 /// Why an ordinary (zero-network) binding lookup could not authenticate a
@@ -254,7 +197,8 @@ impl AcceptedDidBindings {
     }
 
     /// The accepted **source service** binding backing the inbound RFC 9421
-    /// HTTP Message Signature. Never usable for an Event proof.
+    /// HTTP Message Signature. It is the only purpose a bridge accepts, and a
+    /// miss fails closed: there is no lookup to fall back on.
     pub fn source_service(
         &self,
         did: &DidFullId,
@@ -263,36 +207,13 @@ impl AcceptedDidBindings {
     ) -> std::result::Result<AcceptedDidBinding, BindingLookupError> {
         self.get(did, DidBindingPurpose::Service, verification_method, now)
     }
-
-    /// The accepted **Event signer** binding for one `proof.verification_method`.
-    /// Never usable for the HTTP Message Signature.
-    pub fn event_signer(
-        &self,
-        did: &DidFullId,
-        verification_method: &DidUrl,
-        now: DateTime<Utc>,
-    ) -> std::result::Result<AcceptedDidBinding, BindingLookupError> {
-        self.get(did, DidBindingPurpose::Principal, verification_method, now)
-    }
-
-    /// Whether an Event-signer acceptance already exists (zero network).
-    pub fn has_event_signer(
-        &self,
-        did: &DidFullId,
-        verification_method: &DidUrl,
-        now: DateTime<Utc>,
-    ) -> bool {
-        self.event_signer(did, verification_method, now).is_ok()
-    }
 }
 
-/// The **only** type on the inbound path that owns a network DID resolver.
+/// The inbound binding store plus the acceptance entry points that write to it.
 ///
-/// Everything reachable from a handler is either [`AcceptedDidBindings`] (no
-/// resolver) or one of the explicitly named §4 authority entry points below.
-/// The `resolver` field is private and no accessor returns it.
+/// It owns no resolver and no way to obtain one, so every inbound request costs
+/// zero DID authority network calls by construction rather than by convention.
 pub struct DidAuthority {
-    resolver: Arc<dyn DidResolver + Send + Sync>,
     bindings: AcceptedDidBindings,
 }
 
@@ -308,24 +229,9 @@ impl std::fmt::Debug for DidAuthority {
 impl DidAuthority {
     /// Build the inbound authority adapter and its accepted-binding store.
     pub fn new(trust_domain: TypedTrustDomainId) -> Result<Self> {
-        let policy = inbound_resolver_policy();
-        let mut resolver = CompositeDidResolver::new().with_policy(policy.clone());
-        resolver.push(DidKeyResolver::new());
-        resolver.push(HttpDidResolver::with_policy(policy)?);
-        Self::with_resolver(trust_domain, Arc::new(resolver))
-    }
-
-    /// Same, with a caller-supplied resolver. Used by the DID-P1-B02 tests to
-    /// substitute a counting spy and assert that ordinary transactions add zero
-    /// authority network calls.
-    pub fn with_resolver(
-        trust_domain: TypedTrustDomainId,
-        resolver: Arc<dyn DidResolver + Send + Sync>,
-    ) -> Result<Self> {
         let policy_digest =
-            resolver_policy_digest(&inbound_resolver_policy()).map_err(BridgeError::Runtime)?;
+            binding_policy_digest(&inbound_binding_policy()).map_err(BridgeError::Runtime)?;
         Ok(Self {
-            resolver,
             bindings: AcceptedDidBindings {
                 store: Arc::new(InMemoryVerifiedDidBindingStore::new(BINDING_STORE_CAPACITY)),
                 trust_domain,
@@ -334,7 +240,7 @@ impl DidAuthority {
         })
     }
 
-    /// The resolver-free view handed to ordinary verification.
+    /// The read-only view handed to ordinary verification.
     pub fn bindings(&self) -> &AcceptedDidBindings {
         &self.bindings
     }
@@ -420,97 +326,25 @@ impl DidAuthority {
         Ok(accepted)
     }
 
-    /// Establish or refresh an **Event signer** binding — the only inbound path
-    /// that reaches the network.
+    /// Answer the SDK [`arkret::AppletHandler`](arkret::AppletHandler)
+    /// verification-method contract from the accepted-binding store.
     ///
-    /// `did-usage-and-verification.md` §4 triggers this call site can name:
-    ///
-    /// - row 1: a DID that this trust domain has not accepted before crosses the boundary;
-    /// - row 3: a `verification_method` not yet accepted for an already-known DID;
-    /// - row 7: a received rotation / deactivation / policy-change invalidation, or an expired
-    ///   freshness window.
-    ///
-    /// Callers MUST have checked [`AcceptedDidBindings::has_event_signer`]
-    /// first, so a warm binding costs zero calls.
-    /// [`resolve_and_verify_binding`] re-checks the store itself and then
-    /// resolves **exactly once**; on a store hit the resolver is never called,
-    /// so a cached acceptance keeps the evidence receipt it was made under.
-    pub fn accept_event_signer(
-        &self,
-        verification_method: &DidUrl,
-        now: DateTime<Utc>,
-    ) -> std::result::Result<AcceptedDidBinding, String> {
-        let did = verification_method_did(verification_method)?;
-        self.resolve_once(
-            &BindingResolveRequest {
-                did,
-                trust_domain: self.bindings.trust_domain.clone(),
-                purpose: DidBindingPurpose::Principal,
-                policy_digest: self.bindings.policy_digest.clone(),
-                verification_method: Some(verification_method.clone()),
-                freshness: inbound_freshness_profile(),
-            },
-            now,
-        )
-    }
-
-    /// Resolve one verification method for the SDK
-    /// [`arkret::AppletHandler`](arkret::AppletHandler) contract.
-    ///
-    /// This is an authority surface by definition — the SDK router calls it to
-    /// authenticate an inbound push — so it lives here and not on the handler.
-    /// It is store-first: a warm `service` binding answers without a network
-    /// call.
+    /// The SDK router calls this to authenticate an inbound push, so it lives
+    /// here rather than on the handler. It is store-only: the operator-pinned
+    /// trust anchors are accepted at startup, and a method that has no
+    /// acceptance fails closed instead of triggering a lookup — §4's exclusion
+    /// list gives a bridge no trigger that would justify one.
     pub fn service_verification_method(
         &self,
         verification_method: &DidUrl,
         now: DateTime<Utc>,
     ) -> std::result::Result<AcceptedDidBinding, String> {
         let did = verification_method_did(verification_method)?;
-        if let Ok(accepted) = self.bindings.source_service(&did, verification_method, now) {
-            return Ok(accepted);
-        }
-        self.resolve_once(
-            &BindingResolveRequest {
-                did,
-                trust_domain: self.bindings.trust_domain.clone(),
-                purpose: DidBindingPurpose::Service,
-                policy_digest: self.bindings.policy_digest.clone(),
-                verification_method: Some(verification_method.clone()),
-                freshness: inbound_freshness_profile(),
-            },
-            now,
-        )
-    }
-
-    /// Resolve **exactly once** and store the acceptance.
-    ///
-    /// Everything §5 calls a product of the resolution — the canonical evidence
-    /// receipt and its digest, the §5.6 dependency record, the per-pin
-    /// `limited_trust` states, `refresh_after` and `expires_at` — is derived
-    /// inside [`resolve_and_verify_binding`] from what the resolver returned and
-    /// from the referenced freshness profile. There is deliberately no seam here
-    /// where a bridge could substitute a value of its own: that seam is how this
-    /// module previously shipped a `document_evidence_placeholder`.
-    ///
-    /// `method_proofs` stays empty for every acceptance made here, because
-    /// `CompositeDidResolver` resolves `did:key` and plain HTTP `did:webvh`
-    /// documents and surfaces no log head, witness set or controller proof
-    /// bundle. Recording an empty proof set is the normative degenerate form,
-    /// not a placeholder, and the accompanying `limited_trust` says so per pin.
-    fn resolve_once(
-        &self,
-        request: &BindingResolveRequest,
-        now: DateTime<Utc>,
-    ) -> std::result::Result<AcceptedDidBinding, String> {
-        let did = request.did.clone();
-        resolve_and_verify_binding(
-            self.resolver.as_ref(),
-            self.bindings.store.as_ref(),
-            request,
-            now,
-        )
-        .map_err(|err| format!("DID authority verification failed for `{did}`: {err}"))
+        self.bindings
+            .source_service(&did, verification_method, now)
+            .map_err(|error| {
+                format!("no usable source service DID binding for `{verification_method}`: {error}")
+            })
     }
 
     /// Drop every acceptance for `did` (§5: rotation / deactivation / witness
@@ -541,32 +375,12 @@ pub fn verification_method_did(
 
 #[cfg(test)]
 mod tests {
-    use arkret::identity::{ResolvedDid, public_key_material_from_binding};
+    use arkret::identity::public_key_material_from_binding;
 
     use super::*;
 
-    /// A resolver that never answers. Every test in this module asserts a
-    /// property of the *accepted binding* layer, so reaching this type at all
-    /// would already be the bug.
-    #[derive(Debug)]
-    struct NeverResolvingDidResolver;
-
-    impl DidResolver for NeverResolvingDidResolver {
-        fn supports(&self, _did: &DidFullId) -> bool {
-            true
-        }
-
-        fn resolve_did(
-            &self,
-            did: &DidFullId,
-        ) -> std::result::Result<ResolvedDid, arkret::identity::IdentityError> {
-            panic!("the accepted-binding path must never resolve `{did}`");
-        }
-    }
-
     fn authority() -> DidAuthority {
-        DidAuthority::with_resolver(trust_domain(), Arc::new(NeverResolvingDidResolver))
-            .expect("authority")
+        DidAuthority::new(trust_domain()).expect("authority")
     }
 
     fn trust_domain() -> TypedTrustDomainId {
@@ -592,55 +406,6 @@ mod tests {
 
     fn multibase(seed: u8) -> String {
         arkret::ed25519_pubkey_to_did_key_multibase(&public_key_bytes(seed))
-    }
-
-    /// A resolver that serves one prepared document, so an acceptance can be
-    /// made for documents this module cannot build through the config path.
-    #[derive(Debug)]
-    struct OneDocumentDidResolver(DidDocument);
-
-    impl DidResolver for OneDocumentDidResolver {
-        fn supports(&self, _did: &DidFullId) -> bool {
-            true
-        }
-
-        fn resolve_did(
-            &self,
-            did: &DidFullId,
-        ) -> std::result::Result<ResolvedDid, arkret::identity::IdentityError> {
-            if did == &self.0.id {
-                // `did:webvh` served as a plain document: proofless, which the
-                // binding records per pin instead of pretending otherwise.
-                Ok(ResolvedDid::proofless(self.0.clone()))
-            } else {
-                Err(arkret::identity::IdentityError::Protocol(format!(
-                    "unknown DID `{did}`"
-                )))
-            }
-        }
-    }
-
-    #[test]
-    fn pinned_documents_with_relative_verification_method_ids_still_resolve_their_key() {
-        // DID Core 1.0 §3.1 allows `verificationMethod[].id` to be relative, and
-        // `DidDocument` keeps the wire spelling verbatim. Both `#key-1` and the
-        // absolute form must find the same key.
-        let did = DidFullId::new("did:webvh:z6mkfixture:relative.example".to_owned()).expect("did");
-        let vm = DidUrl::new(format!("{did}#key-1")).expect("did url");
-        let document = DidDocument::new(did.clone(), "#key-1", multibase(5));
-        let authority =
-            DidAuthority::with_resolver(trust_domain(), Arc::new(OneDocumentDidResolver(document)))
-                .expect("authority");
-        let now = Utc::now();
-
-        let accepted = authority
-            .accept_event_signer(&vm, now)
-            .expect("event signer accepted");
-        let material = public_key_material_from_binding(&accepted, &vm).expect("key material");
-        assert_eq!(
-            material.ed25519_bytes().expect("bytes"),
-            public_key_bytes(5)
-        );
     }
 
     /// §5 non-degeneracy gate, mirroring the SDK's
@@ -689,27 +454,30 @@ mod tests {
         );
     }
 
+    /// A bridge never accepts a DID it was not configured with: there is no
+    /// resolver to reach and `service_verification_method` fails closed.
     #[test]
-    fn source_service_and_event_signer_bindings_never_substitute_for_each_other() {
+    fn an_unconfigured_verification_method_fails_closed() {
         let authority = authority();
-        let vm = DidUrl::new("did:webvh:z6mkfixture:server.example#key-1").expect("did url");
-        let did = verification_method_did(&vm).expect("did");
-        let key = multibase(7);
+        let configured =
+            DidUrl::new("did:webvh:z6mkfixture:server.example#key-1").expect("did url");
+        let foreign = DidUrl::new("did:webvh:z6mkfixture:attacker.example#key-1").expect("did url");
         let now = Utc::now();
 
         authority
-            .accept_configured_source_service_key(&vm, &key, now)
+            .accept_configured_source_service_key(&configured, &multibase(7), now)
             .expect("service binding accepted");
 
-        // The service acceptance answers the HTTP-signature lookup...
-        assert!(authority.bindings().source_service(&did, &vm, now).is_ok());
-        // ...and is invisible to the Event-proof lookup, which is keyed by a
-        // different purpose even though the DID and the key are identical.
-        assert_eq!(
-            authority.bindings().event_signer(&did, &vm, now),
-            Err(BindingLookupError::Missing)
+        assert!(
+            authority
+                .service_verification_method(&configured, now)
+                .is_ok()
         );
-        assert!(!authority.bindings().has_event_signer(&did, &vm, now));
+        assert!(
+            authority
+                .service_verification_method(&foreign, now)
+                .is_err()
+        );
     }
 
     #[test]
@@ -791,14 +559,15 @@ mod tests {
     }
 
     /// Source-level regression gate for the §6 layering rule ("业务 reducer、
-    /// projection、query、UI 与 routing 代码 … 不直接持有通用网络 resolver").
+    /// projection、query、UI 与 routing 代码 … 不直接持有通用网络 resolver")
+    /// and for the ruling that a bridge has **no** DID authority call site at
+    /// all: inbound Event proof signer authority is carried by the source
+    /// Arkret node, and the HTTP-signature anchor comes from configuration.
     ///
-    /// The general-purpose network resolver chain may be constructed in exactly
-    /// one place — [`DidAuthority::new`]. A handler that grows its own
-    /// `CompositeDidResolver` fails this test rather than quietly reintroducing
-    /// per-request DID resolution.
+    /// A handler that grows its own resolver chain fails here rather than
+    /// quietly reintroducing per-request DID resolution.
     #[test]
-    fn the_network_resolver_is_constructed_in_exactly_one_place() {
+    fn the_runtime_constructs_no_network_did_resolver() {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut sites = Vec::new();
         for entry in std::fs::read_dir(&src).expect("runtime src directory") {
@@ -808,7 +577,11 @@ mod tests {
             }
             let text = std::fs::read_to_string(&path).expect("source file");
             // Only production code is gated; this very test names the types.
-            let text = match text.find("\n#[cfg(test)]\n") {
+            let text = match text.find(
+                "
+#[cfg(test)]
+",
+            ) {
                 Some(offset) => &text[..offset],
                 None => &text[..],
             };
@@ -819,6 +592,7 @@ mod tests {
                 }
                 if line.contains("CompositeDidResolver::new(")
                     || line.contains("HttpDidResolver::with_policy(")
+                    || line.contains("resolve_and_verify_binding(")
                 {
                     sites.push(format!(
                         "{}:{}",
@@ -828,17 +602,9 @@ mod tests {
                 }
             }
         }
-        assert_eq!(
-            sites.len(),
-            2,
-            "expected exactly one resolver-chain construction site \
-             (`CompositeDidResolver::new` + `HttpDidResolver::with_policy` in \
-             did_binding.rs), found: {sites:?}"
-        );
         assert!(
-            sites.iter().all(|site| site.starts_with("did_binding.rs:")),
-            "the network resolver must only be built inside the DID authority \
-             adapter, found: {sites:?}"
+            sites.is_empty(),
+            "a bridge has no registered DID authority call site, so it must              build no resolver chain at all; found: {sites:?}"
         );
     }
 

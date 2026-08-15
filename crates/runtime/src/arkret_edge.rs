@@ -842,13 +842,11 @@ pub struct BridgeAppletHandler {
     /// Durable single-event-level dedup store (applet-integration §7.3; the
     /// runtime path injects [`crate::db::DbEventDedupStore`]).
     dedup: Arc<dyn EventDedupStore>,
-    /// Inbound DID **authority adapter** (`did-usage-and-verification.md` §6).
+    /// Inbound DID **binding store** (`did-usage-and-verification.md` §6).
     ///
-    /// The handler holds the adapter, not a resolver: `DidAuthority` keeps its
-    /// `CompositeDidResolver` in a private field with no accessor, so the only
-    /// way to reach the network from here is one of its explicitly named §4
-    /// authority entry points. Ordinary per-signature verification consumes
-    /// [`DidAuthority::bindings`], which has no resolver at all.
+    /// A bridge has no registered DID authority call site, so [`DidAuthority`]
+    /// owns no resolver: it holds the operator-configured acceptances and
+    /// nothing else, and every lookup from here is in-memory.
     did_authority: Arc<DidAuthority>,
 }
 
@@ -971,11 +969,11 @@ fn glob_suffix_match(pattern: &str, candidate: &str) -> bool {
 impl arkret::AppletHandler for BridgeAppletHandler {
     /// SDK `AppletHandler` authority hook.
     ///
-    /// This is an authority surface by definition (the SDK router calls it to
-    /// authenticate an inbound push), so it delegates to [`DidAuthority`] rather
-    /// than holding a resolver here. The adapter is store-first: an already
-    /// accepted `service`-purpose binding answers with zero network calls, and
-    /// only a genuine §4 trigger resolves — exactly once.
+    /// The SDK router calls this to authenticate an inbound push, so it
+    /// delegates to [`DidAuthority`] rather than holding key material here. The
+    /// lookup is store-only: the operator-configured `service`-purpose anchor
+    /// answers with zero network calls, and an unconfigured method fails closed
+    /// because there is no resolver to fall back on.
     fn resolve_verification_method(
         &self,
         verification_method: &DidUrl,
