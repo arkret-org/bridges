@@ -71,13 +71,15 @@ struct ChannelRealmMappingConfig {
     alias: Option<String>,
 }
 
-#[derive(Default, serde::Deserialize)]
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MessagingConfig {
     #[serde(default)]
     mappings: Vec<ChannelRealmMappingConfig>,
 }
 
-#[derive(Default, serde::Deserialize)]
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MessagingBridgeConfig {
     #[serde(default)]
     disable_deletion_forwarding: bool,

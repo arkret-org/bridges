@@ -12,6 +12,7 @@ use crate::teams::TeamsApp;
 
 /// Bot Framework application credentials.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AppConfig {
     app_id: String,
     app_password: String,

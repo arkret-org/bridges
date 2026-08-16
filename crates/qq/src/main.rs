@@ -9,6 +9,7 @@ use crate::qq::QqApp;
 
 /// OneBot onboarding configuration.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AppConfig {
     /// OneBot HTTP API base URL.
     onebot_url: String,

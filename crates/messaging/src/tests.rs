@@ -27,6 +27,16 @@ fn channel_mapping_config_rejects_unknown_keys() {
 }
 
 #[test]
+fn messaging_config_rejects_unknown_top_level_keys() {
+    let error = serde_json::from_value::<crate::MessagingConfig>(json!({
+        "mapings": []
+    }))
+    .unwrap_err();
+
+    assert!(error.to_string().contains("unknown field `mapings`"));
+}
+
+#[test]
 fn json_scalar_id_string_accepts_string_and_integer_ids() {
     assert_eq!(
         json_scalar_id_string(&json!(" msg-1 ")).as_deref(),

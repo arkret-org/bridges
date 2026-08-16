@@ -11,6 +11,7 @@ use crate::dingtalk::DingTalkApp;
 /// used to obtain an access_token; `robot_code` identifies the robot. The
 /// optional inbound body HMAC secret is required to accept message deliveries.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AppConfig {
     app_key: String,
     app_secret: String,

@@ -9,6 +9,7 @@ use crate::line::LineApp;
 
 /// LINE Messaging API credentials.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AppConfig {
     /// Used to push messages (Bearer).
     channel_access_token: String,

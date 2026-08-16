@@ -8,6 +8,7 @@ use serde::Deserialize;
 use crate::slack::SlackApp;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AppConfig {
     /// The `xoxb-` token used to authenticate the Web API (chat.postMessage).
     bot_token: String,

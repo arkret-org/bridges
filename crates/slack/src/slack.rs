@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use arkret_bridge_messaging::runtime::{BridgeError, Result, jittered_delay};
+use arkret_bridge_messaging::runtime::{BridgeError, Result, bridge_retry_delay};
 use arkret_bridge_messaging::{
     AppMessageRef, ExternalMediaRequest, InboundAppMessage, InboundMediaAuthorization,
     MessageBridge, MessageContext, OutboundAppMessage, SenderRenderStyle, send_json_expect,
@@ -29,11 +29,6 @@ const CHAT_POST_MESSAGE: &str = "https://slack.com/api/chat.postMessage";
 /// healthy connection never trips it, while a wedged (TCP half-open) connection
 /// is detected within two windows instead of blocking forever.
 const SOCKET_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// Base reconnect delay after a failed connect / URL fetch.
-const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
-/// Base delay after a clean disconnect before reconnecting.
-const DISCONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Slack bridge adapter.
 pub struct SlackApp {
@@ -203,12 +198,19 @@ impl MessageBridge for SlackApp {
 
     async fn run(self: Arc<Self>, ctx: Arc<MessageContext>) -> Result<()> {
         // Reconnect loop: obtain a fresh wss URL and reconnect each time.
+        // Slack is an external vendor surface, so Arkret's five-retry protocol
+        // budget does not terminate this long-lived worker. The delay curve is
+        // nevertheless the workspace-owned arkret-retry curve: it escalates
+        // across consecutive failures and resets only after an inbound frame
+        // proves that the newly connected socket is healthy.
+        let mut reconnect_attempt = 0_u32;
         loop {
             let url = match self.open_socket_url(&ctx).await {
                 Ok(u) => u,
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to fetch Slack socket URL, retrying");
-                    tokio::time::sleep(jittered_delay(RECONNECT_BACKOFF)).await;
+                    tokio::time::sleep(bridge_retry_delay(reconnect_attempt)).await;
+                    reconnect_attempt = reconnect_attempt.saturating_add(1);
                     continue;
                 }
             };
@@ -217,7 +219,8 @@ impl MessageBridge for SlackApp {
                 Ok(pair) => pair,
                 Err(e) => {
                     tracing::warn!(error = %e, "Slack socket connection failed, retrying");
-                    tokio::time::sleep(jittered_delay(RECONNECT_BACKOFF)).await;
+                    tokio::time::sleep(bridge_retry_delay(reconnect_attempt)).await;
+                    reconnect_attempt = reconnect_attempt.saturating_add(1);
                     continue;
                 }
             };
@@ -257,6 +260,7 @@ impl MessageBridge for SlackApp {
                 };
                 // Any inbound frame proves the connection is live.
                 awaiting_pong = false;
+                reconnect_attempt = 0;
                 let WsMessage::Text(txt) = frame else {
                     continue;
                 };
@@ -287,7 +291,8 @@ impl MessageBridge for SlackApp {
             }
 
             tracing::warn!("Slack socket disconnected, reconnecting shortly");
-            tokio::time::sleep(jittered_delay(DISCONNECT_BACKOFF)).await;
+            tokio::time::sleep(bridge_retry_delay(reconnect_attempt)).await;
+            reconnect_attempt = reconnect_attempt.saturating_add(1);
         }
     }
 

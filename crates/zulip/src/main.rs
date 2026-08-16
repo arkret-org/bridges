@@ -8,6 +8,7 @@ use serde::Deserialize;
 use crate::zulip::ZulipApp;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AppConfig {
     /// Zulip server base URL (trailing slashes are trimmed).
     site: String,

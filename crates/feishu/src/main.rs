@@ -8,6 +8,7 @@ use serde::Deserialize;
 use crate::feishu::FeishuApp;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AppConfig {
     app_id: String,
     app_secret: String,

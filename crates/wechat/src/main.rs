@@ -12,6 +12,7 @@ use crate::wechat::WechatApp;
 /// `app_id`/`app_secret`. Both spellings are accepted (serde aliases) and
 /// passed to the adapter as a unified "credential id"/secret.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AppConfig {
     #[serde(alias = "app_id")]
     corp_id: String,

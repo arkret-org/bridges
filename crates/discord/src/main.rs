@@ -8,6 +8,7 @@ use serde::Deserialize;
 use crate::discord::DiscordApp;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AppConfig {
     /// Discord bot token used by the serenity gateway client.
     bot_token: String,

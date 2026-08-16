@@ -77,6 +77,7 @@ pub struct BridgeConfig {
 
 /// Per-source-IP rate limit settings for the public webhook plane.
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WebhookRateLimitConfig {
     /// Master switch; `true` by default ("isolated by default" extends to
     /// "rate-limited by default").
@@ -136,6 +137,7 @@ impl BridgeConfig {
 /// arkret protocol-side integration parameters (server URL, service DID,
 /// applet id, signing material).
 #[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArkretConfig {
     /// The arkret edge/home server base URL (used for events_submit / blob /
     /// directory).
@@ -209,6 +211,7 @@ impl ArkretConfig {
 
 /// A configured verification method and its Ed25519 public key material.
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TrustedVerificationMethodConfig {
     pub verification_method: String,
     pub public_key: PublicKeyMaterial,
@@ -241,6 +244,7 @@ impl fmt::Debug for ArkretConfig {
 /// Database configuration. `url` looks like `sqlite://bridge.db` /
 /// `postgres://...` / `mysql://...`.
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DatabaseConfig {
     #[serde(default = "default_db_url")]
     pub url: String,
@@ -258,6 +262,7 @@ impl Default for DatabaseConfig {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LoggingConfig {
     #[serde(default = "default_log_level")]
     pub level: String,
@@ -503,5 +508,15 @@ arkret:
         let err = Config::from_yaml(&text).unwrap_err();
 
         assert!(format!("{err}").contains("ARKRET_BRIDGE_TEST_MISSING_ENV"));
+    }
+
+    #[test]
+    fn webhook_rate_limit_config_rejects_misspelled_security_keys() {
+        let error = serde_yaml_ng::from_str::<WebhookRateLimitConfig>(
+            "enabled: true\nmax_request: 10\nwindow_secs: 60\n",
+        )
+        .expect_err("a misspelled rate-limit key must not silently use the default");
+
+        assert!(error.to_string().contains("unknown field `max_request`"));
     }
 }

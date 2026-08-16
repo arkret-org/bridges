@@ -9,6 +9,7 @@ use crate::whatsapp::WhatsAppApp;
 
 /// WhatsApp Cloud API credentials.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AppConfig {
     /// Sender phone number ID (outbound URL path segment).
     phone_number_id: String,

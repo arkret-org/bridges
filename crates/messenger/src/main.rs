@@ -9,6 +9,7 @@ use crate::messenger::MessengerApp;
 
 /// Facebook Messenger credentials.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AppConfig {
     /// Page access token used for sending (Bearer).
     page_access_token: String,

@@ -9,6 +9,7 @@ use crate::imessage::IMessageApp;
 
 /// iMessage is sent/received via HTTP gateways such as BlueBubbles / AirMessage.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AppConfig {
     gateway_url: String,
     password: Option<String>,
