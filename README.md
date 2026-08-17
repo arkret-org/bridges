@@ -18,13 +18,6 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `arkret-bridge-
   用户/消息映射表、`ak.message.create` 转换、actor/realm 反查解析、webhook 助手,契约是
   `MessageBridge`/`MessageContext`(14 个聊天桥都实现它,经 `run_message_bridge` 装配)。
 
-共享层术语对照:
-
-| 目录 | 包名 | 当前职责 | 历史/旧称 |
-|---|---|---|---|
-| `crates/runtime` | `arkret-bridge-runtime` | 通用桥运行时 | core/runtime |
-| `crates/messaging` | `arkret-bridge-messaging` | 聊天消息契约层 | messaging |
-
 | crate(包名) | 对端 app | 应用侧技术 | 端口 |
 |---|---|---|---|
 | `arkret-bridge-runtime`(`crates/runtime`) | — | 通用桥运行时(arkret 接入/DB/web/队列) | — |

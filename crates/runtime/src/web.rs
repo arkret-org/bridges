@@ -1092,7 +1092,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use arkret::signatures::{Ed25519PayloadSigner, SignEventOptions, sign_event};
-    use arkret::{DidCoreId, DidFullId, Event, Hlc, RealmId, ScopeRef, TypedTrustDomainId};
+    use arkret::{DidCoreId, DidFullId, Event, Hlc, RealmId, ScopeRef, TrustDomainId};
     use chrono::DateTime;
 
     use super::*;
@@ -1153,8 +1153,8 @@ mod tests {
             .to_bytes()
     }
 
-    fn trust_domain() -> TypedTrustDomainId {
-        TypedTrustDomainId::new("ak:trust_domain:bridge.example".to_owned()).expect("trust domain")
+    fn trust_domain() -> TrustDomainId {
+        TrustDomainId::new("ak:trust_domain:bridge.example".to_owned()).expect("trust domain")
     }
 
     fn actor_did() -> DidFullId {

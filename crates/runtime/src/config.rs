@@ -145,7 +145,7 @@ pub struct ArkretConfig {
     /// The service DID of this bridge acting as an Applet.
     pub service_id: String,
     /// Trust domain advertised by the applet service description.
-    pub trust_domain: arkret::TypedTrustDomainId,
+    pub trust_domain: arkret::TrustDomainId,
     /// This bridge's applet id (`ak:applet:<uuidv7>`).
     pub applet_id: String,
     /// Capability grant returned by Applet install for

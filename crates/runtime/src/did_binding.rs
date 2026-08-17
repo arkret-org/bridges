@@ -66,7 +66,7 @@ use arkret::identity::{
     ResolverFailMode, ResolverPolicy, VerifiedDidBinding, VerifiedDidBindingDocumentInput,
     VerifiedDidBindingKey, VerifiedDidBindingStore, document_canonical_digest, policy_digest,
 };
-use arkret::{DidFullId, Hash, TypedTrustDomainId};
+use arkret::{DidFullId, Hash, TrustDomainId};
 use arkret_wire::DidUrl;
 use chrono::{DateTime, Utc};
 
@@ -144,7 +144,7 @@ impl std::fmt::Display for BindingLookupError {
 #[derive(Clone)]
 pub struct AcceptedDidBindings {
     store: Arc<dyn VerifiedDidBindingStore>,
-    trust_domain: TypedTrustDomainId,
+    trust_domain: TrustDomainId,
     policy_digest: Hash,
 }
 
@@ -228,7 +228,7 @@ impl std::fmt::Debug for DidAuthority {
 
 impl DidAuthority {
     /// Build the inbound authority adapter and its accepted-binding store.
-    pub fn new(trust_domain: TypedTrustDomainId) -> Result<Self> {
+    pub fn new(trust_domain: TrustDomainId) -> Result<Self> {
         let policy_digest =
             binding_policy_digest(&inbound_binding_policy()).map_err(BridgeError::Runtime)?;
         Ok(Self {
@@ -383,8 +383,8 @@ mod tests {
         DidAuthority::new(trust_domain()).expect("authority")
     }
 
-    fn trust_domain() -> TypedTrustDomainId {
-        TypedTrustDomainId::new("ak:trust_domain:bridge.example".to_owned()).expect("trust domain")
+    fn trust_domain() -> TrustDomainId {
+        TrustDomainId::new("ak:trust_domain:bridge.example".to_owned()).expect("trust domain")
     }
 
     /// A **real** Ed25519 public key derived from `seed`.

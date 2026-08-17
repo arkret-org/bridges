@@ -830,7 +830,7 @@ fn event_content_fingerprint(event: &Event) -> i64 {
 pub struct BridgeAppletHandler {
     applet_id: String,
     service_id: DidFullId,
-    trust_domain: arkret::TypedTrustDomainId,
+    trust_domain: arkret::TrustDomainId,
     namespaces: Value,
     inbound_tx: Sender<Event>,
     signal_tx: Option<Sender<SignalEnvelope>>,
