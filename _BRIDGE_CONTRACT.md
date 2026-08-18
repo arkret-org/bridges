@@ -4,9 +4,8 @@
 `arkret-bridge-messaging`(消息层)。**必须**严格按本契约,与参考实现 `crates/discord/` 保持一致
 结构,确保 `cargo check` 通过。
 
-> 历史:共享层早期为单 crate `arkret-bridge-core`/trait `BridgeApp`,现已拆为 runtime+messaging,
-> 聊天桥实现 `MessageBridge`(不再直接实现 `BridgeApp`)。`BridgeApp` 仍是 runtime 的泛型底座,
-> 供非聊天集成直接使用。
+> 分层:聊天桥实现 `arkret-bridge-messaging` 的 `MessageBridge`,**不**直接实现 `BridgeApp`。
+> `BridgeApp` 是 `arkret-bridge-runtime` 的泛型底座,供非聊天集成(IoT / 工单 / CI 等)直接使用。
 
 ## 核心 API(聊天桥用 `arkret-bridge-messaging`;勿改两个共享 crate)
 
@@ -41,12 +40,17 @@ pub trait MessageBridge: Send + Sync + 'static {
     async fn run(self: Arc<Self>, ctx: Arc<MessageContext>) -> Result<()>;    // app 接收循环
     async fn send_to_app(&self, ctx: Arc<MessageContext>, msg: OutboundAppMessage)
         -> Result<AppMessageRef>;                                             // arkret→app 发送
+    // arkret→app 删除;默认是结构化拒绝,未接线的桥绝不会"确认"一次它没做的删除
     async fn redact_in_app(
         &self,
         _ctx: Arc<MessageContext>,
         _app_channel: &str,
         _app_message_id: &str,
-    ) -> Result<()> { Ok(()) }
+    ) -> Result<()> { Err(BridgeError::App("outbound deletion is not supported by this adapter".into())) }
+    // 静态能力声明;默认 text_only,共享出站守卫会先把附件降级为文本再交给 adapter
+    fn capabilities(&self) -> MessageBridgeCapabilities { MessageBridgeCapabilities::default() }
+    // 声明本桥入站面就是 webhook_router;为 true 时 webhook_router 返回 None 会启动期 fail-fast
+    fn expects_webhook_inbound(&self) -> bool { false }
     // 纯 HTTP 桥重写此项,返回入站 webhook 路由(由 runtime web 服务挂载);默认 None
     fn webhook_router(self: Arc<Self>, _ctx: Arc<MessageContext>) -> Option<salvo::Router> { None }
 }
@@ -59,12 +63,13 @@ pub trait MessageBridge: Send + Sync + 'static {
 `bridge_main` 经 serde 反序列化成每桥自定义的强类型 `AppConfig`(缺字段由 serde 按字段名报错)。
 错误统一用 `BridgeError::App(String)`。
 
-> **删除 / Signal 能力状态:** 删除共享链路已实现并有单测。LINE 已把 `unsend`
-> 入站事件接到 `submit_app_delete`;Discord 已把
-> 出站 redaction 接到原生删除 API。其余平台仍按各自 API 能力逐桥接线,未 override 的能力会
-> fail closed 或使用默认 no-op。现行 `SignalEnvelope` 为 encrypted-only，外层不再暴露
-> `ak.typing` kind/payload；LINE loading indicator 必须等 host 提供合法解密后的 typed Signal
-> 派发边界后再恢复。接线余项见 [`_bridges_todos.md`](_bridges_todos.md)。
+> **删除 / Signal 能力状态:** 删除共享链路已实现并有单测,两个方向都不是可选项的降级面。
+> 入站(app→arkret)LINE 已把 `unsend` 接到 `submit_app_delete`;出站(arkret→app)Discord 与
+> Teams 已接到各自平台原生删除 API。其余平台按各自 API 能力逐桥接线,**未 override 就走共享层
+> 的 fail-closed 默认**(返回 `BridgeError::App`),不存在"默认 no-op 静默成功"这条路径。
+> 现行 `SignalEnvelope` 为 encrypted-only，外层不再暴露 `ak.typing` kind/payload；LINE loading
+> indicator 必须等 host 提供合法解密后的 typed Signal 派发边界后再恢复,不得由桥猜测 ciphertext
+> 内容。
 >
 > **入站媒体状态:** `InboundMediaFetcher` 统一执行 HTTPS/host allowlist、大小上限、内容类型、
 > 流式读取、超时、重试和失败审计。Discord、Telegram、Slack、LINE、WhatsApp、Messenger

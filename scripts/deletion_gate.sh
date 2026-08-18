@@ -21,8 +21,7 @@ cd "$ROOT"
 BASELINES=$(cat <<'EOF'
 Cokret|0|brand rename (closed)|Cokret
 ck_ops|0|brand rename (closed)|ck_ops
-ArkretApi-doc-ref|0|stale client doc reference (closed)|ArkretApi
-TypedTrustDomainId|0|SDK identifier alias deleted; use TrustDomainId|TypedTrustDomainId
+TypedTrustDomainId|0|SDK alias deleted, renamed to TrustDomainId here (closed)|TypedTrustDomainId
 EOF
 )
 

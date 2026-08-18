@@ -25,8 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arkret::{
-    AppletId, ContentBlock, DidFullId, Event, EventId, EventKind, MessageId, MessageRedactPayload,
-    RealmId,
+    AppletId, ContentBlock, DidFullId, Event, EventKind, MessageId, MessageRedactPayload, RealmId,
 };
 pub use arkret_bridge_runtime as runtime;
 use arkret_bridge_runtime::app::{BridgeApp, BridgeContext};

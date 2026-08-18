@@ -217,8 +217,16 @@ fn app_delete_recall_builds_message_redact_payload() {
         "ak:message:AcuTkvesoi9I-a82lRObr46_TuorpNOfeSLt8XCCajYY"
     );
     assert_eq!(payload["reason"], "external_user_delete");
-    assert!(payload.get("target_event_id").is_none());
-    assert!(payload.get("reason_code").is_none());
+    // `message_redact_payload` is a closed schema: assert the exact emitted key
+    // set rather than naming individual keys that must be absent.
+    let mut keys: Vec<&str> = payload
+        .as_object()
+        .expect("payload object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["message_id", "reason"]);
 }
 
 #[test]

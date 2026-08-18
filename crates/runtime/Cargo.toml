@@ -10,6 +10,14 @@ description = "Applet bridge runtime for Arkret integrations: protocol-side even
 [features]
 default  = ["full", "sqlite"]
 full     = ["db", "web", "runtime"]
+# Intentionally empty and intentionally kept: `edge` names the always-available
+# protocol-edge surface (ArkretEdge / SeqStore / SeqAllocator / Config / errors /
+# cache / queue), which is what is left when no other feature is on. It enables
+# nothing because that surface is unconditional — see the crate-level docs in
+# src/lib.rs. It is not a dangling feature: the out-of-repo consumer
+# ../../../savfox-ai/savfox/Cargo.toml depends on this crate with
+# `default-features = false, features = ["edge"]`, so removing the name breaks
+# that manifest with "feature `edge` does not exist".
 edge     = []
 db       = ["dep:diesel", "dep:diesel_migrations"]
 sqlite   = ["db", "diesel/sqlite", "dep:libsqlite3-sys"]

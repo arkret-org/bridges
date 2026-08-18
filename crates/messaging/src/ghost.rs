@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use arkret::http_client::ClientRequestOptions;
 use arkret::{
     AppletId, AuthorizationRef, DidFullId, EventId, EventKind, EventRef, GrantId, Hash, Hlc,
-    PayloadProof, RealmId, ScopeRef, StrandId, StrandTrackConfig,
+    PayloadProof, RealmId, ScopeRef, StrandId, StrandTrack,
 };
 use arkret_bridge_runtime::{BridgeError, Result};
 use arkret_models_collaboration::events_payloads::StrandCreatePayload;
@@ -647,7 +647,7 @@ pub(crate) async fn create_portal_strand(
     strand.tracks.clear();
     strand.tracks.insert(
         PORTAL_STRAND_TRACK.to_owned(),
-        StrandTrackConfig::discussion_primary(),
+        StrandTrack::discussion_primary(),
     );
     let strand_created_at = strand.created_at;
     let payload = StrandCreatePayload {

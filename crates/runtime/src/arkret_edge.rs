@@ -27,8 +27,8 @@ use arkret::identity::public_key_material_from_binding;
 use arkret::signatures::{EventProofBuilder, VerificationMethodDocument};
 use arkret::signatures::{SignEventOptions, sign_event};
 use arkret::{
-    AppletId, DidCoreId, DidFullId, Ed25519PayloadSigner, Event, EventId, Hlc, HlcGenerator,
-    PayloadSigner, RealmId, ScopeRef, project_full_id_to_core_id,
+    AppletId, DidCoreId, DidFullId, Ed25519PayloadSigner, Event, Hlc, HlcGenerator, PayloadSigner,
+    RealmId, ScopeRef, project_full_id_to_core_id,
 };
 use arkret_event_draft::{EventSpec, TypedEventDraft};
 use arkret_models_collaboration::event_sync::{
