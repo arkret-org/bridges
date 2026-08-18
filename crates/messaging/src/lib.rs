@@ -25,7 +25,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arkret::{
-    AppletId, ContentBlock, DidFullId, Event, EventId, EventKind, MessageRedactPayload, RealmId,
+    AppletId, ContentBlock, DidFullId, Event, EventId, EventKind, MessageId, MessageRedactPayload,
+    RealmId,
 };
 pub use arkret_bridge_runtime as runtime;
 use arkret_bridge_runtime::app::{BridgeApp, BridgeContext};
@@ -164,6 +165,9 @@ pub(crate) const PORTAL_STRAND_SCAN_PAGE_LIMIT: u32 = 200;
 /// realms; a fresh portal realm resolves in one page).
 pub(crate) const PORTAL_STRAND_SCAN_MAX_PAGES: usize = 25;
 
+/// `message_id` is the single registered target carrier of
+/// `message_redact_payload`; the create Event token is retyped to
+/// `ak:message:` per `common-fields.md` §6.0.
 pub(crate) fn redaction_payload_for_app_delete(
     target_event_id: &str,
     reason: AppDeleteReason,
@@ -171,11 +175,12 @@ pub(crate) fn redaction_payload_for_app_delete(
     let Some(reason) = reason.redaction_reason() else {
         return Ok(None);
     };
+    let message_id = match target_event_id.strip_prefix("ak:event:") {
+        Some(token) => format!("ak:message:{token}"),
+        None => target_event_id.to_owned(),
+    };
     Ok(Some(MessageRedactPayload {
-        message_id: None,
-        target_ref: None,
-        event_id: None,
-        target_event_id: Some(EventId::new(target_event_id.to_owned())?),
+        message_id: MessageId::new(message_id)?,
         track_name: None,
         reason: Some(reason.to_owned()),
         preserve: None,
@@ -722,7 +727,6 @@ impl MessageContext {
                         .submit_redaction_with_external_ref_as(
                             &actor,
                             &realm_for_submit,
-                            &target_event_id,
                             payload,
                             external_ref_for_delete(&config, &delete),
                             &mapping.authorization_ref,
@@ -1140,14 +1144,22 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
             if messaging_bridge_config(&self.ctx.core().config)?.disable_deletion_forwarding {
                 return Ok(());
             }
-            let Some(target) = event.redacts.as_ref() else {
+            // `payload.message_id` is the single registered target carrier; the
+            // bridge index is keyed by the create Event id, so retype it back.
+            let Some(target) = event
+                .payload
+                .get("message_id")
+                .and_then(|value| value.as_str())
+                .and_then(|value| value.strip_prefix("ak:message:"))
+                .map(|token| format!("ak:event:{token}"))
+            else {
                 return Ok(());
             };
             let Some(mapping) = self
                 .ctx
                 .store
                 .clone()
-                .app_message_for_event_async(target.as_ref().to_owned())
+                .app_message_for_event_async(target)
                 .await?
             else {
                 return Ok(());

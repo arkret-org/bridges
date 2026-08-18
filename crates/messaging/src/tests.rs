@@ -212,9 +212,12 @@ fn app_delete_recall_builds_message_redact_payload() {
         .expect("redaction payload result")
         .expect("redaction payload");
     let payload = serde_json::to_value(payload).unwrap();
-    assert_eq!(payload["target_event_id"], target_event_id);
+    assert_eq!(
+        payload["message_id"],
+        "ak:message:AcuTkvesoi9I-a82lRObr46_TuorpNOfeSLt8XCCajYY"
+    );
     assert_eq!(payload["reason"], "external_user_delete");
-    assert!(payload.get("message_id").is_none());
+    assert!(payload.get("target_event_id").is_none());
     assert!(payload.get("reason_code").is_none());
 }
 

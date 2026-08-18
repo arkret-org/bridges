@@ -549,7 +549,7 @@ impl ArkretEdge {
     }
 
     /// Re-sign an already-minted event after signed-envelope mutation (e.g.
-    /// setting `redacts`, overriding `created_at`, or adding `external_ref`).
+    /// overriding `created_at` or adding `external_ref`).
     /// Clears the existing proofs and signs with the service key over the
     /// current canonical envelope.
     pub fn resign_event(&self, event: &mut Event) -> Result<()> {
@@ -630,14 +630,14 @@ impl ArkretEdge {
         self.submit_event(&event).await
     }
 
-    /// Submit a message redaction attributed to a delegated app actor while
-    /// setting the signed envelope `redacts` target. External app expiry or
-    /// retention drops must be filtered by callers before reaching this helper.
+    /// Submit a message redaction attributed to a delegated app actor. The
+    /// redaction target travels in `content.message_id`, the single registered
+    /// target carrier. External app expiry or retention drops must be filtered
+    /// by callers before reaching this helper.
     pub async fn submit_redaction_with_external_ref_as<E>(
         &self,
         actor: &DidFullId,
         realm_id: &str,
-        target_event_id: &str,
         content: MessageRedactPayload,
         external_ref: E,
         authorization_ref: &str,
@@ -647,8 +647,8 @@ impl ArkretEdge {
     {
         let realm = RealmId::new(realm_id.to_owned())?;
         let external_ref = spec_external_ref_map(external_ref)?;
-        // Set `redacts` + `external_ref` before the single signature so the proof
-        // covers them (no discarded first sign).
+        // Set `external_ref` before the single signature so the proof covers it
+        // (no discarded first sign).
         let mut event = self
             .build_delegated_event_async::<event_spec::MessageRedact>(
                 actor,
@@ -657,7 +657,6 @@ impl ArkretEdge {
                 authorization_ref,
             )
             .await?;
-        event.redacts = Some(EventId::new(target_event_id.to_owned())?);
         event.external_ref = Some(external_ref);
         self.sign_as_service(&mut event)?;
         self.submit_event(&event).await
