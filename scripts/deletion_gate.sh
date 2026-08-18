@@ -62,7 +62,7 @@ done <<< "$BASELINES"
 
 if [ "$fail" -ne 0 ]; then
   echo >&2
-  echo "deletion_gate: FAILED — see arkret-work/review/code-open/重构计划-2026-07-10.md (ARC-0002)." >&2
+  echo "deletion_gate: FAILED." >&2
   exit 1
 fi
 
