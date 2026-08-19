@@ -23,7 +23,10 @@
 //!
 //! - `edge` (always available): the protocol edge ([`ArkretEdge`], the [`SeqStore`] trait +
 //!   [`SeqAllocator`], config, errors, cache/queue, and blob helpers) without diesel or salvo. A
-//!   host injects its own [`SeqStore`].
+//!   host injects its own [`SeqStore`]. The out-of-repo consumer `savfox`
+//!   (`../../../savfox-ai/savfox`) depends on this surface with `default-features = false,
+//!   features = ["edge"]` and calls e.g. `ArkretEdge::new_outbound`; check it before deleting
+//!   any shared-layer pub symbol.
 //! - `db`: the diesel-backed database pool ([`db`]) and [`DbSeqStore`].
 //! - `web`: the salvo HTTP service ([`web`]).
 //! - `runtime` (= `db` + `web`): [`BridgeContext`] / [`BridgeApp`] / [`run_bridge`].

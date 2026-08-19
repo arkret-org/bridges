@@ -139,6 +139,9 @@ messenger=9113, teams=9114。
 - 只有跨桥共享能力才放入 `arkret-bridge-runtime` / `arkret-bridge-messaging`;
   单桥协议细节留在各自 adapter。确需下沉到共享层的改动 / 待办登记到
   [`_bridges_todos.md`](_bridges_todos.md)。
+- 删除共享层（runtime / messaging）任何 pub 符号前,消费者证据必须包含仓外的
+  `../savfox-ai/savfox`(它以 `default-features = false, features = ["edge"]` 依赖
+  runtime 并调用 `ArkretEdge::new_outbound` 等),不能只 grep 本仓就下"无调用者"的结论。
 - 各 crate 位于 `crates/<短名>`(去掉 `arkret-bridge-` 前缀;包名仍 `arkret-bridge-*`);
   workspace `members = ["crates/*"]` 自动纳入,无需手改根 `Cargo.toml`。
 - 不要引入未缓存的专有 SDK(feishu-sdk/dingtalk-sdk 等);一律用 `reqwest`。
