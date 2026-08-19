@@ -324,19 +324,22 @@ async fn build_signed_ghost_provision_request(
     let (service_actor_seq, service_prev_refs) = service_frontier
         .map(|frontier| (frontier.next_actor_seq, frontier.frontier_event_ids))
         .unwrap_or_default();
-    let mut accountability_event = arkret_event_draft::accountability_grant_event(
+    let accountability_intent = arkret_event_draft::accountability_grant_intent(
         &grant,
         ScopeRef::Realm {
             realm_id: realm_id.clone(),
         },
+        chrono::Utc::now(),
+        None,
+    )?
+    .with_prev_refs(service_prev_refs)
+    .with_applet_id(applet_id.clone())
+    .with_authorization_ref(authorization_ref.clone());
+    let accountability_event = edge.author_and_sign_at(
+        accountability_intent,
         service_actor_seq,
         edge.next_event_hlc(&realm_id)?,
-        None,
     )?;
-    accountability_event.prev_refs = service_prev_refs;
-    accountability_event.applet_id = Some(applet_id.clone());
-    accountability_event.authorization_ref = Some(authorization_ref.clone());
-    edge.resign_event(&mut accountability_event)?;
 
     let effective_display_name = display_name
         .map(str::trim)
@@ -377,19 +380,22 @@ async fn build_signed_ghost_provision_request(
         authorization_ref,
         applet_id.clone(),
     );
-    let mut profile_event = profile_request.profile_create_event(
-        ScopeRef::Realm {
-            realm_id: realm_id.clone(),
-        },
-        0,
-        edge.next_event_hlc(&realm_id)?,
-        Some(&delegation),
-    )?;
-    profile_event.refs.push(EventRef::new(
-        accountability_event.event_id.as_str(),
-        "accountability",
-    ));
-    edge.resign_event(&mut profile_event)?;
+    // The reference names the grant by its FINAL id, which exists because the
+    // grant was authored above.
+    let profile_intent = profile_request
+        .profile_create_intent(
+            ScopeRef::Realm {
+                realm_id: realm_id.clone(),
+            },
+            chrono::Utc::now(),
+            Some(&delegation),
+        )?
+        .with_ref(EventRef::new(
+            accountability_event.event_id().as_str(),
+            "accountability",
+        ));
+    let profile_event =
+        edge.author_and_sign_at(profile_intent, 0, edge.next_event_hlc(&realm_id)?)?;
 
     let mut request = GhostActorProvisionRequestBody::new(
         applet_id,
@@ -400,8 +406,8 @@ async fn build_signed_ghost_provision_request(
         external_user_id,
         realm_id,
         external_ref_for_user(config, protocol, tenant, external_user_id),
-        accountability_event,
-        profile_event,
+        accountability_event.into_event(),
+        profile_event.into_event(),
     );
     if let Some(display_name) = display_name {
         request = request.with_display_name(display_name);
@@ -654,23 +660,23 @@ pub(crate) async fn create_portal_strand(
         object: strand,
         initial_relations: None,
     };
-    // Build unsigned, set the signed-envelope fields, then sign once (no
-    // discarded first signature). strand_create_payload semantic validation
-    // requires object.created_by == actor_id (both are the service DID here) and
-    // object.created_at == the envelope created_at.
-    let mut event = edge
-        .mint_event_unsigned_async::<arkret_wire::event_spec::StrandCreate>(&realm, payload)
-        .await?;
-    event.created_at = strand_created_at;
-    event.external_ref = Some(
-        location
-            .as_object()
-            .ok_or_else(|| BridgeError::App("portal location must be an object".to_owned()))?
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect(),
-    );
-    edge.resign_event(&mut event)?;
-    edge.submit_event(&event).await?;
-    Ok(StrandId::from_event_id(&event.event_id).to_string())
+    // Every producer-signed member rides the intent, and the one derived
+    // identity covers them all. strand_create_payload semantic validation
+    // requires object.created_by == actor_id (both are the service DID here)
+    // and object.created_at == the envelope created_at.
+    let intent = edge
+        .service_intent::<arkret_wire::event_spec::StrandCreate>(&realm, payload)?
+        .with_created_at(strand_created_at)
+        .with_external_ref(
+            location
+                .as_object()
+                .ok_or_else(|| BridgeError::App("portal location must be an object".to_owned()))?
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        );
+    let event = edge.author_and_sign(&realm, intent).await?;
+    edge.submit_event(event.event()).await?;
+    // The Strand is named by `retype(event_id)` of its own accepted create.
+    Ok(StrandId::from_event_id(event.event_id()).to_string())
 }

@@ -27,8 +27,8 @@ use arkret::identity::public_key_material_from_binding;
 use arkret::signatures::{EventProofBuilder, VerificationMethodDocument};
 use arkret::signatures::{SignEventOptions, sign_event};
 use arkret::{
-    AppletId, DidCoreId, DidFullId, Ed25519PayloadSigner, Event, Hlc, HlcGenerator, PayloadSigner,
-    RealmId, ScopeRef, project_full_id_to_core_id,
+    AppletId, AuthoredEvent, DidCoreId, DidFullId, Ed25519PayloadSigner, Event, EventIntent, Hlc,
+    HlcGenerator, PayloadSigner, RealmId, ScopeRef, project_full_id_to_core_id,
 };
 use arkret_event_draft::{EventSpec, TypedEventDraft};
 use arkret_models_collaboration::event_sync::{
@@ -424,33 +424,18 @@ impl ArkretEdge {
             .map_err(|e| BridgeError::Arkret(e.to_string()))
     }
 
-    /// Build an unsigned service-actor event for runtime hot paths. Any
-    /// backing-store refill for actor sequence numbers runs on the blocking pool
-    /// instead of a Tokio worker.
-    pub async fn mint_event_unsigned_async<K>(
-        &self,
-        realm_id: &RealmId,
-        content: K::Payload,
-    ) -> Result<Event>
-    where
-        K: EventSpec,
-    {
-        self.build_service_event_async::<K>(realm_id, content).await
-    }
-
-    /// Build an unsigned event authored by the service actor (seq + HLC
-    /// allocated, no proof). Applet-originated writes carry the top-level
+    /// The service-actor write for `content`, with everything except the actor
+    /// chain position filled in. Applet-originated writes carry the top-level
     /// `applet_id` in the signed envelope.
-    async fn build_service_event_async<K>(
-        &self,
-        realm_id: &RealmId,
-        content: K::Payload,
-    ) -> Result<Event>
+    ///
+    /// A write is an [`EventIntent`] until [`Self::author_and_sign`] positions
+    /// it: hosts fill in producer-signed members (`created_at`, `external_ref`,
+    /// encrypted content) HERE, because the Event's identity is derived from
+    /// them exactly once at authoring and nothing may rewrite it afterwards.
+    pub fn service_intent<K>(&self, realm_id: &RealmId, content: K::Payload) -> Result<EventIntent>
     where
         K: EventSpec,
     {
-        let seq = self.seq.alloc_blocking().await?;
-        let hlc = self.next_hlc(realm_id)?;
         Ok(TypedEventDraft::<K>::new(
             ScopeRef::Realm {
                 realm_id: realm_id.clone(),
@@ -460,22 +445,22 @@ impl ArkretEdge {
             content,
         )?
         .with_applet_id(self.applet_id.clone())
-        .author_now(seq, hlc)?)
+        .into_intent(chrono::Utc::now())?)
     }
 
-    async fn build_delegated_event_async<K>(
+    /// [`Self::service_intent`] with an explicit delegated actor and the
+    /// durable authorization it acts under.
+    pub fn delegated_intent<K>(
         &self,
-        actor: &arkret::DidFullId,
+        actor: &DidFullId,
         realm_id: &RealmId,
         content: K::Payload,
         authorization_ref: &str,
-    ) -> Result<Event>
+    ) -> Result<EventIntent>
     where
         K: EventSpec,
     {
         let authorization_ref = validate_authorization_ref(authorization_ref)?;
-        let seq = self.seq.alloc_blocking().await?;
-        let hlc = self.next_hlc(realm_id)?;
         let actor_id = project_full_id_to_core_id(actor)?;
         Ok(TypedEventDraft::<K>::new(
             ScopeRef::Realm {
@@ -488,32 +473,48 @@ impl ArkretEdge {
         .with_executed_by(self.service_actor_id.clone())
         .with_authorization_ref(authorization_ref)
         .with_applet_id(self.applet_id.clone())
-        .author_now(seq, hlc)?)
+        .into_intent(chrono::Utc::now())?)
     }
 
-    /// Build an unsigned delegated-actor event asynchronously.
+    /// Position `intent` on the service actor chain, derive its one identity,
+    /// and attach the service proof.
     ///
-    /// Hosts may mutate signed-envelope fields or replace plaintext content
-    /// with encrypted content before calling [`Self::resign_event`] once and
-    /// submitting the result.
-    pub async fn mint_event_as_unsigned_async<K>(
+    /// Any backing-store refill for actor sequence numbers runs on the blocking
+    /// pool instead of a Tokio worker. An intent that pinned its own
+    /// `prev_refs` (e.g. from a fetched frontier) keeps them.
+    pub async fn author_and_sign(
         &self,
-        actor: &DidFullId,
         realm_id: &RealmId,
-        content: K::Payload,
-        authorization_ref: &str,
-    ) -> Result<Event>
-    where
-        K: EventSpec,
-    {
-        self.build_delegated_event_async::<K>(actor, realm_id, content, authorization_ref)
-            .await
+        intent: EventIntent,
+    ) -> Result<AuthoredEvent> {
+        let seq = self.seq.alloc_blocking().await?;
+        let hlc = self.next_hlc(realm_id)?;
+        let mut event = intent
+            .author(seq, hlc)
+            .map_err(|error| BridgeError::Arkret(error.to_string()))?;
+        self.sign_as_service(&mut event)?;
+        Ok(event)
     }
 
-    /// Sign `event` with the service key over the current canonical envelope.
-    /// Used after all signed-envelope fields are in place so the event is signed
-    /// exactly once.
-    fn sign_as_service(&self, event: &mut Event) -> Result<()> {
+    /// [`Self::author_and_sign`] at an explicit actor chain position, for a
+    /// caller that already resolved the accepted frontier itself.
+    pub fn author_and_sign_at(
+        &self,
+        intent: EventIntent,
+        actor_seq: u64,
+        hlc: Hlc,
+    ) -> Result<AuthoredEvent> {
+        let mut event = intent
+            .author(actor_seq, hlc)
+            .map_err(|error| BridgeError::Arkret(error.to_string()))?;
+        self.sign_as_service(&mut event)?;
+        Ok(event)
+    }
+
+    /// Sign `event` with the service key. The signer verifies the authored
+    /// identity against its own content and fails closed on a mismatch, so
+    /// there is no signed-envelope mutation after this point.
+    fn sign_as_service(&self, event: &mut AuthoredEvent) -> Result<()> {
         let verification_method = self.verification_method_for_actor(&self.service_id)?;
         sign_event(
             event,
@@ -553,15 +554,6 @@ impl ArkretEdge {
             ));
         }
         self.submit_initial(&submission).await
-    }
-
-    /// Re-sign an already-minted event after signed-envelope mutation (e.g.
-    /// overriding `created_at` or adding `external_ref`).
-    /// Clears the existing proofs and signs with the service key over the
-    /// current canonical envelope.
-    pub fn resign_event(&self, event: &mut Event) -> Result<()> {
-        event.proofs.clear();
-        self.sign_as_service(event)
     }
 
     /// Sign an already-canonicalized payload-proof transcript with the
@@ -627,14 +619,13 @@ impl ArkretEdge {
     {
         let realm = RealmId::new(realm_id.to_owned())?;
         let external_ref = spec_external_ref_map(external_ref)?;
-        // Set the signed-envelope `external_ref` before the single signature so
-        // the proof covers it (no discarded first sign).
-        let mut event = self
-            .build_delegated_event_async::<K>(actor, &realm, content, authorization_ref)
-            .await?;
-        event.external_ref = Some(external_ref);
-        self.sign_as_service(&mut event)?;
-        self.submit_event(&event).await
+        // `external_ref` is producer-signed content: it rides the intent, so the
+        // one derived identity covers it.
+        let intent = self
+            .delegated_intent::<K>(actor, &realm, content, authorization_ref)?
+            .with_external_ref(external_ref);
+        let event = self.author_and_sign(&realm, intent).await?;
+        self.submit_event(event.event()).await
     }
 
     /// Submit a message redaction attributed to a delegated app actor. The
@@ -654,19 +645,18 @@ impl ArkretEdge {
     {
         let realm = RealmId::new(realm_id.to_owned())?;
         let external_ref = spec_external_ref_map(external_ref)?;
-        // Set `external_ref` before the single signature so the proof covers it
-        // (no discarded first sign).
-        let mut event = self
-            .build_delegated_event_async::<event_spec::MessageRedact>(
+        // `external_ref` is producer-signed content: it rides the intent, so the
+        // one derived identity covers it.
+        let intent = self
+            .delegated_intent::<event_spec::MessageRedact>(
                 actor,
                 &realm,
                 content,
                 authorization_ref,
-            )
-            .await?;
-        event.external_ref = Some(external_ref);
-        self.sign_as_service(&mut event)?;
-        self.submit_event(&event).await
+            )?
+            .with_external_ref(external_ref);
+        let event = self.author_and_sign(&realm, intent).await?;
+        self.submit_event(event.event()).await
     }
 
     /// Emit a `ak.applet.bridge_error` Event so a bridging failure is durable
@@ -680,17 +670,15 @@ impl ArkretEdge {
         realm_id: &RealmId,
         builder: arkret_event_draft::AppletBridgeErrorBuilder,
     ) -> Result<String> {
-        let seq = self.seq.alloc_blocking().await?;
-        let hlc = self.next_hlc(realm_id)?;
-        let mut event = builder.build(seq, hlc)?;
         // applet-integration §8: the signed envelope of every Applet-originated
         // write Event MUST carry the top-level `applet_id`; the builder only
-        // binds it inside the content, so stamp it before the single signature.
-        event.applet_id = Some(self.applet_id.clone());
-        // The builder produced an unsigned event; sign it with the service key
-        // over the current canonical envelope.
-        self.resign_event(&mut event)?;
-        self.submit_event(&event).await
+        // binds it inside the content, so it rides the intent and the one
+        // derived identity covers it.
+        let intent = builder
+            .build(chrono::Utc::now())?
+            .with_applet_id(self.applet_id.clone());
+        let event = self.author_and_sign(realm_id, intent).await?;
+        self.submit_event(event.event()).await
     }
 
     /// The configured applet id this bridge presents to arkret.

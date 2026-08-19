@@ -1186,7 +1186,7 @@ mod tests {
         let realm =
             RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").expect("realm");
         let hlc = Hlc::new(format!("01970e589d2{seq}-0001-a13f9c2e")).expect("hlc");
-        let mut event = arkret_wire::test_support::raw_event(
+        let event = arkret_wire::test_support::raw_event(
             "ak.message.create",
             ScopeRef::Realm { realm_id: realm },
             actor_id(actor),
@@ -1196,6 +1196,13 @@ mod tests {
             json!({ "body": format!("hello {seq}") }),
         )
         .expect("event");
+        // A received Event arrives finalized and signed, so the fixture reaches
+        // the verifier the same way.
+        let mut event = arkret_wire::AuthoredEvent::finalize_with_digest_suite(
+            event,
+            arkret::canonical::DigestSuite::Sha256,
+        )
+        .expect("fixture envelope finalizes");
         sign_event(
             &mut event,
             &signer(seed, actor, verification_method),
@@ -1203,7 +1210,7 @@ mod tests {
             SignEventOptions::new(),
         )
         .expect("sign event");
-        event
+        event.into_event()
     }
 
     fn transaction(events: Vec<Event>) -> AppletTransactionRequestBody {
