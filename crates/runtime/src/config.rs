@@ -313,10 +313,6 @@ impl Config {
         Self::from_yaml_with_base_dir(&text, path.parent())
     }
 
-    pub fn from_yaml(text: &str) -> Result<Self> {
-        Self::from_yaml_with_base_dir(text, None)
-    }
-
     fn from_yaml_with_base_dir(text: &str, base_dir: Option<&Path>) -> Result<Self> {
         let mut value: serde_yaml_ng::Value =
             serde_yaml_ng::from_str(text).map_err(|e| BridgeError::Config(e.to_string()))?;
@@ -484,7 +480,7 @@ arkret:
         let yaml_path = path.to_string_lossy().replace('\\', "/");
 
         let text = minimal_config(&format!("app:\n  webhook_secret: \"file:{yaml_path}\"\n",));
-        let config = Config::from_yaml(&text).unwrap();
+        let config = Config::from_yaml_with_base_dir(&text, None).unwrap();
 
         assert_eq!(config.app["webhook_secret"], "from-file");
         let _ = std::fs::remove_file(path);
@@ -497,7 +493,7 @@ arkret:
         };
         let expected = path.to_string_lossy();
         let text = minimal_config("app:\n  path_copy: \"${PATH}\"\n");
-        let config = Config::from_yaml(&text).unwrap();
+        let config = Config::from_yaml_with_base_dir(&text, None).unwrap();
 
         assert_eq!(config.app["path_copy"], expected.as_ref());
     }
@@ -505,7 +501,7 @@ arkret:
     #[test]
     fn config_rejects_missing_env_references() {
         let text = minimal_config("app:\n  secret: \"env:ARKRET_BRIDGE_TEST_MISSING_ENV\"\n");
-        let err = Config::from_yaml(&text).unwrap_err();
+        let err = Config::from_yaml_with_base_dir(&text, None).unwrap_err();
 
         assert!(format!("{err}").contains("ARKRET_BRIDGE_TEST_MISSING_ENV"));
     }

@@ -232,8 +232,9 @@ pub struct ArkretEdge {
     client: Client,
     signer: Ed25519PayloadSigner,
     /// Authority transport for issuer-produced AuthorizationLease/CBA
-    /// evidence. The default uses the authenticated Principal Server.
-    submission_provider: Mutex<Arc<dyn EventInitialSubmissionProvider>>,
+    /// evidence: the authenticated Principal Server provider installed at
+    /// construction time.
+    submission_provider: Arc<dyn EventInitialSubmissionProvider>,
     /// Resolvable full DID used for key lookup and proof `verification_method`.
     service_id: DidFullId,
     /// Stable service actor core written into Event envelopes.
@@ -359,7 +360,7 @@ impl ArkretEdge {
             config,
             client,
             signer,
-            submission_provider: Mutex::new(submission_provider),
+            submission_provider,
             service_id,
             service_actor_id,
             applet_id,
@@ -378,22 +379,8 @@ impl ArkretEdge {
         self.signal_tx = Some(tx);
     }
 
-    pub fn config(&self) -> &Config {
-        &self.config
-    }
-
     pub fn client(&self) -> &Client {
         &self.client
-    }
-
-    /// Override the default authenticated Principal Server publication
-    /// provider. This is intended for another production authority transport;
-    /// returned wrappers are still validated before network submission.
-    pub fn set_initial_submission_provider(
-        &self,
-        provider: Arc<dyn EventInitialSubmissionProvider>,
-    ) {
-        *self.submission_provider.lock() = provider;
     }
 
     pub fn service_id(&self) -> &DidFullId {
@@ -557,10 +544,9 @@ impl ArkretEdge {
     }
 
     /// Ask the authority provider to wrap an exact signed Event, then submit
-    /// it. The default provider calls the authenticated Principal Server.
+    /// it. The provider calls the authenticated Principal Server.
     pub async fn submit_event(&self, event: &Event) -> Result<String> {
-        let provider = self.submission_provider.lock().clone();
-        let submission = provider.initial_submission(event).await?;
+        let submission = self.submission_provider.initial_submission(event).await?;
         if submission.event != *event {
             return Err(BridgeError::Runtime(
                 "EventInitialSubmissionProvider replaced or mutated the signed Event".to_owned(),

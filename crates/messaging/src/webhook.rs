@@ -28,7 +28,7 @@ use crate::{InboundAppMessage, MessageContext};
 type HmacSha256 = Hmac<Sha256>;
 type HmacSha1 = Hmac<Sha1>;
 
-pub const MAX_WEBHOOK_BODY_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_WEBHOOK_BODY_BYTES: usize = 1024 * 1024;
 const JWT_JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
 const JWT_CLOCK_SKEW: Duration = Duration::from_secs(60);
 

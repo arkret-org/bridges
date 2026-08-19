@@ -47,9 +47,9 @@ use ghost::{
     find_existing_portal_strand, message_mapping_channel_key, normalized_external_id,
     portal_location_ref, provision_ghost_actor, require_nonempty_ref,
 };
-pub use media::{
-    HttpInboundMediaFetcher, InboundMediaAuthorization, InboundMediaFetchPolicy,
-    InboundMediaFetcher, InboundMediaReference,
+pub use media::InboundMediaAuthorization;
+use media::{
+    HttpInboundMediaFetcher, InboundMediaFetchPolicy, InboundMediaFetcher, InboundMediaReference,
 };
 pub use runtime::salvo;
 use serde_json::{Value, json};
@@ -221,17 +221,6 @@ impl MessageContext {
 
     pub fn core(&self) -> &Arc<BridgeContext> {
         &self.inner
-    }
-
-    /// Install the host-owned source of issuer-produced first-publication
-    /// evidence used by all message, redaction, portal-strand and bridge-error
-    /// submissions. The provider receives the final signed Event and must
-    /// return that exact Event inside an `EventInitialSubmission`.
-    pub fn set_initial_submission_provider(
-        &self,
-        provider: Arc<dyn runtime::EventInitialSubmissionProvider>,
-    ) {
-        self.inner.edge.set_initial_submission_provider(provider);
     }
 
     /// Build a durable webhook replay window (bridge contract G-4) with the
@@ -571,7 +560,7 @@ impl MessageContext {
     /// Submit an inbound media message. The `attachment` must already reference a
     /// blob uploaded via [`MessageContext::upload_blob`]; `msg.body` becomes the
     /// caption when non-empty.
-    pub async fn submit_media_message(
+    pub(crate) async fn submit_media_message(
         &self,
         msg: InboundAppMessage,
         mut attachment: Attachment,
