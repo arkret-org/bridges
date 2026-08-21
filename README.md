@@ -85,15 +85,35 @@ cargo run -p arkret-bridge-discord -- --config config.yaml
 
 - **公网 webhook 面**(`/webhooks/*`,Teams 另含 Bot Framework 的 `/api/messages`):
   绑 `webhook_bind:port`,默认 `webhook_bind=0.0.0.0`,必须可被对应平台回调可达。
-- **内网 admin/edge 面**(受信协议面 `/_arkret/edge/applet/*` 与运维面 `/health`、
-  `/metrics`):绑 `admin_bind:admin_port`,默认 `admin_bind=127.0.0.1`(仅回环),
-  `admin_port` 省略时回落到 `port + 1000`。即使不配反向代理,协议面与运维面也默认不对
-  公网开放。
+- **内网 admin/edge 面**(受信协议面 `/_arkret/edge/applet/*`、运维面 `/health`、
+  `/metrics` 与 operator 命令面 `/admin/*`):绑 `admin_bind:admin_port`,默认
+  `admin_bind=127.0.0.1`(仅回环),`admin_port` 省略时回落到 `port + 1000`。即使不配
+  反向代理,协议面与运维面也默认不对公网开放。
 
 `/_arkret/edge/applet/*` 配置 `trusted_server_did` 与 `trusted_verification_methods` 后会
 校验 HTTP Message Signature、source/destination DID 与 event proof;生产仍建议在反代/网络层
 进一步限制为仅可信 Arkret server 访问,并对 `/metrics` 做内网或认证访问控制。若需把 admin/edge
 面也对外(如 arkret server 在另一网段),显式设置 `admin_bind` 即可,但应自行收敛网络层暴露面。
+
+**DID binding 失效(operator 命令面)**:spec `identity/did-usage-and-verification.md`
+§5.6 要求 rotation / deactivation / witness fork / explicit revocation **必须**使受影响的
+DID binding 失效。bridge 不持有 resolver、也收不到上游 rotation 通知,因此**该义务的运行时
+触发责任在 operator**:得知受信 server DID 发生上述事件后,operator 必须在 admin 面调用失效
+端点(随后按新 key 更新 `arkret.trusted_verification_methods` 并重启;失效后、重新播种前的
+入站推送会 fail-closed 被拒——这正是 revocation 期望的行为):
+
+```bash
+curl -sS -X POST http://127.0.0.1:<admin_port>/admin/did-bindings/invalidate \
+  -H 'content-type: application/json' \
+  -d '{"did": "did:webvh:...:server.example"}'
+# => {"ok":true,"did":"...","trust_domain":"...","invalidated_bindings":1}
+```
+
+body 可选 `trust_domain` 字段作误操作护栏:填写时必须等于该 bridge 配置的 trust domain,
+否则 409 拒绝且不清扫。清扫是 §5.6 认可的 `for_did` 粗粒度安全下界,幂等,
+`invalidated_bindings: 0` 也是成功。该端点与 `/health`、`/metrics` 同等暴露方式——仅靠
+admin 面默认回环绑定隔离,无请求级鉴权;若显式放宽 `admin_bind`,必须在网络层/反代收敛
+整个 admin 面的可达性。
 
 公网 webhook 面**默认启用每源 IP 速率限制**(`bridge.webhook_rate_limit`,默认
 `enabled: true`、`max_requests: 600`、`window_secs: 60`,即每 IP 持续 10 rps),用于无反代

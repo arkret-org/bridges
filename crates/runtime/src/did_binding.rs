@@ -55,8 +55,11 @@
 //! the normative degenerate form, and the pins are recorded as
 //! `method_unsupported` rather than silently omitted. Rotation is handled by an
 //! operator config change and by explicit [`DidAuthority::invalidate_did`]
-//! (§4 row 7 "收到 rotation / deactivation / witness fork / policy-change
-//! invalidation").
+//! (§5.6: rotation / deactivation / witness fork / explicit revocation "MUST 使
+//! 受影响 binding 失效"; the `for_did` coarse sweep is the safety floor that
+//! section accepts until evidence dependency records land). The runtime trigger
+//! is the operator: `POST /admin/did-bindings/invalidate` on the loopback admin
+//! plane (`web.rs`) reaches [`DidAuthority::invalidate_did`] directly.
 
 use std::sync::Arc;
 
@@ -243,6 +246,15 @@ impl DidAuthority {
     /// The read-only view handed to ordinary verification.
     pub fn bindings(&self) -> &AcceptedDidBindings {
         &self.bindings
+    }
+
+    /// The trust domain every acceptance in this store is scoped to.
+    ///
+    /// The operator invalidation surface (`web.rs`) uses this to fail closed
+    /// when a request names a *different* trust domain: §5.6's sweep is scoped,
+    /// so a mismatched domain must be a rejected request, not a silent no-op.
+    pub fn trust_domain(&self) -> &TrustDomainId {
+        &self.bindings.trust_domain
     }
 
     /// Record the operator-configured HTTP-signature trust anchor as a

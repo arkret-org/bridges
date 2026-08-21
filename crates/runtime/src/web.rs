@@ -12,8 +12,8 @@ use arkret::signatures::http_signature::{
     verify_signed_http_message,
 };
 use arkret::{
-    AppletHandler, IdempotencyDirection, IdempotencyIdentity, RejectedItem, TransactionClaim,
-    TransactionIdempotencyStore,
+    AppletHandler, DidFullId, IdempotencyDirection, IdempotencyIdentity, RejectedItem,
+    TransactionClaim, TransactionIdempotencyStore,
 };
 use arkret_models_collaboration::http_bodies::AppletTransactionRequestBody;
 use arkret_models_integration::AppletTransactionOutcome;
@@ -84,17 +84,20 @@ pub async fn serve(ctx: Arc<BridgeContext>, extra: Option<Router>) -> Result<()>
         handler,
         config: ctx.config.clone(),
         idempotency,
-        did_authority,
+        did_authority: did_authority.clone(),
     });
 
     // Internal plane: the trusted applet protocol surface
-    // (`/_arkret/edge/applet/*`) and the ops surface (`/health` + `/metrics`)
-    // share one loopback-by-default acceptor. Keeping these off the public
-    // webhook bind means "no reverse proxy configured" still isolates the
-    // trusted and ops planes from the public network (BRG-06-004).
+    // (`/_arkret/edge/applet/*`), the ops surface (`/health` + `/metrics`) and
+    // the operator command surface (`/admin/*`) share one loopback-by-default
+    // acceptor. Keeping these off the public webhook bind means "no reverse
+    // proxy configured" still isolates the trusted and ops planes from the
+    // public network (BRG-06-004); the operator invalidation endpoint relies on
+    // exactly that same network-isolation posture.
     let admin_router = Router::new()
         .push(Router::with_path("health").get(health))
         .push(Router::with_path("metrics").get(metrics_endpoint))
+        .push(admin_did_bindings_router(AdminWebState { did_authority }))
         .push(applet);
 
     let admin_addr = ctx.config.bridge.admin_addr();
@@ -188,6 +191,10 @@ fn prometheus_handle() -> std::result::Result<&'static PrometheusHandle, String>
             "arkret_bridge_applet_transactions_total",
             "Applet transaction request count, labelled by result."
         );
+        describe_counter!(
+            "arkret_bridge_did_binding_invalidations_total",
+            "Operator DID-binding invalidation request count, labelled by result."
+        );
         Ok(handle)
     }) {
         Ok(handle) => Ok(handle),
@@ -197,6 +204,105 @@ fn prometheus_handle() -> std::result::Result<&'static PrometheusHandle, String>
 
 fn record_applet_transaction(result: &'static str) {
     counter!("arkret_bridge_applet_transactions_total", "result" => result).increment(1);
+}
+
+fn record_did_binding_invalidation(result: &'static str) {
+    counter!("arkret_bridge_did_binding_invalidations_total", "result" => result).increment(1);
+}
+
+/// Operator command surface state for the admin plane (`/admin/*`).
+#[derive(Clone)]
+struct AdminWebState {
+    did_authority: Arc<DidAuthority>,
+}
+
+/// Body of `POST /admin/did-bindings/invalidate`.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InvalidateDidBindingsRequest {
+    /// The DID whose accepted bindings must be dropped.
+    did: String,
+    /// Optional guard: when present it must equal this bridge's configured
+    /// trust domain. The sweep itself is always scoped to that domain, so a
+    /// mismatch is a rejected request rather than a silent cross-domain no-op.
+    #[serde(default)]
+    trust_domain: Option<String>,
+}
+
+/// The operator command surface for `identity/did-usage-and-verification.md`
+/// §5.6: rotation, deactivation, witness fork and explicit revocation MUST
+/// invalidate the affected bindings. A bridge holds no resolver and receives no
+/// rotation notifications, so the runtime trigger for that obligation is the
+/// operator invoking this endpoint (see README「DID binding 失效」).
+///
+/// Protection model: identical to `/health` and `/metrics` — the admin plane
+/// binds loopback by default (BRG-06-004) and carries no request-level
+/// authentication of its own. An operator who widens `admin_bind` is expected
+/// to gate the whole plane at the network / reverse-proxy layer.
+fn admin_did_bindings_router(state: AdminWebState) -> Router {
+    Router::with_path("admin/did-bindings/invalidate")
+        .hoop(affix_state::inject(state))
+        .post(admin_invalidate_did_bindings)
+}
+
+#[handler]
+async fn admin_invalidate_did_bindings(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    let Ok(state) = depot.get_typed::<AdminWebState>() else {
+        record_did_binding_invalidation("internal_error");
+        internal_error(res, "admin web state missing");
+        return;
+    };
+    let body: InvalidateDidBindingsRequest = match req.parse_json().await {
+        Ok(body) => body,
+        Err(err) => {
+            record_did_binding_invalidation("bad_request");
+            bad_request(res, format!("invalid invalidation request body: {err}"));
+            return;
+        }
+    };
+    let did = match DidFullId::new(body.did) {
+        Ok(did) => did,
+        Err(err) => {
+            record_did_binding_invalidation("bad_request");
+            bad_request(res, format!("`did` is not a valid full DID: {err}"));
+            return;
+        }
+    };
+    let trust_domain = state.did_authority.trust_domain();
+    if let Some(requested) = body.trust_domain.as_deref()
+        && requested != trust_domain.as_str()
+    {
+        record_did_binding_invalidation("trust_domain_mismatch");
+        // The admin surface is not part of the applet universal failure
+        // surface, so this code is not bound to the closed applet registry.
+        applet_error(
+            res,
+            StatusCode::CONFLICT,
+            "trust_domain_mismatch",
+            format!(
+                "trust_domain `{requested}` does not match this bridge's \
+                 trust domain `{trust_domain}`; refusing to sweep"
+            ),
+        );
+        return;
+    }
+    // §5.6 `for_did` coarse sweep, scoped to this bridge's trust domain. Zero
+    // dropped acceptances is still a success: the sweep is idempotent, and an
+    // operator retrying a revocation must not read the retry as a failure.
+    let invalidated = state.did_authority.invalidate_did(&did);
+    record_did_binding_invalidation("invalidated");
+    tracing::info!(
+        did = %did,
+        trust_domain = %trust_domain,
+        invalidated,
+        "operator invalidated accepted DID bindings"
+    );
+    res.render(Json(json!({
+        "ok": true,
+        "did": did.as_str(),
+        "trust_domain": trust_domain.as_str(),
+        "invalidated_bindings": invalidated,
+    })));
 }
 
 #[derive(Clone)]
@@ -1371,5 +1477,134 @@ mod tests {
             public_key_bytes(8),
             "the rotated key must replace, not shadow, the previous one"
         );
+    }
+
+    // ========================================================================
+    // The operator invalidation endpoint is a real runtime trigger for §5.6.
+    // These go through the mounted route and HTTP body parsing, not the
+    // `invalidate_did` method in isolation.
+    // ========================================================================
+
+    use salvo::test::{ResponseExt, TestClient};
+
+    const INVALIDATE_URL: &str = "http://127.0.0.1/admin/did-bindings/invalidate";
+
+    fn admin_service(authority: Arc<DidAuthority>) -> salvo::Service {
+        salvo::Service::new(Router::new().push(admin_did_bindings_router(AdminWebState {
+            did_authority: authority,
+        })))
+    }
+
+    #[tokio::test]
+    async fn the_admin_endpoint_invalidates_the_accepted_binding() {
+        let authority = Arc::new(authority());
+        let now = Utc::now();
+        seed_source_service(&authority, 7, now);
+        assert!(
+            authority
+                .bindings()
+                .source_service(&server_did(), &server_verification_method(), now)
+                .is_ok(),
+            "precondition: the seeded binding answers lookups"
+        );
+        let service = admin_service(authority.clone());
+
+        let mut response = TestClient::post(INVALIDATE_URL)
+            .json(&json!({ "did": server_did().to_string() }))
+            .send(&service)
+            .await;
+        assert_eq!(response.status_code, Some(StatusCode::OK));
+        let body: Value = response.take_json().await.expect("json body");
+        assert_eq!(body["ok"], json!(true));
+        assert_eq!(body["invalidated_bindings"], json!(1));
+
+        assert_eq!(
+            authority
+                .bindings()
+                .source_service(&server_did(), &server_verification_method(), now),
+            Err(crate::did_binding::BindingLookupError::Missing),
+            "the trigger must drop the acceptance immediately"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_matching_trust_domain_guard_still_sweeps() {
+        let authority = Arc::new(authority());
+        let now = Utc::now();
+        seed_source_service(&authority, 7, now);
+        let service = admin_service(authority.clone());
+
+        let mut response = TestClient::post(INVALIDATE_URL)
+            .json(&json!({
+                "did": server_did().to_string(),
+                "trust_domain": trust_domain().as_str(),
+            }))
+            .send(&service)
+            .await;
+        assert_eq!(response.status_code, Some(StatusCode::OK));
+        let body: Value = response.take_json().await.expect("json body");
+        assert_eq!(body["invalidated_bindings"], json!(1));
+    }
+
+    #[tokio::test]
+    async fn a_foreign_trust_domain_is_refused_and_the_binding_survives() {
+        let authority = Arc::new(authority());
+        let now = Utc::now();
+        seed_source_service(&authority, 7, now);
+        let service = admin_service(authority.clone());
+
+        let response = TestClient::post(INVALIDATE_URL)
+            .json(&json!({
+                "did": server_did().to_string(),
+                "trust_domain": "ak:trust_domain:other.example",
+            }))
+            .send(&service)
+            .await;
+        assert_eq!(response.status_code, Some(StatusCode::CONFLICT));
+        assert!(
+            authority
+                .bindings()
+                .source_service(&server_did(), &server_verification_method(), now)
+                .is_ok(),
+            "a refused sweep must not touch the store"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_invalid_did_is_rejected_without_touching_the_store() {
+        let authority = Arc::new(authority());
+        let now = Utc::now();
+        seed_source_service(&authority, 7, now);
+        let service = admin_service(authority.clone());
+
+        let response = TestClient::post(INVALIDATE_URL)
+            .json(&json!({ "did": "not-a-did" }))
+            .send(&service)
+            .await;
+        assert_eq!(response.status_code, Some(StatusCode::BAD_REQUEST));
+        assert!(
+            authority
+                .bindings()
+                .source_service(&server_did(), &server_verification_method(), now)
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn sweeping_a_did_with_no_acceptance_is_an_idempotent_success() {
+        let authority = Arc::new(authority());
+        let service = admin_service(authority);
+
+        let mut response = TestClient::post(INVALIDATE_URL)
+            .json(&json!({ "did": actor_did().to_string() }))
+            .send(&service)
+            .await;
+        assert_eq!(
+            response.status_code,
+            Some(StatusCode::OK),
+            "an operator retrying a revocation must not read the retry as a failure"
+        );
+        let body: Value = response.take_json().await.expect("json body");
+        assert_eq!(body["invalidated_bindings"], json!(0));
     }
 }
