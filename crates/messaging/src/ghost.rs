@@ -321,6 +321,7 @@ async fn build_signed_ghost_provision_request(
     grant.proof.jws = edge.sign_detached_jws(&grant.canonical_proof_binding_bytes()?)?;
 
     let service_frontier = edge.realm_actor_frontier(&realm_id, &service_id).await?;
+    let digest_suite = edge.realm_digest_suite(&realm_id).await?;
     let (service_actor_seq, service_prev_refs) = service_frontier
         .map(|frontier| (frontier.next_actor_seq, frontier.frontier_event_ids))
         .unwrap_or_default();
@@ -339,6 +340,7 @@ async fn build_signed_ghost_provision_request(
         accountability_intent,
         service_actor_seq,
         edge.next_event_hlc(&realm_id)?,
+        digest_suite,
     )?;
 
     let effective_display_name = display_name
@@ -394,8 +396,12 @@ async fn build_signed_ghost_provision_request(
             accountability_event.event_id().as_str(),
             "accountability",
         ));
-    let profile_event =
-        edge.author_and_sign_at(profile_intent, 0, edge.next_event_hlc(&realm_id)?)?;
+    let profile_event = edge.author_and_sign_at(
+        profile_intent,
+        0,
+        edge.next_event_hlc(&realm_id)?,
+        digest_suite,
+    )?;
 
     let mut request = GhostActorProvisionRequestBody::new(
         applet_id,
@@ -676,7 +682,7 @@ pub(crate) async fn create_portal_strand(
                 .collect(),
         );
     let event = edge.author_and_sign(&realm, intent).await?;
-    edge.submit_event(event.event()).await?;
+    edge.submit_event(&event).await?;
     // The Strand is named by `retype(event_id)` of its own accepted create.
     Ok(StrandId::from_event_id(event.event_id()).to_string())
 }

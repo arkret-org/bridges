@@ -972,9 +972,6 @@ fn verify_transaction_events(
         if event.proofs.is_empty() {
             return Err(format!("event {} has no proofs", event.event_id));
         }
-        event
-            .validate_proof_bindings()
-            .map_err(|err| format!("event {} proof binding failed: {err}", event.event_id))?;
         let expected_signer = event.executed_by.as_ref().unwrap_or(&event.actor_id);
         let producer_proofs = event
             .proofs
@@ -987,6 +984,22 @@ fn verify_transaction_events(
                 event.event_id
             ));
         }
+        // The bridge checks immutable content-address consistency against the
+        // algorithm committed by the unique producer proof. Trusted Realm-suite
+        // admission remains the source Arkret node's responsibility; the bridge
+        // never infers governance state from the EventId prefix.
+        let selector_suite = producer_proofs[0]
+            .event_digest
+            .digest_suite()
+            .map_err(|error| {
+                format!(
+                    "event {} producer digest suite is invalid: {error}",
+                    event.event_id
+                )
+            })?;
+        event
+            .validate_proof_bindings_with_digest_suite(selector_suite)
+            .map_err(|err| format!("event {} proof binding failed: {err}", event.event_id))?;
         for proof in producer_proofs {
             proof.validate_production().map_err(|err| {
                 format!("event {} proof is not production: {err}", event.event_id)

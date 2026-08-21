@@ -27,8 +27,8 @@ use arkret::identity::public_key_material_from_binding;
 use arkret::signatures::{EventProofBuilder, VerificationMethodDocument};
 use arkret::signatures::{SignEventOptions, sign_event};
 use arkret::{
-    AppletId, AuthoredEvent, DidCoreId, DidFullId, Ed25519PayloadSigner, Event, EventIntent, Hlc,
-    HlcGenerator, PayloadSigner, RealmId, ScopeRef, project_full_id_to_core_id,
+    AppletId, AuthoredEvent, DidCoreId, DidFullId, DigestSuite, Ed25519PayloadSigner, Event,
+    EventIntent, Hlc, HlcGenerator, PayloadSigner, RealmId, ScopeRef, project_full_id_to_core_id,
 };
 use arkret_event_draft::{EventSpec, TypedEventDraft};
 use arkret_models_collaboration::event_sync::{
@@ -104,7 +104,11 @@ pub const SEQ_STATE_KEY: &str = "actor_seq_reserved";
 /// runtime validates both the wrapper and exact Event identity before sending.
 #[async_trait]
 pub trait EventInitialSubmissionProvider: Send + Sync + 'static {
-    async fn initial_submission(&self, event: &Event) -> Result<EventInitialSubmission>;
+    async fn initial_submission(
+        &self,
+        event: &Event,
+        digest_suite: DigestSuite,
+    ) -> Result<EventInitialSubmission>;
 }
 
 /// Production provider backed by the authenticated Principal Server.
@@ -124,9 +128,13 @@ impl PrincipalServerSubmissionProvider {
 
 #[async_trait]
 impl EventInitialSubmissionProvider for PrincipalServerSubmissionProvider {
-    async fn initial_submission(&self, event: &Event) -> Result<EventInitialSubmission> {
+    async fn initial_submission(
+        &self,
+        event: &Event,
+        digest_suite: DigestSuite,
+    ) -> Result<EventInitialSubmission> {
         self.client
-            .prepare_initial_submission(event)
+            .prepare_initial_submission(event, digest_suite)
             .await
             .map_err(Into::into)
     }
@@ -487,10 +495,11 @@ impl ArkretEdge {
         realm_id: &RealmId,
         intent: EventIntent,
     ) -> Result<AuthoredEvent> {
+        let digest_suite = self.realm_digest_suite(realm_id).await?;
         let seq = self.seq.alloc_blocking().await?;
         let hlc = self.next_hlc(realm_id)?;
         let mut event = intent
-            .author(seq, hlc)
+            .author_with_digest_suite(seq, hlc, digest_suite)
             .map_err(|error| BridgeError::Arkret(error.to_string()))?;
         self.sign_as_service(&mut event)?;
         Ok(event)
@@ -503,9 +512,10 @@ impl ArkretEdge {
         intent: EventIntent,
         actor_seq: u64,
         hlc: Hlc,
+        digest_suite: DigestSuite,
     ) -> Result<AuthoredEvent> {
         let mut event = intent
-            .author(actor_seq, hlc)
+            .author_with_digest_suite(actor_seq, hlc, digest_suite)
             .map_err(|error| BridgeError::Arkret(error.to_string()))?;
         self.sign_as_service(&mut event)?;
         Ok(event)
@@ -535,10 +545,14 @@ impl ArkretEdge {
     /// This boundary deliberately accepts the SDK wrapper rather than a bare
     /// [`Event`]. Online wrappers omit the lease; delayed wrappers may carry
     /// authority-produced publication evidence.
-    pub async fn submit_initial(&self, submission: &EventInitialSubmission) -> Result<String> {
+    pub async fn submit_initial(
+        &self,
+        submission: &EventInitialSubmission,
+        digest_suite: DigestSuite,
+    ) -> Result<String> {
         let event_id = submission.event.event_id.to_string();
         submission
-            .validate_structural()
+            .validate_structural(digest_suite)
             .map_err(|error| BridgeError::Arkret(error.to_string()))?;
         self.client.events_submit(submission).await?;
         Ok(event_id)
@@ -546,14 +560,18 @@ impl ArkretEdge {
 
     /// Ask the authority provider to wrap an exact signed Event, then submit
     /// it. The provider calls the authenticated Principal Server.
-    pub async fn submit_event(&self, event: &Event) -> Result<String> {
-        let submission = self.submission_provider.initial_submission(event).await?;
-        if submission.event != *event {
+    pub async fn submit_event(&self, event: &AuthoredEvent) -> Result<String> {
+        let digest_suite = event.digest_suite();
+        let submission = self
+            .submission_provider
+            .initial_submission(event.event(), digest_suite)
+            .await?;
+        if submission.event != *event.event() {
             return Err(BridgeError::Runtime(
                 "EventInitialSubmissionProvider replaced or mutated the signed Event".to_owned(),
             ));
         }
-        self.submit_initial(&submission).await
+        self.submit_initial(&submission, digest_suite).await
     }
 
     /// Sign an already-canonicalized payload-proof transcript with the
@@ -594,6 +612,40 @@ impl ArkretEdge {
         }
     }
 
+    /// Resolve the current Realm digest suite from the authenticated
+    /// Seal-frontier projection. The state and control roots must agree; an
+    /// Event or Seal identifier prefix is never used as governance state.
+    pub async fn realm_digest_suite(&self, realm_id: &RealmId) -> Result<DigestSuite> {
+        let state = self
+            .client
+            .events_frontier(&EventsFrontierSelector::RealmSeal {
+                realm_id: realm_id.clone(),
+            })
+            .await?;
+        let EventsFrontierView::RealmSeal(frontier) = state.frontier else {
+            return Err(BridgeError::Arkret(
+                "events frontier returned the wrong variant".to_owned(),
+            ));
+        };
+        frontier
+            .validate_protocol_bounds()
+            .map_err(|error| BridgeError::Arkret(error.to_string()))?;
+        let state_suite = frontier
+            .state_root
+            .digest_suite()
+            .map_err(|error| BridgeError::Arkret(error.to_string()))?;
+        let control_suite = frontier
+            .control_event_set_root
+            .digest_suite()
+            .map_err(|error| BridgeError::Arkret(error.to_string()))?;
+        if state_suite != control_suite {
+            return Err(BridgeError::Arkret(
+                "Realm Seal frontier roots use different digest suites".to_owned(),
+            ));
+        }
+        Ok(state_suite)
+    }
+
     /// Allocate the next Realm-scoped HLC for a caller-built Event.
     pub fn next_event_hlc(&self, realm_id: &RealmId) -> Result<Hlc> {
         self.next_hlc(realm_id)
@@ -625,7 +677,7 @@ impl ArkretEdge {
             .delegated_intent::<K>(actor, &realm, content, authorization_ref)?
             .with_external_ref(external_ref);
         let event = self.author_and_sign(&realm, intent).await?;
-        self.submit_event(event.event()).await
+        self.submit_event(&event).await
     }
 
     /// Submit a message redaction attributed to a delegated app actor. The
@@ -656,7 +708,7 @@ impl ArkretEdge {
             )?
             .with_external_ref(external_ref);
         let event = self.author_and_sign(&realm, intent).await?;
-        self.submit_event(event.event()).await
+        self.submit_event(&event).await
     }
 
     /// Emit a `ak.applet.bridge_error` Event so a bridging failure is durable
@@ -678,7 +730,7 @@ impl ArkretEdge {
             .build(chrono::Utc::now())?
             .with_applet_id(self.applet_id.clone());
         let event = self.author_and_sign(realm_id, intent).await?;
-        self.submit_event(event.event()).await
+        self.submit_event(&event).await
     }
 
     /// The configured applet id this bridge presents to arkret.
@@ -1390,6 +1442,8 @@ mod tests {
                 "sha256:0000000000000000000000000000000000000000000000000000000000000000",
             )
             .unwrap(),
+            signer_resolution_evidence_ref: None,
+            signer_resolution_evidence_digest: None,
             created_at: "2026-04-26T00:00:00Z".parse().unwrap(),
             domain: None,
             audience: None,
