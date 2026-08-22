@@ -630,11 +630,32 @@ impl ArkretEdge {
         frontier
             .validate_protocol_bounds()
             .map_err(|error| BridgeError::Arkret(error.to_string()))?;
-        let state_suite = frontier
+        // The frontier view carries no service-derived root hint, so the
+        // accepted leaf Seal is resolved and its own signed roots are read.
+        let leaf = frontier
+            .sole_leaf()
+            .map_err(|error| BridgeError::Arkret(error.to_string()))?
+            .clone();
+        let resolved = self
+            .client
+            .seals_resolve(&arkret::SelfSealResolveRequestBody {
+                realm_id: realm_id.clone(),
+                seal_refs: vec![leaf.clone()],
+                history_traversal_access: None,
+            })
+            .await?;
+        let seal = resolved
+            .seals
+            .into_iter()
+            .find(|seal| seal.id == leaf)
+            .ok_or_else(|| {
+                BridgeError::Arkret("accepted Realm Seal frontier leaf did not resolve".to_owned())
+            })?;
+        let state_suite = seal
             .state_root
             .digest_suite()
             .map_err(|error| BridgeError::Arkret(error.to_string()))?;
-        let control_suite = frontier
+        let control_suite = seal
             .control_event_set_root
             .digest_suite()
             .map_err(|error| BridgeError::Arkret(error.to_string()))?;
