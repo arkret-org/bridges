@@ -1,10 +1,10 @@
 //! The arkret protocol-side edge (replaces the Matrix bridge's
 //! `MatrixAppservice`).
 //!
-//! - **Outbound (app -> arkret)**: [`ArkretEdge::mint_event_unsigned_async`] and
-//!   [`ArkretEdge::mint_event_as_unsigned_async`] build unsigned `Event`s; callers finalize signed
-//!   envelope fields, sign once with [`ArkretEdge::resign_event`], build an initial-publication
-//!   wrapper, then submit an [`EventInitialSubmission`].
+//! - **Outbound (app -> arkret)**: [`ArkretEdge::service_intent`] and
+//!   [`ArkretEdge::delegated_intent`] build `EventIntent`s with everything except the actor chain
+//!   position filled in; [`ArkretEdge::author_and_sign`] positions and signs one, then
+//!   [`ArkretEdge::submit_event`] wraps it in an initial-publication submission and sends it.
 //! - **Inbound (arkret → app)**: transactions pushed by the arkret server via the applet HTTP
 //!   endpoints are placed into the `inbound_tx` queue by [`BridgeAppletHandler`]; after the core
 //!   consumes them they are forwarded to the app adapter.

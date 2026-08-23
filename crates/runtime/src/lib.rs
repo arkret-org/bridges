@@ -9,8 +9,8 @@
 //! - **Inbound async pump**: turns the SDK's synchronous `AppletHandler` transaction pushes into an
 //!   async [`arkret::Event`] stream + a background consumer ([`app::consume_inbound`]).
 //! - **Outbound mint bookkeeping**: monotonic `actor_seq`, HLC generation, `applet_id` stamping and
-//!   one-pass signing, exposed through the asynchronous unsigned-mint methods on
-//!   [`arkret_edge::ArkretEdge`].
+//!   one-pass signing, exposed through [`arkret_edge::ArkretEdge`]'s intent/authoring methods
+//!   (`service_intent`, `delegated_intent`, `author_and_sign`, `submit_event`).
 //! - **App-runtime scaffolding**: config loading, a diesel pool + migration runner, a salvo server
 //!   (applet routes + health/metrics + app webhooks), and the [`run_bridge`] orchestration loop.
 //!
