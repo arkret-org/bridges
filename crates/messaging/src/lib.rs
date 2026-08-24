@@ -34,7 +34,8 @@ use arkret_bridge_runtime::{
     BridgeError, ReplayGuardStore, Result, TokenCache, TokenStore, redact_sensitive_url_values,
 };
 use arkret_event_draft::{AppletBridgeErrorBuilder, EventPayloadExt};
-use arkret_models_integration::{AppletBridgeVisibilityScope, AppletIdentifier};
+use arkret_models_integration::AppletBridgeVisibilityScope;
+use arkret_wire::AppletIdentifier;
 pub use arkret_wire::SignalEnvelope;
 use async_trait::async_trait;
 pub use content::{
