@@ -1334,6 +1334,10 @@ mod tests {
 
     fn transaction(events: Vec<Event>) -> AppletTransactionRequestBody {
         AppletTransactionRequestBody {
+            applet_id: arkret::AppletId::new(
+                "ak:applet:01904100-0000-7000-8000-000000000001".to_owned(),
+            )
+            .expect("applet id"),
             source_service_id: arkret::project_full_id_to_core_id(&server_did())
                 .expect("server core id"),
             events,

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use arkret::DidFullId;
 use arkret::signatures::PublicKeyMaterial;
+use arkret_models_integration::AppletWireNamespaces;
 use arkret_wire::DidUrl;
 use serde::Deserialize;
 
@@ -148,9 +149,6 @@ pub struct ArkretConfig {
     pub trust_domain: arkret::TrustDomainId,
     /// This bridge's applet id (`ak:applet:<uuidv7>`).
     pub applet_id: String,
-    /// Capability grant returned by Applet install for
-    /// `ak.applet.ghost.provision`.
-    pub ghost_provision_authorization_ref: String,
     /// The Bearer access token used to submit events.
     pub access_token: String,
     /// The event signing private key seed (32 bytes, hexadecimal).
@@ -165,18 +163,18 @@ pub struct ArkretConfig {
     /// signatures and event envelope proofs on transaction pushes.
     #[serde(default)]
     pub trusted_verification_methods: Vec<TrustedVerificationMethodConfig>,
-    /// Optional inbound realm namespace override. When omitted, the runtime
-    /// enforces a narrow namespace derived from the bridge id and service DID.
-    #[serde(default)]
-    pub applet_namespaces: Option<serde_json::Value>,
+    /// Exact namespace claims from the installed canonical Applet package.
+    /// There is no service-DID-derived fallback: omitting this field is a
+    /// startup configuration error.
+    pub applet_namespaces: AppletWireNamespaces,
 }
 
 impl ArkretConfig {
     /// The `#fragment` of the configured signing verification method.
     ///
-    /// `verification_method_id` is configured as a bare fragment (`#key-1`) so
-    /// one value works for the service DID and for every ghost actor DID the
-    /// bridge signs as.
+    /// `verification_method_id` is configured as a bare fragment (`#key-1`) of
+    /// this Applet service DID. Ghost key custody belongs to the separately
+    /// installed Applet-managed authoring provider.
     pub fn verification_method_fragment(&self) -> Result<&str> {
         let (_, fragment) = self
             .verification_method_id
@@ -224,10 +222,6 @@ impl fmt::Debug for ArkretConfig {
             .field("service_id", &self.service_id)
             .field("trust_domain", &self.trust_domain)
             .field("applet_id", &self.applet_id)
-            .field(
-                "ghost_provision_authorization_ref",
-                &self.ghost_provision_authorization_ref,
-            )
             .field("access_token", &"<redacted>")
             .field("signing_key_seed_hex", &"<redacted>")
             .field("verification_method_id", &self.verification_method_id)
@@ -460,11 +454,14 @@ arkret:
   service_id: "did:webvh:bridge.example"
   trust_domain: "ak:trust_domain:example.net"
   applet_id: "ak:applet:01904100-0000-7000-8000-000000000001"
-  ghost_provision_authorization_ref: "ak:grant:Ae5vV8Lwlft2Dp8x2y6Dv4NysvsHJwrADG-6PXdUz1Sl"
   access_token: "token"
   signing_key_seed_hex: "1111111111111111111111111111111111111111111111111111111111111111"
   verification_method_id: "#key-1"
   trusted_server_did: "did:webvh:server.example"
+  applet_namespaces:
+    actors: []
+    realms: []
+    handles: []
 {extra}
 "##
         )
@@ -514,5 +511,17 @@ arkret:
         .expect_err("a misspelled rate-limit key must not silently use the default");
 
         assert!(error.to_string().contains("unknown field `max_request`"));
+    }
+
+    #[test]
+    fn config_requires_explicit_applet_namespaces() {
+        let text = minimal_config("").replace(
+            "  applet_namespaces:\n    actors: []\n    realms: []\n    handles: []\n",
+            "",
+        );
+        let error = Config::from_yaml_with_base_dir(&text, None)
+            .expect_err("missing canonical Applet namespaces must fail closed");
+
+        assert!(error.to_string().contains("applet_namespaces"));
     }
 }

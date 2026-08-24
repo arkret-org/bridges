@@ -5,7 +5,7 @@ use crate::content::{
     build_message_create_payload, extract_attachment, extract_plain_body, extract_strand_id,
     media_content_block, media_content_kind, text_content_block,
 };
-use crate::ghost::{assert_ghost_suffix_method, location_matches};
+use crate::ghost::location_matches;
 use crate::types::{AppDeleteOutcome, AppDeleteReason, Attachment};
 use crate::{
     ChannelRealmMappingConfig, EXTERNAL_REF_SCHEMA, PORTAL_STRAND_TRACK, json_scalar_id_string,
@@ -54,21 +54,6 @@ fn json_scalar_id_string_rejects_empty_or_non_scalar_ids() {
     assert!(json_scalar_id_string(&json!("   ")).is_none());
     assert!(json_scalar_id_string(&json!(null)).is_none());
     assert!(json_scalar_id_string(&json!({"id": "nested"})).is_none());
-}
-
-#[test]
-fn ghost_suffix_method_is_webvh_only() {
-    use arkret::DidFullId;
-
-    // Workspace-wide rule: bridge service identities are did:webvh only.
-    let webvh = DidFullId::new("did:webvh:bridge.example").unwrap();
-    assert!(assert_ghost_suffix_method(&webvh).is_ok());
-    // Negative fixtures: did:web (not an accepted alias) and did:key (no
-    // path-structured suffix form) are both rejected fail-closed.
-    let web = DidFullId::new("did:web:bridge.example").unwrap();
-    assert!(assert_ghost_suffix_method(&web).is_err());
-    let key = DidFullId::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap();
-    assert!(assert_ghost_suffix_method(&key).is_err());
 }
 
 fn media_attachment() -> Attachment {

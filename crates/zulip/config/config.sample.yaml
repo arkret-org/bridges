@@ -16,11 +16,16 @@ arkret:
   service_id: "did:webvh:zulip-bridge.example"
   trust_domain: "ak:trust_domain:example.net"
   applet_id: "ak:applet:00000000-0000-7000-8000-0000000000d7"
-  ghost_provision_authorization_ref: "ak:grant:Ae5vV8Lwlft2Dp8x2y6Dv4NysvsHJwrADG-6PXdUz1Sl"
   access_token: "CHANGE_ME_ARKRET_ACCESS_TOKEN"
   signing_key_seed_hex: "0000000000000000000000000000000000000000000000000000000000000000"
   verification_method_id: "#key-1"
   trusted_server_did: "did:webvh:arkret-server.example"
+  # Copy these claims exactly from the installed canonical Applet package.
+  # Empty arrays are fail-closed: no Realm transaction is accepted.
+  applet_namespaces:
+    actors: []
+    realms: []
+    handles: []
   trusted_verification_methods:
     - verification_method: "did:webvh:arkret-server.example#key-1"
       public_key:

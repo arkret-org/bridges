@@ -42,7 +42,7 @@ use arkret_models_discovery::ServiceDescribe;
 #[cfg(any(feature = "web", test))]
 use arkret_models_integration::{
     AppletActorView, AppletPingOutcome, AppletProtocolMetadata, AppletRealmView,
-    AppletTransactionOutcome,
+    AppletTransactionOutcome, AppletWireNamespaces,
 };
 use arkret_wire::{AuthorizationRef, DidUrl, EventInitialSubmission, SignalEnvelope, event_spec};
 #[cfg(any(feature = "web", test))]
@@ -51,7 +51,7 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde::Serialize;
 use serde_json::Value;
-#[cfg(any(feature = "web", test))]
+#[cfg(test)]
 use serde_json::json;
 use tokio::sync::mpsc::Sender;
 
@@ -342,12 +342,9 @@ impl ArkretEdge {
                 base.scheme()
             )));
         }
-        // The default applet namespaces and ghost actor ids derive from the
-        // service DID by appending a `:ghost:*` suffix (applet-integration §3.4).
-        // Only `did:webvh` is accepted: the workspace-wide rule (and the §3.4
-        // examples) mandate webvh-only service identities, so fail closed at
-        // startup for any other method (including `did:web`) rather than later
-        // minting a ghost DID under a non-verifiable-history identity.
+        // Applet service identities use verifiable-history DIDs. Managed actor
+        // identities and namespaces are independent package-authority inputs,
+        // unrelated to this service identity.
         match service_id.method() {
             "webvh" => {}
             other => {
@@ -895,10 +892,10 @@ fn event_content_fingerprint(event: &Event) -> i64 {
 /// [`arkret::AppletHandler`]). It delivers the events in a transaction to the
 /// inbound queue; the business forwarding is done in the core consumer loop.
 pub struct BridgeAppletHandler {
-    applet_id: String,
+    applet_id: AppletId,
     service_id: DidFullId,
     trust_domain: arkret::TrustDomainId,
-    namespaces: Value,
+    namespaces: AppletWireNamespaces,
     inbound_tx: Sender<Event>,
     signal_tx: Option<Sender<SignalEnvelope>>,
     resolver: Option<Arc<dyn AppletResolver>>,
@@ -918,25 +915,6 @@ pub struct BridgeAppletHandler {
 }
 
 #[cfg(any(feature = "web", test))]
-fn default_applet_namespaces(bridge_id: &str, service_id: &DidFullId) -> Value {
-    let service_id = service_id.as_str();
-    json!({
-        "actors": [{
-            "exclusive": true,
-            "pattern": format!("{service_id}:ghost:*"),
-        }],
-        "realms": [{
-            "exclusive": true,
-            "pattern": format!("{bridge_id}:*"),
-        }],
-        "handles": [{
-            "exclusive": true,
-            "pattern": format!("{bridge_id}/*"),
-        }],
-    })
-}
-
-#[cfg(any(feature = "web", test))]
 impl BridgeAppletHandler {
     /// Build the handler from an inbound-capable edge. The edge must have been
     /// constructed with an inbound sender (the run_bridge/web path always is).
@@ -948,18 +926,12 @@ impl BridgeAppletHandler {
         handled_event_kinds: Option<Vec<String>>,
         did_authority: Arc<DidAuthority>,
     ) -> Result<Self> {
-        let bridge_id = edge.config.bridge.bridge_id.clone();
         let service_id = edge.service_id.clone();
         Ok(Self {
-            applet_id: edge.config.arkret.applet_id.clone(),
+            applet_id: edge.applet_id.clone(),
             service_id: service_id.clone(),
             trust_domain: edge.config.arkret.trust_domain.clone(),
-            namespaces: edge
-                .config
-                .arkret
-                .applet_namespaces
-                .clone()
-                .unwrap_or_else(|| default_applet_namespaces(&bridge_id, &service_id)),
+            namespaces: edge.config.arkret.applet_namespaces.clone(),
             inbound_tx: edge.inbound_sender().ok_or_else(|| {
                 BridgeError::Config("applet handler requires an inbound-enabled edge".into())
             })?,
@@ -982,27 +954,13 @@ impl BridgeAppletHandler {
 
     /// Whether `realm_id` falls inside one of the realm namespace patterns this
     /// applet declared in `describe` (applet-integration §7/§13 namespace
-    /// matching). Patterns use the spec's `*` suffix-glob form (e.g.
-    /// `{bridge_id}:*`). When no realm patterns are declared the check is
-    /// permissive (cannot constrain what was never declared).
+    /// matching). Patterns use the spec's trailing `*` suffix-glob form. An
+    /// empty explicit Realm namespace accepts no Realm.
     fn realm_in_namespace(&self, realm_id: &str) -> bool {
-        let patterns = self
-            .namespaces
-            .get("realms")
-            .and_then(Value::as_array)
-            .map(|realms| {
-                realms
-                    .iter()
-                    .filter_map(|entry| entry.get("pattern").and_then(Value::as_str))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        if patterns.is_empty() {
-            return true;
-        }
-        patterns
+        self.namespaces
+            .realms
             .iter()
-            .any(|pattern| glob_suffix_match(pattern, realm_id))
+            .any(|entry| glob_suffix_match(&entry.pattern, realm_id))
     }
 }
 

@@ -21,7 +21,7 @@ mod token;
 mod types;
 pub mod webhook;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use arkret::{
@@ -35,18 +35,19 @@ use arkret_bridge_runtime::{
 };
 use arkret_event_draft::{AppletBridgeErrorBuilder, EventPayloadExt};
 use arkret_models_integration::AppletBridgeVisibilityScope;
-use arkret_wire::AppletIdentifier;
 pub use arkret_wire::SignalEnvelope;
 use async_trait::async_trait;
 pub use content::{
     extract_attachment, extract_plain_body, extract_strand_id, media_content_block,
     text_content_block,
 };
+pub use ghost::{GhostProvisionAuthoringRequest, GhostProvisionRequestProvider};
 use ghost::{
     bridge_error_class, bridge_error_code, bridge_protocol, bridge_tenant, create_portal_strand,
     external_id_object_ref_digest, external_ref_for_delete, external_ref_for_message,
     find_existing_portal_strand, message_mapping_channel_key, normalized_external_id,
-    portal_location_ref, provision_ghost_actor, require_nonempty_ref,
+    portal_location_ref, provision_ghost_actor, require_ghost_provision_provider,
+    require_nonempty_ref,
 };
 pub use media::InboundMediaAuthorization;
 use media::{
@@ -184,6 +185,7 @@ pub(crate) fn redaction_payload_for_app_delete(
         track_name: None,
         reason: Some(reason.to_owned()),
         preserve: None,
+        mimi_provenance: None,
     }))
 }
 
@@ -198,6 +200,7 @@ pub struct MessageContext {
     /// Shared durable store backing every [`TokenCache`] this bridge builds
     /// (one live vendor token across replicas).
     token_store: Arc<dyn TokenStore>,
+    ghost_provision_provider: OnceLock<Arc<dyn GhostProvisionRequestProvider>>,
     pub http: reqwest::Client,
 }
 
@@ -212,8 +215,21 @@ impl MessageContext {
             store,
             replay_guard,
             token_store,
+            ghost_provision_provider: OnceLock::new(),
             http,
         }
+    }
+
+    /// Install the authority that owns Ghost WebVH keys and authors the exact
+    /// four-event formal provisioning unit. Calling a Ghost provisioning path
+    /// without installing one fails closed.
+    pub fn set_ghost_provision_provider(
+        &self,
+        provider: Arc<dyn GhostProvisionRequestProvider>,
+    ) -> Result<()> {
+        self.ghost_provision_provider.set(provider).map_err(|_| {
+            BridgeError::Config("Ghost provision provider is already installed".to_owned())
+        })
     }
 
     pub fn store(&self) -> &MessageStore {
@@ -294,7 +310,7 @@ impl MessageContext {
         let external_ref = portal_location_ref(&self.inner.config, &msg.app_channel);
         let builder = AppletBridgeErrorBuilder::new(
             realm.clone(),
-            AppletIdentifier::Cx(AppletId::new(edge.applet_id().to_owned())?),
+            AppletId::new(edge.applet_id().to_owned())?,
             edge.service_actor_id().clone(),
             failed_ref,
             bridge_error_class(error),
@@ -387,7 +403,7 @@ impl MessageContext {
         let external_ref = portal_location_ref(&self.inner.config, app_channel);
         let builder = AppletBridgeErrorBuilder::new(
             realm.clone(),
-            AppletIdentifier::Cx(AppletId::new(edge.applet_id().to_owned())?),
+            AppletId::new(edge.applet_id().to_owned())?,
             edge.service_actor_id().clone(),
             failed_event_id.to_owned(),
             bridge_error_class(error),
@@ -616,6 +632,7 @@ impl MessageContext {
             })?;
         let mapping_channel_key =
             message_mapping_channel_key(&self.inner.config, &delete.app_channel);
+        let ghost_provision_provider = self.ghost_provision_provider.get().cloned();
         self.inner
             .queue
             .run(&mapping_channel_key, || {
@@ -627,6 +644,7 @@ impl MessageContext {
                 let external_actor_id = external_actor_id.clone();
                 let realm_for_submit = realm.clone();
                 let delete = delete.clone();
+                let ghost_provision_provider = ghost_provision_provider.clone();
                 async move {
                     let Some(target_event_id) = store
                         .clone()
@@ -653,9 +671,13 @@ impl MessageContext {
                     {
                         Some(mapping) => mapping,
                         None => {
+                            let provider = require_ghost_provision_provider(
+                                ghost_provision_provider.as_ref(),
+                            )?;
                             let provisioned = provision_ghost_actor(
                                 &edge,
                                 store.clone(),
+                                provider,
                                 &config,
                                 &protocol,
                                 &tenant,
@@ -681,9 +703,9 @@ impl MessageContext {
                                     tenant.clone(),
                                     external_actor_id.clone(),
                                     actor_id,
-                                    provisioned.outcome.profile_event_ref.clone(),
-                                    provisioned.outcome.accountability_grant_ref.clone(),
-                                    provisioned.outcome.authorization_ref.clone(),
+                                    provisioned.outcome.profile_event_ref.to_string(),
+                                    provisioned.outcome.accountability_grant_ref.to_string(),
+                                    provisioned.outcome.authorization_ref.to_string(),
                                     display_name.map(str::to_owned),
                                 )
                                 .await?;
@@ -773,6 +795,7 @@ impl MessageContext {
         }
 
         let mapping_channel_key = message_mapping_channel_key(&self.inner.config, &msg.app_channel);
+        let ghost_provision_provider = self.ghost_provision_provider.get().cloned();
         let event_id = self
             .inner
             .queue
@@ -788,6 +811,7 @@ impl MessageContext {
                 let external_user_id = external_user_id.clone();
                 let realm_for_submit = realm.clone();
                 let realm_for_record = realm.clone();
+                let ghost_provision_provider = ghost_provision_provider.clone();
                 async move {
                     if let Some(existing_event_id) = store
                         .clone()
@@ -811,9 +835,13 @@ impl MessageContext {
                     {
                         Some(mapping) => mapping,
                         None => {
+                            let provider = require_ghost_provision_provider(
+                                ghost_provision_provider.as_ref(),
+                            )?;
                             let provisioned = provision_ghost_actor(
                                 &edge,
                                 store.clone(),
+                                provider,
                                 &config,
                                 &protocol,
                                 &tenant,
@@ -839,9 +867,9 @@ impl MessageContext {
                                     tenant.clone(),
                                     external_user_id.clone(),
                                     actor_id,
-                                    provisioned.outcome.profile_event_ref.clone(),
-                                    provisioned.outcome.accountability_grant_ref.clone(),
-                                    provisioned.outcome.authorization_ref.clone(),
+                                    provisioned.outcome.profile_event_ref.to_string(),
+                                    provisioned.outcome.accountability_grant_ref.to_string(),
+                                    provisioned.outcome.authorization_ref.to_string(),
                                     display_name.map(str::to_owned),
                                 )
                                 .await?;

@@ -1,22 +1,19 @@
 //! Ghost actor provisioning, external_ref provenance, and portal strand
 //! acquisition helpers (applet-integration §9.1 / §10.1 / §16).
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use arkret::http_client::ClientRequestOptions;
 use arkret::{
-    AppletId, AuthorizationRef, DidFullId, EventId, EventKind, EventRef, GrantId, Hash, Hlc,
-    PayloadProof, RealmId, ScopeRef, StrandId, StrandTrack,
+    AppletId, DidCoreId, DidFullId, EventId, EventKind, Hlc, RealmId, StrandId, StrandTrack,
 };
 use arkret_bridge_runtime::{BridgeError, Result};
+use arkret_event_draft::EventPayloadExt;
 use arkret_models_collaboration::events_payloads::StrandCreatePayload;
-use arkret_models_collaboration::governance::accountability::{
-    AccountabilityGrantPayload, AccountabilityScope, AccountabilityScopeKind,
-};
 use arkret_models_collaboration::objects::strand::Strand;
 use arkret_models_integration::{
-    AppletBridgeErrorClass, AppletDelegatedEventAuthorization, GhostActorProvisionOutcome,
-    GhostActorProvisionRequestBody,
+    AppletBridgeErrorClass, AppletManagedActorProvisionPayload, AppletManagedActorRole,
+    GhostActorProvisionOutcome, GhostActorProvisionRequestBody, GhostExternalTuple,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -56,56 +53,6 @@ pub(crate) fn bridge_tenant(config: &runtime::Config) -> String {
         .map(normalized_external_id)
         .filter(|tenant| !tenant.is_empty())
         .unwrap_or_else(|| normalized_external_id(&config.arkret.service_id))
-}
-
-fn requested_ghost_actor_id_for_user(
-    config: &runtime::Config,
-    protocol: &str,
-    tenant: &str,
-    external_user_id: &str,
-) -> Result<String> {
-    if protocol.trim().is_empty() {
-        return Err(BridgeError::App("bridge protocol must not be empty".into()));
-    }
-    if tenant.trim().is_empty() {
-        return Err(BridgeError::App("bridge tenant must not be empty".into()));
-    }
-    if external_user_id.trim().is_empty() {
-        return Err(BridgeError::App(
-            "inbound app_user is required for ghost actor mapping".into(),
-        ));
-    }
-    // The default ghost derivation appends a `:ghost:u<...>` suffix to the
-    // service DID (applet-integration §3.4). Only `did:webvh` is accepted per
-    // the workspace-wide webvh-only rule; for other methods (e.g. `did:key`)
-    // the bare suffix would not even be a valid actor DID. Assert the method
-    // before deriving so a misconfigured service DID fails closed here rather
-    // than producing a malformed ghost id.
-    let service_id = DidFullId::new(config.arkret.service_id.clone())?;
-    assert_ghost_suffix_method(&service_id)?;
-    let material =
-        [protocol, tenant, external_user_id].join(&MESSAGE_MAPPING_KEY_SEPARATOR.to_string());
-    let encoded = arkret::base64url_encode(material.as_bytes());
-    let did = format!(
-        "{}:ghost:u{encoded}",
-        service_id.as_str().trim_end_matches(':')
-    );
-    DidFullId::new(did.clone())?;
-    Ok(did)
-}
-
-/// Assert that `service_id`'s method supports the `:ghost:*` suffix derivation
-/// used for default applet namespaces and ghost actor ids. Only `did:webvh` is
-/// valid (workspace-wide webvh-only rule; the applet-integration §3.4 examples
-/// are webvh as well).
-pub(crate) fn assert_ghost_suffix_method(service_id: &DidFullId) -> Result<()> {
-    match service_id.method() {
-        "webvh" => Ok(()),
-        other => Err(BridgeError::Config(format!(
-            "service DID method `{other}` is not allowed; \
-             a bridge service DID must be did:webvh"
-        ))),
-    }
 }
 
 /// The spec-registered ghost provision binding: `ak.self.applet.ghost.command.provision`
@@ -173,21 +120,6 @@ pub(crate) struct DeleteExternalRef {
     app_message_id: String,
 }
 
-fn external_ref_for_user(
-    _config: &runtime::Config,
-    protocol: &str,
-    tenant: &str,
-    external_user_id: &str,
-) -> arkret::ExternalRef {
-    arkret::ExternalRef {
-        protocol: protocol.to_owned(),
-        external_id: external_user_id.to_owned(),
-        instance_id: Some(tenant.to_owned()),
-        display_name: None,
-        url: None,
-    }
-}
-
 /// A completed Ghost provisioning: the Principal Server's outcome plus the
 /// resolvable Ghost DID this bridge authored for the same subject.
 ///
@@ -201,6 +133,43 @@ pub(crate) struct ProvisionedGhostActor {
     pub(crate) outcome: GhostActorProvisionOutcome,
 }
 
+/// Closed input handed to the Applet-managed identity authority that owns
+/// Ghost WebVH key custody and the four-event authoring ledger.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GhostProvisionAuthoringRequest {
+    pub applet_id: AppletId,
+    pub service_id: DidCoreId,
+    pub actor_principal_server_id: DidCoreId,
+    pub realm_id: RealmId,
+    pub external_ref: GhostExternalTuple,
+    pub display_name: Option<String>,
+}
+
+/// Supplies one complete, caller-authored formal Ghost creation unit.
+///
+/// The provider is the only boundary allowed to own Ghost WebVH root keys,
+/// complete method-history evidence, registration anchors, and the durable
+/// exact-replay authoring ledger. A bridge without such a provider fails
+/// closed; it never synthesizes a Ghost DID from the service identity or fabricates
+/// provision/PCR Events locally.
+#[async_trait::async_trait]
+pub trait GhostProvisionRequestProvider: Send + Sync {
+    async fn author_request(
+        &self,
+        request: &GhostProvisionAuthoringRequest,
+    ) -> Result<GhostActorProvisionRequestBody>;
+}
+
+pub(crate) fn require_ghost_provision_provider(
+    provider: Option<&Arc<dyn GhostProvisionRequestProvider>>,
+) -> Result<&dyn GhostProvisionRequestProvider> {
+    provider.map(AsRef::as_ref).ok_or_else(|| {
+        BridgeError::Config(
+            "Ghost provisioning requires an Applet-managed authoring provider".to_owned(),
+        )
+    })
+}
+
 // Ghost provisioning threads one distinct external-identity field per
 // parameter; bundling them into a struct would let two of them be swapped
 // at a call site without a type error.
@@ -208,6 +177,7 @@ pub(crate) struct ProvisionedGhostActor {
 pub(crate) async fn provision_ghost_actor(
     edge: &runtime::ArkretEdge,
     store: std::sync::Arc<MessageStore>,
+    provider: &dyn GhostProvisionRequestProvider,
     config: &runtime::Config,
     protocol: &str,
     tenant: &str,
@@ -222,12 +192,29 @@ pub(crate) async fn provision_ghost_actor(
         .get_or_init(|| tokio::sync::Mutex::new(()))
         .lock()
         .await;
-    let ghost_actor_id = DidFullId::new(requested_ghost_actor_id_for_user(
-        config,
-        protocol,
-        tenant,
-        external_user_id,
-    )?)?;
+    let external_ref = GhostExternalTuple {
+        protocol: normalized_external_id(protocol),
+        instance_id: normalized_external_id(tenant),
+        external_id: normalized_external_id(external_user_id),
+    };
+    if external_ref.protocol.is_empty()
+        || external_ref.instance_id.is_empty()
+        || external_ref.external_id.is_empty()
+    {
+        return Err(BridgeError::App(
+            "Ghost provision external identity tuple must be complete".to_owned(),
+        ));
+    }
+    let authoring_request = GhostProvisionAuthoringRequest {
+        applet_id: AppletId::new(config.arkret.applet_id.clone())?,
+        service_id: edge.service_actor_id().clone(),
+        actor_principal_server_id: arkret::project_full_id_to_core_id(&DidFullId::new(
+            config.arkret.trusted_server_did.clone(),
+        )?)?,
+        realm_id: RealmId::new(realm_id.to_owned())?,
+        external_ref,
+        display_name: display_name.map(ToOwned::to_owned),
+    };
     let idempotency_key = ghost_provision_idempotency_key(
         &config.arkret.applet_id,
         protocol,
@@ -241,17 +228,8 @@ pub(crate) async fn provision_ghost_actor(
     {
         Some(request_json) => request_json,
         None => {
-            let request = build_signed_ghost_provision_request(
-                edge,
-                config,
-                protocol,
-                tenant,
-                external_user_id,
-                display_name,
-                RealmId::new(realm_id.to_owned())?,
-                ghost_actor_id.clone(),
-            )
-            .await?;
+            let request = provider.author_request(&authoring_request).await?;
+            let _ = validate_authored_ghost_request(&authoring_request, &request)?;
             let request_json = serde_json::to_string(&request).map_err(|error| {
                 BridgeError::App(format!("Ghost provision encode failed: {error}"))
             })?;
@@ -264,6 +242,7 @@ pub(crate) async fn provision_ghost_actor(
         serde_json::from_str(&request_json).map_err(|error| {
             BridgeError::Database(format!("stored Ghost provision invalid: {error}"))
         })?;
+    let ghost_actor_id = validate_authored_ghost_request(&authoring_request, &request)?;
     let path = ghost_actor_provision_path(&config.arkret.applet_id)?;
     let options = ClientRequestOptions::new().idempotency_key(idempotency_key);
     let response: GhostActorProvisionOutcome = edge
@@ -278,147 +257,42 @@ pub(crate) async fn provision_ghost_actor(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn build_signed_ghost_provision_request(
-    edge: &runtime::ArkretEdge,
-    config: &runtime::Config,
-    protocol: &str,
-    tenant: &str,
-    external_user_id: &str,
-    display_name: Option<&str>,
-    realm_id: RealmId,
-    ghost_actor_id: DidFullId,
-) -> Result<GhostActorProvisionRequestBody> {
-    let applet_id = AppletId::new(config.arkret.applet_id.clone())?;
-    // `service_id` stays the resolvable DID for the frontier read; the wire
-    // bodies below carry the stable identity cores.
-    let service_id = edge.service_id().clone();
-    let service_core_id = edge.service_actor_id().clone();
-    let ghost_actor_core_id = arkret::project_full_id_to_core_id(&ghost_actor_id)?;
-    let authorization_ref: AuthorizationRef =
-        GrantId::new(config.arkret.ghost_provision_authorization_ref.clone())?.into();
-    let created_at = chrono::DateTime::from_timestamp_millis(chrono::Utc::now().timestamp_millis())
-        .ok_or_else(|| BridgeError::Runtime("system clock is out of range".to_owned()))?;
-    let verification_method = edge.service_verification_method()?;
-    let mut grant = AccountabilityGrantPayload::new(
-        service_core_id.clone(),
-        ghost_actor_core_id.clone(),
-        AccountabilityScope::Single(AccountabilityScopeKind::ContractedService),
-        created_at - chrono::Duration::seconds(1),
-        None,
-        PayloadProof {
-            kind: "detached_jws".to_owned(),
-            verification_method,
-            payload_digest: Hash::new(format!("sha256:{}", "0".repeat(64)))?,
-            created_at,
-            domain: None,
-            audience: None,
-            proof_purpose: None,
-            jws: "pending".to_owned(),
-        },
-    );
-    grant.proof.payload_digest = grant.payload_digest()?;
-    grant.proof.jws = edge.sign_detached_jws(&grant.canonical_proof_binding_bytes()?)?;
-
-    let service_frontier = edge.realm_actor_frontier(&realm_id, &service_id).await?;
-    let digest_suite = edge.realm_digest_suite(&realm_id).await?;
-    let (service_actor_seq, service_prev_refs) = service_frontier
-        .map(|frontier| (frontier.next_actor_seq, frontier.frontier_event_ids))
-        .unwrap_or_default();
-    let accountability_intent = arkret_event_draft::accountability_grant_intent(
-        &grant,
-        ScopeRef::Realm {
-            realm_id: realm_id.clone(),
-        },
-        chrono::Utc::now(),
-        None,
-    )?
-    .with_prev_refs(service_prev_refs)
-    .with_applet_id(applet_id.clone())
-    .with_authorization_ref(authorization_ref.clone());
-    let accountability_event = edge.author_and_sign_at(
-        accountability_intent,
-        service_actor_seq,
-        edge.next_event_hlc(&realm_id)?,
-        digest_suite,
-    )?;
-
-    let effective_display_name = display_name
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(external_user_id);
-    // The profile's `external_ref` is the *same* external provenance the
-    // provision request carries, so it is built from the same typed
-    // `arkret::ExternalRef` rather than hand-written. Hand-writing it produced
-    // an `ak.`-namespaced `schema` id the spec never registered plus keys
-    // (`tenant`, `external_user_id`, a nested `external_ref`) outside the
-    // `event-envelope.schema.json#/$defs/external_ref` vocabulary — and because
-    // that def is an open object, nothing rejected it at runtime. `realm_id` is
-    // dropped here: it is already a signed envelope field of the Event this
-    // payload rides on.
-    let profile_external_ref = serde_json::to_value(external_ref_for_user(
-        config,
-        protocol,
-        tenant,
-        external_user_id,
-    ))
-    .map_err(|error| BridgeError::App(format!("Ghost profile external_ref invalid: {error}")))?;
-    // No profile id: it is derived from the `ak.profile.create` Event this
-    // payload rides on (spec `zh/models/common-fields.md` section 6.0).
-    let profile_request = arkret_event_draft::GhostActorProfileRequest::new(
-        ghost_actor_core_id.clone(),
-        effective_display_name,
-        applet_id.clone(),
-    )
-    .with_realm_id(realm_id.clone())
-    .with_accountable_principal_ids(vec![edge.service_actor_id().clone()])
-    .with_external_ref(
-        serde_json::from_value(profile_external_ref).map_err(|error| {
-            BridgeError::App(format!("Ghost profile external_ref invalid: {error}"))
-        })?,
-    );
-    let delegation = AppletDelegatedEventAuthorization::new(
-        edge.service_actor_id().clone(),
-        authorization_ref,
-        applet_id.clone(),
-    );
-    // The reference names the grant by its FINAL id, which exists because the
-    // grant was authored above.
-    let profile_intent = profile_request
-        .profile_create_intent(
-            ScopeRef::Realm {
-                realm_id: realm_id.clone(),
-            },
-            chrono::Utc::now(),
-            Some(&delegation),
-        )?
-        .with_ref(EventRef::new(
-            accountability_event.event_id().as_str(),
-            "accountability",
+fn validate_authored_ghost_request(
+    expected: &GhostProvisionAuthoringRequest,
+    request: &GhostActorProvisionRequestBody,
+) -> Result<DidFullId> {
+    if request.applet_id != expected.applet_id
+        || request.service_id != expected.service_id
+        || request.actor_principal_server_id != expected.actor_principal_server_id
+        || request.realm_id != expected.realm_id
+        || request.external_ref != expected.external_ref
+        || request.display_name != expected.display_name
+    {
+        return Err(BridgeError::Arkret(
+            "Ghost authoring provider returned a request for different coordinates".to_owned(),
         ));
-    let profile_event = edge.author_and_sign_at(
-        profile_intent,
-        0,
-        edge.next_event_hlc(&realm_id)?,
-        digest_suite,
-    )?;
-
-    let mut request = GhostActorProvisionRequestBody::new(
-        applet_id,
-        service_core_id,
-        ghost_actor_core_id,
-        protocol,
-        tenant,
-        external_user_id,
-        realm_id,
-        external_ref_for_user(config, protocol, tenant, external_user_id),
-        accountability_event.into_event(),
-        profile_event.into_event(),
-    );
-    if let Some(display_name) = display_name {
-        request = request.with_display_name(display_name);
     }
-    Ok(request)
+    let payload: AppletManagedActorProvisionPayload = request
+        .managed_actor_provision_event
+        .as_applet_managed_actor_provision()
+        .map_err(|error| {
+            BridgeError::Arkret(format!("invalid managed-actor provision: {error}"))
+        })?;
+    payload.validate().map_err(|error| {
+        BridgeError::Arkret(format!("invalid managed-actor provision payload: {error}"))
+    })?;
+    if payload.actor_role != AppletManagedActorRole::Ghost
+        || payload.applet_id != request.applet_id
+        || payload.service_id != request.service_id
+        || payload.actor_id != request.ghost_actor_id
+        || payload.actor_principal_server_id != request.actor_principal_server_id
+        || payload.external_ref.as_ref() != Some(&request.external_ref)
+    {
+        return Err(BridgeError::Arkret(
+            "Ghost authoring provider returned a cross-bound provision payload".to_owned(),
+        ));
+    }
+    Ok(payload.initial_resolution.full_id)
 }
 
 fn validate_ghost_provision_response(
@@ -431,13 +305,54 @@ fn validate_ghost_provision_response(
             response.ghost_actor_id, requested_actor
         )));
     }
-    require_nonempty_ref("profile_event_ref", &response.profile_event_ref)?;
-    require_nonempty_ref(
-        "accountability_grant_ref",
-        &response.accountability_grant_ref,
-    )?;
-    require_nonempty_ref("authorization_ref", &response.authorization_ref)?;
     Ok(response)
+}
+
+#[cfg(test)]
+mod provider_tests {
+    use super::*;
+
+    struct RejectingProvider;
+
+    #[async_trait::async_trait]
+    impl GhostProvisionRequestProvider for RejectingProvider {
+        async fn author_request(
+            &self,
+            _request: &GhostProvisionAuthoringRequest,
+        ) -> Result<GhostActorProvisionRequestBody> {
+            Err(BridgeError::Config("fixture provider invoked".to_owned()))
+        }
+    }
+
+    #[test]
+    fn missing_authoring_provider_fails_closed() {
+        assert!(require_ghost_provision_provider(None).is_err());
+    }
+
+    #[tokio::test]
+    async fn installed_authoring_provider_is_the_only_request_source() {
+        let provider: Arc<dyn GhostProvisionRequestProvider> = Arc::new(RejectingProvider);
+        let selected = require_ghost_provision_provider(Some(&provider)).unwrap();
+        let request = GhostProvisionAuthoringRequest {
+            applet_id: AppletId::new("ak:applet:01904100-0000-7000-8000-000000000001".to_owned())
+                .unwrap(),
+            service_id: DidCoreId::new("ak:did_core:webvh:z6mkservice").unwrap(),
+            actor_principal_server_id: DidCoreId::new("ak:did_core:webvh:z6mkserver").unwrap(),
+            realm_id: RealmId::new(
+                "ak:realm:AdkQ-RmB1a8zyc52yl9GWAsodQ_EUle1WAVZqbO7pc19".to_owned(),
+            )
+            .unwrap(),
+            external_ref: GhostExternalTuple {
+                protocol: "fixture".to_owned(),
+                instance_id: "tenant-1".to_owned(),
+                external_id: "user-1".to_owned(),
+            },
+            display_name: None,
+        };
+
+        let error = selected.author_request(&request).await.unwrap_err();
+        assert!(error.to_string().contains("fixture provider invoked"));
+    }
 }
 
 pub(crate) fn require_nonempty_ref(label: &str, value: &str) -> Result<()> {
