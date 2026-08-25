@@ -13,7 +13,8 @@ use arkret_bridge_messaging::salvo::prelude::*;
 use arkret_bridge_messaging::salvo::{self, affix_state};
 use arkret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
-    SenderRenderStyle, VendorTokenCheck, fetch_vendor_token, send_json_expect_status, webhook,
+    SenderRenderStyle, VendorTokenCheck, fetch_vendor_token, non_empty_owned,
+    send_json_expect_status, webhook,
 };
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -333,12 +334,6 @@ impl DingTalkInboundPayload {
             body: text,
         }))
     }
-}
-
-fn non_empty_owned(value: Option<String>) -> Option<String> {
-    value
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
 }
 
 fn dingtalk_inbound_payload(body: Value) -> std::result::Result<DingTalkInboundPayload, String> {

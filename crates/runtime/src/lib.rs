@@ -47,6 +47,7 @@ mod file_seq_store;
 pub mod idempotency;
 pub mod logging;
 pub mod queue;
+mod seq;
 pub mod telemetry;
 
 #[cfg(feature = "db")]
@@ -60,13 +61,8 @@ use std::sync::Arc;
 pub use app::{AppletResolver, ResolvedActor, ResolvedRealm};
 #[cfg(feature = "runtime")]
 pub use app::{BridgeApp, BridgeContext};
-#[cfg(feature = "db")]
-pub use arkret_edge::DbSeqStore;
-pub use arkret_edge::{
-    ArkretEdge, EventInitialSubmissionProvider, PrincipalServerSubmissionProvider, SeqAllocator,
-    SeqStore,
-};
-pub use backoff::{BRIDGE_RETRY, bridge_retry_delay, jittered_delay};
+pub use arkret_edge::{ArkretEdge, PrincipalServerSubmissionProvider};
+pub use backoff::{BRIDGE_RETRY, bridge_retry_delay};
 pub use blocking::run_blocking;
 pub use cache::{PersistedToken, TokenCache, TokenStore};
 pub use config::{Config, DatabaseConfig, WebhookRateLimitConfig};
@@ -88,6 +84,9 @@ pub use file_seq_store::FileSeqStore;
 pub use idempotency::{DedupVerdict, EventDedupStore, ReplayGuardStore, ReplayGuardVerdict};
 #[cfg(feature = "web")]
 pub use salvo;
+#[cfg(feature = "db")]
+pub use seq::DbSeqStore;
+pub use seq::{SeqAllocator, SeqStore};
 pub use telemetry::increment_counter;
 #[cfg(feature = "runtime")]
 use tokio::sync::mpsc;

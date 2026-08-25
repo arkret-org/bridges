@@ -12,7 +12,7 @@ use arkret_bridge_messaging::salvo::prelude::*;
 use arkret_bridge_messaging::salvo::{self, affix_state};
 use arkret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
-    SenderRenderStyle, send_json_expect_status, webhook,
+    SenderRenderStyle, non_empty_owned, send_json_expect_status, webhook,
 };
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -274,55 +274,49 @@ struct IMessageHandleRef {
     address: Option<String>,
 }
 
-fn imessage_non_empty(value: Option<String>) -> Option<String> {
-    value
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-}
-
 impl IMessageWebhookPayload {
     fn text_body(&self) -> Option<String> {
         self.data
             .as_ref()
-            .and_then(|data| imessage_non_empty(data.text.clone()))
+            .and_then(|data| non_empty_owned(data.text.clone()))
             .or_else(|| {
                 self.data
                     .as_ref()
-                    .and_then(|data| imessage_non_empty(data.message.clone()))
+                    .and_then(|data| non_empty_owned(data.message.clone()))
             })
-            .or_else(|| imessage_non_empty(self.text.clone()))
-            .or_else(|| imessage_non_empty(self.message.clone()))
+            .or_else(|| non_empty_owned(self.text.clone()))
+            .or_else(|| non_empty_owned(self.message.clone()))
     }
 
     fn message_id(&self) -> Option<String> {
         self.data
             .as_ref()
-            .and_then(|data| imessage_non_empty(data.guid.clone()))
-            .or_else(|| imessage_non_empty(self.guid.clone()))
-            .or_else(|| imessage_non_empty(self.id.clone()))
+            .and_then(|data| non_empty_owned(data.guid.clone()))
+            .or_else(|| non_empty_owned(self.guid.clone()))
+            .or_else(|| non_empty_owned(self.id.clone()))
     }
 
     fn app_channel(&self) -> String {
         self.data
             .as_ref()
-            .and_then(|data| imessage_non_empty(data.chat_guid_camel.clone()))
+            .and_then(|data| non_empty_owned(data.chat_guid_camel.clone()))
             .or_else(|| {
                 self.data
                     .as_ref()
-                    .and_then(|data| imessage_non_empty(data.chat_guid.clone()))
+                    .and_then(|data| non_empty_owned(data.chat_guid.clone()))
             })
-            .or_else(|| imessage_non_empty(self.chat_guid_camel.clone()))
-            .or_else(|| imessage_non_empty(self.chat_guid.clone()))
+            .or_else(|| non_empty_owned(self.chat_guid_camel.clone()))
+            .or_else(|| non_empty_owned(self.chat_guid.clone()))
             .or_else(|| {
                 self.data
                     .as_ref()
                     .and_then(|data| data.chat.as_ref())
-                    .and_then(|chat| imessage_non_empty(chat.guid.clone()))
+                    .and_then(|chat| non_empty_owned(chat.guid.clone()))
             })
             .or_else(|| {
                 self.chat
                     .as_ref()
-                    .and_then(|chat| imessage_non_empty(chat.guid.clone()))
+                    .and_then(|chat| non_empty_owned(chat.guid.clone()))
             })
             .unwrap_or_default()
     }
@@ -331,24 +325,24 @@ impl IMessageWebhookPayload {
         self.data
             .as_ref()
             .and_then(|data| data.handle.as_ref())
-            .and_then(|handle| imessage_non_empty(handle.address.clone()))
+            .and_then(|handle| non_empty_owned(handle.address.clone()))
             .or_else(|| {
                 self.handle
                     .as_ref()
-                    .and_then(|handle| imessage_non_empty(handle.address.clone()))
+                    .and_then(|handle| non_empty_owned(handle.address.clone()))
             })
             .or_else(|| {
                 self.data
                     .as_ref()
-                    .and_then(|data| imessage_non_empty(data.from.clone()))
+                    .and_then(|data| non_empty_owned(data.from.clone()))
             })
             .or_else(|| {
                 self.data
                     .as_ref()
-                    .and_then(|data| imessage_non_empty(data.sender.clone()))
+                    .and_then(|data| non_empty_owned(data.sender.clone()))
             })
-            .or_else(|| imessage_non_empty(self.from.clone()))
-            .or_else(|| imessage_non_empty(self.sender.clone()))
+            .or_else(|| non_empty_owned(self.from.clone()))
+            .or_else(|| non_empty_owned(self.sender.clone()))
             .unwrap_or_default()
     }
 

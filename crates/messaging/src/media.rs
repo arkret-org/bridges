@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 
 use crate::runtime::{BridgeError, Result, bridge_retry_delay, redact_sensitive_url_values};
-use crate::{DownloadedMedia, MAX_EXTERNAL_MEDIA_BYTES};
+use crate::types::{DownloadedMedia, MAX_EXTERNAL_MEDIA_BYTES};
 
 const DEFAULT_MEDIA_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_MEDIA_FETCH_ATTEMPTS: u32 = 3;

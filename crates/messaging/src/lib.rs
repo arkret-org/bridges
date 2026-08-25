@@ -21,7 +21,7 @@ mod token;
 mod types;
 pub mod webhook;
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use arkret::{
@@ -37,17 +37,16 @@ use arkret_event_draft::{AppletBridgeErrorBuilder, EventPayloadExt};
 use arkret_models_integration::AppletBridgeVisibilityScope;
 pub use arkret_wire::SignalEnvelope;
 use async_trait::async_trait;
-pub use content::{
+use content::{
     extract_attachment, extract_plain_body, extract_strand_id, media_content_block,
     text_content_block,
 };
-pub use ghost::{GhostProvisionAuthoringRequest, GhostProvisionRequestProvider};
 use ghost::{
-    bridge_error_class, bridge_error_code, bridge_protocol, bridge_tenant, create_portal_strand,
-    external_id_object_ref_digest, external_ref_for_delete, external_ref_for_message,
-    find_existing_portal_strand, message_mapping_channel_key, normalized_external_id,
-    portal_location_ref, provision_ghost_actor, require_ghost_provision_provider,
-    require_nonempty_ref,
+    GhostProvisionRequestProvider, bridge_error_class, bridge_error_code, bridge_protocol,
+    bridge_tenant, create_portal_strand, external_id_object_ref_digest, external_ref_for_delete,
+    external_ref_for_message, find_existing_portal_strand, message_mapping_channel_key,
+    normalized_external_id, portal_location_ref, provision_ghost_actor,
+    require_ghost_provision_provider, require_nonempty_ref,
 };
 pub use media::InboundMediaAuthorization;
 use media::{
@@ -55,14 +54,14 @@ use media::{
 };
 pub use runtime::salvo;
 use serde_json::{Value, json};
-use store::MessageResolver;
-pub use store::{ChannelRealmMapping, MessageMapping, MessageStore, UserMapping};
+use store::{MessageResolver, MessageStore};
 pub use token::{VendorTokenCheck, fetch_vendor_token};
 pub use types::{
     AppDeleteOutcome, AppDeleteReason, AppMessageRef, Attachment, DEFAULT_GRAPH_API_VERSION,
-    DEFAULT_MEDIA_MIME, DownloadedMedia, InboundAppDelete, InboundAppMessage,
-    MAX_EXTERNAL_MEDIA_BYTES, MessageBridgeCapabilities, OutboundAppMessage, SenderRenderStyle,
+    InboundAppDelete, InboundAppMessage, MessageBridgeCapabilities, OutboundAppMessage,
+    SenderRenderStyle,
 };
+use types::{DEFAULT_MEDIA_MIME, DownloadedMedia};
 
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -148,6 +147,15 @@ pub fn json_scalar_id_string(value: &Value) -> Option<String> {
     }
 }
 
+/// Trim an optional platform string field to an owned value, treating an empty
+/// result as absent. Shared by adapters whose payloads carry the same value
+/// under several alternative fields.
+pub fn non_empty_owned(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
 /// The inbound (arkret → app) event kinds this messaging bridge consumes, used
 /// for capability enforcement (BRG-01-009): the runtime rejects any pushed event
 /// whose kind is not listed. `MessageAdapter::on_arkret_event` handles exactly
@@ -200,7 +208,6 @@ pub struct MessageContext {
     /// Shared durable store backing every [`TokenCache`] this bridge builds
     /// (one live vendor token across replicas).
     token_store: Arc<dyn TokenStore>,
-    ghost_provision_provider: OnceLock<Arc<dyn GhostProvisionRequestProvider>>,
     pub http: reqwest::Client,
 }
 
@@ -215,25 +222,8 @@ impl MessageContext {
             store,
             replay_guard,
             token_store,
-            ghost_provision_provider: OnceLock::new(),
             http,
         }
-    }
-
-    /// Install the authority that owns Ghost WebVH keys and authors the exact
-    /// four-event formal provisioning unit. Calling a Ghost provisioning path
-    /// without installing one fails closed.
-    pub fn set_ghost_provision_provider(
-        &self,
-        provider: Arc<dyn GhostProvisionRequestProvider>,
-    ) -> Result<()> {
-        self.ghost_provision_provider.set(provider).map_err(|_| {
-            BridgeError::Config("Ghost provision provider is already installed".to_owned())
-        })
-    }
-
-    pub fn store(&self) -> &MessageStore {
-        &self.store
     }
 
     pub fn core(&self) -> &Arc<BridgeContext> {
@@ -429,7 +419,7 @@ impl MessageContext {
     /// Download app-hosted media with HTTPS, host allow-list and a hard byte
     /// cap. Use this for all inbound media fetches before uploading to Arkret blob
     /// storage.
-    pub async fn download_external_media(
+    pub(crate) async fn download_external_media(
         &self,
         url: &str,
         authorization: Option<InboundMediaAuthorization>,
@@ -632,7 +622,9 @@ impl MessageContext {
             })?;
         let mapping_channel_key =
             message_mapping_channel_key(&self.inner.config, &delete.app_channel);
-        let ghost_provision_provider = self.ghost_provision_provider.get().cloned();
+        // No Ghost provision authority is installed in this workspace, so the
+        // on-demand provisioning path fails closed on a mapping miss.
+        let ghost_provision_provider: Option<Arc<dyn GhostProvisionRequestProvider>> = None;
         self.inner
             .queue
             .run(&mapping_channel_key, || {
@@ -795,7 +787,9 @@ impl MessageContext {
         }
 
         let mapping_channel_key = message_mapping_channel_key(&self.inner.config, &msg.app_channel);
-        let ghost_provision_provider = self.ghost_provision_provider.get().cloned();
+        // No Ghost provision authority is installed in this workspace, so the
+        // on-demand provisioning path fails closed on a mapping miss.
+        let ghost_provision_provider: Option<Arc<dyn GhostProvisionRequestProvider>> = None;
         let event_id = self
             .inner
             .queue

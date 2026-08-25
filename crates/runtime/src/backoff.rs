@@ -7,7 +7,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use arkret_retry::{Jitter, RetryPolicy, SPEC_JITTER_RATIO};
+use arkret_retry::{Jitter, RetryPolicy};
 
 /// The reconnect / retry curve every bridge loop uses.
 pub const BRIDGE_RETRY: RetryPolicy = RetryPolicy::arkret_default();
@@ -24,13 +24,6 @@ fn jitter() -> Jitter {
     Jitter::from_seed(nanos)
 }
 
-/// Add the spec's 0–20% jitter to a fixed delay so reconnecting bridge fleets
-/// do not retry in lockstep.
-#[must_use]
-pub fn jittered_delay(base: Duration) -> Duration {
-    arkret_retry::apply_jitter(base, SPEC_JITTER_RATIO, &mut jitter())
-}
-
 /// The delay before retry number `attempt` (0-based) on the shared bridge
 /// curve, with the spec's 0–20% jitter added on top of the capped delay.
 ///
@@ -45,16 +38,6 @@ pub fn bridge_retry_delay(attempt: u32) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn jitter_only_ever_lengthens_a_fixed_delay() {
-        let base = Duration::from_secs(4);
-        for _ in 0..64 {
-            let delay = jittered_delay(base);
-            assert!(delay >= base, "{delay:?} fell below the base delay");
-            assert!(delay <= Duration::from_millis(4_800), "{delay:?}");
-        }
-    }
 
     #[test]
     fn bridge_ladder_scales_and_saturates() {
