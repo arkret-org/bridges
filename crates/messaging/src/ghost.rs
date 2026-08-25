@@ -3,7 +3,6 @@
 
 use std::sync::{Arc, OnceLock};
 
-use arkret::http_client::ClientRequestOptions;
 use arkret::{
     AppletId, DidCoreId, DidFullId, EventId, EventKind, Hlc, RealmId, StrandId, StrandTrack,
 };
@@ -53,20 +52,6 @@ pub(crate) fn bridge_tenant(config: &runtime::Config) -> String {
         .map(normalized_external_id)
         .filter(|tenant| !tenant.is_empty())
         .unwrap_or_else(|| normalized_external_id(&config.arkret.service_id))
-}
-
-/// The spec-registered ghost provision binding: `ak.self.applet.ghost.command.provision`
-/// = `POST /_arkret/self/applets/{applet_id}/ghosts/provision`
-/// (applet-integration §9.1, `operation-registry.json`, openapi).
-fn ghost_actor_provision_path(applet_id: &str) -> Result<String> {
-    if applet_id.trim().is_empty() || applet_id.contains('/') {
-        return Err(BridgeError::Config(
-            "arkret.applet_id must be a non-empty path-safe ak:applet id".into(),
-        ));
-    }
-    Ok(format!(
-        "/_arkret/self/applets/{applet_id}/ghosts/provision"
-    ))
 }
 
 /// Deterministic `Idempotency-Key` for ghost provisioning (required header per
@@ -243,11 +228,9 @@ pub(crate) async fn provision_ghost_actor(
             BridgeError::Database(format!("stored Ghost provision invalid: {error}"))
         })?;
     let ghost_actor_id = validate_authored_ghost_request(&authoring_request, &request)?;
-    let path = ghost_actor_provision_path(&config.arkret.applet_id)?;
-    let options = ClientRequestOptions::new().idempotency_key(idempotency_key);
     let response: GhostActorProvisionOutcome = edge
         .client()
-        .post_with_options(&path, &request, &options)
+        .ghost_actor_provision(&config.arkret.applet_id, &idempotency_key, &request)
         .await?;
     let requested_core_id = arkret::project_full_id_to_core_id(&ghost_actor_id)?;
     let outcome = validate_ghost_provision_response(&requested_core_id, response)?;
