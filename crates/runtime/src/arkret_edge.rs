@@ -372,22 +372,6 @@ impl ArkretEdge {
         Ok(event)
     }
 
-    /// [`Self::author_and_sign`] at an explicit actor chain position, for a
-    /// caller that already resolved the accepted frontier itself.
-    pub fn author_and_sign_at(
-        &self,
-        intent: EventIntent,
-        actor_seq: u64,
-        hlc: Hlc,
-        digest_suite: DigestSuite,
-    ) -> Result<AuthoredEvent> {
-        let mut event = intent
-            .author_with_digest_suite(actor_seq, hlc, digest_suite)
-            .map_err(|error| BridgeError::Arkret(error.to_string()))?;
-        self.sign_as_service(&mut event)?;
-        Ok(event)
-    }
-
     /// Sign `event` with the service key. The signer verifies the authored
     /// identity against its own content and fails closed on a mismatch, so
     /// there is no signed-envelope mutation after this point.
