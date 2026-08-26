@@ -1,7 +1,7 @@
-//! Telegram adapter (teloxide long polling).
+//! Telegram adapter (Telegram Bot API long polling).
 //!
-//! - Inbound (Telegram → arkret): once `teloxide::repl` long polling receives a text message, it
-//!   calls [`MessageContext::submit_app_message`].
+//! - Inbound (Telegram → arkret): once Bot API long polling receives a text message, it calls
+//!   [`MessageContext::submit_app_message`].
 //! - Outbound (arkret → Telegram): [`MessageBridge::send_to_app`] uses the Bot HTTP `send_message`
 //!   to deliver to the corresponding chat.
 
@@ -13,8 +13,8 @@ use arkret_bridge_messaging::{
     MessageBridgeCapabilities, MessageContext, OutboundAppMessage, SenderRenderStyle,
 };
 use async_trait::async_trait;
-use teloxide::prelude::*;
-use teloxide::types::{ChatId, FileId, InputFile};
+use teloxide_core::prelude::*;
+use teloxide_core::types::{ChatId, FileId, InputFile, Message, Update, UpdateKind};
 
 /// Telegram bridge adapter.
 pub struct TelegramApp {
@@ -45,62 +45,36 @@ impl MessageBridge for TelegramApp {
     async fn run(self: Arc<Self>, ctx: Arc<MessageContext>) -> Result<()> {
         let bot = self.bot.clone();
         let token = self.token.clone();
+        let mut offset = None;
+        let mut poll_failures = 0_u8;
 
-        // teloxide long-polling receive loop; submit text and media to the core.
-        teloxide::repl(bot, move |bot: Bot, msg: Message| {
-            let ctx = ctx.clone();
-            let token = token.clone();
-            async move {
-                // Defense-in-depth loop guard, aligning with the other gateway
-                // bridges (Discord `author.bot`, Slack `bot_id`, Zulip
-                // `sender_email`): skip messages authored by any bot, including
-                // this bot's own echoes. Telegram's privacy mode usually hides
-                // these, but a group with privacy off (or multiple bots) can
-                // surface them. The authoritative loop guard remains in the
-                // shared layer (`on_arkret_event`).
-                if msg.from.as_ref().map(|u| u.is_bot).unwrap_or(false) {
-                    return respond(());
-                }
-                let channel = msg.chat.id.0.to_string();
-                let user = msg
-                    .from
-                    .as_ref()
-                    .map(|u| u.id.0.to_string())
-                    .unwrap_or_default();
-
-                if let Some(text) = msg.text() {
-                    let inbound = InboundAppMessage {
-                        app_channel: channel.clone(),
-                        app_user: user.clone(),
-                        app_message_id: msg.id.0.to_string(),
-                        body: text.to_owned(),
-                    };
-                    if let Err(e) = ctx.submit_app_message(inbound.clone()).await
-                        && ctx.report_inbound_failure("telegram", &inbound, &e).await
-                    {
-                        return telegram_retry_error("Telegram text submit retriable failure");
-                    }
-                }
-
-                if let Some((file_id, filename, mime)) = telegram_media(&msg)
-                    && let Err(e) = forward_media(
-                        &bot, &ctx, &token, &channel, &user, &msg, file_id, filename, mime,
-                    )
-                    .await
-                {
-                    // The media forwarder already ran the inbound failure
-                    // audit; only translate retriability here.
-                    if e.is_retriable() {
-                        return telegram_retry_error("Telegram media submit retriable failure");
-                    }
-                }
-
-                respond(())
+        loop {
+            let mut request = bot.get_updates().timeout(30);
+            if let Some(offset) = offset {
+                request = request.offset(offset);
             }
-        })
-        .await;
-
-        Ok(())
+            match request.await {
+                Ok(updates) => {
+                    poll_failures = 0;
+                    for update in updates {
+                        offset = Some(next_update_offset(&update)?);
+                        if let UpdateKind::Message(message) = update.kind {
+                            process_message(&bot, &ctx, &token, message).await;
+                        }
+                    }
+                }
+                Err(error) => {
+                    poll_failures = poll_failures.saturating_add(1);
+                    let delay = poll_retry_delay(poll_failures);
+                    tracing::warn!(
+                        error = %redact_sensitive_url_values(error.to_string()),
+                        retry_delay_seconds = delay.as_secs(),
+                        "Telegram getUpdates failed"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
     }
 
     async fn send_to_app(
@@ -144,10 +118,57 @@ impl MessageBridge for TelegramApp {
     }
 }
 
-fn telegram_retry_error(message: &'static str) -> teloxide::requests::ResponseResult<()> {
-    Err(teloxide::RequestError::Io(Arc::new(std::io::Error::other(
-        message,
-    ))))
+async fn process_message(bot: &Bot, ctx: &Arc<MessageContext>, token: &str, msg: Message) {
+    // Defense-in-depth loop guard, aligning with the other gateway
+    // bridges (Discord `author.bot`, Slack `bot_id`, Zulip
+    // `sender_email`): skip messages authored by any bot, including
+    // this bot's own echoes. Telegram's privacy mode usually hides
+    // these, but a group with privacy off (or multiple bots) can
+    // surface them. The authoritative loop guard remains in the
+    // shared layer (`on_arkret_event`).
+    if msg.from.as_ref().map(|user| user.is_bot).unwrap_or(false) {
+        return;
+    }
+    let channel = msg.chat.id.0.to_string();
+    let user = msg
+        .from
+        .as_ref()
+        .map(|user| user.id.0.to_string())
+        .unwrap_or_default();
+
+    if let Some(text) = msg.text() {
+        let inbound = InboundAppMessage {
+            app_channel: channel.clone(),
+            app_user: user.clone(),
+            app_message_id: msg.id.0.to_string(),
+            body: text.to_owned(),
+        };
+        if let Err(error) = ctx.submit_app_message(inbound.clone()).await {
+            ctx.report_inbound_failure("telegram", &inbound, &error)
+                .await;
+        }
+    }
+
+    if let Some((file_id, filename, mime)) = telegram_media(&msg) {
+        let _ = forward_media(
+            bot, &ctx, token, &channel, &user, &msg, file_id, filename, mime,
+        )
+        .await;
+    }
+}
+
+fn next_update_offset(update: &Update) -> Result<i32> {
+    let update_id = i32::try_from(update.id.0).map_err(|_| {
+        BridgeError::App("Telegram update id exceeds the Bot API offset range".into())
+    })?;
+    update_id.checked_add(1).ok_or_else(|| {
+        BridgeError::App("Telegram update id exceeds the Bot API offset range".into())
+    })
+}
+
+fn poll_retry_delay(attempt: u8) -> std::time::Duration {
+    let exponent = u32::from(attempt.saturating_sub(1).min(5));
+    std::time::Duration::from_secs((1_u64 << exponent).min(30))
 }
 
 fn parse_telegram_chat_id(channel: &str) -> Result<ChatId> {
@@ -252,5 +273,13 @@ mod tests {
             telegram_file_download_url("TOKEN", "documents/file.dat"),
             "https://api.telegram.org/file/botTOKEN/documents/file.dat"
         );
+    }
+
+    #[test]
+    fn telegram_poll_retry_is_bounded() {
+        assert_eq!(poll_retry_delay(1).as_secs(), 1);
+        assert_eq!(poll_retry_delay(5).as_secs(), 16);
+        assert_eq!(poll_retry_delay(6).as_secs(), 30);
+        assert_eq!(poll_retry_delay(u8::MAX).as_secs(), 30);
     }
 }

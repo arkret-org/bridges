@@ -64,7 +64,7 @@ serenity = {version = "0.12",default-features = false}
 sha1 = "0.11"
 sha2 = "0.11"
 subtle = "2.6"
-teloxide = {version = "0.17",default-features = false}
+teloxide-core = {version = "0.13",default-features = false}
 thiserror = "2.0"
 tokio = {version = "1.52",default-features = false,features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"]}
 tokio-tungstenite = {version = "0.29",default-features = false}
