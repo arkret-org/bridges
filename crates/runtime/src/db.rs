@@ -74,6 +74,36 @@ impl DatabaseManager {
             .map_err(|e| BridgeError::Database(e.to_string()))?;
         Ok(())
     }
+
+    pub fn cleanup_expired_runtime_rows(&self) -> Result<usize> {
+        let mut conn = self.conn()?;
+        let now = now_ts();
+        conn.transaction::<_, diesel::result::Error, _>(|conn| {
+            let mut deleted = 0;
+            deleted += diesel::delete(
+                idempotency_schema::transaction_idempotency::table
+                    .filter(idempotency_schema::transaction_idempotency::expires_at.le(now)),
+            )
+            .execute(conn)?;
+            deleted += diesel::delete(
+                idempotency_schema::event_dedup::table
+                    .filter(idempotency_schema::event_dedup::expires_at.le(now)),
+            )
+            .execute(conn)?;
+            deleted += diesel::delete(
+                idempotency_schema::webhook_replay_guard::table
+                    .filter(idempotency_schema::webhook_replay_guard::expires_at.le(now)),
+            )
+            .execute(conn)?;
+            deleted += diesel::delete(
+                idempotency_schema::token_cache::table
+                    .filter(idempotency_schema::token_cache::expires_at.le(now)),
+            )
+            .execute(conn)?;
+            Ok(deleted)
+        })
+        .map_err(Into::into)
+    }
 }
 
 /// Normalize `sqlite://path` into the plain path diesel sqlite accepts; other
@@ -209,9 +239,6 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
 
         let mut conn = self.db.conn()?;
         let now = now_ts();
-        diesel::delete(dsl::transaction_idempotency.filter(dsl::expires_at.le(now)))
-            .execute(&mut conn)?;
-
         // Two attempts: a lost insert race re-reads the winner's row once.
         for _ in 0..2 {
             let row = dsl::transaction_idempotency
@@ -254,7 +281,7 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
                     // window is presumed crashed mid-flight and taken over;
                     // otherwise ask the server to retry shortly.
                     if row.created_at + PENDING_TAKEOVER_GRACE_SECS <= now {
-                        diesel::update(
+                        let claimed = diesel::update(
                             dsl::transaction_idempotency
                                 .filter(dsl::operation_id.eq(&replay.operation_id))
                                 .filter(dsl::direction.eq(replay.direction.as_str()))
@@ -262,14 +289,19 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
                                 .filter(
                                     dsl::destination_service_id.eq(&replay.destination_service_id),
                                 )
-                                .filter(dsl::idempotency_key.eq(&replay.idempotency_key)),
+                                .filter(dsl::idempotency_key.eq(&replay.idempotency_key))
+                                .filter(dsl::status.eq(STATUS_PENDING))
+                                .filter(dsl::created_at.eq(row.created_at)),
                         )
                         .set((
                             dsl::created_at.eq(now),
                             dsl::expires_at.eq(now + IDEMPOTENCY_TTL_SECS),
                         ))
                         .execute(&mut conn)?;
-                        return Ok(TransactionClaim::Claimed);
+                        if claimed == 1 {
+                            return Ok(TransactionClaim::Claimed);
+                        }
+                        continue;
                     }
                     return Ok(TransactionClaim::Pending);
                 }
@@ -389,8 +421,6 @@ impl EventDedupStore for DbEventDedupStore {
 
         let mut conn = self.db.conn()?;
         let now = now_ts();
-        diesel::delete(dsl::event_dedup.filter(dsl::expires_at.le(now))).execute(&mut conn)?;
-
         for _ in 0..2 {
             let seen = dsl::event_dedup
                 .filter(dsl::event_id.eq(event_id))
@@ -461,9 +491,6 @@ impl ReplayGuardStore for DbReplayGuardStore {
         use idempotency_schema::webhook_replay_guard::dsl;
 
         let mut conn = self.db.conn()?;
-        let now = now_ts();
-        diesel::delete(dsl::webhook_replay_guard.filter(dsl::expires_at.le(now)))
-            .execute(&mut conn)?;
         let seen = dsl::webhook_replay_guard
             .filter(dsl::replay_key.eq(key))
             .select(dsl::replay_key)
@@ -477,8 +504,6 @@ impl ReplayGuardStore for DbReplayGuardStore {
 
         let mut conn = self.db.conn()?;
         let now = now_ts();
-        diesel::delete(dsl::webhook_replay_guard.filter(dsl::expires_at.le(now)))
-            .execute(&mut conn)?;
         let inserted = diesel::insert_into(dsl::webhook_replay_guard)
             .values((dsl::replay_key.eq(key), dsl::expires_at.eq(now + ttl_secs)))
             .execute(&mut conn);
@@ -538,26 +563,18 @@ impl TokenStore for DbTokenStore {
         use idempotency_schema::token_cache::dsl;
 
         let mut conn = self.db.conn()?;
-        // Backend-agnostic upsert: delete + insert, last write wins (matching
-        // the vendor semantics where the newest fetched token is the live one).
-        // A lost insert race means a concurrent refresh already stored a newer
-        // token, which is exactly the value the next read should observe.
-        diesel::delete(dsl::token_cache.filter(dsl::cache_key.eq(key))).execute(&mut conn)?;
-        let inserted = diesel::insert_into(dsl::token_cache)
-            .values((
-                dsl::cache_key.eq(key),
-                dsl::token_value.eq(token),
-                dsl::expires_at.eq(expires_at),
-            ))
-            .execute(&mut conn);
-        match inserted {
-            Ok(_) => Ok(()),
-            Err(diesel::result::Error::DatabaseError(
-                diesel::result::DatabaseErrorKind::UniqueViolation,
-                _,
-            )) => Ok(()),
-            Err(err) => Err(err.into()),
-        }
+        conn.transaction::<_, diesel::result::Error, _>(|conn| {
+            diesel::delete(dsl::token_cache.filter(dsl::cache_key.eq(key))).execute(conn)?;
+            diesel::insert_into(dsl::token_cache)
+                .values((
+                    dsl::cache_key.eq(key),
+                    dsl::token_value.eq(token),
+                    dsl::expires_at.eq(expires_at),
+                ))
+                .execute(conn)?;
+            Ok(())
+        })
+        .map_err(Into::into)
     }
 }
 

@@ -46,3 +46,12 @@ CREATE TABLE IF NOT EXISTS outbound_dead_letters (
     event_json TEXT NOT NULL,
     first_seen_at BIGINT NOT NULL,
     updated_at BIGINT NOT NULL);
+
+CREATE INDEX IF NOT EXISTS transaction_idempotency_expires_at_idx
+    ON transaction_idempotency (expires_at);
+CREATE INDEX IF NOT EXISTS event_dedup_expires_at_idx
+    ON event_dedup (expires_at);
+CREATE INDEX IF NOT EXISTS webhook_replay_guard_expires_at_idx
+    ON webhook_replay_guard (expires_at);
+CREATE INDEX IF NOT EXISTS token_cache_expires_at_idx
+    ON token_cache (expires_at);

@@ -155,6 +155,29 @@ where
         tokio::spawn(async move { app::replay_outbound_dead_letters(ctx, app).await })
     };
 
+    let runtime_row_cleanup = {
+        let db = ctx.db.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            loop {
+                interval.tick().await;
+                let db = db.clone();
+                match tokio::task::spawn_blocking(move || db.cleanup_expired_runtime_rows()).await {
+                    Ok(Ok(deleted)) if deleted > 0 => {
+                        tracing::debug!(deleted, "expired runtime rows cleaned");
+                    }
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "expired runtime row cleanup failed");
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "expired runtime row cleanup task failed");
+                    }
+                }
+            }
+        })
+    };
+
     // 2) web: health/metrics + applet routes + app webhook routes
     let web = {
         let ctx = ctx.clone();
@@ -188,6 +211,7 @@ where
         r = consumer => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,
         r = signal_consumer => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,
         r = dead_letter_replayer => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,
+        r = runtime_row_cleanup => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,
         r = web => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,
         r = runner => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,
     }
