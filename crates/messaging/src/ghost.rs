@@ -7,7 +7,6 @@ use arkret::{
     AppletId, DidCoreId, DidFullId, EventId, EventKind, Hlc, RealmId, StrandId, StrandTrack,
 };
 use arkret_bridge_runtime::{BridgeError, Result};
-use arkret_event_draft::EventPayloadExt;
 use arkret_models_collaboration::events_payloads::StrandCreatePayload;
 use arkret_models_collaboration::objects::strand::Strand;
 use arkret_models_integration::{
@@ -244,32 +243,44 @@ fn validate_authored_ghost_request(
     expected: &GhostProvisionAuthoringRequest,
     request: &GhostActorProvisionRequestBody,
 ) -> Result<DidFullId> {
-    if request.applet_id != expected.applet_id
-        || request.service_id != expected.service_id
-        || request.actor_principal_server_id != expected.actor_principal_server_id
-        || request.realm_id != expected.realm_id
-        || request.external_ref != expected.external_ref
-        || request.display_name != expected.display_name
+    request
+        .authoring_request
+        .validate_bindings()
+        .map_err(|error| {
+            BridgeError::Arkret(format!("invalid Ghost authoring request: {error}"))
+        })?;
+    request
+        .managed_actor_bundle
+        .validate_bindings(&request.authoring_request)
+        .map_err(|error| BridgeError::Arkret(format!("invalid Ghost authoring bundle: {error}")))?;
+    let basis = request.authoring_basis().ok_or_else(|| {
+        BridgeError::Arkret("Ghost authoring provider returned a non-Ghost basis".to_owned())
+    })?;
+    if basis.applet_id != expected.applet_id
+        || basis.service_id != expected.service_id
+        || basis.target_principal_server_id != expected.actor_principal_server_id
+        || basis.realm_id != expected.realm_id
+        || basis.external_ref != expected.external_ref
+        || basis.display_name != expected.display_name
     {
         return Err(BridgeError::Arkret(
             "Ghost authoring provider returned a request for different coordinates".to_owned(),
         ));
     }
-    let payload: AppletManagedActorProvisionPayload = request
-        .managed_actor_provision_event
-        .as_applet_managed_actor_provision()
-        .map_err(|error| {
+    let payload: AppletManagedActorProvisionPayload =
+        request.managed_actor_provision_payload().map_err(|error| {
             BridgeError::Arkret(format!("invalid managed-actor provision: {error}"))
         })?;
     payload.validate().map_err(|error| {
         BridgeError::Arkret(format!("invalid managed-actor provision payload: {error}"))
     })?;
     if payload.actor_role != AppletManagedActorRole::Ghost
-        || payload.applet_id != request.applet_id
-        || payload.service_id != request.service_id
-        || payload.actor_id != request.ghost_actor_id
-        || payload.actor_principal_server_id != request.actor_principal_server_id
-        || payload.external_ref.as_ref() != Some(&request.external_ref)
+        || payload.applet_id != basis.applet_id
+        || payload.service_id != basis.service_id
+        || payload.actor_principal_server_id != basis.target_principal_server_id
+        || payload.registration_ref != basis.registration_event_ref
+        || payload.applet_authority_ref != basis.authorization_ref
+        || payload.external_ref.as_ref() != Some(&basis.external_ref)
     {
         return Err(BridgeError::Arkret(
             "Ghost authoring provider returned a cross-bound provision payload".to_owned(),
