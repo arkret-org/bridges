@@ -27,7 +27,7 @@ use arkret::signatures::{EventProofBuilder, VerificationMethodDocument};
 use arkret::signatures::{SignEventOptions, sign_event};
 use arkret::{
     AppletId, AuthoredEvent, DidCoreId, DidFullId, DigestSuite, Ed25519PayloadSigner, Event,
-    EventIntent, Hlc, HlcGenerator, PayloadSigner, RealmId, ScopeRef, project_full_id_to_core_id,
+    EventIntent, Hlc, HlcGenerator, RealmId, ScopeRef, project_full_id_to_core_id,
 };
 use arkret_event_draft::{EventSpec, TypedEventDraft};
 use arkret_models_collaboration::events_payloads::MessageRedactPayload;
@@ -276,9 +276,19 @@ impl ArkretEdge {
         self.verification_method_for_actor(&self.service_id)
     }
 
-    /// Produce a detached JWS with the installed Applet service authority.
-    pub fn sign_service_payload(&self, payload: &[u8]) -> Result<String> {
-        Ok(self.signer.sign_payload(payload)?.jws)
+    /// Author the closed managed-actor creation unit with the installed Applet
+    /// service authority. Event construction lives in the shared SDK kernel;
+    /// this runtime wrapper keeps the service seed private.
+    pub fn author_managed_actor_bundle(
+        &self,
+        request: &arkret::AppletManagedActorAuthoringRequest,
+        input: arkret::AppletManagedActorBundleAuthoringInput,
+    ) -> Result<arkret::AppletManagedActorAuthoringBundle> {
+        Ok(arkret::author_applet_managed_actor_bundle(
+            request,
+            input,
+            &self.signer,
+        )?)
     }
 
     /// The inbound event sender (bounded), if this edge was built with one.
@@ -381,30 +391,6 @@ impl ArkretEdge {
             .author_with_digest_suite(seq, hlc, digest_suite)
             .map_err(|error| BridgeError::Arkret(error.to_string()))?;
         self.sign_as_service(&mut event)?;
-        Ok(event)
-    }
-
-    /// Author at an authority-reported explicit frontier. This is used by
-    /// closed multi-Event creation units, where allocating a local sequence
-    /// block would race the Principal Server's accepted service actor chain.
-    pub fn author_and_sign_at(
-        &self,
-        intent: EventIntent,
-        actor_seq: u64,
-        hlc: Hlc,
-        digest_suite: DigestSuite,
-        proof_created_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<AuthoredEvent> {
-        let mut event = intent
-            .author_with_digest_suite(actor_seq, hlc, digest_suite)
-            .map_err(|error| BridgeError::Arkret(error.to_string()))?;
-        let verification_method = self.verification_method_for_actor(&self.service_id)?;
-        sign_event(
-            &mut event,
-            &self.signer,
-            &verification_method,
-            SignEventOptions::new().with_created_at(proof_created_at),
-        )?;
         Ok(event)
     }
 

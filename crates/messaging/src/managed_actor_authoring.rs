@@ -9,21 +9,17 @@ use std::sync::Arc;
 use arkret::canonical::{canonical_json_bytes, canonical_sha256};
 use arkret::signatures::Ed25519DetachedJwsVerifier;
 use arkret::{
-    AppletDelegatedEventAuthorization, AppletId, AppletManagedActorAuthorOutcome,
-    AppletManagedActorAuthorRequestBody, AppletManagedActorAuthoringBundle,
-    AppletManagedActorAuthoringRequest, AppletManagedActorProof,
-    AppletManagedActorProvisionPayload, AppletManagedActorPurpose, AppletManagedActorRole,
-    AuthorizationRef, DidCoreId, DidFullId, EncryptionProfile, EventRef, GenesisSalt,
-    GhostActorProfileRequest, GhostActorProvisionRequestBody, GhostPreviewRequestBody, Hash, Hlc,
-    NotaryValue, PayloadProof, RealmCreatePayload, RealmGenesis, ResolutionCommitment,
-    ResolutionDidBindingEvidenceKind, ResolutionDidBindingEvidenceReceipt,
-    ResolutionDidBindingMethodProof, ResolutionMethodEvidenceBoundary,
-    ResolutionMethodHistoryEvidence, SchemaId, ScopeRef, SecurityClass, TrustDomainId,
-    TypedEventDraft, event_spec, namespace_pattern_matches, project_full_id_to_core_id,
+    AppletId, AppletManagedActorAuthorOutcome, AppletManagedActorAuthorRequestBody,
+    AppletManagedActorAuthoringBundle, AppletManagedActorAuthoringRequest,
+    AppletManagedActorPurpose, DidCoreId, DidFullId, GenesisSalt, GhostActorProvisionRequestBody,
+    GhostPreviewRequestBody, Hash, ResolutionCommitment, ResolutionDidBindingEvidenceKind,
+    ResolutionDidBindingEvidenceReceipt, ResolutionDidBindingMethodProof,
+    ResolutionMethodEvidenceBoundary, ResolutionMethodHistoryEvidence, SecurityClass,
+    TrustDomainId, namespace_pattern_matches, project_full_id_to_core_id,
 };
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use salvo::http::StatusCode;
 use salvo::prelude::*;
@@ -530,10 +526,6 @@ impl ManagedActorAuthoringService {
         let basis = request.basis.ghost().expect("request validated as Ghost");
         let realm_id = basis.realm_id.clone();
         let service_id = basis.service_id.clone();
-        let principal_server_id = basis.target_principal_server_id.clone();
-        let authorization_ref: AuthorizationRef = basis.authorization_ref.clone().into();
-        let applet_id = basis.applet_id.clone();
-        let created_at = request.issued_at;
         let frontier_selector = arkret::EventsFrontierSelector::RealmActor {
             realm_id: realm_id.clone(),
             actor_id: service_id.clone(),
@@ -551,200 +543,25 @@ impl ManagedActorAuthoringService {
         };
         let (seal_basis, digest_suite) = self.edge.realm_authoring_basis(&realm_id).await?;
 
-        let provision_payload = AppletManagedActorProvisionPayload {
-            schema: AppletManagedActorProvisionPayload::SCHEMA.to_owned(),
-            applet_id: applet_id.clone(),
-            service_id: service_id.clone(),
-            actor_id: identity.actor_id.clone(),
-            actor_principal_server_id: principal_server_id.clone(),
-            actor_role: AppletManagedActorRole::Ghost,
-            initial_resolution: identity.initial_resolution.clone(),
-            method_history_evidence: identity.method_history_evidence.clone().try_into()?,
-            registration_ref: basis.registration_event_ref.clone(),
-            applet_authority_ref: basis.authorization_ref.clone(),
-            external_ref: Some(basis.external_ref.clone()),
-        };
-        provision_payload.validate()?;
-        let provision_intent = TypedEventDraft::<event_spec::AppletManagedActorProvision>::new(
-            ScopeRef::Realm {
-                realm_id: realm_id.clone(),
-            },
-            service_id.clone(),
-            principal_server_id.clone(),
-            provision_payload,
-        )?
-        .with_prev_refs(frontier.frontier_event_ids.clone())
-        .with_seal_basis(seal_basis.clone())
-        .with_authorization_ref(authorization_ref.clone())
-        .with_applet_id(applet_id.clone())
-        .into_intent(created_at)?;
-        let provision_event = self
-            .edge
-            .author_and_sign_at(
-                provision_intent,
-                frontier.next_actor_seq,
-                authoring_hlc(created_at, "managed-provision")?,
-                digest_suite,
-                created_at,
-            )?
-            .into_event();
-
         let mut genesis_salt = [0_u8; 32];
         getrandom::fill(&mut genesis_salt)
             .map_err(|error| BridgeError::Runtime(format!("PCR salt RNG failed: {error}")))?;
-        let genesis = RealmGenesis::applet_managed_control(
-            GenesisSalt::new(arkret::base64url_encode(genesis_salt))?,
-            identity.initial_resolution.clone(),
-            TrustDomainId::new(self.config.arkret.trust_domain.to_string())?,
-            vec![
-                SchemaId::REALM_V1.to_owned(),
-                arkret::ProfileId::PRINCIPAL_CONTROL_REALM_V1.to_owned(),
-            ],
-            arkret::CORE_REDUCER_PROFILE,
-            digest_suite,
-            SecurityClass::HighAssurance,
-            EncryptionProfile::MlsRfc9420,
-            NotaryValue::single_signer(request.hosting_notary.clone()),
-        )?;
-        let pcr_intent = TypedEventDraft::<event_spec::RealmCreate>::new(
-            ScopeRef::RealmGenesis,
-            identity.actor_id.clone(),
-            principal_server_id.clone(),
-            RealmCreatePayload::new(genesis),
-        )?
-        .with_executed_by(service_id.clone())
-        .with_authorization_ref(authorization_ref.clone())
-        .with_applet_id(applet_id.clone())
-        .with_ref(EventRef::new(
-            provision_event.event_id.as_str(),
-            "applet_managed_actor_provision",
-        ))
-        .into_intent(created_at)?;
-        let pcr_genesis_event = self
-            .edge
-            .author_and_sign_at(
-                pcr_intent,
-                0,
-                authoring_hlc(created_at, "pcr-genesis")?,
+        self.edge.author_managed_actor_bundle(
+            request,
+            arkret::AppletManagedActorBundleAuthoringInput {
+                actor_id: identity.actor_id.clone(),
+                initial_resolution: identity.initial_resolution.clone(),
+                method_history_evidence: identity.method_history_evidence.clone(),
+                service_actor_seq: frontier.next_actor_seq,
+                service_prev_refs: frontier.frontier_event_ids,
+                seal_basis,
                 digest_suite,
-                created_at,
-            )?
-            .into_event();
-
-        let service_method = self.edge.service_verification_method()?;
-        let mut accountability = arkret::AccountabilityGrantPayload::new(
-            service_id.clone(),
-            identity.actor_id.clone(),
-            arkret::AccountabilityScope::Single(arkret::AccountabilityScopeKind::ContractedService),
-            created_at - chrono::Duration::seconds(1),
-            None,
-            PayloadProof {
-                kind: arkret::proof_kind::DETACHED_JWS.to_owned(),
-                verification_method: service_method.clone(),
-                payload_digest: Hash::new(format!("sha256:{}", "00".repeat(32)))?,
-                created_at,
-                domain: None,
-                audience: None,
-                proof_purpose: None,
-                jws: String::new(),
+                trust_domain: TrustDomainId::new(self.config.arkret.trust_domain.to_string())?,
+                security_class: SecurityClass::HighAssurance,
+                genesis_salt: GenesisSalt::new(arkret::base64url_encode(genesis_salt))?,
+                bot_display_name: "Applet Bot".to_owned(),
             },
-        );
-        accountability.proof.payload_digest = accountability.payload_digest()?;
-        accountability.proof.jws = self
-            .edge
-            .sign_service_payload(&accountability.canonical_proof_binding_bytes()?)?;
-        let accountability_intent =
-            TypedEventDraft::<event_spec::IdentityAccountabilityGrant>::new(
-                ScopeRef::Realm {
-                    realm_id: realm_id.clone(),
-                },
-                service_id.clone(),
-                principal_server_id.clone(),
-                accountability,
-            )?
-            .with_prev_refs(vec![provision_event.event_id.clone()])
-            .with_seal_basis(seal_basis.clone())
-            .with_authorization_ref(authorization_ref.clone())
-            .with_applet_id(applet_id.clone())
-            .into_intent(created_at)?;
-        let accountability_grant_event = self
-            .edge
-            .author_and_sign_at(
-                accountability_intent,
-                frontier.next_actor_seq + 1,
-                authoring_hlc(created_at, "accountability")?,
-                digest_suite,
-                created_at,
-            )?
-            .into_event();
-
-        let delegation = AppletDelegatedEventAuthorization::new(
-            service_id.clone(),
-            authorization_ref,
-            applet_id,
-        );
-        let profile = GhostActorProfileRequest::new(
-            identity.actor_id.clone(),
-            basis
-                .display_name
-                .as_deref()
-                .unwrap_or(&basis.external_ref.external_id),
-            basis.applet_id.clone(),
-            basis.external_ref.clone(),
         )
-        .with_realm_id(realm_id.clone())
-        .with_accountable_principal_ids(vec![service_id]);
-        delegation.validate()?;
-        let profile_intent = TypedEventDraft::<event_spec::ProfileCreate>::new(
-            ScopeRef::Realm { realm_id },
-            identity.actor_id.clone(),
-            principal_server_id.clone(),
-            arkret::ActorProfileCreatePayload {
-                object: profile.to_actor_profile()?,
-            },
-        )?
-        .with_executed_by(delegation.executed_by)
-        .with_authorization_ref(delegation.authorization_ref)
-        .with_applet_id(delegation.applet_id)
-        .with_refs(vec![EventRef::new(
-            accountability_grant_event.event_id.as_str(),
-            "accountability",
-        )])
-        .with_seal_basis(seal_basis)
-        .into_intent(created_at)?;
-        let profile_event = self
-            .edge
-            .author_and_sign_at(
-                profile_intent,
-                0,
-                authoring_hlc(created_at, "profile")?,
-                digest_suite,
-                created_at,
-            )?
-            .into_event();
-
-        let mut bundle = AppletManagedActorAuthoringBundle {
-            schema: AppletManagedActorAuthoringBundle::SCHEMA.to_owned(),
-            authoring_request_digest: request.canonical_digest()?,
-            managed_actor_provision_event: provision_event,
-            pcr_genesis_event,
-            accountability_grant_event,
-            profile_event,
-            proof: AppletManagedActorProof {
-                kind: arkret::proof_kind::DETACHED_JWS.to_owned(),
-                verification_method: service_method,
-                payload_digest: Hash::new(format!("sha256:{}", "00".repeat(32)))?,
-                created_at,
-                audience: principal_server_id,
-                jws: String::new(),
-            },
-        };
-        bundle.proof.payload_digest = bundle.payload_digest()?;
-        bundle.proof.jws = self
-            .edge
-            .sign_service_payload(&bundle.proof_binding_bytes()?)?;
-        bundle.validate_bindings(request)?;
-        Ok(bundle)
     }
 }
 
@@ -791,18 +608,6 @@ fn random_token(bytes: usize) -> Result<String> {
     getrandom::fill(&mut value)
         .map_err(|error| BridgeError::Runtime(format!("authoring token RNG failed: {error}")))?;
     Ok(arkret::base64url_encode(value))
-}
-
-fn authoring_hlc(created_at: DateTime<Utc>, label: &str) -> Result<Hlc> {
-    use sha2::Digest;
-
-    let digest = sha2::Sha256::digest(label.as_bytes());
-    Hlc::new(format!(
-        "{:012x}-0000-{}",
-        created_at.timestamp_millis().max(0) as u64,
-        hex::encode(&digest[..4])
-    ))
-    .map_err(Into::into)
 }
 
 #[derive(Clone)]
