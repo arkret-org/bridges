@@ -765,7 +765,6 @@ impl arkret::AppletHandler for BridgeAppletHandler {
 
     fn ping(&self) -> std::result::Result<AppletPingOutcome, WireError> {
         Ok(AppletPingOutcome {
-            ok: true,
             applet_id: self.applet_id.clone(),
             // The wire field is the stable identity core; the configured
             // resolvable DID is projected through the registered method
@@ -783,14 +782,22 @@ impl arkret::AppletHandler for BridgeAppletHandler {
             arkret::ServiceKind::AppletService,
         );
         description.supported_profiles = vec![ProfileId::APPLET_SERVICE_V1.to_owned()];
-        description.supported_operations = vec![
+        description.operation_bindings = [
             ServiceOperationId::EDGE_APPLET_COMMAND_TRANSACTION.to_owned(),
             ServiceOperationId::EDGE_APPLET_READ_DESCRIBE.to_owned(),
             ServiceOperationId::EDGE_APPLET_READ_PING.to_owned(),
             ServiceOperationId::EDGE_APPLET_ACTOR_READ_RESOLVE.to_owned(),
             ServiceOperationId::EDGE_APPLET_REALM_READ_RESOLVE.to_owned(),
             ServiceOperationId::EDGE_APPLET_READ_PROTOCOL_METADATA.to_owned(),
-        ];
+        ]
+        .into_iter()
+        .map(|operation| {
+            let operation_id = ServiceOperationId::from_wire(&operation)
+                .expect("generated applet operation id is registered");
+            arkret_models_discovery::OperationBinding::current_http_json(operation_id)
+                .expect("generated applet operation descriptor is valid")
+        })
+        .collect();
         description.validate()?;
         Ok(description)
     }
@@ -800,6 +807,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
         _idempotency_key: &str,
         req: AppletTransactionRequestBody,
     ) -> std::result::Result<AppletTransactionOutcome, WireError> {
+        let event_count = req.events.len();
         let mut rejected: Vec<arkret::RejectedItem> = Vec::new();
         let mut enqueue_failed = false;
         // Set when the bounded inbound queue is full: we ask the server to retry
@@ -966,13 +974,19 @@ impl arkret::AppletHandler for BridgeAppletHandler {
             }
         }
 
-        // `ok` reflects whether every durable event was accepted (either freshly
+        // `status` reflects whether every durable event was accepted (either freshly
         // enqueued or de-duplicated). When enqueueing failed or the queue is full
         // (backpressure), signal a retry so the server re-pushes the unaccepted
         // events rather than dropping the batch.
         let retry_after_ms = (enqueue_failed || queue_full).then_some(INBOUND_QUEUE_FULL_RETRY_MS);
         Ok(AppletTransactionOutcome {
-            ok: rejected.is_empty(),
+            status: if rejected.is_empty() {
+                arkret_models_integration::AppletTransactionStatus::Accepted
+            } else if rejected.len() == event_count {
+                arkret_models_integration::AppletTransactionStatus::Rejected
+            } else {
+                arkret_models_integration::AppletTransactionStatus::Partial
+            },
             rejected,
             retry_after_ms,
         })

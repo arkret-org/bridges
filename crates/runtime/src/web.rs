@@ -12,11 +12,11 @@ use arkret::signatures::http_signature::{
     verify_signed_http_message,
 };
 use arkret::{
-    AppletHandler, DidFullId, IdempotencyDirection, IdempotencyIdentity, RejectedItem,
-    TransactionClaim, TransactionIdempotencyStore,
+    AppletHandler, DidFullId, IdempotencyDirection, IdempotencyIdentity, TransactionClaim,
+    TransactionIdempotencyStore,
 };
 use arkret_models_collaboration::http_bodies::AppletTransactionRequestBody;
-use arkret_models_integration::AppletTransactionOutcome;
+use arkret_models_integration::{AppletTransactionOutcome, AppletTransactionStatus};
 use arkret_wire::{DidUrl, ServiceOperationId};
 use chrono::Utc;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
@@ -580,7 +580,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         Ok(Ok(TransactionClaim::Pending)) => {
             record_applet_transaction("pending");
             res.render(Json(arkret_models_integration::AppletTransactionOutcome {
-                ok: false,
+                status: AppletTransactionStatus::Rejected,
                 rejected: Vec::new(),
                 retry_after_ms: Some(1000),
             }));
@@ -591,18 +591,12 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
             // Same (source_service_id, Idempotency-Key) with a different body:
             // applet-integration §7.3/§14 require the closed error code
             // `duplicate_conflict` (the registry has no `idempotency_conflict`).
-            res.status_code(StatusCode::CONFLICT);
-            res.render(Json(arkret_models_integration::AppletTransactionOutcome {
-                ok: false,
-                rejected: vec![RejectedItem {
-                    event_id: None,
-                    reason_code: arkret_wire::ReasonCode::from_wire(
-                        arkret_wire::ReasonCode::DUPLICATE_CONFLICT,
-                    ),
-                    retry_after_ms: None,
-                }],
-                retry_after_ms: None,
-            }));
+            applet_error(
+                res,
+                StatusCode::CONFLICT,
+                arkret_wire::ErrorCode::DUPLICATE_CONFLICT,
+                "idempotency key was already used with a different request body",
+            );
             return;
         }
         Ok(Ok(TransactionClaim::Claimed)) => {}
@@ -1116,18 +1110,28 @@ fn request_target_uri(
     format!("{scheme}://{authority}{path}")
 }
 
-/// Render the spec standard error response shape
-/// (`{"ok":false,"error":{"code":..,"message":..}}`, see
-/// `service-http-binding.md` §9) with a registry error code. The protocol
+/// Render the RFC 9457 Problem Details response with a registry error code. The protocol
 /// surface (`/_arkret/edge/applet/*`) is part of the universal failure surface
 /// in `operations-error-mapping.json`, so the `code` must come from the closed
 /// `error-code-registry.json` set rather than being a free-form string.
 fn applet_error(res: &mut Response, status: StatusCode, code: &str, message: impl Into<String>) {
-    res.status_code(status);
-    res.render(Json(json!({
-        "ok": false,
-        "error": { "code": code, "message": message.into() },
-    })));
+    let envelope = arkret_wire::ErrorEnvelope::new(code, message)
+        .with_request_id(arkret_wire::new_prefixed_uuid7("ak:request:"));
+    let problem = arkret_wire::Problem::from_error_envelope(&envelope, status.as_u16());
+    let mut output = salvo::http::Problem::new(status)
+        .kind(problem.problem_type)
+        .title(problem.title)
+        .detail(problem.detail)
+        .with_extensions(
+            problem
+                .extensions
+                .into_iter()
+                .collect::<serde_json::Map<_, _>>(),
+        );
+    if let Some(instance) = problem.instance {
+        output = output.instance(instance);
+    }
+    res.render(output);
 }
 
 fn bad_request(res: &mut Response, message: impl Into<String>) {

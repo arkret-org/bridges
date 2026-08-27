@@ -774,7 +774,7 @@ mod tests {
         ));
 
         let response = AppletTransactionOutcome {
-            ok: true,
+            status: arkret_models_integration::AppletTransactionStatus::Accepted,
             rejected: Vec::new(),
             retry_after_ms: None,
         };
@@ -782,7 +782,10 @@ mod tests {
             .record(&replay_key("idem-1"), "hash-a", "anchor-a", &response)
             .unwrap();
         match store.claim(&replay_key("idem-1"), "hash-a", "anchor-a") {
-            Ok(TransactionClaim::Duplicate(cached)) => assert!(cached.ok),
+            Ok(TransactionClaim::Duplicate(cached)) => assert_eq!(
+                cached.status,
+                arkret_models_integration::AppletTransactionStatus::Accepted
+            ),
             _ => panic!("expected duplicate replay"),
         }
     }
