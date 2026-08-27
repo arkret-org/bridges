@@ -1,9 +1,8 @@
 # syntax=docker/dockerfile:1.7
 
-ARG RUST_VERSION=1.97
 ARG BRIDGE_BIN=arkret-bridge-discord
 
-FROM rust:${RUST_VERSION}-bookworm AS chef
+FROM rust:bookworm AS chef
 RUN apt-get update \
     && apt-get install -y --no-install-recommends pkg-config libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
