@@ -44,6 +44,7 @@ arkret-retry = {workspace = true}
 arkret-wire = {workspace = true}
 diesel = {workspace = true,optional = true}
 diesel_migrations = {workspace = true,optional = true}
+hex = {workspace = true}
 libsqlite3-sys = {workspace = true,features = ["bundled"],optional = true}
 metrics = {workspace = true,optional = true}
 metrics-exporter-prometheus = {workspace = true,optional = true}

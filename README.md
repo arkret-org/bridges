@@ -45,10 +45,11 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `arkret-bridge-
   推送事件 → runtime `BridgeAppletHandler` 入队 → `consume_inbound` 消费循环 →
   `MessageBridge::on_arkret_event` → 适配器 `send_to_app`。
 - **出站(app → arkret)**:适配器收到 app 消息(gateway/长轮询/webhook)→
-  `MessageContext::submit_app_message` → 查找已持久化的 per-user Ghost Actor 映射并构造带
-  `external_ref` 溯源的 `ak.message.create` 事件 → `events_submit` 提交。当前生产装配尚未提供
-  `GhostProvisionRequestProvider`，因此首次遇到未预配用户时会 fail closed，不会自动创建 Ghost；
-  部署方必须预先写入 `user_mappings`，直至 durable author provider 接入。纯 HTTP 桥的入站经各自
+  `MessageContext::submit_app_message` → 查找已持久化的 per-user Ghost Actor 映射；首次用户通过
+  Principal Server preview → Applet `managed-actors/author` → Principal Server commit 创建正式
+  Ghost，再构造带 `external_ref` 溯源的 `ak.message.create` 事件并提交。Ghost WebVH root/next key
+  使用独立随机材料和配置的 32-byte key 加密落库；author ledger 按完整请求 digest 保存 exact
+  bundle，支持并发、重启和成功请求过期后的逐字重放。纯 HTTP 桥的入站经各自
   `MessageBridge::webhook_router` 挂到 web 服务,平台来源验签在 handler 解析 JSON 前完成。
   部分桥(WeChat / Feishu / DingTalk / iMessage / QQ / LINE 等)的入站还需要 body-bound
   验签材料(EncodingAESKey / Encrypt Key / 注入式 HMAC secret / signing secret);缺失时入站面

@@ -49,7 +49,11 @@ const DESTINATION_SERVICE_ID_HEADER: &str = "destination-service-id";
 
 /// Start the web service and run it blocking. `extra` is each app adapter's
 /// webhook routes (optional).
-pub async fn serve(ctx: Arc<BridgeContext>, extra: Option<Router>) -> Result<()> {
+pub async fn serve(
+    ctx: Arc<BridgeContext>,
+    extra: Option<Router>,
+    internal: Option<Router>,
+) -> Result<()> {
     prometheus_handle()
         .map_err(|err| BridgeError::Runtime(format!("metrics recorder init failed: {err}")))?;
     counter!(
@@ -94,11 +98,14 @@ pub async fn serve(ctx: Arc<BridgeContext>, extra: Option<Router>) -> Result<()>
     // proxy configured" still isolates the trusted and ops planes from the
     // public network (BRG-06-004); the operator invalidation endpoint relies on
     // exactly that same network-isolation posture.
-    let admin_router = Router::new()
+    let mut admin_router = Router::new()
         .push(Router::with_path("health").get(health))
         .push(Router::with_path("metrics").get(metrics_endpoint))
         .push(admin_did_bindings_router(AdminWebState { did_authority }))
         .push(applet);
+    if let Some(internal) = internal {
+        admin_router = admin_router.push(internal);
+    }
 
     let admin_addr = ctx.config.bridge.admin_addr();
     tracing::info!(addr = %admin_addr, "admin/edge plane listening (applet + health/metrics)");

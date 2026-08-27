@@ -28,6 +28,7 @@ async-trait = "0.1"
 base64 = "0.22"
 cbc = {version = "0.1",features = ["block-padding"]}
 chrono = {version = "0.4",features = ["serde"]}
+chacha20poly1305 = "0.10"
 clap = {version = "4.6",features = ["string"]}
 arkret = {version = "0.3.0",path = "../arkret-rust-sdk/crates/sdk",default-features = false,features = [
     "client",
@@ -46,6 +47,7 @@ arkret-bridge-runtime = {path = "crates/runtime",default-features = false}
 diesel = {version = "2.3",default-features = false,features = ["r2d2", "chrono"]}
 diesel_migrations = "2.3"
 futures = "0.3"
+getrandom = "0.3"
 hex = "0.4"
 hmac = "0.13"
 jsonwebtoken = {version = "10.4",features = ["rust_crypto"]}
@@ -60,6 +62,7 @@ salvo = {version = "=0.96.0",default-features = false,features = ["fix-http1-req
 serde = {version = "1.0",features = ["derive"]}
 serde_json = "1.0"
 serde_yaml_ng = "0.10.0"
+ed25519-dalek = "2.2"
 serenity = {version = "0.12",default-features = false}
 sha1 = "0.11"
 sha2 = "0.11"

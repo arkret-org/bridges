@@ -13,6 +13,7 @@
 
 mod content;
 mod ghost;
+mod managed_actor_authoring;
 mod media;
 mod models;
 mod schema;
@@ -48,6 +49,7 @@ use ghost::{
     normalized_external_id, portal_location_ref, provision_ghost_actor,
     require_ghost_provision_provider, require_nonempty_ref,
 };
+use managed_actor_authoring::ManagedActorAuthoringService;
 pub use media::InboundMediaAuthorization;
 use media::{
     HttpInboundMediaFetcher, InboundMediaFetchPolicy, InboundMediaFetcher, InboundMediaReference,
@@ -208,22 +210,33 @@ pub struct MessageContext {
     /// Shared durable store backing every [`TokenCache`] this bridge builds
     /// (one live vendor token across replicas).
     token_store: Arc<dyn TokenStore>,
+    managed_actor_authoring: Arc<ManagedActorAuthoringService>,
+    ghost_provision_provider: Arc<dyn GhostProvisionRequestProvider>,
     pub http: reqwest::Client,
 }
 
 impl MessageContext {
-    fn new(inner: Arc<BridgeContext>, store: Arc<MessageStore>) -> Self {
+    fn new(inner: Arc<BridgeContext>, store: Arc<MessageStore>) -> Result<Self> {
         let http = inner.http.clone();
         let replay_guard: Arc<dyn ReplayGuardStore> =
             Arc::new(DbReplayGuardStore::new(inner.db.clone()));
         let token_store: Arc<dyn TokenStore> = Arc::new(DbTokenStore::new(inner.db.clone()));
-        Self {
+        let managed_actor_authoring = Arc::new(ManagedActorAuthoringService::new(
+            inner.edge.clone(),
+            store.clone(),
+            inner.config.clone(),
+        )?);
+        let ghost_provision_provider: Arc<dyn GhostProvisionRequestProvider> =
+            managed_actor_authoring.clone();
+        Ok(Self {
             inner,
             store,
             replay_guard,
             token_store,
+            managed_actor_authoring,
+            ghost_provision_provider,
             http,
-        }
+        })
     }
 
     pub fn core(&self) -> &Arc<BridgeContext> {
@@ -622,9 +635,7 @@ impl MessageContext {
             })?;
         let mapping_channel_key =
             message_mapping_channel_key(&self.inner.config, &delete.app_channel);
-        // No Ghost provision authority is installed in this workspace, so the
-        // on-demand provisioning path fails closed on a mapping miss.
-        let ghost_provision_provider: Option<Arc<dyn GhostProvisionRequestProvider>> = None;
+        let ghost_provision_provider = self.ghost_provision_provider.clone();
         self.inner
             .queue
             .run(&mapping_channel_key, || {
@@ -663,9 +674,8 @@ impl MessageContext {
                     {
                         Some(mapping) => mapping,
                         None => {
-                            let provider = require_ghost_provision_provider(
-                                ghost_provision_provider.as_ref(),
-                            )?;
+                            let provider =
+                                require_ghost_provision_provider(Some(&ghost_provision_provider))?;
                             let provisioned = provision_ghost_actor(
                                 &edge,
                                 store.clone(),
@@ -787,9 +797,7 @@ impl MessageContext {
         }
 
         let mapping_channel_key = message_mapping_channel_key(&self.inner.config, &msg.app_channel);
-        // No Ghost provision authority is installed in this workspace, so the
-        // on-demand provisioning path fails closed on a mapping miss.
-        let ghost_provision_provider: Option<Arc<dyn GhostProvisionRequestProvider>> = None;
+        let ghost_provision_provider = self.ghost_provision_provider.clone();
         let event_id = self
             .inner
             .queue
@@ -829,9 +837,8 @@ impl MessageContext {
                     {
                         Some(mapping) => mapping,
                         None => {
-                            let provider = require_ghost_provision_provider(
-                                ghost_provision_provider.as_ref(),
-                            )?;
+                            let provider =
+                                require_ghost_provision_provider(Some(&ghost_provision_provider))?;
                             let provisioned = provision_ghost_actor(
                                 &edge,
                                 store.clone(),
@@ -1327,6 +1334,10 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
     fn webhook_router(self: Arc<Self>, _ctx: Arc<BridgeContext>) -> Option<salvo::Router> {
         self.user.clone().webhook_router(self.ctx.clone())
     }
+
+    fn internal_router(self: Arc<Self>, _ctx: Arc<BridgeContext>) -> Option<salvo::Router> {
+        Some(self.ctx.managed_actor_authoring.router())
+    }
 }
 
 pub async fn run_message_bridge<M, F>(config: runtime::Config, factory: F) -> Result<()>
@@ -1354,7 +1365,7 @@ where
         // applet handler rejects anything else as `capability_denied`
         // (BRG-01-009). `MessageAdapter::on_arkret_event` handles exactly these.
         core_ctx.set_handled_event_kinds(BRIDGE_HANDLED_EVENT_KINDS.iter().map(EventKind::as_str));
-        let ctx = Arc::new(MessageContext::new(core_ctx, store));
+        let ctx = Arc::new(MessageContext::new(core_ctx, store)?);
         let user = Arc::new(factory(ctx.clone())?);
         Ok(MessageAdapter { user, ctx })
     })

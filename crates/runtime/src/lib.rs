@@ -182,6 +182,7 @@ where
     let web = {
         let ctx = ctx.clone();
         let extra = app.clone().webhook_router(ctx.clone());
+        let internal = app.clone().internal_router(ctx.clone());
         // Fail fast (BRG-REL-001): a bridge whose inbound surface is the webhook
         // router MUST mount it. If the router is `None` (e.g. a required
         // body-signature key such as Feishu `encrypt_key` is missing) we refuse
@@ -195,7 +196,7 @@ where
                 config.bridge.bridge_id
             )));
         }
-        tokio::spawn(async move { web::serve(ctx, extra).await })
+        tokio::spawn(async move { web::serve(ctx, extra, internal).await })
     };
 
     // 3) The adapter's own receive loop (gateway/websocket/webhook/poll)

@@ -331,11 +331,14 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "cbc",
+ "chacha20poly1305",
  "chrono",
  "clap",
  "diesel",
  "diesel_migrations",
+ "ed25519-dalek",
  "futures",
+ "getrandom 0.3.4",
  "hex",
  "hmac 0.13.0",
  "jsonwebtoken",
@@ -348,6 +351,7 @@ dependencies = [
  "subtle",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -391,6 +395,7 @@ dependencies = [
  "chrono",
  "diesel",
  "diesel_migrations",
+ "hex",
  "libsqlite3-sys",
  "metrics",
  "metrics-exporter-prometheus",

@@ -192,6 +192,13 @@ pub trait BridgeApp: Send + Sync + 'static {
     fn webhook_router(self: Arc<Self>, _ctx: Arc<BridgeContext>) -> Option<salvo::Router> {
         None
     }
+
+    /// Optional trusted Applet protocol routes mounted on the loopback-by-
+    /// default admin/edge plane. Product webhook routes must stay in
+    /// [`Self::webhook_router`]; Applet protocol operations belong here.
+    fn internal_router(self: Arc<Self>, _ctx: Arc<BridgeContext>) -> Option<salvo::Router> {
+        None
+    }
 }
 
 /// Maximum delivery attempts for one inbound (arkret → app) event before it is

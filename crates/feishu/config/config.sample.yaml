@@ -23,9 +23,14 @@ arkret:
   # Copy these claims exactly from the installed canonical Applet package.
   # Empty arrays are fail-closed: no Realm transaction is accepted.
   applet_namespaces:
-    actors: []
+    actors:
+      - exclusive: true
+        pattern: "did:webvh:*:managed-actors.example:identities:*"
     realms: []
     handles: []
+  managed_actor_authoring:
+    principal_endpoint: "https://managed-actors.example/identities/"
+    key_encryption_key_hex: "CHANGE_ME_64_HEX_CHARACTERS"
   trusted_verification_methods:
     - verification_method: "did:webvh:arkret-server.example#key-1"
       public_key:

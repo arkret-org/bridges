@@ -167,6 +167,66 @@ pub struct ArkretConfig {
     /// There is no service-DID-derived fallback: omitting this field is a
     /// startup configuration error.
     pub applet_namespaces: AppletWireNamespaces,
+    /// Applet-owned managed-actor identity authoring and key-custody settings.
+    /// Messaging bridges require this because a first-seen external user must
+    /// be materialized as a real Ghost actor before its Event can be submitted.
+    pub managed_actor_authoring: ManagedActorAuthoringConfig,
+}
+
+/// Durable Applet-managed actor identity configuration.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedActorAuthoringConfig {
+    /// Public HTTPS base used in managed `did:webvh` identities. The generated
+    /// DID is checked against the installed Applet actor namespace before any
+    /// key or authoring result becomes visible.
+    pub principal_endpoint: String,
+    /// 32-byte hexadecimal key encrypting managed-actor root/next seeds at
+    /// rest. It is deliberately separate from the Applet service signing key.
+    pub key_encryption_key_hex: String,
+}
+
+impl ManagedActorAuthoringConfig {
+    pub fn principal_endpoint(&self) -> Result<url::Url> {
+        let endpoint = url::Url::parse(&self.principal_endpoint).map_err(|error| {
+            BridgeError::Config(format!(
+                "managed_actor_authoring.principal_endpoint: {error}"
+            ))
+        })?;
+        if endpoint.scheme() != "https"
+            && !matches!(endpoint.host_str(), Some("127.0.0.1" | "localhost" | "::1"))
+        {
+            return Err(BridgeError::Config(
+                "managed_actor_authoring.principal_endpoint must use https; only loopback may use http"
+                    .to_owned(),
+            ));
+        }
+        Ok(endpoint)
+    }
+
+    pub fn key_encryption_key(&self) -> Result<[u8; 32]> {
+        let bytes = hex::decode(&self.key_encryption_key_hex).map_err(|error| {
+            BridgeError::Config(format!(
+                "managed_actor_authoring.key_encryption_key_hex must be hexadecimal: {error}"
+            ))
+        })?;
+        bytes.try_into().map_err(|_| {
+            BridgeError::Config(
+                "managed_actor_authoring.key_encryption_key_hex must encode exactly 32 bytes"
+                    .to_owned(),
+            )
+        })
+    }
+}
+
+impl fmt::Debug for ManagedActorAuthoringConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ManagedActorAuthoringConfig")
+            .field("principal_endpoint", &self.principal_endpoint)
+            .field("key_encryption_key_hex", &"<redacted>")
+            .finish()
+    }
 }
 
 impl ArkretConfig {
@@ -231,6 +291,7 @@ impl fmt::Debug for ArkretConfig {
                 &self.trusted_verification_methods,
             )
             .field("applet_namespaces", &self.applet_namespaces)
+            .field("managed_actor_authoring", &self.managed_actor_authoring)
             .finish()
     }
 }
@@ -462,6 +523,9 @@ arkret:
     actors: []
     realms: []
     handles: []
+  managed_actor_authoring:
+    principal_endpoint: "https://managed-actors.example/identities/"
+    key_encryption_key_hex: "2222222222222222222222222222222222222222222222222222222222222222"
 {extra}
 "##
         )

@@ -27,7 +27,7 @@ use arkret::signatures::{EventProofBuilder, VerificationMethodDocument};
 use arkret::signatures::{SignEventOptions, sign_event};
 use arkret::{
     AppletId, AuthoredEvent, DidCoreId, DidFullId, DigestSuite, Ed25519PayloadSigner, Event,
-    EventIntent, Hlc, HlcGenerator, RealmId, ScopeRef, project_full_id_to_core_id,
+    EventIntent, Hlc, HlcGenerator, PayloadSigner, RealmId, ScopeRef, project_full_id_to_core_id,
 };
 use arkret_event_draft::{EventSpec, TypedEventDraft};
 use arkret_models_collaboration::events_payloads::MessageRedactPayload;
@@ -269,6 +269,18 @@ impl ArkretEdge {
         &self.service_actor_id
     }
 
+    /// Applet service verification method used by Event, payload and aggregate
+    /// proofs. Managed actors have separate root keys; this method only exposes
+    /// the installed Applet service authority.
+    pub fn service_verification_method(&self) -> Result<DidUrl> {
+        self.verification_method_for_actor(&self.service_id)
+    }
+
+    /// Produce a detached JWS with the installed Applet service authority.
+    pub fn sign_service_payload(&self, payload: &[u8]) -> Result<String> {
+        Ok(self.signer.sign_payload(payload)?.jws)
+    }
+
     /// The inbound event sender (bounded), if this edge was built with one.
     pub fn inbound_sender(&self) -> Option<Sender<Event>> {
         self.inbound_tx.clone()
@@ -372,6 +384,30 @@ impl ArkretEdge {
         Ok(event)
     }
 
+    /// Author at an authority-reported explicit frontier. This is used by
+    /// closed multi-Event creation units, where allocating a local sequence
+    /// block would race the Principal Server's accepted service actor chain.
+    pub fn author_and_sign_at(
+        &self,
+        intent: EventIntent,
+        actor_seq: u64,
+        hlc: Hlc,
+        digest_suite: DigestSuite,
+        proof_created_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<AuthoredEvent> {
+        let mut event = intent
+            .author_with_digest_suite(actor_seq, hlc, digest_suite)
+            .map_err(|error| BridgeError::Arkret(error.to_string()))?;
+        let verification_method = self.verification_method_for_actor(&self.service_id)?;
+        sign_event(
+            &mut event,
+            &self.signer,
+            &verification_method,
+            SignEventOptions::new().with_created_at(proof_created_at),
+        )?;
+        Ok(event)
+    }
+
     /// Sign `event` with the service key. The signer verifies the authored
     /// identity against its own content and fails closed on a mismatch, so
     /// there is no signed-envelope mutation after this point.
@@ -429,9 +465,19 @@ impl ArkretEdge {
     /// Seal-frontier projection. The state and control roots must agree; an
     /// Event or Seal identifier prefix is never used as governance state.
     pub async fn realm_digest_suite(&self, realm_id: &RealmId) -> Result<DigestSuite> {
+        Ok(self.realm_authoring_basis(realm_id).await?.1)
+    }
+
+    /// Return one coherent accepted Seal basis and its signed digest suite for
+    /// authoring a Control Move. Both values come from the same frontier read.
+    pub async fn realm_authoring_basis(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<(arkret::SealBasis, DigestSuite)> {
         // `seals_frontier` fails closed on a realm mismatch or an
         // out-of-bounds frontier before returning.
         let frontier = self.client.seals_frontier(realm_id.clone()).await?.frontier;
+        let seal_basis = frontier.seal_basis();
         // The frontier view carries no service-derived root hint, so the
         // accepted leaf Seal is resolved and its own signed roots are read.
         let leaf = frontier
@@ -466,7 +512,7 @@ impl ArkretEdge {
                 "Realm Seal frontier roots use different digest suites".to_owned(),
             ));
         }
-        Ok(state_suite)
+        Ok((seal_basis, state_suite))
     }
 
     /// Outbound convenience with bridge provenance and an explicit delegated

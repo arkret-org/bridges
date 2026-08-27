@@ -73,6 +73,18 @@ impl From<arkret::WireError> for BridgeError {
     }
 }
 
+impl From<arkret::canonical::CanonicalError> for BridgeError {
+    fn from(error: arkret::canonical::CanonicalError) -> Self {
+        BridgeError::Arkret(error.to_string())
+    }
+}
+
+impl From<serde_json::Error> for BridgeError {
+    fn from(error: serde_json::Error) -> Self {
+        BridgeError::Arkret(error.to_string())
+    }
+}
+
 impl From<arkret::signatures::Error> for BridgeError {
     fn from(e: arkret::signatures::Error) -> Self {
         BridgeError::Arkret(e.to_string())
