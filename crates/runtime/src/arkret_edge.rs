@@ -34,15 +34,15 @@ use arkret_models_collaboration::events_payloads::MessageRedactPayload;
 #[cfg(any(feature = "web", test))]
 use arkret_models_collaboration::http_bodies::AppletTransactionRequestBody;
 #[cfg(any(feature = "web", test))]
-use arkret_models_discovery::ServiceDescribe;
+use arkret_models_discovery::{ServiceDescribe, TransportBinding};
 #[cfg(any(feature = "web", test))]
 use arkret_models_integration::{
     AppletActorView, AppletPingOutcome, AppletProtocolMetadata, AppletRealmView,
     AppletTransactionOutcome, AppletWireNamespaces,
 };
-use arkret_wire::{AuthorizationRef, DidUrl, EventInitialSubmission, SignalEnvelope, event_spec};
 #[cfg(any(feature = "web", test))]
-use arkret_wire::{ProfileId, ServiceOperationId};
+use arkret_wire::ProfileId;
+use arkret_wire::{AuthorizationRef, DidUrl, EventInitialSubmission, SignalEnvelope, event_spec};
 use parking_lot::Mutex;
 use serde::Serialize;
 use serde_json::Value;
@@ -638,6 +638,7 @@ pub struct BridgeAppletHandler {
     applet_id: AppletId,
     service_id: DidFullId,
     trust_domain: arkret::TrustDomainId,
+    transport_base_url: String,
     namespaces: AppletWireNamespaces,
     inbound_tx: Sender<Event>,
     signal_tx: Option<Sender<SignalEnvelope>>,
@@ -674,6 +675,7 @@ impl BridgeAppletHandler {
             applet_id: edge.applet_id.clone(),
             service_id: service_id.clone(),
             trust_domain: edge.config.arkret.trust_domain.clone(),
+            transport_base_url: format!("http://{}", edge.config.bridge.admin_addr()),
             namespaces: edge.config.arkret.applet_namespaces.clone(),
             inbound_tx: edge.inbound_sender().ok_or_else(|| {
                 BridgeError::Config("applet handler requires an inbound-enabled edge".into())
@@ -776,28 +778,22 @@ impl arkret::AppletHandler for BridgeAppletHandler {
     }
 
     fn describe(&self) -> std::result::Result<ServiceDescribe, WireError> {
+        let service_kind = arkret::ServiceKind::AppletService;
+        let describe_bundle = arkret_wire::role_describe_bundle_descriptor(service_kind)
+            .expect("Applet service describe bundle is registered")
+            .operation_bundle_id
+            .to_owned();
         let mut description = ServiceDescribe::development(
             self.service_id.clone(),
             self.trust_domain.clone(),
-            arkret::ServiceKind::AppletService,
+            service_kind,
+            vec![describe_bundle],
+            vec![TransportBinding::HttpJson {
+                base_url: self.transport_base_url.clone(),
+                extension_profile_required: (),
+            }],
         );
         description.supported_profiles = vec![ProfileId::APPLET_SERVICE_V1.to_owned()];
-        description.operation_bindings = [
-            ServiceOperationId::EDGE_APPLET_COMMAND_TRANSACTION.to_owned(),
-            ServiceOperationId::EDGE_APPLET_READ_DESCRIBE.to_owned(),
-            ServiceOperationId::EDGE_APPLET_READ_PING.to_owned(),
-            ServiceOperationId::EDGE_APPLET_ACTOR_READ_RESOLVE.to_owned(),
-            ServiceOperationId::EDGE_APPLET_REALM_READ_RESOLVE.to_owned(),
-            ServiceOperationId::EDGE_APPLET_READ_PROTOCOL_METADATA.to_owned(),
-        ]
-        .into_iter()
-        .map(|operation| {
-            let operation_id = ServiceOperationId::from_wire(&operation)
-                .expect("generated applet operation id is registered");
-            arkret_models_discovery::OperationBinding::current_http_json(operation_id)
-                .expect("generated applet operation descriptor is valid")
-        })
-        .collect();
         description.validate()?;
         Ok(description)
     }

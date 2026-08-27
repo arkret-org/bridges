@@ -680,7 +680,6 @@ dependencies = [
  "arkret-identifiers",
  "arkret-models-crypto",
  "arkret-models-identity",
- "arkret-schema",
  "arkret-wire",
  "chrono",
  "chrono-tz",
@@ -706,7 +705,6 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "thiserror 2.0.18",
 ]
 
@@ -718,9 +716,11 @@ dependencies = [
  "arkret-models-identity",
  "arkret-wire",
  "chrono",
+ "curve25519-dalek",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "url",
 ]
 
 [[package]]
@@ -768,7 +768,6 @@ dependencies = [
 name = "arkret-push-policy"
 version = "0.3.0"
 dependencies = [
- "arkret-identifiers",
  "arkret-models-integration",
  "serde",
  "serde_json",

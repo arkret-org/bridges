@@ -58,7 +58,7 @@ jobs:
         working-directory: bridges
 
       - name: Rustfmt
-        run: cargo fmt --all -- --check
+        run: cargo +nightly fmt --all -- --check
         working-directory: bridges
 
       - name: Clippy

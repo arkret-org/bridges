@@ -930,7 +930,7 @@ fn build_delivery_authentication_record_digest(
         "direction": IdempotencyDirection::NodeToApplet.as_str(),
         "expires": verified.expires,
         "idempotency_key": idempotency_key,
-        "operation_id": ServiceOperationId::EDGE_APPLET_COMMAND_TRANSACTION,
+        "operation_id": ServiceOperationId::EDGE_APPLET_COMMAND_TRANSACTION_V1,
         "source_key_state_digest": &verified.source_key_state_digest,
         "source_service_id": &verified.source_service_id,
         "verification_method": &verified.key_id,
