@@ -821,7 +821,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
             service_kind,
             vec![describe_bundle],
             vec![TransportBinding::HttpJson {
-                base_url: self.transport_base_url.clone(),
+                base_uri: self.transport_base_url.clone(),
                 extension_profile_required: (),
             }],
         );

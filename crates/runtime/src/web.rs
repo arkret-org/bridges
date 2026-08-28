@@ -1369,8 +1369,7 @@ mod tests {
                 "ak:applet:01904100-0000-7000-8000-000000000001".to_owned(),
             )
             .expect("applet id"),
-            source_id: arkret::project_did_to_core_id(&server_did())
-                .expect("server core id"),
+            source_id: arkret::project_did_to_core_id(&server_did()).expect("server core id"),
             events,
             signals: None,
         }

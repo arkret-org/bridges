@@ -242,8 +242,8 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
             let row = dsl::transaction_idempotency
                 .filter(dsl::operation_id.eq(&replay.operation_id))
                 .filter(dsl::direction.eq(replay.direction.as_str()))
-                .filter(dsl::source_service_id.eq(replay.source_service_id.as_str()))
-                .filter(dsl::destination_service_id.eq(replay.destination_service_id.as_str()))
+                .filter(dsl::source_service_id.eq(replay.source_id.as_str()))
+                .filter(dsl::destination_service_id.eq(replay.destination_id.as_str()))
                 .filter(dsl::idempotency_key.eq(&replay.idempotency_key))
                 .select((
                     dsl::body_hash,
@@ -283,12 +283,9 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
                             dsl::transaction_idempotency
                                 .filter(dsl::operation_id.eq(&replay.operation_id))
                                 .filter(dsl::direction.eq(replay.direction.as_str()))
+                                .filter(dsl::source_service_id.eq(replay.source_id.as_str()))
                                 .filter(
-                                    dsl::source_service_id.eq(replay.source_service_id.as_str()),
-                                )
-                                .filter(
-                                    dsl::destination_service_id
-                                        .eq(replay.destination_service_id.as_str()),
+                                    dsl::destination_service_id.eq(replay.destination_id.as_str()),
                                 )
                                 .filter(dsl::idempotency_key.eq(&replay.idempotency_key))
                                 .filter(dsl::status.eq(STATUS_PENDING))
@@ -311,8 +308,8 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
                         .values((
                             dsl::operation_id.eq(&replay.operation_id),
                             dsl::direction.eq(replay.direction.as_str()),
-                            dsl::source_service_id.eq(replay.source_service_id.as_str()),
-                            dsl::destination_service_id.eq(replay.destination_service_id.as_str()),
+                            dsl::source_service_id.eq(replay.source_id.as_str()),
+                            dsl::destination_service_id.eq(replay.destination_id.as_str()),
                             dsl::idempotency_key.eq(&replay.idempotency_key),
                             dsl::body_hash.eq(hash),
                             dsl::delivery_authentication_record_digest
@@ -354,8 +351,8 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
             dsl::transaction_idempotency
                 .filter(dsl::operation_id.eq(&replay.operation_id))
                 .filter(dsl::direction.eq(replay.direction.as_str()))
-                .filter(dsl::source_service_id.eq(replay.source_service_id.as_str()))
-                .filter(dsl::destination_service_id.eq(replay.destination_service_id.as_str()))
+                .filter(dsl::source_service_id.eq(replay.source_id.as_str()))
+                .filter(dsl::destination_service_id.eq(replay.destination_id.as_str()))
                 .filter(dsl::idempotency_key.eq(&replay.idempotency_key))
                 .filter(dsl::body_hash.eq(hash))
                 .filter(
@@ -385,8 +382,8 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
             dsl::transaction_idempotency
                 .filter(dsl::operation_id.eq(&replay.operation_id))
                 .filter(dsl::direction.eq(replay.direction.as_str()))
-                .filter(dsl::source_service_id.eq(replay.source_service_id.as_str()))
-                .filter(dsl::destination_service_id.eq(replay.destination_service_id.as_str()))
+                .filter(dsl::source_service_id.eq(replay.source_id.as_str()))
+                .filter(dsl::destination_service_id.eq(replay.destination_id.as_str()))
                 .filter(dsl::idempotency_key.eq(&replay.idempotency_key))
                 .filter(dsl::body_hash.eq(hash))
                 .filter(
