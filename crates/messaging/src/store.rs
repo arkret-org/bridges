@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use arkret::{Did, DidCoreId};
 use arkret_bridge_runtime::app::{AppletResolver, ResolvedActor, ResolvedRealm};
 use arkret_bridge_runtime::db::DatabaseManager;
 use arkret_bridge_runtime::{BridgeError, Result, run_blocking};
@@ -612,7 +613,8 @@ impl MessageStore {
         protocol: &str,
         tenant: &str,
         external_user_id: &str,
-        actor_id: &str,
+        actor_id: &DidCoreId,
+        actor_did: &Did,
         profile_event_ref: &str,
         accountability_grant_ref: &str,
         authorization_ref: &str,
@@ -635,7 +637,8 @@ impl MessageStore {
                 protocol,
                 tenant,
                 external_user_id,
-                arkret_actor_id: actor_id,
+                arkret_actor_id: actor_id.as_str(),
+                arkret_actor_did: actor_did.as_str(),
                 profile_event_ref,
                 accountability_grant_ref,
                 authorization_ref,
@@ -656,7 +659,8 @@ impl MessageStore {
                         .filter(dsl::external_user_id.eq(external_user_id)),
                 )
                 .set((
-                    dsl::arkret_actor_id.eq(actor_id),
+                    dsl::arkret_actor_id.eq(actor_id.as_str()),
+                    dsl::arkret_actor_did.eq(actor_did.as_str()),
                     dsl::profile_event_ref.eq(profile_event_ref),
                     dsl::accountability_grant_ref.eq(accountability_grant_ref),
                     dsl::authorization_ref.eq(authorization_ref),
@@ -686,7 +690,7 @@ impl MessageStore {
             .optional()?)
     }
 
-    /// Reverse lookup for ghost resolution: find the user row by arkret actor DID.
+    /// Reverse lookup for ghost resolution: find the user row by stable Arkret actor identity.
     pub fn user_by_actor(&self, actor_id: &str) -> Result<Option<UserMapping>> {
         use schema::user_mappings::dsl;
 
@@ -787,7 +791,8 @@ impl MessageStore {
         protocol: String,
         tenant: String,
         external_user_id: String,
-        actor_id: String,
+        actor_id: DidCoreId,
+        actor_did: Did,
         profile_event_ref: String,
         accountability_grant_ref: String,
         authorization_ref: String,
@@ -799,6 +804,7 @@ impl MessageStore {
                 &tenant,
                 &external_user_id,
                 &actor_id,
+                &actor_did,
                 &profile_event_ref,
                 &accountability_grant_ref,
                 &authorization_ref,
@@ -979,7 +985,7 @@ impl AppletResolver for MessageResolver {
     fn resolve_actor(&self, actor_id: &str) -> Option<ResolvedActor> {
         let row = self.store.user_by_actor(actor_id).ok().flatten()?;
         Some(ResolvedActor {
-            actor_id: row.arkret_actor_id,
+            actor_id: DidCoreId::new(row.arkret_actor_id).ok()?,
             display_name: row.display_name,
             external_ref: Some(arkret::ExternalRef {
                 protocol: row.protocol,

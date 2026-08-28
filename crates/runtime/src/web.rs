@@ -12,8 +12,8 @@ use arkret::signatures::http_signature::{
     verify_signed_http_message,
 };
 use arkret::{
-    AppletHandler, Did, IdempotencyDirection, IdempotencyIdentity, TransactionClaim,
-    TransactionIdempotencyStore,
+    AppletHandler, Did, DidCoreId, IdempotencyDirection, IdempotencyIdentity, TransactionClaim,
+    TransactionIdempotencyStore, project_did_to_core_id,
 };
 use arkret_models_collaboration::http_bodies::AppletTransactionRequestBody;
 use arkret_models_integration::{AppletTransactionOutcome, AppletTransactionStatus};
@@ -382,8 +382,8 @@ async fn record_transaction_outcome(
 }
 
 struct VerifiedAppletHttpRequest {
-    source_service_id: String,
-    destination_service_id: String,
+    source_service_id: DidCoreId,
+    destination_service_id: DidCoreId,
     key_id: String,
     source_key_state_digest: String,
     content_digest: Option<String>,
@@ -527,7 +527,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         }
     };
 
-    let source = body.source_service_id.to_string();
+    let source = body.source_service_id.clone();
     if source != verified.source_service_id {
         record_applet_transaction("unauthorized");
         unauthorized_code(
@@ -537,16 +537,6 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         );
         return;
     }
-    if source != state.config.arkret.trusted_server_did {
-        record_applet_transaction("unauthorized");
-        unauthorized_code(
-            res,
-            "http_signature_invalid",
-            "transaction source_service_id is not trusted",
-        );
-        return;
-    }
-
     let destination = verified.destination_service_id.clone();
     let replay = IdempotencyIdentity::applet_transaction(
         IdempotencyDirection::NodeToApplet,
@@ -792,17 +782,47 @@ fn verify_http_applet_request(
 
     let origin = header_value_from(headers, SOURCE_SERVICE_ID_HEADER)
         .ok_or_else(|| http_signature_invalid("Source-Service-ID header is required"))?;
-    if origin != config.arkret.trusted_server_did {
+    let origin = DidCoreId::new(origin).map_err(|error| {
+        http_signature_invalid(format!(
+            "Source-Service-ID is not a valid service id: {error}"
+        ))
+    })?;
+    let trusted_server_id = project_did_to_core_id(
+        &Did::new(config.arkret.trusted_server_did.clone()).map_err(|error| {
+            http_signature_invalid(format!("configured trusted server DID is invalid: {error}"))
+        })?,
+    )
+    .map_err(|error| {
+        http_signature_invalid(format!(
+            "configured trusted server DID cannot be projected: {error}"
+        ))
+    })?;
+    if origin != trusted_server_id {
         return Err(http_signature_invalid(
-            "HTTP signature source service DID is not trusted",
+            "HTTP signature source service id is not trusted",
         ));
     }
 
     let destination = header_value_from(headers, DESTINATION_SERVICE_ID_HEADER)
         .ok_or_else(|| http_signature_invalid("Destination-Service-ID header is required"))?;
-    if destination != config.arkret.service_did {
+    let destination = DidCoreId::new(destination).map_err(|error| {
+        http_signature_invalid(format!(
+            "Destination-Service-ID is not a valid service id: {error}"
+        ))
+    })?;
+    let bridge_service_id = project_did_to_core_id(
+        &Did::new(config.arkret.service_did.clone()).map_err(|error| {
+            http_signature_invalid(format!("configured bridge service DID is invalid: {error}"))
+        })?,
+    )
+    .map_err(|error| {
+        http_signature_invalid(format!(
+            "configured bridge service DID cannot be projected: {error}"
+        ))
+    })?;
+    if destination != bridge_service_id {
         return Err(http_signature_invalid(
-            "HTTP signature destination service DID does not match this bridge",
+            "HTTP signature destination service id does not match this bridge",
         ));
     }
 
@@ -1416,8 +1436,8 @@ mod tests {
         let store = Arc::new(CountingIdempotencyStore::default());
         let replay = IdempotencyIdentity::applet_transaction(
             IdempotencyDirection::NodeToApplet,
-            server_did().to_string(),
-            "did:webvh:z6mkfixture:bridge.example",
+            project_did_to_core_id(&server_did()).expect("server core id"),
+            DidCoreId::new("ak:did_core:webvh:z6mkfixturebridge").unwrap(),
             "invalid-proof",
         );
 

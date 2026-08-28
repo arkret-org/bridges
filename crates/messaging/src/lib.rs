@@ -692,7 +692,6 @@ impl MessageContext {
                             // outbound submission signs with it. The server's
                             // stable core id was checked against this exact
                             // DID during provisioning.
-                            let actor_id = provisioned.did.to_string();
                             let display_name = provisioned
                                 .outcome
                                 .display_name
@@ -704,7 +703,8 @@ impl MessageContext {
                                     protocol.clone(),
                                     tenant.clone(),
                                     external_actor_id.clone(),
-                                    actor_id,
+                                    provisioned.outcome.ghost_actor_id.clone(),
+                                    provisioned.did.clone(),
                                     provisioned.outcome.profile_event_ref.to_string(),
                                     provisioned.outcome.accountability_grant_ref.to_string(),
                                     provisioned.outcome.authorization_ref.to_string(),
@@ -732,7 +732,7 @@ impl MessageContext {
                         &mapping.accountability_grant_ref,
                     )?;
                     require_nonempty_ref("authorization_ref", &mapping.authorization_ref)?;
-                    let actor = Did::new(mapping.arkret_actor_id)?;
+                    let actor = Did::new(mapping.arkret_actor_did)?;
                     let payload =
                         redaction_payload_for_app_delete(&target_event_id, delete.reason)?
                             .expect("delete reason was checked before queue submission");
@@ -855,7 +855,6 @@ impl MessageContext {
                             // outbound submission signs with it. The server's
                             // stable core id was checked against this exact
                             // DID during provisioning.
-                            let actor_id = provisioned.did.to_string();
                             let display_name = provisioned
                                 .outcome
                                 .display_name
@@ -867,7 +866,8 @@ impl MessageContext {
                                     protocol.clone(),
                                     tenant.clone(),
                                     external_user_id.clone(),
-                                    actor_id,
+                                    provisioned.outcome.ghost_actor_id.clone(),
+                                    provisioned.did.clone(),
                                     provisioned.outcome.profile_event_ref.to_string(),
                                     provisioned.outcome.accountability_grant_ref.to_string(),
                                     provisioned.outcome.authorization_ref.to_string(),
@@ -895,7 +895,7 @@ impl MessageContext {
                         &mapping.accountability_grant_ref,
                     )?;
                     require_nonempty_ref("authorization_ref", &mapping.authorization_ref)?;
-                    let actor = Did::new(mapping.arkret_actor_id)?;
+                    let actor = Did::new(mapping.arkret_actor_did)?;
                     let event_id = edge
                         .submit_with_external_ref_as::<arkret_wire::event_spec::MessageCreate, _>(
                             &actor,

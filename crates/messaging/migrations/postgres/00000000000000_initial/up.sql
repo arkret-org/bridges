@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS user_mappings (
     tenant TEXT NOT NULL,
     external_user_id TEXT NOT NULL,
     arkret_actor_id TEXT NOT NULL UNIQUE,
+    arkret_actor_did TEXT NOT NULL UNIQUE,
     profile_event_ref TEXT NOT NULL,
     accountability_grant_ref TEXT NOT NULL,
     authorization_ref TEXT NOT NULL,

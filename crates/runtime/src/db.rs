@@ -242,8 +242,8 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
             let row = dsl::transaction_idempotency
                 .filter(dsl::operation_id.eq(&replay.operation_id))
                 .filter(dsl::direction.eq(replay.direction.as_str()))
-                .filter(dsl::source_service_id.eq(&replay.source_service_id))
-                .filter(dsl::destination_service_id.eq(&replay.destination_service_id))
+                .filter(dsl::source_service_id.eq(replay.source_service_id.as_str()))
+                .filter(dsl::destination_service_id.eq(replay.destination_service_id.as_str()))
                 .filter(dsl::idempotency_key.eq(&replay.idempotency_key))
                 .select((
                     dsl::body_hash,
@@ -283,9 +283,12 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
                             dsl::transaction_idempotency
                                 .filter(dsl::operation_id.eq(&replay.operation_id))
                                 .filter(dsl::direction.eq(replay.direction.as_str()))
-                                .filter(dsl::source_service_id.eq(&replay.source_service_id))
                                 .filter(
-                                    dsl::destination_service_id.eq(&replay.destination_service_id),
+                                    dsl::source_service_id.eq(replay.source_service_id.as_str()),
+                                )
+                                .filter(
+                                    dsl::destination_service_id
+                                        .eq(replay.destination_service_id.as_str()),
                                 )
                                 .filter(dsl::idempotency_key.eq(&replay.idempotency_key))
                                 .filter(dsl::status.eq(STATUS_PENDING))
@@ -308,8 +311,8 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
                         .values((
                             dsl::operation_id.eq(&replay.operation_id),
                             dsl::direction.eq(replay.direction.as_str()),
-                            dsl::source_service_id.eq(&replay.source_service_id),
-                            dsl::destination_service_id.eq(&replay.destination_service_id),
+                            dsl::source_service_id.eq(replay.source_service_id.as_str()),
+                            dsl::destination_service_id.eq(replay.destination_service_id.as_str()),
                             dsl::idempotency_key.eq(&replay.idempotency_key),
                             dsl::body_hash.eq(hash),
                             dsl::delivery_authentication_record_digest
@@ -351,8 +354,8 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
             dsl::transaction_idempotency
                 .filter(dsl::operation_id.eq(&replay.operation_id))
                 .filter(dsl::direction.eq(replay.direction.as_str()))
-                .filter(dsl::source_service_id.eq(&replay.source_service_id))
-                .filter(dsl::destination_service_id.eq(&replay.destination_service_id))
+                .filter(dsl::source_service_id.eq(replay.source_service_id.as_str()))
+                .filter(dsl::destination_service_id.eq(replay.destination_service_id.as_str()))
                 .filter(dsl::idempotency_key.eq(&replay.idempotency_key))
                 .filter(dsl::body_hash.eq(hash))
                 .filter(
@@ -382,8 +385,8 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
             dsl::transaction_idempotency
                 .filter(dsl::operation_id.eq(&replay.operation_id))
                 .filter(dsl::direction.eq(replay.direction.as_str()))
-                .filter(dsl::source_service_id.eq(&replay.source_service_id))
-                .filter(dsl::destination_service_id.eq(&replay.destination_service_id))
+                .filter(dsl::source_service_id.eq(replay.source_service_id.as_str()))
+                .filter(dsl::destination_service_id.eq(replay.destination_service_id.as_str()))
                 .filter(dsl::idempotency_key.eq(&replay.idempotency_key))
                 .filter(dsl::body_hash.eq(hash))
                 .filter(
@@ -491,6 +494,7 @@ impl ReplayGuardStore for DbReplayGuardStore {
         let mut conn = self.db.conn()?;
         let seen = dsl::webhook_replay_guard
             .filter(dsl::replay_key.eq(key))
+            .filter(dsl::expires_at.gt(now_ts()))
             .select(dsl::replay_key)
             .first::<String>(&mut conn)
             .optional()?;
@@ -502,6 +506,12 @@ impl ReplayGuardStore for DbReplayGuardStore {
 
         let mut conn = self.db.conn()?;
         let now = now_ts();
+        diesel::delete(
+            dsl::webhook_replay_guard
+                .filter(dsl::replay_key.eq(key))
+                .filter(dsl::expires_at.le(now)),
+        )
+        .execute(&mut conn)?;
         let inserted = diesel::insert_into(dsl::webhook_replay_guard)
             .values((dsl::replay_key.eq(key), dsl::expires_at.eq(now + ttl_secs)))
             .execute(&mut conn);
@@ -743,14 +753,14 @@ mod tests {
     }
 
     fn replay_key(idempotency_key: &str) -> IdempotencyIdentity {
-        replay_key_to("did:webvh:bridge.example", idempotency_key)
+        replay_key_to("ak:did_core:webvh:bridge", idempotency_key)
     }
 
     fn replay_key_to(destination_service_id: &str, idempotency_key: &str) -> IdempotencyIdentity {
         IdempotencyIdentity::applet_transaction(
             IdempotencyDirection::NodeToApplet,
-            "did:webvh:server.example",
-            destination_service_id,
+            arkret::DidCoreId::new("ak:did_core:webvh:server").unwrap(),
+            arkret::DidCoreId::new(destination_service_id).unwrap(),
             idempotency_key,
         )
     }
@@ -817,7 +827,7 @@ mod tests {
         ));
         assert!(matches!(
             store.claim(
-                &replay_key_to("did:webvh:other-bridge.example", "idem-3"),
+                &replay_key_to("ak:did_core:webvh:otherbridge", "idem-3"),
                 "hash-a",
                 "anchor-b"
             ),

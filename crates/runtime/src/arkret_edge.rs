@@ -1021,21 +1021,16 @@ impl arkret::AppletHandler for BridgeAppletHandler {
     }
 
     fn resolve_actor(&self, actor_id: &str) -> std::result::Result<AppletActorView, WireError> {
-        // `ResolvedActor::actor_id` carries the resolvable ghost DID that was
-        // persisted at provisioning time. The wire view answers with the
-        // stable identity core, so the string is parsed as a DID and
-        // projected; either step failing means the mapping row cannot be
-        // vouched for and the probe answers `exists: false`.
+        // The resolver returns the stable Ghost identity that was bound to the
+        // required DID during provisioning.
         if let Some(resolved) = self
             .resolver
             .as_ref()
             .and_then(|r| r.resolve_actor(actor_id))
-            && let Ok(did) = Did::new(resolved.actor_id)
-            && let Ok(core_id) = project_did_to_core_id(&did)
         {
             return Ok(AppletActorView {
                 exists: true,
-                actor_id: Some(core_id),
+                actor_id: Some(resolved.actor_id),
                 display_name: resolved.display_name,
                 external_ref: resolved.external_ref,
             });

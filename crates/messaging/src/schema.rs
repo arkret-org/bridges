@@ -65,6 +65,7 @@ diesel::table! {
         tenant -> Text,
         external_user_id -> Text,
         arkret_actor_id -> Text,
+        arkret_actor_did -> Text,
         profile_event_ref -> Text,
         accountability_grant_ref -> Text,
         authorization_ref -> Text,
