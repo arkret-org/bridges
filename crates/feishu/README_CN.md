@@ -33,7 +33,7 @@ cargo run -p arkret-bridge-feishu -- --config config.yaml
   `X-Lark-Signature`(`sha256(timestamp+nonce+encrypt_key+body)`)。本桥对**每条**投递强制:
   (1) 验签;(2) 时间戳新鲜度(±300s);(3) 重放窗口去重;(4) 解密 `{"encrypt":...}` 信封。
   明文回调无逐次来源签名,违反 bridge 合约,故 `encrypt_key` 留空时 webhook 路由**不挂载**(fail closed)。
-- `database.url`:`sqlite://...` / `postgres://...` / `mysql://...`(对应 feature)。
+- `database.url`:`sqlite://...` / `postgres://...`(对应 feature)。
 
 ## 待完善(TODO)
 

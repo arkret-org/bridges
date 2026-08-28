@@ -33,7 +33,7 @@ cargo run -p arkret-bridge-whatsapp -- --config config.yaml
 - `app.access_token`:Cloud API 令牌(Bearer)。
 - `app.verify_token`:webhook 校验回显令牌(入站接入时使用)。
 - `app.app_secret`:Meta App Secret,必填;POST 投递用 `X-Hub-Signature-256` 校验。
-- `database.url`:`sqlite://...` / `postgres://...` / `mysql://...`(对应 feature)。
+- `database.url`:`sqlite://...` / `postgres://...`(对应 feature)。
 
 ## 待完善(TODO)
 

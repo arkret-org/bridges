@@ -92,7 +92,7 @@ pub trait MessageBridge: Send + Sync + 'static {
 
 1. `Cargo.toml`:应用 crate 只直接依赖 `arkret-bridge-messaging`(`{ workspace = true }`)；
    如需通用运行时类型，通过 `arkret_bridge_messaging::runtime` 使用 re-export，勿绕过消息层。
-   + 该 app 传输库;`[[bin]]` name 同 crate;features 转发 sqlite/postgres/mysql 到这两个 crate(见 discord)。
+   + 该 app 传输库;`[[bin]]` name 同 crate;features 转发 sqlite/postgres 到这两个 crate(见 discord)。
    只声明源码实际 `use` 的依赖(`ctx.http` 已带 reqwest,桥自身通常无需再声明)。
 2. `src/main.rs`:定义 `#[derive(Deserialize)] struct AppConfig {...}` →
    `bridge_main("arkret <-> Xxx bridge", |app: AppConfig, _ctx| Ok(App::new(...)))`(CLI/配置加载/

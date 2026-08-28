@@ -1,5 +1,5 @@
 //! Generic database access (diesel + r2d2). Defaults to sqlite; features can
-//! switch to postgres/mysql.
+//! switch to postgres.
 //!
 //! The core only owns the connection pool and a generic migration runner.
 //! Domain-specific tables (e.g. the channel/realm/message/user mappings used
@@ -26,7 +26,7 @@ use crate::idempotency::{
 
 /// Embedded migrations for the runtime-owned tables (`transaction_idempotency`,
 /// `event_dedup`, `bridge_state`). The SQL uses the common subset supported by
-/// SQLite, PostgreSQL, and MySQL, so every backend embeds the same migration.
+/// SQLite and PostgreSQL, so every backend embeds the same migration.
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
 /// The backend connection type (selected by feature, exactly one).
@@ -34,8 +34,6 @@ pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 pub type DbConnection = diesel::SqliteConnection;
 #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
 pub type DbConnection = diesel::PgConnection;
-#[cfg(all(feature = "mysql", not(feature = "sqlite"), not(feature = "postgres")))]
-pub type DbConnection = diesel::MysqlConnection;
 
 pub type DbPool = Pool<ConnectionManager<DbConnection>>;
 pub type DbConn = PooledConnection<ConnectionManager<DbConnection>>;

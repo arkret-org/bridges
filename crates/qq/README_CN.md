@@ -29,7 +29,7 @@ cargo run -p arkret-bridge-qq -- --config config.yaml
 - `app.onebot_url`:OneBot 实现的 HTTP API 基址。
 - `app.access_token`:OneBot access_token(可选)。
 - `app.signing_secret`:OneBot `X-Signature` HMAC secret,必填。
-- `database.url`:`sqlite://...` / `postgres://...` / `mysql://...`(对应 feature)。
+- `database.url`:`sqlite://...` / `postgres://...`(对应 feature)。
 
 ## 待办
 

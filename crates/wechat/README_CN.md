@@ -32,7 +32,7 @@ cargo run -p arkret-bridge-wechat -- --config config.yaml
 - `app.corp_id` / `app.corp_secret` / `app.agent_id`:企业微信应用凭证;
   公众号场景改填 `app.app_id` / `app.app_secret`。
 - `app.webhook_token`:微信回调 Token,必填;GET/POST 均校验 plaintext `signature`。
-- `database.url`:`sqlite://...` / `postgres://...` / `mysql://...`(对应 feature)。
+- `database.url`:`sqlite://...` / `postgres://...`(对应 feature)。
 
 ## 待完善(TODO)
 

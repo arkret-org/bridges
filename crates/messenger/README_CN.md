@@ -31,7 +31,7 @@ cargo run -p arkret-bridge-messenger -- --config config.yaml
 - `app.page_access_token`:Facebook Page 访问令牌(发送鉴权)。
 - `app.verify_token`:webhook 验证令牌(GET 握手比对)。
 - `app.app_secret`:Meta App Secret,必填;POST 投递用 `X-Hub-Signature-256` 校验。
-- `database.url`:`sqlite://...` / `postgres://...` / `mysql://...`(对应 feature)。
+- `database.url`:`sqlite://...` / `postgres://...`(对应 feature)。
 
 ## 待办
 

@@ -26,6 +26,6 @@ cargo run -p arkret-bridge-discord -- --config config.yaml
 
 - `arkret.*`:arkret 接入(server_url、service_id、applet_id、access_token、签名种子)。
 - `app.bot_token`:Discord bot token。
-- `database.url`:`sqlite://...` / `postgres://...` / `mysql://...`(对应 feature)。
+- `database.url`:`sqlite://...` / `postgres://...`(对应 feature)。
 
 契约与共享层约束见仓库根目录 [`_BRIDGE_CONTRACT.md`](../../_BRIDGE_CONTRACT.md)。

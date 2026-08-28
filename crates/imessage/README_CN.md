@@ -33,7 +33,7 @@ cargo run -p arkret-bridge-imessage -- --config config.yaml
 - `app.webhook_secret`:入站 `/webhooks/imessage` 的 HMAC 密钥,必填。签名格式为
   `hex(HMAC-SHA256(secret, x-arkret-timestamp + "\n" + raw_body))`,放入
   `x-arkret-signature-256`;时间戳为 Unix 秒,并参与重放防护。未配置时 fail closed 拒绝。
-- `database.url`:`sqlite://...` / `postgres://...` / `mysql://...`(对应 feature)。
+- `database.url`:`sqlite://...` / `postgres://...`(对应 feature)。
 
 ## 待办
 

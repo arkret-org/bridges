@@ -24,7 +24,6 @@ edge     = []
 db       = ["dep:diesel", "dep:diesel_migrations"]
 sqlite   = ["db", "diesel/sqlite", "dep:libsqlite3-sys"]
 postgres = ["db", "diesel/postgres"]
-mysql    = ["db", "diesel/mysql"]
 web      = ["dep:metrics", "dep:metrics-exporter-prometheus", "dep:salvo"]
 runtime  = ["db", "web"]
 

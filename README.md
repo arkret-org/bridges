@@ -56,7 +56,7 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `arkret-bridge-
   **fail-closed**:WeChat 整类 POST 投递被拒(仅 GET 握手可用),Feishu 直接不挂载 webhook 路由,
   且声明 webhook 入站面的桥若 `webhook_router` 因此返回 `None` 会在**启动期 fail-fast**(不会降级为
   无入站面的“健康”进程)。配齐 access token 不等于入站可用,还须配齐这些 body 验签材料。
-- **映射 / 解析**:频道↔realm、消息↔event、用户↔actor 持久化于 diesel(sqlite/postgres/mysql);
+- **映射 / 解析**:频道↔realm、消息↔event、用户↔actor 持久化于 diesel(sqlite/postgres);
   反查驱动 applet `resolve_actor`/`resolve_realm`(ghost/portal 读侧解析)。用户↔actor 映射
   同时参与 app→arkret 写侧署名。
 - **序号**:服务 actor 的事件 seq 经 DB 块预留持久化,重启后严格单调。
@@ -76,7 +76,7 @@ cargo check --workspace
 cargo run -p arkret-bridge-discord -- --config config.yaml
 ```
 
-每个 crate 默认 `sqlite` feature;`--features postgres` / `--features mysql` 切换后端。
+每个 crate 默认 `sqlite` feature;`--features postgres` 切换后端。
 配置文件使用 YAML。
 所有桥都必须显式建立 app channel 到 Realm 的映射；没有 channel-realm mapping 的入站消息会直接失败,
 不再回退到默认 Realm。
@@ -125,7 +125,7 @@ admin 面默认回环绑定隔离,无请求级鉴权;若显式放宽 `admin_bind
 **重放守卫与 vendor token 缓存均持久化于桥数据库**(`webhook_replay_guard` / `token_cache`
 表):重启后 TTL 内的捕获报文无法重放,且同一桥的多副本共享同一守卫与同一 vendor access token
 (WeChat 类"取新令旧失效"平台在多副本下因此可用)。水平扩展多副本时,各副本必须指向同一
-`database.url`(共享 postgres/mysql;sqlite 仅适合单副本)。
+`database.url`(共享 postgres;sqlite 仅适合单副本)。
 
 ## 容器发布
 

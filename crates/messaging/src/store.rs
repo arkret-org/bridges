@@ -24,8 +24,6 @@ use crate::schema;
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
 #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/postgres");
-#[cfg(all(feature = "mysql", not(feature = "sqlite"), not(feature = "postgres")))]
-const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/mysql");
 
 pub(crate) fn now_ts() -> i64 {
     chrono::Utc::now().timestamp()
@@ -628,7 +626,7 @@ impl MessageStore {
         // but the user mapping's unique key is (protocol, tenant, external_user_id),
         // so both racers can reach `insert` and one would hit a UNIQUE violation.
         // Try insert first; on a conflict, fall back to update by the conflict key
-        // (an atomic upsert in effect, portable across sqlite/postgres/mysql and
+        // (an atomic upsert in effect, portable across sqlite/postgres and
         // matching the existing dedup-store pattern). The losing racer then re-reads
         // the winner's mapping (via `ghost_actor_for_app_user`) and continues
         // submitting rather than failing the message.

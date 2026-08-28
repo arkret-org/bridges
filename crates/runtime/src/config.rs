@@ -297,7 +297,7 @@ impl fmt::Debug for ArkretConfig {
 }
 
 /// Database configuration. `url` looks like `sqlite://bridge.db` /
-/// `postgres://...` / `mysql://...`.
+/// `postgres://...`.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DatabaseConfig {

@@ -875,7 +875,6 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "thiserror 2.0.18",
  "unicode-normalization",
  "unicode-security",
@@ -1718,13 +1717,10 @@ dependencies = [
  "downcast-rs",
  "itoa",
  "libsqlite3-sys",
- "mysqlclient-sys",
- "percent-encoding",
  "pq-sys",
  "r2d2",
  "sqlite-wasm-rs",
  "time",
- "url",
 ]
 
 [[package]]
@@ -3174,17 +3170,6 @@ dependencies = [
  "memchr",
  "mime",
  "spin 0.10.0",
-]
-
-[[package]]
-name = "mysqlclient-sys"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92ed7312f0cfc4032aea6f8ea2abb4d288e4413e33bf0c80ad30eef8aa8fb9d8"
-dependencies = [
- "pkg-config",
- "semver",
- "vcpkg",
 ]
 
 [[package]]
