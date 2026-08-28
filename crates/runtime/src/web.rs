@@ -12,7 +12,7 @@ use arkret::signatures::http_signature::{
     verify_signed_http_message,
 };
 use arkret::{
-    AppletHandler, DidFullId, IdempotencyDirection, IdempotencyIdentity, TransactionClaim,
+    AppletHandler, Did, IdempotencyDirection, IdempotencyIdentity, TransactionClaim,
     TransactionIdempotencyStore,
 };
 use arkret_models_collaboration::http_bodies::AppletTransactionRequestBody;
@@ -267,11 +267,11 @@ async fn admin_invalidate_did_bindings(req: &mut Request, depot: &mut Depot, res
             return;
         }
     };
-    let did = match DidFullId::new(body.did) {
+    let did = match Did::new(body.did) {
         Ok(did) => did,
         Err(err) => {
             record_did_binding_invalidation("bad_request");
-            bad_request(res, format!("`did` is not a valid full DID: {err}"));
+            bad_request(res, format!("`did` is not a valid DID: {err}"));
             return;
         }
     };
@@ -800,7 +800,7 @@ fn verify_http_applet_request(
 
     let destination = header_value_from(headers, DESTINATION_SERVICE_ID_HEADER)
         .ok_or_else(|| http_signature_invalid("Destination-Service-ID header is required"))?;
-    if destination != config.arkret.service_id {
+    if destination != config.arkret.service_did {
         return Err(http_signature_invalid(
             "HTTP signature destination service DID does not match this bridge",
         ));
@@ -1006,8 +1006,8 @@ fn verify_transaction_events(
                 format!("event {} proof is not production: {err}", event.event_id)
             })?;
             let signer_did = verification_method_did(&proof.verification_method)?;
-            let signer_actor_id = arkret::project_full_id_to_core_id(&signer_did)
-                .map_err(|error| error.to_string())?;
+            let signer_actor_id =
+                arkret::project_did_to_core_id(&signer_did).map_err(|error| error.to_string())?;
             if &signer_actor_id != expected_signer {
                 return Err(format!(
                     "event {} proof signer DID does not match actor/executed_by",
@@ -1222,7 +1222,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use arkret::signatures::{Ed25519PayloadSigner, SignEventOptions, sign_event};
-    use arkret::{DidCoreId, DidFullId, Event, Hlc, RealmId, ScopeRef, TrustDomainId};
+    use arkret::{Did, DidCoreId, Event, Hlc, RealmId, ScopeRef, TrustDomainId};
     use chrono::DateTime;
 
     use super::*;
@@ -1269,7 +1269,7 @@ mod tests {
     // Fixtures
     // ========================================================================
 
-    fn signer(seed: u8, actor: &DidFullId, verification_method: &DidUrl) -> Ed25519PayloadSigner {
+    fn signer(seed: u8, actor: &Did, verification_method: &DidUrl) -> Ed25519PayloadSigner {
         Ed25519PayloadSigner::from_did_key_seed(
             [seed; 32],
             actor.clone(),
@@ -1287,20 +1287,20 @@ mod tests {
         TrustDomainId::new("ak:trust_domain:bridge.example".to_owned()).expect("trust domain")
     }
 
-    fn actor_did() -> DidFullId {
-        DidFullId::new("did:webvh:z6mkfixture:alice.example".to_owned()).expect("actor did")
+    fn actor_did() -> Did {
+        Did::new("did:webvh:z6mkfixture:alice.example".to_owned()).expect("actor did")
     }
 
     fn actor_verification_method() -> DidUrl {
         DidUrl::new(format!("{}#key-1", actor_did())).expect("did url")
     }
 
-    fn actor_id(did: &DidFullId) -> DidCoreId {
-        arkret::project_full_id_to_core_id(did).expect("actor core id")
+    fn actor_id(did: &Did) -> DidCoreId {
+        arkret::project_did_to_core_id(did).expect("actor core id")
     }
 
-    fn server_did() -> DidFullId {
-        DidFullId::new("did:webvh:z6mkfixture:server.example".to_owned()).expect("server did")
+    fn server_did() -> Did {
+        Did::new("did:webvh:z6mkfixture:server.example".to_owned()).expect("server did")
     }
 
     fn server_verification_method() -> DidUrl {
@@ -1312,7 +1312,7 @@ mod tests {
     }
 
     /// One Event signed by `seed`'s key under `verification_method`.
-    fn signed_event(actor: &DidFullId, verification_method: &DidUrl, seed: u8, seq: u64) -> Event {
+    fn signed_event(actor: &Did, verification_method: &DidUrl, seed: u8, seq: u64) -> Event {
         let realm =
             RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").expect("realm");
         let hlc = Hlc::new(format!("01970e589d2{seq}-0001-a13f9c2e")).expect("hlc");
@@ -1320,7 +1320,7 @@ mod tests {
             "ak.message.create",
             ScopeRef::Realm { realm_id: realm },
             actor_id(actor),
-            arkret::project_full_id_to_core_id(&server_did()).expect("server core id"),
+            arkret::project_did_to_core_id(&server_did()).expect("server core id"),
             seq,
             hlc,
             json!({ "body": format!("hello {seq}") }),
@@ -1349,7 +1349,7 @@ mod tests {
                 "ak:applet:01904100-0000-7000-8000-000000000001".to_owned(),
             )
             .expect("applet id"),
-            source_service_id: arkret::project_full_id_to_core_id(&server_did())
+            source_service_id: arkret::project_did_to_core_id(&server_did())
                 .expect("server core id"),
             events,
             signals: None,
@@ -1382,8 +1382,7 @@ mod tests {
     #[test]
     fn an_event_proof_signed_by_a_foreign_did_is_rejected() {
         // The Event's `actor_id` and the proof's verification method disagree.
-        let foreign =
-            DidFullId::new("did:webvh:z6mkmallory:mallory.example".to_owned()).expect("did");
+        let foreign = Did::new("did:webvh:z6mkmallory:mallory.example".to_owned()).expect("did");
         let foreign_method = DidUrl::new(format!("{foreign}#key-1")).expect("did url");
         let mut event = signed_event(&foreign, &foreign_method, 42, 1);
         event.actor_id = actor_id(&actor_did());

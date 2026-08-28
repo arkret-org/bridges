@@ -36,7 +36,7 @@ pub struct MessageStore {
 
 #[derive(Clone, Debug)]
 pub(crate) struct ManagedActorIdentityRecord {
-    pub(crate) actor_full_id: String,
+    pub(crate) actor_did: String,
     pub(crate) initial_resolution_json: String,
     pub(crate) method_history_evidence_json: String,
     pub(crate) encrypted_key_material: String,
@@ -64,7 +64,7 @@ impl MessageStore {
         Ok(dsl::managed_actor_identities
             .filter(dsl::subject_key.eq(subject_key))
             .select((
-                dsl::actor_full_id,
+                dsl::actor_did,
                 dsl::initial_resolution_json,
                 dsl::method_history_evidence_json,
                 dsl::encrypted_key_material,
@@ -73,12 +73,12 @@ impl MessageStore {
             .optional()?
             .map(
                 |(
-                    actor_full_id,
+                    actor_did,
                     initial_resolution_json,
                     method_history_evidence_json,
                     encrypted_key_material,
                 )| ManagedActorIdentityRecord {
-                    actor_full_id,
+                    actor_did,
                     initial_resolution_json,
                     method_history_evidence_json,
                     encrypted_key_material,
@@ -103,7 +103,7 @@ impl MessageStore {
             .optional()?;
         match row {
             None => Ok(None),
-            Some((stored_request, _, _)) if stored_request != request_json => {
+            Some((stored_request, ..)) if stored_request != request_json => {
                 Err(BridgeError::Database(
                     "managed actor request digest collision with different canonical bytes"
                         .to_owned(),
@@ -152,7 +152,7 @@ impl MessageStore {
         let inserted = diesel::insert_into(dsl::managed_actor_identities)
             .values((
                 dsl::subject_key.eq(subject_key),
-                dsl::actor_full_id.eq(&candidate.actor_full_id),
+                dsl::actor_did.eq(&candidate.actor_did),
                 dsl::initial_resolution_json.eq(&candidate.initial_resolution_json),
                 dsl::method_history_evidence_json.eq(&candidate.method_history_evidence_json),
                 dsl::encrypted_key_material.eq(&candidate.encrypted_key_material),
@@ -898,7 +898,7 @@ mod tests {
     fn managed_actor_ledger_replays_exact_bundle_and_keeps_request_generations() {
         let store = sqlite_store("managed-authoring").unwrap();
         let identity = ManagedActorIdentityRecord {
-            actor_full_id: "did:webvh:z6mkfixture:managed.example:ghost-1".to_owned(),
+            actor_did: "did:webvh:z6mkfixture:managed.example:ghost-1".to_owned(),
             initial_resolution_json: "{\"version\":1}".to_owned(),
             method_history_evidence_json: "{\"history\":1}".to_owned(),
             encrypted_key_material: "v1.nonce.ciphertext".to_owned(),

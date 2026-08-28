@@ -69,7 +69,7 @@ use arkret::identity::{
     ResolverFailMode, ResolverPolicy, VerifiedDidBinding, VerifiedDidBindingDocumentInput,
     VerifiedDidBindingKey, VerifiedDidBindingStore, document_canonical_digest, policy_digest,
 };
-use arkret::{DidFullId, Hash, TrustDomainId};
+use arkret::{Did, Hash, TrustDomainId};
 use arkret_wire::DidUrl;
 use chrono::{DateTime, Utc};
 
@@ -166,7 +166,7 @@ impl AcceptedDidBindings {
     /// this trust domain and under this policy revision.
     fn key(
         &self,
-        did: &DidFullId,
+        did: &Did,
         purpose: DidBindingPurpose,
         verification_method: &DidUrl,
     ) -> VerifiedDidBindingKey {
@@ -181,7 +181,7 @@ impl AcceptedDidBindings {
 
     fn get(
         &self,
-        did: &DidFullId,
+        did: &Did,
         purpose: DidBindingPurpose,
         verification_method: &DidUrl,
         now: DateTime<Utc>,
@@ -204,7 +204,7 @@ impl AcceptedDidBindings {
     /// miss fails closed: there is no lookup to fall back on.
     pub fn source_service(
         &self,
-        did: &DidFullId,
+        did: &Did,
         verification_method: &DidUrl,
         now: DateTime<Utc>,
     ) -> std::result::Result<AcceptedDidBinding, BindingLookupError> {
@@ -362,7 +362,7 @@ impl DidAuthority {
     /// Drop every acceptance for `did` (§5: rotation / deactivation / witness
     /// fork / revocation MUST invalidate the affected bindings). Scoped to this
     /// bridge's trust domain so an unrelated domain is never touched.
-    pub fn invalidate_did(&self, did: &DidFullId) -> usize {
+    pub fn invalidate_did(&self, did: &Did) -> usize {
         self.bindings.store.invalidate(
             &BindingInvalidation::for_did(did.clone())
                 .with_trust_domain(self.bindings.trust_domain.clone()),
@@ -374,14 +374,12 @@ impl DidAuthority {
 ///
 /// `DidUrl` already guarantees a non-empty `#fragment` and rejects `?query`, so
 /// this only has to split.
-pub fn verification_method_did(
-    verification_method: &DidUrl,
-) -> std::result::Result<DidFullId, String> {
+pub fn verification_method_did(verification_method: &DidUrl) -> std::result::Result<Did, String> {
     let (did, _) = verification_method
         .as_str()
         .rsplit_once('#')
         .ok_or_else(|| format!("verification method `{verification_method}` has no `#fragment`"))?;
-    DidFullId::new(did.to_owned())
+    Did::new(did.to_owned())
         .map_err(|err| format!("verification method DID `{did}` is invalid: {err}"))
 }
 
@@ -409,7 +407,7 @@ mod tests {
     fn public_key_bytes(seed: u8) -> [u8; 32] {
         arkret::Ed25519PayloadSigner::from_did_key_seed(
             [seed; 32],
-            DidFullId::new("did:webvh:z6mkfixture:seed.example".to_owned()).expect("did"),
+            Did::new("did:webvh:z6mkfixture:seed.example".to_owned()).expect("did"),
             DidUrl::new("did:webvh:z6mkfixture:seed.example#key-1").expect("did url"),
         )
         .verifying_key()

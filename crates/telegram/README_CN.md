@@ -25,7 +25,7 @@ cargo run -p arkret-bridge-telegram -- --config config.yaml
 
 ## 配置要点
 
-- `arkret.*`:arkret 接入(server_url、service_id、applet_id、access_token、签名种子)。
+- `arkret.*`:arkret 接入(server_url、service_did、applet_id、access_token、签名种子)。
 - `app.bot_token`:Telegram bot token(从 @BotFather 获取)。
 - `database.url`:`sqlite://...` / `postgres://...`(对应 feature)。
 

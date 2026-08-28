@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arkret::{
-    AppletId, ContentBlock, DidFullId, Event, EventKind, MessageId, MessageRedactPayload, RealmId,
+    AppletId, ContentBlock, Did, Event, EventKind, MessageId, MessageRedactPayload, RealmId,
 };
 pub use arkret_bridge_runtime as runtime;
 use arkret_bridge_runtime::app::{BridgeApp, BridgeContext};
@@ -691,8 +691,8 @@ impl MessageContext {
                             // The DB mapping stores the resolvable Ghost DID:
                             // outbound submission signs with it. The server's
                             // stable core id was checked against this exact
-                            // full DID during provisioning.
-                            let actor_id = provisioned.full_id.to_string();
+                            // DID during provisioning.
+                            let actor_id = provisioned.did.to_string();
                             let display_name = provisioned
                                 .outcome
                                 .display_name
@@ -732,7 +732,7 @@ impl MessageContext {
                         &mapping.accountability_grant_ref,
                     )?;
                     require_nonempty_ref("authorization_ref", &mapping.authorization_ref)?;
-                    let actor = DidFullId::new(mapping.arkret_actor_id)?;
+                    let actor = Did::new(mapping.arkret_actor_id)?;
                     let payload =
                         redaction_payload_for_app_delete(&target_event_id, delete.reason)?
                             .expect("delete reason was checked before queue submission");
@@ -854,8 +854,8 @@ impl MessageContext {
                             // The DB mapping stores the resolvable Ghost DID:
                             // outbound submission signs with it. The server's
                             // stable core id was checked against this exact
-                            // full DID during provisioning.
-                            let actor_id = provisioned.full_id.to_string();
+                            // DID during provisioning.
+                            let actor_id = provisioned.did.to_string();
                             let display_name = provisioned
                                 .outcome
                                 .display_name
@@ -895,7 +895,7 @@ impl MessageContext {
                         &mapping.accountability_grant_ref,
                     )?;
                     require_nonempty_ref("authorization_ref", &mapping.authorization_ref)?;
-                    let actor = DidFullId::new(mapping.arkret_actor_id)?;
+                    let actor = Did::new(mapping.arkret_actor_id)?;
                     let event_id = edge
                         .submit_with_external_ref_as::<arkret_wire::event_spec::MessageCreate, _>(
                             &actor,

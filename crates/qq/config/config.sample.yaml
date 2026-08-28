@@ -13,12 +13,12 @@ bridge:
 
 arkret:
   server_url: "http://localhost:8008"
-  service_id: "did:webvh:qq-bridge.example"
+  service_did: "did:webvh:qq-bridge.example"
   trust_domain: "ak:trust_domain:example.net"
   applet_id: "ak:applet:00000000-0000-7000-8000-0000000000qq"
   access_token: "CHANGE_ME_ARKRET_ACCESS_TOKEN"
   signing_key_seed_hex: "0000000000000000000000000000000000000000000000000000000000000000"
-  verification_method_id: "#key-1"
+  verification_method_fragment: "#key-1"
   trusted_server_did: "did:webvh:arkret-server.example"
   # Copy these claims exactly from the installed canonical Applet package.
   # Empty arrays are fail-closed: no Realm transaction is accepted.

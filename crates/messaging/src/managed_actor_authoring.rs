@@ -11,11 +11,11 @@ use arkret::signatures::Ed25519DetachedJwsVerifier;
 use arkret::{
     AppletId, AppletManagedActorAuthorOutcome, AppletManagedActorAuthorRequestBody,
     AppletManagedActorAuthoringBundle, AppletManagedActorAuthoringRequest,
-    AppletManagedActorPurpose, DidCoreId, DidFullId, GenesisSalt, GhostActorProvisionRequestBody,
+    AppletManagedActorPurpose, Did, DidCoreId, GenesisSalt, GhostActorProvisionRequestBody,
     GhostPreviewRequestBody, Hash, ResolutionCommitment, ResolutionDidBindingEvidenceKind,
     ResolutionDidBindingEvidenceReceipt, ResolutionDidBindingMethodProof,
     ResolutionMethodEvidenceBoundary, ResolutionMethodHistoryEvidence, SecurityClass,
-    TrustDomainId, namespace_pattern_matches, project_full_id_to_core_id,
+    TrustDomainId, namespace_pattern_matches, project_did_to_core_id,
 };
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
@@ -71,7 +71,7 @@ impl ManagedActorAuthoringService {
             ));
         }
         let expected_principal_server_id =
-            project_full_id_to_core_id(&DidFullId::new(config.arkret.trusted_server_did.clone())?)?;
+            project_did_to_core_id(&Did::new(config.arkret.trusted_server_did.clone())?)?;
         Ok(Self {
             edge,
             store,
@@ -347,7 +347,7 @@ impl ManagedActorAuthoringService {
         .map_err(|error| {
             BridgeError::App(format!("managed actor WebVH inception failed: {error}"))
         })?;
-        let full_id = DidFullId::new(inception.did.clone())?;
+        let did = Did::new(inception.did.clone())?;
         if !self
             .config
             .arkret
@@ -358,12 +358,12 @@ impl ManagedActorAuthoringService {
                 namespace_pattern_matches(
                     arkret::AppletNamespaceDomain::Actors,
                     &entry.pattern,
-                    full_id.as_str(),
+                    did.as_str(),
                 )
             })
         {
             return Err(BridgeError::Config(format!(
-                "generated managed actor DID `{full_id}` is outside applet_namespaces.actors"
+                "generated managed actor DID `{did}` is outside applet_namespaces.actors"
             )));
         }
         let method_history_head = canonical_sha256(&inception.log_entry)?;
@@ -394,7 +394,7 @@ impl ManagedActorAuthoringService {
             witness_records,
         };
         let initial_resolution = ResolutionCommitment {
-            full_id: full_id.clone(),
+            did: did.clone(),
             method_history_head,
             version_id: inception.version_id,
         };
@@ -406,7 +406,7 @@ impl ManagedActorAuthoringService {
             },
         )?;
         Ok(ManagedActorIdentityRecord {
-            actor_full_id: full_id.to_string(),
+            actor_did: did.to_string(),
             initial_resolution_json: serde_json::to_string(&initial_resolution).map_err(
                 |error| {
                     BridgeError::Runtime(format!("managed actor resolution encode failed: {error}"))
@@ -432,8 +432,8 @@ impl ManagedActorAuthoringService {
         // must fail before replaying or issuing an identity it cannot control.
         let _: ManagedActorKeyMaterial =
             self.decrypt_key_material(subject_key, &record.encrypted_key_material)?;
-        let full_id = DidFullId::new(record.actor_full_id)?;
-        let actor_id = project_full_id_to_core_id(&full_id)?;
+        let did = Did::new(record.actor_did)?;
+        let actor_id = project_did_to_core_id(&did)?;
         let initial_resolution =
             serde_json::from_str(&record.initial_resolution_json).map_err(|error| {
                 BridgeError::Database(format!(

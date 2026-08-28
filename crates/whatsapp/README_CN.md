@@ -28,7 +28,7 @@ cargo run -p arkret-bridge-whatsapp -- --config config.yaml
 
 ## 配置要点
 
-- `arkret.*`:arkret 接入(server_url、service_id、applet_id、access_token、签名种子)。
+- `arkret.*`:arkret 接入(server_url、service_did、applet_id、access_token、签名种子)。
 - `app.phone_number_id`:发送方电话号码 ID(出站 URL 路径段)。
 - `app.access_token`:Cloud API 令牌(Bearer)。
 - `app.verify_token`:webhook 校验回显令牌(入站接入时使用)。

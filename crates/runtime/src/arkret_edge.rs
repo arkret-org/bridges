@@ -26,8 +26,8 @@ use arkret::identity::public_key_material_from_binding;
 use arkret::signatures::{EventProofBuilder, VerificationMethodDocument};
 use arkret::signatures::{SignEventOptions, sign_event};
 use arkret::{
-    AppletId, AuthoredEvent, DidCoreId, DidFullId, DigestSuite, Ed25519PayloadSigner, Event,
-    EventIntent, Hlc, HlcGenerator, RealmId, ScopeRef, project_full_id_to_core_id,
+    AppletId, AuthoredEvent, Did, DidCoreId, DigestSuite, Ed25519PayloadSigner, Event, EventIntent,
+    Hlc, HlcGenerator, RealmId, ScopeRef, project_did_to_core_id,
 };
 use arkret_event_draft::{EventSpec, TypedEventDraft};
 use arkret_models_collaboration::events_payloads::MessageRedactPayload;
@@ -120,8 +120,8 @@ pub struct ArkretEdge {
     /// Authority transport for issuer-produced AuthorizationLease/CBA
     /// evidence: the authenticated Principal Server submission wrapper.
     submission_provider: PrincipalServerSubmissionProvider,
-    /// Resolvable full DID used for key lookup and proof `verification_method`.
-    service_id: DidFullId,
+    /// Resolvable DID used for key lookup and proof `verification_method`.
+    service_did: Did,
     /// Stable service actor core written into Event envelopes.
     service_actor_id: DidCoreId,
     applet_id: AppletId,
@@ -153,23 +153,23 @@ impl ArkretEdge {
         seq: Arc<dyn SeqStore>,
         inbound_tx: Sender<Event>,
     ) -> Result<Self> {
-        let service_id = DidFullId::new(config.arkret.service_id.clone())?;
+        let service_did = Did::new(config.arkret.service_did.clone())?;
         let seed = config.signing_seed()?;
         // The signer's `kid` MUST be the absolute DID URL
-        // `<service_id>#<fragment>`; `verification_method_id` is configured as
+        // `<service_did>#<fragment>`; `verification_method_fragment` is configured as
         // a bare fragment, so it is absolutized here instead of being handed to
         // the signer verbatim.
         let signer = Ed25519PayloadSigner::from_did_key_seed(
             seed,
-            service_id.clone(),
-            config.arkret.verification_method_for(&service_id)?,
+            service_did.clone(),
+            config.arkret.verification_method_for(&service_did)?,
         );
         let client = default_client(&config)?;
         Self::build(
             config,
             client,
             signer,
-            service_id,
+            service_did,
             seed,
             SeqAllocator::new(seq, SEQ_STATE_KEY),
             Some(inbound_tx),
@@ -192,16 +192,16 @@ impl ArkretEdge {
         signer: Ed25519PayloadSigner,
         seq: SeqAllocator,
     ) -> Result<Self> {
-        let service_id = DidFullId::new(config.arkret.service_id.clone())?;
+        let service_did = Did::new(config.arkret.service_did.clone())?;
         let hlc_secret = signer.verifying_key().to_bytes();
-        Self::build(config, client, signer, service_id, hlc_secret, seq, None)
+        Self::build(config, client, signer, service_did, hlc_secret, seq, None)
     }
 
     fn build(
         config: Arc<Config>,
         client: Client,
         signer: Ed25519PayloadSigner,
-        service_id: DidFullId,
+        service_did: Did,
         hlc_secret: [u8; 32],
         seq: SeqAllocator,
         inbound_tx: Option<Sender<Event>>,
@@ -222,7 +222,7 @@ impl ArkretEdge {
         // Applet service identities use verifiable-history DIDs. Managed actor
         // identities and namespaces are independent package-authority inputs,
         // unrelated to this service identity.
-        match service_id.method() {
+        match service_did.method() {
             "webvh" => {}
             other => {
                 return Err(BridgeError::Config(format!(
@@ -233,7 +233,7 @@ impl ArkretEdge {
         }
 
         let applet_id = AppletId::new(config.arkret.applet_id.clone())?;
-        let service_actor_id = project_full_id_to_core_id(&service_id)?;
+        let service_actor_id = project_did_to_core_id(&service_did)?;
         let hlc_device_id = config.bridge.bridge_id.clone();
 
         let submission_provider = PrincipalServerSubmissionProvider::new(client.clone());
@@ -242,7 +242,7 @@ impl ArkretEdge {
             client,
             signer,
             submission_provider,
-            service_id,
+            service_did,
             service_actor_id,
             applet_id,
             seq,
@@ -273,7 +273,7 @@ impl ArkretEdge {
     /// proofs. Managed actors have separate root keys; this method only exposes
     /// the installed Applet service authority.
     pub fn service_verification_method(&self) -> Result<DidUrl> {
-        self.verification_method_for_actor(&self.service_id)
+        self.verification_method_for_actor(&self.service_did)
     }
 
     /// Author the closed managed-actor creation unit with the installed Applet
@@ -349,7 +349,7 @@ impl ArkretEdge {
     /// durable authorization it acts under.
     pub fn delegated_intent<K>(
         &self,
-        actor: &DidFullId,
+        actor: &Did,
         realm_id: &RealmId,
         content: K::Payload,
         authorization_ref: &str,
@@ -358,7 +358,7 @@ impl ArkretEdge {
         K: EventSpec,
     {
         let authorization_ref = validate_authorization_ref(authorization_ref)?;
-        let actor_id = project_full_id_to_core_id(actor)?;
+        let actor_id = project_did_to_core_id(actor)?;
         Ok(TypedEventDraft::<K>::new(
             ScopeRef::Realm {
                 realm_id: realm_id.clone(),
@@ -398,7 +398,7 @@ impl ArkretEdge {
     /// identity against its own content and fails closed on a mismatch, so
     /// there is no signed-envelope mutation after this point.
     fn sign_as_service(&self, event: &mut AuthoredEvent) -> Result<()> {
-        let verification_method = self.verification_method_for_actor(&self.service_id)?;
+        let verification_method = self.verification_method_for_actor(&self.service_did)?;
         sign_event(
             event,
             &self.signer,
@@ -408,7 +408,7 @@ impl ArkretEdge {
         Ok(())
     }
 
-    fn verification_method_for_actor(&self, actor: &DidFullId) -> Result<DidUrl> {
+    fn verification_method_for_actor(&self, actor: &Did) -> Result<DidUrl> {
         self.config.arkret.verification_method_for(actor)
     }
 
@@ -509,7 +509,7 @@ impl ArkretEdge {
     /// `external_ref` for bridge-originated events.
     pub async fn submit_with_external_ref_as<K, E>(
         &self,
-        actor: &DidFullId,
+        actor: &Did,
         realm_id: &str,
         content: K::Payload,
         external_ref: E,
@@ -536,7 +536,7 @@ impl ArkretEdge {
     /// by callers before reaching this helper.
     pub async fn submit_redaction_with_external_ref_as<E>(
         &self,
-        actor: &DidFullId,
+        actor: &Did,
         realm_id: &str,
         content: MessageRedactPayload,
         external_ref: E,
@@ -668,7 +668,7 @@ fn event_content_fingerprint(event: &Event) -> i64 {
 /// inbound queue; the business forwarding is done in the core consumer loop.
 pub struct BridgeAppletHandler {
     applet_id: AppletId,
-    service_id: DidFullId,
+    service_did: Did,
     trust_domain: arkret::TrustDomainId,
     transport_base_url: String,
     namespaces: AppletWireNamespaces,
@@ -702,10 +702,10 @@ impl BridgeAppletHandler {
         handled_event_kinds: Option<Vec<String>>,
         did_authority: Arc<DidAuthority>,
     ) -> Result<Self> {
-        let service_id = edge.service_id.clone();
+        let service_did = edge.service_did.clone();
         Ok(Self {
             applet_id: edge.applet_id.clone(),
-            service_id: service_id.clone(),
+            service_did: service_did.clone(),
             trust_domain: edge.config.arkret.trust_domain.clone(),
             transport_base_url: format!("http://{}", edge.config.bridge.admin_addr()),
             namespaces: edge.config.arkret.applet_namespaces.clone(),
@@ -803,7 +803,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
             // The wire field is the stable identity core; the configured
             // resolvable DID is projected through the registered method
             // adapter rather than re-spelled.
-            service_id: project_full_id_to_core_id(&self.service_id)
+            service_id: project_did_to_core_id(&self.service_did)
                 .map_err(|error| WireError::Protocol(error.to_string()))?,
             protocol_version: arkret::PROTOCOL_VERSION.to_owned(),
         })
@@ -816,7 +816,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
             .operation_bundle_id
             .to_owned();
         let mut description = ServiceDescribe::development(
-            self.service_id.clone(),
+            self.service_did.clone(),
             self.trust_domain.clone(),
             service_kind,
             vec![describe_bundle],
@@ -1023,15 +1023,15 @@ impl arkret::AppletHandler for BridgeAppletHandler {
     fn resolve_actor(&self, actor_id: &str) -> std::result::Result<AppletActorView, WireError> {
         // `ResolvedActor::actor_id` carries the resolvable ghost DID that was
         // persisted at provisioning time. The wire view answers with the
-        // stable identity core, so the string is parsed as a full DID and
+        // stable identity core, so the string is parsed as a DID and
         // projected; either step failing means the mapping row cannot be
         // vouched for and the probe answers `exists: false`.
         if let Some(resolved) = self
             .resolver
             .as_ref()
             .and_then(|r| r.resolve_actor(actor_id))
-            && let Ok(did) = DidFullId::new(resolved.actor_id)
-            && let Ok(core_id) = project_full_id_to_core_id(&did)
+            && let Ok(did) = Did::new(resolved.actor_id)
+            && let Ok(core_id) = project_did_to_core_id(&did)
         {
             return Ok(AppletActorView {
                 exists: true,
@@ -1094,10 +1094,9 @@ mod tests {
     #[test]
     fn event_fingerprint_ignores_unsigned_and_proofs() {
         let realm = RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").unwrap();
-        let actor = project_full_id_to_core_id(
-            &DidFullId::new("did:webvh:z6mkfixture:alice.example").unwrap(),
-        )
-        .unwrap();
+        let actor =
+            project_did_to_core_id(&Did::new("did:webvh:z6mkfixture:alice.example").unwrap())
+                .unwrap();
         let hlc = Hlc::new("01970e589d21-0001-a13f9c2e").unwrap();
         let mut first = arkret_wire::test_support::raw_event(
             "ak.message.create",

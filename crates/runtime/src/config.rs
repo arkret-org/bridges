@@ -5,7 +5,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use arkret::DidFullId;
+use arkret::Did;
 use arkret::signatures::PublicKeyMaterial;
 use arkret_models_integration::AppletWireNamespaces;
 use arkret_wire::DidUrl;
@@ -144,7 +144,7 @@ pub struct ArkretConfig {
     /// directory).
     pub server_url: String,
     /// The service DID of this bridge acting as an Applet.
-    pub service_id: String,
+    pub service_did: String,
     /// Trust domain advertised by the applet service description.
     pub trust_domain: arkret::TrustDomainId,
     /// This bridge's applet id (`ak:applet:<uuidv7>`).
@@ -155,7 +155,7 @@ pub struct ArkretConfig {
     pub signing_key_seed_hex: String,
     /// The signing verification method id (the kid on the DID).
     #[serde(default = "default_kid")]
-    pub verification_method_id: String,
+    pub verification_method_fragment: String,
     /// The only arkret server DID accepted for server -> bridge transaction
     /// pushes.
     pub trusted_server_did: String,
@@ -232,21 +232,21 @@ impl fmt::Debug for ManagedActorAuthoringConfig {
 impl ArkretConfig {
     /// The `#fragment` of the configured signing verification method.
     ///
-    /// `verification_method_id` is configured as a bare fragment (`#key-1`) of
+    /// `verification_method_fragment` is configured as a bare fragment (`#key-1`) of
     /// this Applet service DID. Ghost key custody belongs to the separately
     /// installed Applet-managed authoring provider.
     pub fn verification_method_fragment(&self) -> Result<&str> {
         let (_, fragment) = self
-            .verification_method_id
+            .verification_method_fragment
             .rsplit_once('#')
             .ok_or_else(|| {
                 BridgeError::Config(
-                    "verification_method_id must contain a #key fragment".to_owned(),
+                    "verification_method_fragment must contain a #key fragment".to_owned(),
                 )
             })?;
         if fragment.trim().is_empty() {
             return Err(BridgeError::Config(
-                "verification_method_id key fragment must not be empty".to_owned(),
+                "verification_method_fragment key fragment must not be empty".to_owned(),
             ));
         }
         Ok(fragment)
@@ -257,11 +257,11 @@ impl ArkretConfig {
     /// `DidUrl` is the wire type for `verification_method`
     /// (`did-usage-and-verification.md` §2.2); a bare DID or a bare `#fragment`
     /// is rejected at construction rather than travelling as a `String`.
-    pub fn verification_method_for(&self, actor: &DidFullId) -> Result<DidUrl> {
+    pub fn verification_method_for(&self, actor: &Did) -> Result<DidUrl> {
         let fragment = self.verification_method_fragment()?;
         DidUrl::new(format!("{}#{fragment}", actor.as_str())).map_err(|err| {
             BridgeError::Config(format!(
-                "verification_method_id does not form a valid DID URL for `{actor}`: {err}"
+                "verification_method_fragment does not form a valid DID URL for `{actor}`: {err}"
             ))
         })
     }
@@ -279,12 +279,15 @@ impl fmt::Debug for ArkretConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ArkretConfig")
             .field("server_url", &self.server_url)
-            .field("service_id", &self.service_id)
+            .field("service_did", &self.service_did)
             .field("trust_domain", &self.trust_domain)
             .field("applet_id", &self.applet_id)
             .field("access_token", &"<redacted>")
             .field("signing_key_seed_hex", &"<redacted>")
-            .field("verification_method_id", &self.verification_method_id)
+            .field(
+                "verification_method_fragment",
+                &self.verification_method_fragment,
+            )
             .field("trusted_server_did", &self.trusted_server_did)
             .field(
                 "trusted_verification_methods",
@@ -512,12 +515,12 @@ bridge:
   bridge_id: test
 arkret:
   server_url: "https://example.test"
-  service_id: "did:webvh:bridge.example"
+  service_did: "did:webvh:bridge.example"
   trust_domain: "ak:trust_domain:example.net"
   applet_id: "ak:applet:01904100-0000-7000-8000-000000000001"
   access_token: "token"
   signing_key_seed_hex: "1111111111111111111111111111111111111111111111111111111111111111"
-  verification_method_id: "#key-1"
+  verification_method_fragment: "#key-1"
   trusted_server_did: "did:webvh:server.example"
   applet_namespaces:
     actors: []

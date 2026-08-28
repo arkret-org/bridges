@@ -3,9 +3,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use arkret::{
-    AppletId, DidCoreId, DidFullId, EventId, EventKind, Hlc, RealmId, StrandId, StrandTrack,
-};
+use arkret::{AppletId, Did, DidCoreId, EventId, EventKind, Hlc, RealmId, StrandId, StrandTrack};
 use arkret_bridge_runtime::{BridgeError, Result};
 use arkret_models_collaboration::events_payloads::StrandCreatePayload;
 use arkret_models_collaboration::objects::strand::Strand;
@@ -50,7 +48,7 @@ pub(crate) fn bridge_tenant(config: &runtime::Config) -> String {
         .as_deref()
         .map(normalized_external_id)
         .filter(|tenant| !tenant.is_empty())
-        .unwrap_or_else(|| normalized_external_id(&config.arkret.service_id))
+        .unwrap_or_else(|| normalized_external_id(&config.arkret.service_did))
 }
 
 /// Deterministic `Idempotency-Key` for ghost provisioning (required header per
@@ -109,11 +107,11 @@ pub(crate) struct DeleteExternalRef {
 ///
 /// The two are bound by [`validate_ghost_provision_response`], which requires
 /// the server's stable `ghost_actor_id` core to be exactly the projection of
-/// `full_id`. Callers that need the resolvable form (event signing, DID
+/// `did`. Callers that need the resolvable form (event signing, DID
 /// resolution) therefore carry it forward as verified evidence instead of
-/// reconstructing a full DID from the core id, which is never permitted.
+/// reconstructing a DID from the core id, which is never permitted.
 pub(crate) struct ProvisionedGhostActor {
-    pub(crate) full_id: DidFullId,
+    pub(crate) did: Did,
     pub(crate) outcome: GhostActorProvisionOutcome,
 }
 
@@ -192,7 +190,7 @@ pub(crate) async fn provision_ghost_actor(
     let authoring_request = GhostProvisionAuthoringRequest {
         applet_id: AppletId::new(config.arkret.applet_id.clone())?,
         service_id: edge.service_actor_id().clone(),
-        actor_principal_server_id: arkret::project_full_id_to_core_id(&DidFullId::new(
+        actor_principal_server_id: arkret::project_did_to_core_id(&Did::new(
             config.arkret.trusted_server_did.clone(),
         )?)?,
         realm_id: RealmId::new(realm_id.to_owned())?,
@@ -231,10 +229,10 @@ pub(crate) async fn provision_ghost_actor(
         .client()
         .ghost_actor_provision(&config.arkret.applet_id, &idempotency_key, &request)
         .await?;
-    let requested_core_id = arkret::project_full_id_to_core_id(&ghost_actor_id)?;
+    let requested_core_id = arkret::project_did_to_core_id(&ghost_actor_id)?;
     let outcome = validate_ghost_provision_response(&requested_core_id, response)?;
     Ok(ProvisionedGhostActor {
-        full_id: ghost_actor_id,
+        did: ghost_actor_id,
         outcome,
     })
 }
@@ -242,7 +240,7 @@ pub(crate) async fn provision_ghost_actor(
 fn validate_authored_ghost_request(
     expected: &GhostProvisionAuthoringRequest,
     request: &GhostActorProvisionRequestBody,
-) -> Result<DidFullId> {
+) -> Result<Did> {
     request
         .authoring_request
         .validate_bindings()
@@ -286,7 +284,7 @@ fn validate_authored_ghost_request(
             "Ghost authoring provider returned a cross-bound provision payload".to_owned(),
         ));
     }
-    Ok(payload.initial_resolution.full_id)
+    Ok(payload.initial_resolution.did)
 }
 
 fn validate_ghost_provision_response(

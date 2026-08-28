@@ -1,6 +1,6 @@
 CREATE TABLE managed_actor_identities (
     subject_key TEXT PRIMARY KEY,
-    actor_full_id TEXT NOT NULL UNIQUE,
+    actor_did TEXT NOT NULL UNIQUE,
     initial_resolution_json TEXT NOT NULL,
     method_history_evidence_json TEXT NOT NULL,
     encrypted_key_material TEXT NOT NULL,

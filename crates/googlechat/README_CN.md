@@ -33,7 +33,7 @@ cargo run -p arkret-bridge-googlechat -- --config config.yaml
 
 ## 配置要点
 
-- `arkret.*`:arkret 接入(server_url、service_id、applet_id、access_token、签名种子)。
+- `arkret.*`:arkret 接入(server_url、service_did、applet_id、access_token、签名种子)。
 - `app.service_account_json`:Google Chat 鉴权；bridge 自动刷新 access token。
 - `app.inbound_jwt`:Google Chat webhook Bearer JWT 验签配置(`issuer`/`audience`/`jwks_url`)。
 - `database.url`:`sqlite://...` / `postgres://...`(对应 feature)。

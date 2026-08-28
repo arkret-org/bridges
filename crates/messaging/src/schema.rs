@@ -19,7 +19,7 @@ diesel::table! {
     /// and next seeds are retained only as authenticated ciphertext.
     managed_actor_identities (subject_key) {
         subject_key -> Text,
-        actor_full_id -> Text,
+        actor_did -> Text,
         initial_resolution_json -> Text,
         method_history_evidence_json -> Text,
         encrypted_key_material -> Text,

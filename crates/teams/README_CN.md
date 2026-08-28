@@ -28,7 +28,7 @@ cargo run -p arkret-bridge-teams -- --config config.yaml
 
 ## 配置要点
 
-- `arkret.*`:arkret 接入(server_url、service_id、applet_id、access_token、签名种子)。
+- `arkret.*`:arkret 接入(server_url、service_did、applet_id、access_token、签名种子)。
 - `app.app_id` / `app.app_password`:Azure Bot 注册的应用 ID 与密钥。
 - `app.service_url`:Bot Framework serviceUrl 基地址(必填,按区域不同)。
 - `app.inbound_jwt`:Teams webhook Bearer JWT 验签配置(`issuer`/`audience`/`jwks_url`)。
