@@ -527,13 +527,13 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         }
     };
 
-    let source = body.source_service_id.clone();
+    let source = body.source_id.clone();
     if source != verified.source_service_id {
         record_applet_transaction("unauthorized");
         unauthorized_code(
             res,
             "http_signature_invalid",
-            "transaction source_service_id does not match signed origin service DID",
+            "transaction source_id does not match signed origin service DID",
         );
         return;
     }
@@ -953,13 +953,13 @@ fn build_delivery_authentication_record_digest(
         "content_digest": content_digest,
         "covered_components": &verified.covered_components,
         "created": verified.created,
-        "destination_service_id": &verified.destination_service_id,
+        "destination_id": &verified.destination_service_id,
         "direction": IdempotencyDirection::NodeToApplet.as_str(),
         "expires": verified.expires,
         "idempotency_key": idempotency_key,
         "operation_id": ServiceOperationId::EDGE_APPLET_COMMAND_TRANSACTION_V1,
         "source_key_state_digest": &verified.source_key_state_digest,
-        "source_service_id": &verified.source_service_id,
+        "source_id": &verified.source_service_id,
         "verification_method": &verified.key_id,
     }))
     .map_err(|err| err.to_string())
@@ -1369,7 +1369,7 @@ mod tests {
                 "ak:applet:01904100-0000-7000-8000-000000000001".to_owned(),
             )
             .expect("applet id"),
-            source_service_id: arkret::project_did_to_core_id(&server_did())
+            source_id: arkret::project_did_to_core_id(&server_did())
                 .expect("server core id"),
             events,
             signals: None,
