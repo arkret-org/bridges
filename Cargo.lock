@@ -628,6 +628,7 @@ dependencies = [
  "getrandom 0.4.2",
  "serde",
  "thiserror 2.0.18",
+ "url",
  "uuid",
  "web-time",
 ]
