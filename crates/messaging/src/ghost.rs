@@ -48,7 +48,7 @@ pub(crate) fn bridge_tenant(config: &runtime::Config) -> String {
         .as_deref()
         .map(normalized_external_id)
         .filter(|tenant| !tenant.is_empty())
-        .unwrap_or_else(|| normalized_external_id(&config.arkret.service_did))
+        .unwrap_or_else(|| normalized_external_id(config.arkret.service_did.as_str()))
 }
 
 /// Deterministic `Idempotency-Key` for ghost provisioning (required header per
@@ -190,9 +190,9 @@ pub(crate) async fn provision_ghost_actor(
     let authoring_request = GhostProvisionAuthoringRequest {
         applet_id: AppletId::new(config.arkret.applet_id.clone())?,
         service_id: edge.service_actor_id().clone(),
-        actor_principal_server_id: arkret::project_did_to_core_id(&Did::new(
-            config.arkret.trusted_server_did.clone(),
-        )?)?,
+        actor_principal_server_id: arkret::project_did_to_core_id(
+            &config.arkret.trusted_server_did,
+        )?,
         realm_id: RealmId::new(realm_id.to_owned())?,
         external_ref,
         display_name: display_name.map(ToOwned::to_owned),
@@ -575,7 +575,7 @@ pub(crate) async fn create_portal_strand(
     };
     // Every producer-signed member rides the intent, and the one derived
     // identity covers them all. strand_create_payload semantic validation
-    // requires object.created_by == actor_id (both are the service DID here)
+    // requires object.created_by == actor_id (both are the stable service identity here)
     // and object.created_at == the envelope created_at.
     let intent = edge
         .service_intent::<arkret_wire::event_spec::StrandCreate>(&realm, payload)?

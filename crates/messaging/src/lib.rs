@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arkret::{
-    AppletId, ContentBlock, Did, Event, EventKind, MessageId, MessageRedactPayload, RealmId,
+    AppletId, ContentBlock, DidCoreId, Event, EventKind, MessageId, MessageRedactPayload, RealmId,
 };
 pub use arkret_bridge_runtime as runtime;
 use arkret_bridge_runtime::app::{BridgeApp, BridgeContext};
@@ -732,7 +732,7 @@ impl MessageContext {
                         &mapping.accountability_grant_ref,
                     )?;
                     require_nonempty_ref("authorization_ref", &mapping.authorization_ref)?;
-                    let actor = Did::new(mapping.arkret_actor_did)?;
+                    let actor = mapping.arkret_actor_did;
                     let payload =
                         redaction_payload_for_app_delete(&target_event_id, delete.reason)?
                             .expect("delete reason was checked before queue submission");
@@ -895,7 +895,7 @@ impl MessageContext {
                         &mapping.accountability_grant_ref,
                     )?;
                     require_nonempty_ref("authorization_ref", &mapping.authorization_ref)?;
-                    let actor = Did::new(mapping.arkret_actor_did)?;
+                    let actor = mapping.arkret_actor_did;
                     let event_id = edge
                         .submit_with_external_ref_as::<arkret_wire::event_spec::MessageCreate, _>(
                             &actor,
@@ -1125,15 +1125,16 @@ impl<M: MessageBridge> MessageAdapter<M> {
 
 async fn sender_display_for_event(
     store: Arc<MessageStore>,
-    actor_id: String,
-    executed_by: Option<String>,
+    actor_id: DidCoreId,
+    executed_by: Option<DidCoreId>,
 ) -> Result<String> {
+    let actor_id_text = actor_id.to_string();
     let mut display = match store.user_by_actor_async(actor_id.clone()).await? {
         Some(row) => row
             .display_name
             .filter(|name| !name.trim().is_empty())
             .unwrap_or(row.external_user_id),
-        None => actor_id.clone(),
+        None => actor_id_text,
     };
     if let Some(executed_by) = executed_by
         && executed_by != actor_id
@@ -1254,8 +1255,8 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
         let attachment = extract_attachment(&payload)?;
         let sender_display = sender_display_for_event(
             self.ctx.store.clone(),
-            event.actor_id.to_string(),
-            event.executed_by.as_ref().map(ToString::to_string),
+            event.actor_id.clone(),
+            event.executed_by.clone(),
         )
         .await?;
         let mut out = OutboundAppMessage {

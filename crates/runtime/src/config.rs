@@ -144,7 +144,7 @@ pub struct ArkretConfig {
     /// directory).
     pub server_url: String,
     /// The service DID of this bridge acting as an Applet.
-    pub service_did: String,
+    pub service_did: Did,
     /// Trust domain advertised by the applet service description.
     pub trust_domain: arkret::TrustDomainId,
     /// This bridge's applet id (`ak:applet:<uuidv7>`).
@@ -158,7 +158,7 @@ pub struct ArkretConfig {
     pub verification_method_fragment: String,
     /// The only arkret server DID accepted for server -> bridge transaction
     /// pushes.
-    pub trusted_server_did: String,
+    pub trusted_server_did: Did,
     /// Static DID verification-method public keys accepted for HTTP message
     /// signatures and event envelope proofs on transaction pushes.
     #[serde(default)]
@@ -271,7 +271,7 @@ impl ArkretConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrustedVerificationMethodConfig {
-    pub verification_method: String,
+    pub verification_method: DidUrl,
     pub public_key: PublicKeyMaterial,
 }
 

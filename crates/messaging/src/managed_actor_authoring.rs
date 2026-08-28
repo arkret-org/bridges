@@ -71,7 +71,7 @@ impl ManagedActorAuthoringService {
             ));
         }
         let expected_principal_server_id =
-            project_did_to_core_id(&Did::new(config.arkret.trusted_server_did.clone())?)?;
+            project_did_to_core_id(&config.arkret.trusted_server_did)?;
         Ok(Self {
             edge,
             store,

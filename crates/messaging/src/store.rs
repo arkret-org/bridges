@@ -14,7 +14,7 @@ use diesel::prelude::*;
 use diesel_migrations::{EmbeddedMigrations, embed_migrations};
 
 pub use crate::models::{ChannelRealmMapping, MessageMapping, UserMapping};
-use crate::models::{NewChannelRealmMapping, NewMessageMapping, NewUserMapping};
+use crate::models::{NewChannelRealmMapping, NewMessageMapping, NewUserMapping, UserMappingRow};
 use crate::schema;
 
 /// Embedded migrations for the messaging-owned mapping tables
@@ -682,23 +682,25 @@ impl MessageStore {
         use schema::user_mappings::dsl;
 
         let mut conn = self.db.conn()?;
-        Ok(dsl::user_mappings
+        let row = dsl::user_mappings
             .filter(dsl::protocol.eq(protocol))
             .filter(dsl::tenant.eq(tenant))
             .filter(dsl::external_user_id.eq(external_user_id))
-            .first::<UserMapping>(&mut conn)
-            .optional()?)
+            .first::<UserMappingRow>(&mut conn)
+            .optional()?;
+        row.map(typed_user_mapping).transpose()
     }
 
     /// Reverse lookup for ghost resolution: find the user row by stable Arkret actor identity.
-    pub fn user_by_actor(&self, actor_id: &str) -> Result<Option<UserMapping>> {
+    pub fn user_by_actor(&self, actor_id: &DidCoreId) -> Result<Option<UserMapping>> {
         use schema::user_mappings::dsl;
 
         let mut conn = self.db.conn()?;
-        Ok(dsl::user_mappings
-            .filter(dsl::arkret_actor_id.eq(actor_id))
-            .first::<UserMapping>(&mut conn)
-            .optional()?)
+        let row = dsl::user_mappings
+            .filter(dsl::arkret_actor_id.eq(actor_id.as_str()))
+            .first::<UserMappingRow>(&mut conn)
+            .optional()?;
+        row.map(typed_user_mapping).transpose()
     }
 
     /// Reverse lookup for portal resolution: find the channel mapping by arkret
@@ -826,7 +828,7 @@ impl MessageStore {
 
     pub async fn user_by_actor_async(
         self: Arc<Self>,
-        actor_id: String,
+        actor_id: DidCoreId,
     ) -> Result<Option<UserMapping>> {
         run_blocking(move || self.user_by_actor(&actor_id)).await
     }
@@ -897,6 +899,52 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("{\"event\":\"first\"}")
+        );
+    }
+
+    #[test]
+    fn user_mapping_validates_persisted_identity_columns() {
+        let store = sqlite_store("user-identity-validation").unwrap();
+        let actor_id = DidCoreId::new("ak:did_core:web:ghost.example").unwrap();
+        let actor_did = Did::new("did:web:ghost.example").unwrap();
+        store
+            .upsert_user(
+                "test",
+                "tenant",
+                "external-valid",
+                &actor_id,
+                &actor_did,
+                "ak:event:AcuTkvesoi9I-a82lRObr46_TuorpNOfeSLt8XCCajYY",
+                "ak:event:AfF-hFqRoMbajXkPapH-xaq0xwK-UKt2ph2zTs9JZRAO",
+                "ak:event:ARabC48NfMhqcg2oBgyd7Gc3C5zvXU9k1Qe6wPiJtLSo",
+                None,
+            )
+            .unwrap();
+
+        let mapping = store
+            .ghost_actor_for_app_user("test", "tenant", "external-valid")
+            .unwrap()
+            .expect("mapping");
+        assert_eq!(mapping.arkret_actor_id, actor_id);
+        assert_eq!(mapping.arkret_actor_did, actor_did);
+
+        let mut conn = store.db.conn().unwrap();
+        diesel::sql_query(
+            "INSERT INTO user_mappings \
+             (protocol, tenant, external_user_id, arkret_actor_id, arkret_actor_did, \
+              profile_event_ref, accountability_grant_ref, authorization_ref, created_at) \
+             VALUES ('test', 'tenant', 'external-invalid', 'did:web:not-core.example', \
+              'did:web:invalid-row.example', 'profile', 'grant', 'authorization', 0)",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        drop(conn);
+
+        assert!(
+            store
+                .ghost_actor_for_app_user("test", "tenant", "external-invalid")
+                .is_err(),
+            "invalid persisted DidCoreId must surface as a storage error"
         );
     }
 
@@ -983,9 +1031,17 @@ pub(crate) struct MessageResolver {
 
 impl AppletResolver for MessageResolver {
     fn resolve_actor(&self, actor_id: &str) -> Option<ResolvedActor> {
-        let row = self.store.user_by_actor(actor_id).ok().flatten()?;
+        let actor_id = DidCoreId::new(actor_id).ok()?;
+        let row = match self.store.user_by_actor(&actor_id) {
+            Ok(Some(row)) => row,
+            Ok(None) => return None,
+            Err(_) => {
+                tracing::error!("persisted messaging user mapping failed identity validation");
+                return None;
+            }
+        };
         Some(ResolvedActor {
-            actor_id: DidCoreId::new(row.arkret_actor_id).ok()?,
+            actor_id: row.arkret_actor_id,
             display_name: row.display_name,
             external_ref: Some(arkret::ExternalRef {
                 protocol: row.protocol,
@@ -1015,4 +1071,8 @@ impl AppletResolver for MessageResolver {
             }),
         })
     }
+}
+
+fn typed_user_mapping(row: UserMappingRow) -> Result<UserMapping> {
+    Ok(row.try_into()?)
 }

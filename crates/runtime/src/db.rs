@@ -124,18 +124,18 @@ fn normalize_url(url: &str) -> String {
 mod idempotency_schema {
     diesel::table! {
         /// Transaction-level idempotency records, keyed by
-        /// `(operation_id, direction, source_service_id, destination_service_id, Idempotency-Key)`.
+        /// `(operation_id, direction, source_id, destination_id, Idempotency-Key)`.
         transaction_idempotency (
             operation_id,
             direction,
-            source_service_id,
-            destination_service_id,
+            source_id,
+            destination_id,
             idempotency_key
         ) {
             operation_id -> Text,
             direction -> Text,
-            source_service_id -> Text,
-            destination_service_id -> Text,
+            source_id -> Text,
+            destination_id -> Text,
             idempotency_key -> Text,
             body_hash -> Text,
             delivery_authentication_record_digest -> Text,
@@ -242,8 +242,8 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
             let row = dsl::transaction_idempotency
                 .filter(dsl::operation_id.eq(&replay.operation_id))
                 .filter(dsl::direction.eq(replay.direction.as_str()))
-                .filter(dsl::source_service_id.eq(replay.source_id.as_str()))
-                .filter(dsl::destination_service_id.eq(replay.destination_id.as_str()))
+                .filter(dsl::source_id.eq(replay.source_id.as_str()))
+                .filter(dsl::destination_id.eq(replay.destination_id.as_str()))
                 .filter(dsl::idempotency_key.eq(&replay.idempotency_key))
                 .select((
                     dsl::body_hash,
@@ -283,10 +283,8 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
                             dsl::transaction_idempotency
                                 .filter(dsl::operation_id.eq(&replay.operation_id))
                                 .filter(dsl::direction.eq(replay.direction.as_str()))
-                                .filter(dsl::source_service_id.eq(replay.source_id.as_str()))
-                                .filter(
-                                    dsl::destination_service_id.eq(replay.destination_id.as_str()),
-                                )
+                                .filter(dsl::source_id.eq(replay.source_id.as_str()))
+                                .filter(dsl::destination_id.eq(replay.destination_id.as_str()))
                                 .filter(dsl::idempotency_key.eq(&replay.idempotency_key))
                                 .filter(dsl::status.eq(STATUS_PENDING))
                                 .filter(dsl::created_at.eq(row.created_at)),
@@ -308,8 +306,8 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
                         .values((
                             dsl::operation_id.eq(&replay.operation_id),
                             dsl::direction.eq(replay.direction.as_str()),
-                            dsl::source_service_id.eq(replay.source_id.as_str()),
-                            dsl::destination_service_id.eq(replay.destination_id.as_str()),
+                            dsl::source_id.eq(replay.source_id.as_str()),
+                            dsl::destination_id.eq(replay.destination_id.as_str()),
                             dsl::idempotency_key.eq(&replay.idempotency_key),
                             dsl::body_hash.eq(hash),
                             dsl::delivery_authentication_record_digest
@@ -351,8 +349,8 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
             dsl::transaction_idempotency
                 .filter(dsl::operation_id.eq(&replay.operation_id))
                 .filter(dsl::direction.eq(replay.direction.as_str()))
-                .filter(dsl::source_service_id.eq(replay.source_id.as_str()))
-                .filter(dsl::destination_service_id.eq(replay.destination_id.as_str()))
+                .filter(dsl::source_id.eq(replay.source_id.as_str()))
+                .filter(dsl::destination_id.eq(replay.destination_id.as_str()))
                 .filter(dsl::idempotency_key.eq(&replay.idempotency_key))
                 .filter(dsl::body_hash.eq(hash))
                 .filter(
@@ -382,8 +380,8 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
             dsl::transaction_idempotency
                 .filter(dsl::operation_id.eq(&replay.operation_id))
                 .filter(dsl::direction.eq(replay.direction.as_str()))
-                .filter(dsl::source_service_id.eq(replay.source_id.as_str()))
-                .filter(dsl::destination_service_id.eq(replay.destination_id.as_str()))
+                .filter(dsl::source_id.eq(replay.source_id.as_str()))
+                .filter(dsl::destination_id.eq(replay.destination_id.as_str()))
                 .filter(dsl::idempotency_key.eq(&replay.idempotency_key))
                 .filter(dsl::body_hash.eq(hash))
                 .filter(
@@ -753,11 +751,11 @@ mod tests {
         replay_key_to("ak:did_core:webvh:bridge", idempotency_key)
     }
 
-    fn replay_key_to(destination_service_id: &str, idempotency_key: &str) -> IdempotencyIdentity {
+    fn replay_key_to(destination_id: &str, idempotency_key: &str) -> IdempotencyIdentity {
         IdempotencyIdentity::applet_transaction(
             IdempotencyDirection::NodeToApplet,
             arkret::DidCoreId::new("ak:did_core:webvh:server").unwrap(),
-            arkret::DidCoreId::new(destination_service_id).unwrap(),
+            arkret::DidCoreId::new(destination_id).unwrap(),
             idempotency_key,
         )
     }
@@ -780,7 +778,7 @@ mod tests {
 
         let response = AppletTransactionOutcome {
             status: arkret_models_integration::AppletTransactionStatus::Accepted,
-            rejected: Vec::new(),
+            rejections: Vec::new(),
             retry_after_ms: None,
         };
         store

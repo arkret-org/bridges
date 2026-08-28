@@ -1,8 +1,8 @@
 CREATE TABLE IF NOT EXISTS transaction_idempotency (
     operation_id VARCHAR(96) NOT NULL,
     direction VARCHAR(32) NOT NULL,
-    source_service_id VARCHAR(191) NOT NULL,
-    destination_service_id VARCHAR(191) NOT NULL,
+    source_id VARCHAR(191) NOT NULL,
+    destination_id VARCHAR(191) NOT NULL,
     idempotency_key VARCHAR(191) NOT NULL,
     body_hash TEXT NOT NULL,
     delivery_authentication_record_digest TEXT NOT NULL,
@@ -13,8 +13,8 @@ CREATE TABLE IF NOT EXISTS transaction_idempotency (
     PRIMARY KEY (
         operation_id,
         direction,
-        source_service_id,
-        destination_service_id,
+        source_id,
+        destination_id,
         idempotency_key
     ));
 

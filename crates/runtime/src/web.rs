@@ -382,8 +382,8 @@ async fn record_transaction_outcome(
 }
 
 struct VerifiedAppletHttpRequest {
-    source_service_id: DidCoreId,
-    destination_service_id: DidCoreId,
+    source_id: DidCoreId,
+    destination_id: DidCoreId,
     key_id: String,
     source_key_state_digest: String,
     content_digest: Option<String>,
@@ -528,7 +528,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
     };
 
     let source = body.source_id.clone();
-    if source != verified.source_service_id {
+    if source != verified.source_id {
         record_applet_transaction("unauthorized");
         unauthorized_code(
             res,
@@ -537,7 +537,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         );
         return;
     }
-    let destination = verified.destination_service_id.clone();
+    let destination = verified.destination_id.clone();
     let replay = IdempotencyIdentity::applet_transaction(
         IdempotencyDirection::NodeToApplet,
         source.clone(),
@@ -578,14 +578,14 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
             record_applet_transaction("pending");
             res.render(Json(arkret_models_integration::AppletTransactionOutcome {
                 status: AppletTransactionStatus::Rejected,
-                rejected: Vec::new(),
+                rejections: Vec::new(),
                 retry_after_ms: Some(1000),
             }));
             return;
         }
         Ok(Ok(TransactionClaim::Conflict)) => {
             record_applet_transaction("conflict");
-            // Same (source_service_id, Idempotency-Key) with a different body:
+            // Same (source_id, Idempotency-Key) with a different body:
             // applet-integration §7.3/§14 require the closed error code
             // `duplicate_conflict` (the registry has no `idempotency_conflict`).
             applet_error(
@@ -774,7 +774,7 @@ fn verify_http_applet_request(
         ))
     })?;
     let signer_did = verification_method_did(&key_id_url).map_err(http_signature_invalid)?;
-    if signer_did.as_str() != config.arkret.trusted_server_did {
+    if signer_did.as_str() != config.arkret.trusted_server_did.as_str() {
         return Err(http_signature_invalid(
             "HTTP signature keyid is not owned by the trusted server DID",
         ));
@@ -787,16 +787,12 @@ fn verify_http_applet_request(
             "Source-Service-ID is not a valid service id: {error}"
         ))
     })?;
-    let trusted_server_id = project_did_to_core_id(
-        &Did::new(config.arkret.trusted_server_did.clone()).map_err(|error| {
-            http_signature_invalid(format!("configured trusted server DID is invalid: {error}"))
-        })?,
-    )
-    .map_err(|error| {
-        http_signature_invalid(format!(
-            "configured trusted server DID cannot be projected: {error}"
-        ))
-    })?;
+    let trusted_server_id =
+        project_did_to_core_id(&config.arkret.trusted_server_did).map_err(|error| {
+            http_signature_invalid(format!(
+                "configured trusted server DID cannot be projected: {error}"
+            ))
+        })?;
     if origin != trusted_server_id {
         return Err(http_signature_invalid(
             "HTTP signature source service id is not trusted",
@@ -810,16 +806,12 @@ fn verify_http_applet_request(
             "Destination-Service-ID is not a valid service id: {error}"
         ))
     })?;
-    let bridge_service_id = project_did_to_core_id(
-        &Did::new(config.arkret.service_did.clone()).map_err(|error| {
-            http_signature_invalid(format!("configured bridge service DID is invalid: {error}"))
-        })?,
-    )
-    .map_err(|error| {
-        http_signature_invalid(format!(
-            "configured bridge service DID cannot be projected: {error}"
-        ))
-    })?;
+    let bridge_service_id =
+        project_did_to_core_id(&config.arkret.service_did).map_err(|error| {
+            http_signature_invalid(format!(
+                "configured bridge service DID cannot be projected: {error}"
+            ))
+        })?;
     if destination != bridge_service_id {
         return Err(http_signature_invalid(
             "HTTP signature destination service id does not match this bridge",
@@ -898,8 +890,8 @@ fn verify_http_applet_request(
     let created = verified.signature_input.created;
     let expires = verified.signature_input.expires;
     Ok(VerifiedAppletHttpRequest {
-        source_service_id: origin,
-        destination_service_id: destination,
+        source_id: origin,
+        destination_id: destination,
         key_id,
         source_key_state_digest,
         content_digest,
@@ -953,13 +945,13 @@ fn build_delivery_authentication_record_digest(
         "content_digest": content_digest,
         "covered_components": &verified.covered_components,
         "created": verified.created,
-        "destination_id": &verified.destination_service_id,
+        "destination_id": &verified.destination_id,
         "direction": IdempotencyDirection::NodeToApplet.as_str(),
         "expires": verified.expires,
         "idempotency_key": idempotency_key,
         "operation_id": ServiceOperationId::EDGE_APPLET_COMMAND_TRANSACTION_V1,
         "source_key_state_digest": &verified.source_key_state_digest,
-        "source_id": &verified.source_service_id,
+        "source_id": &verified.source_id,
         "verification_method": &verified.key_id,
     }))
     .map_err(|err| err.to_string())
@@ -1030,7 +1022,7 @@ fn verify_transaction_events(
                 arkret::project_did_to_core_id(&signer_did).map_err(|error| error.to_string())?;
             if &signer_actor_id != expected_signer {
                 return Err(format!(
-                    "event {} proof signer DID does not match actor/executed_by",
+                    "event {} proof signer DID does not match actor_id/executed_by",
                     event.event_id
                 ));
             }
@@ -1048,26 +1040,19 @@ fn verify_transaction_events(
 fn seed_source_service_bindings(authority: &DidAuthority, config: &Config) -> Result<()> {
     let now = Utc::now();
     for method in &config.arkret.trusted_verification_methods {
-        let verification_method =
-            DidUrl::new(method.verification_method.clone()).map_err(|err| {
-                BridgeError::Config(format!(
-                    "arkret.trusted_verification_methods[].verification_method \
-                     `{}` is not a valid DID URL: {err}",
-                    method.verification_method
-                ))
-            })?;
         // Normalize every accepted key form (raw / multibase / JWK) to the
         // multibase representation a DID document publishes, so the pinned
         // document is exactly what the SDK verifier expects to read back.
         let key_bytes = method.public_key.ed25519_bytes().map_err(|err| {
             BridgeError::Config(format!(
-                "arkret.trusted_verification_methods[] key for `{verification_method}` \
-                 is not a usable Ed25519 key: {err}"
+                "arkret.trusted_verification_methods[] key for `{}` \
+                 is not a usable Ed25519 key: {err}",
+                method.verification_method,
             ))
         })?;
         authority
             .accept_configured_source_service_key(
-                &verification_method,
+                &method.verification_method,
                 &arkret::ed25519_pubkey_to_did_key_multibase(&key_bytes),
                 now,
             )

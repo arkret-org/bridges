@@ -153,7 +153,7 @@ impl ArkretEdge {
         seq: Arc<dyn SeqStore>,
         inbound_tx: Sender<Event>,
     ) -> Result<Self> {
-        let service_did = Did::new(config.arkret.service_did.clone())?;
+        let service_did = config.arkret.service_did.clone();
         let seed = config.signing_seed()?;
         // The signer's `kid` MUST be the absolute DID URL
         // `<service_did>#<fragment>`; `verification_method_fragment` is configured as
@@ -192,7 +192,7 @@ impl ArkretEdge {
         signer: Ed25519PayloadSigner,
         seq: SeqAllocator,
     ) -> Result<Self> {
-        let service_did = Did::new(config.arkret.service_did.clone())?;
+        let service_did = config.arkret.service_did.clone();
         let hlc_secret = signer.verifying_key().to_bytes();
         Self::build(config, client, signer, service_did, hlc_secret, seq, None)
     }
@@ -821,7 +821,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
             service_kind,
             vec![describe_bundle],
             vec![TransportBinding::HttpJson {
-                base_uri: self.transport_base_url.clone(),
+                base_url: self.transport_base_url.clone(),
                 extension_profile_required: (),
             }],
         );
@@ -836,7 +836,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
         req: AppletTransactionRequestBody,
     ) -> std::result::Result<AppletTransactionOutcome, WireError> {
         let event_count = req.events.len();
-        let mut rejected: Vec<arkret::RejectedItem> = Vec::new();
+        let mut rejections: Vec<arkret::RejectedItem> = Vec::new();
         let mut enqueue_failed = false;
         // Set when the bounded inbound queue is full: we ask the server to retry
         // the whole batch shortly (backpressure) rather than buffering without
@@ -851,7 +851,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
             // redeliver, instead of growing memory without bound. Events skipped
             // here were never dedup-recorded, so the redelivery is clean.
             if queue_full {
-                rejected.push(arkret::RejectedItem {
+                rejections.push(arkret::RejectedItem {
                     event_id: Some(event.event_id.clone()),
                     reason_code: arkret_wire::ReasonCode::from_wire(
                         arkret_wire::ReasonCode::QUEUE_FULL,
@@ -871,7 +871,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
                     realm = %event.realm_id,
                     "rejecting event: realm is outside this applet's declared namespace"
                 );
-                rejected.push(arkret::RejectedItem {
+                rejections.push(arkret::RejectedItem {
                     event_id: Some(event.event_id.clone()),
                     reason_code: arkret_wire::ReasonCode::from_wire(
                         arkret_wire::ReasonCode::APPLET_NAMESPACE_MISMATCH,
@@ -892,7 +892,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
                     kind = %event.kind,
                     "rejecting event: kind is not in this applet's declared capability set"
                 );
-                rejected.push(arkret::RejectedItem {
+                rejections.push(arkret::RejectedItem {
                     event_id: Some(event.event_id.clone()),
                     reason_code: arkret_wire::ReasonCode::from_wire(
                         arkret_wire::ErrorCode::CAPABILITY_DENIED,
@@ -911,7 +911,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
                 Ok(permit) => permit,
                 Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {
                     queue_full = true;
-                    rejected.push(arkret::RejectedItem {
+                    rejections.push(arkret::RejectedItem {
                         event_id: Some(event.event_id.clone()),
                         reason_code: arkret_wire::ReasonCode::from_wire(
                             arkret_wire::ReasonCode::QUEUE_FULL,
@@ -923,7 +923,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
                     enqueue_failed = true;
                     tracing::error!(%event_id, "failed to enqueue inbound event: consumer gone");
-                    rejected.push(arkret::RejectedItem {
+                    rejections.push(arkret::RejectedItem {
                         event_id: Some(event.event_id.clone()),
                         reason_code: arkret_wire::ReasonCode::from_wire(
                             arkret_wire::ReasonCode::INTERNAL_ERROR,
@@ -958,7 +958,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
                         %event_id,
                         "rejecting event: same event_id pushed with conflicting content"
                     );
-                    rejected.push(arkret::RejectedItem {
+                    rejections.push(arkret::RejectedItem {
                         event_id: Some(event.event_id.clone()),
                         reason_code: arkret_wire::ReasonCode::from_wire(
                             arkret_wire::ReasonCode::DUPLICATE_CONFLICT,
@@ -970,7 +970,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
                 Err(err) => {
                     enqueue_failed = true;
                     tracing::error!(%event_id, error = %err, "event dedup store failed");
-                    rejected.push(arkret::RejectedItem {
+                    rejections.push(arkret::RejectedItem {
                         event_id: Some(event.event_id.clone()),
                         reason_code: arkret_wire::ReasonCode::from_wire(
                             arkret_wire::ReasonCode::INTERNAL_ERROR,
@@ -1008,14 +1008,14 @@ impl arkret::AppletHandler for BridgeAppletHandler {
         // events rather than dropping the batch.
         let retry_after_ms = (enqueue_failed || queue_full).then_some(INBOUND_QUEUE_FULL_RETRY_MS);
         Ok(AppletTransactionOutcome {
-            status: if rejected.is_empty() {
+            status: if rejections.is_empty() {
                 arkret_models_integration::AppletTransactionStatus::Accepted
-            } else if rejected.len() == event_count {
+            } else if rejections.len() == event_count {
                 arkret_models_integration::AppletTransactionStatus::Rejected
             } else {
                 arkret_models_integration::AppletTransactionStatus::Partial
             },
-            rejected,
+            rejections,
             retry_after_ms,
         })
     }

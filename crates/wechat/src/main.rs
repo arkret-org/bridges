@@ -8,16 +8,14 @@ use serde::Deserialize;
 
 use crate::wechat::WechatApp;
 
-/// WeChat Work uses `corp_id`/`corp_secret`; Official Accounts use
-/// `app_id`/`app_secret`. Both spellings are accepted (serde aliases) and
-/// passed to the adapter as a unified "credential id"/secret.
+/// WeChat Work and Official Accounts both use the bridge-owned canonical
+/// `credential_id` / `credential_secret` configuration fields. The adapter
+/// maps them to the external API parameter names selected by `agent_id`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AppConfig {
-    #[serde(alias = "app_id")]
-    corp_id: String,
-    #[serde(alias = "app_secret")]
-    corp_secret: String,
+    credential_id: String,
+    credential_secret: String,
     /// WeChat Work requires agent_id to send app messages (Official Account
     /// customer-service messages do not).
     agent_id: Option<i64>,
@@ -46,8 +44,8 @@ async fn main() -> anyhow::Result<()> {
             ));
         }
         WechatApp::new(
-            app.corp_id,
-            app.corp_secret,
+            app.credential_id,
+            app.credential_secret,
             app.agent_id,
             app.webhook_token,
             app.encoding_aes_key,

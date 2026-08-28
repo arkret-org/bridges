@@ -22,15 +22,15 @@ Rust 实现的 **arkret ⇄ 微信(企业微信 / 公众号)** 桥接。基于�
 
 ```bash
 cp config/config.sample.yaml config.yaml
-# 填入 arkret.access_token / signing_key_seed_hex 与 app.corp_id / corp_secret / agent_id
+# 填入 arkret.access_token / signing_key_seed_hex 与 app.credential_id / credential_secret / agent_id
 cargo run -p arkret-bridge-wechat -- --config config.yaml
 ```
 
 ## 配置要点
 
 - `arkret.*`:arkret 接入(server_url、service_did、applet_id、access_token、签名种子)。
-- `app.corp_id` / `app.corp_secret` / `app.agent_id`:企业微信应用凭证;
-  公众号场景改填 `app.app_id` / `app.app_secret`。
+- `app.credential_id` / `app.credential_secret` / `app.agent_id`:企业微信应用凭证;
+  公众号场景使用同一组 canonical 配置字段，并省略 `agent_id`。
 - `app.webhook_token`:微信回调 Token,必填;GET/POST 均校验 plaintext `signature`。
 - `database.url`:`sqlite://...` / `postgres://...`(对应 feature)。
 
