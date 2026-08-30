@@ -151,7 +151,7 @@ async fn process_message(bot: &Bot, ctx: &Arc<MessageContext>, token: &str, msg:
 
     if let Some((file_id, filename, mime)) = telegram_media(&msg) {
         let _ = forward_media(
-            bot, &ctx, token, &channel, &user, &msg, file_id, filename, mime,
+            bot, ctx, token, &channel, &user, &msg, file_id, filename, mime,
         )
         .await;
     }

@@ -16,20 +16,20 @@ default = ["sqlite"]
 sqlite = ["arkret-bridge-messaging/sqlite"]
 postgres = ["arkret-bridge-messaging/postgres"]
 
-[lints]
-workspace = true
-
 [dependencies]
-anyhow = {workspace = true}
-async-trait = {workspace = true}
-arkret-bridge-messaging = {workspace = true,default-features = false}
-serde = {workspace = true}
-serenity = {workspace = true,default-features = false,features = [
+anyhow = { workspace = true }
+arkret-bridge-messaging = { workspace = true, default-features = false }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serenity = { workspace = true, default-features = false, features = [
     "client",
     "gateway",
     "rustls_backend",
     "model",
     "cache",
-]}
-tokio = {workspace = true}
-tracing = {workspace = true}
+] }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

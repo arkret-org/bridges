@@ -12,40 +12,40 @@ default = ["sqlite"]
 sqlite = ["arkret-bridge-runtime/runtime", "arkret-bridge-runtime/sqlite"]
 postgres = ["arkret-bridge-runtime/runtime", "arkret-bridge-runtime/postgres"]
 
+[dependencies]
+aes = { workspace = true }
+anyhow = { workspace = true }
+arkret = { workspace = true }
+arkret-bridge-runtime = { workspace = true, default-features = false }
+arkret-egress-reqwest = { workspace = true }
+arkret-event-draft = { workspace = true }
+arkret-models-collaboration = { workspace = true }
+arkret-models-integration = { workspace = true }
+arkret-wire = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+cbc = { workspace = true }
+chacha20poly1305 = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+diesel = { workspace = true }
+diesel_migrations = { workspace = true }
+ed25519-dalek = { workspace = true }
+futures = { workspace = true }
+getrandom = { workspace = true }
+hex = { workspace = true }
+hmac = { workspace = true }
+jsonwebtoken = { workspace = true }
+reqwest = { workspace = true }
+salvo = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+
 [lints]
 workspace = true
-
-[dependencies]
-aes = {workspace = true}
-anyhow = {workspace = true}
-async-trait = {workspace = true}
-base64 = {workspace = true}
-cbc = {workspace = true}
-chrono = {workspace = true}
-chacha20poly1305 = {workspace = true}
-clap = {workspace = true}
-arkret = {workspace = true}
-arkret-event-draft = {workspace = true}
-arkret-egress-reqwest = {workspace = true}
-arkret-models-collaboration = {workspace = true}
-arkret-models-integration = {workspace = true}
-arkret-wire = {workspace = true}
-arkret-bridge-runtime = {workspace = true,default-features = false}
-diesel = {workspace = true}
-diesel_migrations = {workspace = true}
-futures = {workspace = true}
-getrandom = {workspace = true}
-hex = {workspace = true}
-hmac = {workspace = true}
-jsonwebtoken = {workspace = true}
-reqwest = {workspace = true}
-salvo = {workspace = true}
-serde = {workspace = true}
-serde_json = {workspace = true}
-ed25519-dalek = {workspace = true}
-sha1 = {workspace = true}
-sha2 = {workspace = true}
-subtle = {workspace = true}
-tokio = {workspace = true}
-tracing = {workspace = true}
-url = {workspace = true}

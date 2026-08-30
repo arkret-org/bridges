@@ -300,53 +300,6 @@ fn validate_ghost_provision_response(
     Ok(response)
 }
 
-#[cfg(test)]
-mod provider_tests {
-    use super::*;
-
-    struct RejectingProvider;
-
-    #[async_trait::async_trait]
-    impl GhostProvisionRequestProvider for RejectingProvider {
-        async fn author_request(
-            &self,
-            _request: &GhostProvisionAuthoringRequest,
-        ) -> Result<GhostActorProvisionRequestBody> {
-            Err(BridgeError::Config("fixture provider invoked".to_owned()))
-        }
-    }
-
-    #[test]
-    fn missing_authoring_provider_fails_closed() {
-        assert!(require_ghost_provision_provider(None).is_err());
-    }
-
-    #[tokio::test]
-    async fn installed_authoring_provider_is_the_only_request_source() {
-        let provider: Arc<dyn GhostProvisionRequestProvider> = Arc::new(RejectingProvider);
-        let selected = require_ghost_provision_provider(Some(&provider)).unwrap();
-        let request = GhostProvisionAuthoringRequest {
-            applet_id: AppletId::new("ak:applet:01904100-0000-7000-8000-000000000001".to_owned())
-                .unwrap(),
-            service_id: DidCoreId::new("ak:did_core:webvh:z6mkservice").unwrap(),
-            actor_principal_server_id: DidCoreId::new("ak:did_core:webvh:z6mkserver").unwrap(),
-            realm_id: RealmId::new(
-                "ak:realm:AdkQ-RmB1a8zyc52yl9GWAsodQ_EUle1WAVZqbO7pc19".to_owned(),
-            )
-            .unwrap(),
-            external_ref: GhostExternalTuple {
-                protocol: "fixture".to_owned(),
-                instance_id: "tenant-1".to_owned(),
-                external_id: "user-1".to_owned(),
-            },
-            display_name: None,
-        };
-
-        let error = selected.author_request(&request).await.unwrap_err();
-        assert!(error.to_string().contains("fixture provider invoked"));
-    }
-}
-
 pub(crate) fn require_nonempty_ref(label: &str, value: &str) -> Result<()> {
     if value.trim().is_empty() {
         return Err(BridgeError::Arkret(format!(
@@ -592,4 +545,51 @@ pub(crate) async fn create_portal_strand(
     edge.submit_event(&event).await?;
     // The Strand is named by `retype(event_id)` of its own accepted create.
     Ok(StrandId::from_event_id(event.event_id()).to_string())
+}
+
+#[cfg(test)]
+mod provider_tests {
+    use super::*;
+
+    struct RejectingProvider;
+
+    #[async_trait::async_trait]
+    impl GhostProvisionRequestProvider for RejectingProvider {
+        async fn author_request(
+            &self,
+            _request: &GhostProvisionAuthoringRequest,
+        ) -> Result<GhostActorProvisionRequestBody> {
+            Err(BridgeError::Config("fixture provider invoked".to_owned()))
+        }
+    }
+
+    #[test]
+    fn missing_authoring_provider_fails_closed() {
+        assert!(require_ghost_provision_provider(None).is_err());
+    }
+
+    #[tokio::test]
+    async fn installed_authoring_provider_is_the_only_request_source() {
+        let provider: Arc<dyn GhostProvisionRequestProvider> = Arc::new(RejectingProvider);
+        let selected = require_ghost_provision_provider(Some(&provider)).unwrap();
+        let request = GhostProvisionAuthoringRequest {
+            applet_id: AppletId::new("ak:applet:01904100-0000-7000-8000-000000000001".to_owned())
+                .unwrap(),
+            service_id: DidCoreId::new("ak:did_core:webvh:z6mkservice").unwrap(),
+            actor_principal_server_id: DidCoreId::new("ak:did_core:webvh:z6mkserver").unwrap(),
+            realm_id: RealmId::new(
+                "ak:realm:AdkQ-RmB1a8zyc52yl9GWAsodQ_EUle1WAVZqbO7pc19".to_owned(),
+            )
+            .unwrap(),
+            external_ref: GhostExternalTuple {
+                protocol: "fixture".to_owned(),
+                instance_id: "tenant-1".to_owned(),
+                external_id: "user-1".to_owned(),
+            },
+            display_name: None,
+        };
+
+        let error = selected.author_request(&request).await.unwrap_err();
+        assert!(error.to_string().contains("fixture provider invoked"));
+    }
 }

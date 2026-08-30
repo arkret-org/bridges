@@ -24,57 +24,56 @@ unimplemented = "deny"
 # Applet bridge runtime and chat/social helper layer.
 aes = "0.8"
 anyhow = "1.0"
-async-trait = "0.1"
-base64 = "0.22"
-cbc = {version = "0.1",features = ["block-padding"]}
-chrono = {version = "0.4",features = ["serde"]}
-chacha20poly1305 = "0.10"
-clap = {version = "4.6",features = ["string"]}
-arkret = {version = "0.3.0",path = "../arkret-rust-sdk/crates/sdk",default-features = false,features = [
+arkret = { version = "0.3.0", path = "../arkret-rust-sdk/crates/sdk", default-features = false, features = [
     "client",
     "server",
     "signer",
-]}
-arkret-event-draft = {version = "0.3.0",path = "../arkret-rust-sdk/crates/event-draft",default-features = false}
-arkret-egress-reqwest = {version = "0.3.0",path = "../arkret-rust-sdk/crates/egress-reqwest"}
-arkret-models-collaboration = {version = "0.3.0",path = "../arkret-rust-sdk/crates/models-collaboration",default-features = false}
-arkret-models-discovery = {version = "0.3.0",path = "../arkret-rust-sdk/crates/models-discovery",default-features = false}
-arkret-models-integration = {version = "0.3.0",path = "../arkret-rust-sdk/crates/models-integration",default-features = false}
-arkret-retry = {version = "0.3.0",path = "../arkret-rust-sdk/crates/retry",default-features = false}
-arkret-wire = {version = "0.3.0",path = "../arkret-rust-sdk/crates/wire",default-features = false}
-arkret-bridge-messaging = {path = "crates/messaging",default-features = false}
-arkret-bridge-runtime = {path = "crates/runtime",default-features = false}
-diesel = {version = "2.3",default-features = false,features = ["r2d2", "chrono"]}
+] }
+arkret-bridge-messaging = { path = "crates/messaging", default-features = false }
+arkret-bridge-runtime = { path = "crates/runtime", default-features = false }
+arkret-egress-reqwest = { version = "0.3.0", path = "../arkret-rust-sdk/crates/egress-reqwest" }
+arkret-event-draft = { version = "0.3.0", path = "../arkret-rust-sdk/crates/event-draft", default-features = false }
+arkret-models-collaboration = { version = "0.3.0", path = "../arkret-rust-sdk/crates/models-collaboration", default-features = false }
+arkret-models-discovery = { version = "0.3.0", path = "../arkret-rust-sdk/crates/models-discovery", default-features = false }
+arkret-models-integration = { version = "0.3.0", path = "../arkret-rust-sdk/crates/models-integration", default-features = false }
+arkret-retry = { version = "0.3.0", path = "../arkret-rust-sdk/crates/retry", default-features = false }
+arkret-wire = { version = "0.3.0", path = "../arkret-rust-sdk/crates/wire", default-features = false }
+async-trait = "0.1"
+base64 = "0.22"
+cbc = { version = "0.1", features = ["block-padding"] }
+chacha20poly1305 = "0.10"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.6", features = ["string"] }
+diesel = { version = "2.3", default-features = false, features = ["r2d2", "chrono"] }
 diesel_migrations = "2.3"
+ed25519-dalek = "2.2"
 futures = "0.3"
 getrandom = "0.3"
 hex = "0.4"
 hmac = "0.13"
-jsonwebtoken = {version = "10.4",features = ["rust_crypto"]}
+jsonwebtoken = { version = "10.4", features = ["rust_crypto"] }
 libsqlite3-sys = "0.35"
 metrics = "0.24"
-metrics-exporter-prometheus = {version = "0.18.3",default-features = false}
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 parking_lot = "0.12"
-quick-xml = {version = "0.40",features = ["serialize"]}
-reqwest = {version = "0.13",default-features = false,features = ["form", "json", "rustls-no-provider", "stream"]}
-rustls = {version = "0.23",default-features = false,features = ["ring", "std"]}
-salvo = {version = "=0.96.0",default-features = false,features = ["fix-http1-request-uri", "server", "server-handle", "http1", "http2", "oapi", "rfc9457", "affix-state", "rate-limiter"]}
-serde = {version = "1.0",features = ["derive"]}
+quick-xml = { version = "0.40", features = ["serialize"] }
+reqwest = { version = "0.13", default-features = false, features = ["form", "json", "rustls-no-provider", "stream"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+salvo = { version = "=0.96.0", default-features = false, features = ["fix-http1-request-uri", "server", "server-handle", "http1", "http2", "oapi", "rfc9457", "affix-state", "rate-limiter"] }
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml_ng = "0.10.0"
-ed25519-dalek = "2.2"
-serenity = {version = "0.12",default-features = false}
+serenity = { version = "0.12", default-features = false }
 sha1 = "0.11"
 sha2 = "0.11"
 subtle = "2.6"
-teloxide-core = {version = "0.13",default-features = false}
+teloxide-core = { version = "0.13", default-features = false }
 thiserror = "2.0"
-tokio = {version = "1.52",default-features = false,features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"]}
-tokio-tungstenite = {version = "0.29",default-features = false}
+tokio = { version = "1.52", default-features = false, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite = { version = "0.29", default-features = false }
 tracing = "0.1"
-tracing-subscriber = {version = "0.3",features = ["env-filter", "json"]}
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = "2.5"
-
 
 [profile.release]
 lto = "thin"

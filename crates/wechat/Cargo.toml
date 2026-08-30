@@ -16,20 +16,20 @@ default = ["sqlite"]
 sqlite = ["arkret-bridge-messaging/sqlite"]
 postgres = ["arkret-bridge-messaging/postgres"]
 
-[lints]
-workspace = true
-
 [dependencies]
-anyhow = {workspace = true}
-async-trait = {workspace = true}
-arkret-bridge-messaging = {workspace = true,default-features = false}
-quick-xml = {workspace = true}
-serde = {workspace = true}
-serde_json = {workspace = true}
-tokio = {workspace = true}
-tracing = {workspace = true}
+anyhow = { workspace = true }
+arkret-bridge-messaging = { workspace = true, default-features = false }
+async-trait = { workspace = true }
+quick-xml = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
-aes = {workspace = true}
-base64 = {workspace = true}
-cbc = {workspace = true}
+aes = { workspace = true }
+base64 = { workspace = true }
+cbc = { workspace = true }
+
+[lints]
+workspace = true

@@ -7,6 +7,11 @@ authors.workspace = true
 license.workspace = true
 description = "Applet bridge runtime for Arkret integrations: protocol-side event submission, applet routes, database pool, configuration, salvo web, queue/cache, and logging."
 
+# This feature-only dependency selects bundled SQLite and has no direct Rust
+# symbol references for cargo-machete to discover.
+[package.metadata.cargo-machete]
+ignored = ["libsqlite3-sys"]
+
 [features]
 default  = ["full", "sqlite"]
 full     = ["db", "web", "runtime"]
@@ -27,41 +32,41 @@ postgres = ["db", "diesel/postgres"]
 web      = ["dep:metrics", "dep:metrics-exporter-prometheus", "dep:salvo"]
 runtime  = ["db", "web"]
 
-[lints]
-workspace = true
-
 [dependencies]
-anyhow = {workspace = true}
-async-trait = {workspace = true}
-chrono = {workspace = true}
-arkret = {workspace = true}
-arkret-event-draft = {workspace = true}
-arkret-models-collaboration = {workspace = true}
-arkret-models-discovery = {workspace = true}
-arkret-models-integration = {workspace = true}
-arkret-retry = {workspace = true}
-arkret-wire = {workspace = true}
-diesel = {workspace = true,optional = true}
-diesel_migrations = {workspace = true,optional = true}
-hex = {workspace = true}
-libsqlite3-sys = {workspace = true,features = ["bundled"],optional = true}
-metrics = {workspace = true,optional = true}
-metrics-exporter-prometheus = {workspace = true,optional = true}
-parking_lot = {workspace = true}
-reqwest = {workspace = true}
-rustls = {workspace = true}
-salvo = {workspace = true,optional = true}
-serde = {workspace = true}
-serde_json = {workspace = true}
-serde_yaml_ng = {workspace = true}
-thiserror = {workspace = true}
-tokio = {workspace = true}
-tracing = {workspace = true}
-tracing-subscriber = {workspace = true}
-url = {workspace = true}
+anyhow = { workspace = true }
+arkret = { workspace = true }
+arkret-event-draft = { workspace = true }
+arkret-models-collaboration = { workspace = true }
+arkret-models-discovery = { workspace = true }
+arkret-models-integration = { workspace = true }
+arkret-retry = { workspace = true }
+arkret-wire = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+diesel = { workspace = true, optional = true }
+diesel_migrations = { workspace = true, optional = true }
+hex = { workspace = true }
+libsqlite3-sys = { workspace = true, features = ["bundled"], optional = true }
+metrics = { workspace = true, optional = true }
+metrics-exporter-prometheus = { workspace = true, optional = true }
+parking_lot = { workspace = true }
+reqwest = { workspace = true }
+rustls = { workspace = true }
+salvo = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml_ng = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
-arkret-wire = {workspace = true,features = ["test-support"]}
+arkret-wire = { workspace = true, features = ["test-support"] }
 # `test` adds salvo's in-process `TestClient`, used by the web.rs admin-plane
 # trigger-path tests. Dev-only: production builds keep the lean feature set.
-salvo = {workspace = true,features = ["test"]}
+salvo = { workspace = true, features = ["test"] }
+
+[lints]
+workspace = true
