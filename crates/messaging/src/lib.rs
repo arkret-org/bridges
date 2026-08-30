@@ -25,9 +25,7 @@ pub mod webhook;
 use std::sync::Arc;
 use std::time::Duration;
 
-use arkret::{
-    AppletId, ContentBlock, DidCoreId, Event, EventKind, MessageId, MessageRedactPayload, RealmId,
-};
+use arkret::{AppletId, ContentBlock, Event, EventKind, MessageId, MessageRedactPayload, RealmId};
 pub use arkret_bridge_runtime as runtime;
 use arkret_bridge_runtime::app::{BridgeApp, BridgeContext};
 use arkret_bridge_runtime::db::{DbReplayGuardStore, DbTokenStore};
@@ -314,7 +312,7 @@ impl MessageContext {
         let builder = AppletBridgeErrorBuilder::new(
             realm.clone(),
             AppletId::new(edge.applet_id().to_owned())?,
-            edge.service_actor_id().clone(),
+            arkret::ActorId::service(edge.service_actor_id().clone()),
             failed_ref,
             bridge_error_class(error),
             bridge_error_code(error),
@@ -407,7 +405,7 @@ impl MessageContext {
         let builder = AppletBridgeErrorBuilder::new(
             realm.clone(),
             AppletId::new(edge.applet_id().to_owned())?,
-            edge.service_actor_id().clone(),
+            arkret::ActorId::service(edge.service_actor_id().clone()),
             failed_event_id.to_owned(),
             bridge_error_class(error),
             bridge_error_code(error),
@@ -703,7 +701,11 @@ impl MessageContext {
                                     protocol.clone(),
                                     tenant.clone(),
                                     external_actor_id.clone(),
-                                    provisioned.outcome.ghost_actor_id.clone(),
+                                    provisioned
+                                        .outcome
+                                        .ghost_actor_id
+                                        .signing_principal_id()
+                                        .clone(),
                                     provisioned.did.clone(),
                                     provisioned.outcome.profile_event_ref.to_string(),
                                     provisioned.outcome.accountability_grant_ref.to_string(),
@@ -866,7 +868,11 @@ impl MessageContext {
                                     protocol.clone(),
                                     tenant.clone(),
                                     external_user_id.clone(),
-                                    provisioned.outcome.ghost_actor_id.clone(),
+                                    provisioned
+                                        .outcome
+                                        .ghost_actor_id
+                                        .signing_principal_id()
+                                        .clone(),
                                     provisioned.did.clone(),
                                     provisioned.outcome.profile_event_ref.to_string(),
                                     provisioned.outcome.accountability_grant_ref.to_string(),
@@ -1125,11 +1131,14 @@ impl<M: MessageBridge> MessageAdapter<M> {
 
 async fn sender_display_for_event(
     store: Arc<MessageStore>,
-    actor_id: DidCoreId,
-    executed_by: Option<DidCoreId>,
+    actor_id: arkret::ActorId,
+    executed_by: Option<arkret::ActorId>,
 ) -> Result<String> {
     let actor_id_text = actor_id.to_string();
-    let mut display = match store.user_by_actor_async(actor_id.clone()).await? {
+    let mut display = match store
+        .user_by_actor_async(actor_id.signing_principal_id().clone())
+        .await?
+    {
         Some(row) => row
             .display_name
             .filter(|name| !name.trim().is_empty())
@@ -1202,10 +1211,12 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
         // actor events are authored by the service DID itself.
         // Both checks are independent of local DB state, so a server push
         // racing ahead of our own mapping write cannot bypass them.
-        if event.executed_by.as_ref() == Some(self.ctx.core().edge.service_actor_id()) {
+        let service_actor =
+            arkret::ActorId::service(self.ctx.core().edge.service_actor_id().clone());
+        if event.executed_by.as_ref() == Some(&service_actor) {
             return Ok(());
         }
-        if &event.actor_id == self.ctx.core().edge.service_actor_id() {
+        if event.actor_id == service_actor {
             return Ok(());
         }
         let event_id = event.event_id.to_string();

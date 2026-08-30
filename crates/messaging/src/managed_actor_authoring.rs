@@ -526,7 +526,7 @@ impl ManagedActorAuthoringService {
         let service_id = basis.service_id.clone();
         let frontier_selector = arkret::EventsFrontierSelector::RealmActor {
             realm_id: realm_id.clone(),
-            actor_id: service_id.clone(),
+            actor_id: arkret::ActorId::service(service_id.clone()),
         };
         let frontier = self
             .edge

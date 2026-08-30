@@ -273,7 +273,7 @@ fn validate_authored_ghost_request(
     if payload.actor_role != AppletManagedActorRole::Ghost
         || payload.applet_id != basis.applet_id
         || payload.service_id != basis.service_id
-        || payload.actor_station_id != basis.target_station_id
+        || payload.actor_id.route_service_id() != &basis.target_station_id
         || payload.registration_ref != basis.registration_event_ref
         || payload.applet_authority_ref != basis.authorization_ref
         || payload.external_ref.as_ref() != Some(&basis.external_ref)
@@ -289,7 +289,7 @@ fn validate_ghost_provision_response(
     requested_actor: &arkret::DidCoreId,
     response: GhostActorProvisionOutcome,
 ) -> Result<GhostActorProvisionOutcome> {
-    if &response.ghost_actor_id != requested_actor {
+    if response.ghost_actor_id.signing_principal_id() != requested_actor {
         return Err(BridgeError::Arkret(format!(
             "ghost provisioning returned actor {} but requested {}",
             response.ghost_actor_id, requested_actor
@@ -508,7 +508,11 @@ pub(crate) async fn create_portal_strand(
     let title = alias
         .filter(|alias| !alias.trim().is_empty())
         .unwrap_or(app_channel);
-    let mut strand = Strand::new_create(realm.clone(), title, edge.service_actor_id().clone());
+    let mut strand = Strand::new_create(
+        realm.clone(),
+        title,
+        arkret::ActorId::service(edge.service_actor_id().clone()),
+    );
     strand
         .metadata
         .get_or_insert_default()
