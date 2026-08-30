@@ -1020,7 +1020,7 @@ fn verify_transaction_events(
             let signer_did = verification_method_did(&proof.verification_method)?;
             let signer_actor_id =
                 arkret::project_did_to_core_id(&signer_did).map_err(|error| error.to_string())?;
-            if &signer_actor_id != expected_signer {
+            if &signer_actor_id != expected_signer.signing_principal_id() {
                 return Err(format!(
                     "event {} proof signer DID does not match actor_id/executed_by",
                     event.event_id
@@ -1389,7 +1389,7 @@ mod tests {
         let foreign = Did::new("did:webvh:z6mkmallory:mallory.example".to_owned()).expect("did");
         let foreign_method = DidUrl::new(format!("{foreign}#key-1")).expect("did url");
         let mut event = signed_event(&foreign, &foreign_method, 42, 1);
-        event.actor_id = actor_id(&actor_did());
+        event.actor_id = arkret::ActorId::service(actor_id(&actor_did()));
 
         let err = verify_transaction_events(&transaction(vec![event]))
             .expect_err("signer/actor mismatch must be rejected");

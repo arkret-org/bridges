@@ -53,7 +53,7 @@ pub(crate) struct ManagedActorAuthoringService {
     config: Arc<runtime::Config>,
     principal_endpoint: url::Url,
     key_encryption_key: [u8; 32],
-    expected_principal_server_id: DidCoreId,
+    expected_station_id: DidCoreId,
 }
 
 impl ManagedActorAuthoringService {
@@ -70,15 +70,14 @@ impl ManagedActorAuthoringService {
                     .to_owned(),
             ));
         }
-        let expected_principal_server_id =
-            project_did_to_core_id(&config.arkret.trusted_server_did)?;
+        let expected_station_id = project_did_to_core_id(&config.arkret.trusted_server_did)?;
         Ok(Self {
             edge,
             store,
             config,
             principal_endpoint,
             key_encryption_key,
-            expected_principal_server_id,
+            expected_station_id,
         })
     }
 
@@ -232,7 +231,7 @@ impl ManagedActorAuthoringService {
         let configured_applet_id = AppletId::new(self.config.arkret.applet_id.clone())?;
         if basis.applet_id != configured_applet_id
             || basis.service_id != *self.edge.service_actor_id()
-            || basis.target_principal_server_id != self.expected_principal_server_id
+            || basis.target_station_id != self.expected_station_id
             || request.purpose != AppletManagedActorPurpose::ProvisionGhost
         {
             return Err(BridgeError::App(
@@ -250,7 +249,7 @@ impl ManagedActorAuthoringService {
             })
             .ok_or_else(|| {
                 BridgeError::App(
-                    "managed actor authoring request is not signed by a configured Principal Server key"
+                    "managed actor authoring request is not signed by a configured Station key"
                         .to_owned(),
                 )
             })?;
@@ -261,8 +260,7 @@ impl ManagedActorAuthoringService {
             .starts_with(&format!("{}#", self.config.arkret.trusted_server_did))
         {
             return Err(BridgeError::App(
-                "managed actor authoring proof key is outside the trusted Principal Server DID"
-                    .to_owned(),
+                "managed actor authoring proof key is outside the trusted Station DID".to_owned(),
             ));
         }
         Ed25519DetachedJwsVerifier::new()
@@ -538,7 +536,7 @@ impl ManagedActorAuthoringService {
             .frontier;
         let arkret::EventsFrontierView::RealmActor(frontier) = frontier else {
             return Err(BridgeError::Arkret(
-                "Principal Server returned the wrong service actor frontier variant".to_owned(),
+                "Station returned the wrong service actor frontier variant".to_owned(),
             ));
         };
         let (seal_basis, digest_suite) = self.edge.realm_authoring_basis(&realm_id).await?;
@@ -598,7 +596,7 @@ fn managed_actor_subject_key(request: &AppletManagedActorAuthoringRequest) -> Re
     Ok(canonical_sha256(&json!({
         "purpose": request.purpose,
         "applet_id": basis.applet_id,
-        "target_principal_server_id": basis.target_principal_server_id,
+        "target_station_id": basis.target_station_id,
         "external_ref": basis.external_ref,
     }))?)
 }

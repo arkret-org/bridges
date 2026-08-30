@@ -102,7 +102,7 @@ pub(crate) struct DeleteExternalRef {
     app_message_id: String,
 }
 
-/// A completed Ghost provisioning: the Principal Server's outcome plus the
+/// A completed Ghost provisioning: the Station's outcome plus the
 /// resolvable Ghost DID this bridge authored for the same subject.
 ///
 /// The two are bound by [`validate_ghost_provision_response`], which requires
@@ -121,7 +121,7 @@ pub(crate) struct ProvisionedGhostActor {
 pub struct GhostProvisionAuthoringRequest {
     pub applet_id: AppletId,
     pub service_id: DidCoreId,
-    pub actor_principal_server_id: DidCoreId,
+    pub actor_station_id: DidCoreId,
     pub realm_id: RealmId,
     pub external_ref: GhostExternalTuple,
     pub display_name: Option<String>,
@@ -190,9 +190,7 @@ pub(crate) async fn provision_ghost_actor(
     let authoring_request = GhostProvisionAuthoringRequest {
         applet_id: AppletId::new(config.arkret.applet_id.clone())?,
         service_id: edge.service_actor_id().clone(),
-        actor_principal_server_id: arkret::project_did_to_core_id(
-            &config.arkret.trusted_server_did,
-        )?,
+        actor_station_id: arkret::project_did_to_core_id(&config.arkret.trusted_server_did)?,
         realm_id: RealmId::new(realm_id.to_owned())?,
         external_ref,
         display_name: display_name.map(ToOwned::to_owned),
@@ -256,7 +254,7 @@ fn validate_authored_ghost_request(
     })?;
     if basis.applet_id != expected.applet_id
         || basis.service_id != expected.service_id
-        || basis.target_principal_server_id != expected.actor_principal_server_id
+        || basis.target_station_id != expected.actor_station_id
         || basis.realm_id != expected.realm_id
         || basis.external_ref != expected.external_ref
         || basis.display_name != expected.display_name
@@ -275,7 +273,7 @@ fn validate_authored_ghost_request(
     if payload.actor_role != AppletManagedActorRole::Ghost
         || payload.applet_id != basis.applet_id
         || payload.service_id != basis.service_id
-        || payload.actor_principal_server_id != basis.target_principal_server_id
+        || payload.actor_station_id != basis.target_station_id
         || payload.registration_ref != basis.registration_event_ref
         || payload.applet_authority_ref != basis.authorization_ref
         || payload.external_ref.as_ref() != Some(&basis.external_ref)
@@ -576,7 +574,7 @@ mod provider_tests {
             applet_id: AppletId::new("ak:applet:01904100-0000-7000-8000-000000000001".to_owned())
                 .unwrap(),
             service_id: DidCoreId::new("ak:did_core:webvh:z6mkservice").unwrap(),
-            actor_principal_server_id: DidCoreId::new("ak:did_core:webvh:z6mkserver").unwrap(),
+            actor_station_id: DidCoreId::new("ak:did_core:webvh:z6mkserver").unwrap(),
             realm_id: RealmId::new(
                 "ak:realm:AdkQ-RmB1a8zyc52yl9GWAsodQ_EUle1WAVZqbO7pc19".to_owned(),
             )

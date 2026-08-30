@@ -46,7 +46,7 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `arkret-bridge-
   `MessageBridge::on_arkret_event` → 适配器 `send_to_app`。
 - **出站(app → arkret)**:适配器收到 app 消息(gateway/长轮询/webhook)→
   `MessageContext::submit_app_message` → 查找已持久化的 per-user Ghost Actor 映射；首次用户通过
-  Principal Server preview → Applet `managed-actors/author` → Principal Server commit 创建正式
+  Station preview → Applet `managed-actors/author` → Station commit 创建正式
   Ghost，再构造带 `external_ref` 溯源的 `ak.message.create` 事件并提交。Ghost WebVH root/next key
   使用独立随机材料和配置的 32-byte key 加密落库；author ledger 按完整请求 digest 保存 exact
   bundle，支持并发、重启和成功请求过期后的逐字重放。纯 HTTP 桥的入站经各自

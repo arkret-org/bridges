@@ -82,16 +82,16 @@ const MAX_REALM_HLC_GENERATORS: usize = 4_096;
 #[cfg(any(feature = "web", test))]
 const INBOUND_QUEUE_FULL_RETRY_MS: u64 = 1000;
 
-/// Submission wrapper backed by the authenticated Principal Server.
+/// Submission wrapper backed by the authenticated Station.
 ///
 /// The default SDK path returns an online wrapper without an authorization
 /// lease.
 #[derive(Clone)]
-pub struct PrincipalServerSubmissionProvider {
+pub struct StationSubmissionProvider {
     client: Client,
 }
 
-impl PrincipalServerSubmissionProvider {
+impl StationSubmissionProvider {
     pub fn new(client: Client) -> Self {
         Self { client }
     }
@@ -118,8 +118,8 @@ pub struct ArkretEdge {
     client: Client,
     signer: Ed25519PayloadSigner,
     /// Authority transport for issuer-produced AuthorizationLease/CBA
-    /// evidence: the authenticated Principal Server submission wrapper.
-    submission_provider: PrincipalServerSubmissionProvider,
+    /// evidence: the authenticated Station submission wrapper.
+    submission_provider: StationSubmissionProvider,
     /// Resolvable DID used for key lookup and proof `verification_method`.
     service_did: Did,
     /// Stable service actor core written into Event envelopes.
@@ -236,7 +236,7 @@ impl ArkretEdge {
         let service_actor_id = project_did_to_core_id(&service_did)?;
         let hlc_device_id = config.bridge.bridge_id.clone();
 
-        let submission_provider = PrincipalServerSubmissionProvider::new(client.clone());
+        let submission_provider = StationSubmissionProvider::new(client.clone());
         Ok(Self {
             config,
             client,
@@ -337,8 +337,7 @@ impl ArkretEdge {
             ScopeRef::Realm {
                 realm_id: realm_id.clone(),
             },
-            self.service_actor_id.clone(),
-            self.service_actor_id.clone(),
+            arkret::ActorId::service(self.service_actor_id.clone()),
             content,
         )?
         .with_applet_id(self.applet_id.clone())
@@ -363,11 +362,10 @@ impl ArkretEdge {
             ScopeRef::Realm {
                 realm_id: realm_id.clone(),
             },
-            actor_id,
-            self.service_actor_id.clone(),
+            arkret::ActorId::hosted_principal(actor_id, self.service_actor_id.clone()),
             content,
         )?
-        .with_executed_by(self.service_actor_id.clone())
+        .with_executed_by(arkret::ActorId::service(self.service_actor_id.clone()))
         .with_authorization_ref(authorization_ref)
         .with_applet_id(self.applet_id.clone())
         .into_intent(chrono::Utc::now())?)
@@ -432,7 +430,7 @@ impl ArkretEdge {
     }
 
     /// Ask the authority provider to wrap an exact signed Event, then submit
-    /// it. The provider calls the authenticated Principal Server.
+    /// it. The provider calls the authenticated Station.
     pub async fn submit_event(&self, event: &AuthoredEvent) -> Result<String> {
         let digest_suite = event.digest_suite();
         let submission = self
