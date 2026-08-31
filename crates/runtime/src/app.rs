@@ -20,7 +20,7 @@ use std::time::Duration;
 
 #[cfg(feature = "runtime")]
 use arkret::Event;
-use arkret::{DidCoreId, ExternalRef};
+use arkret::{ActorId, ExternalRef};
 #[cfg(feature = "runtime")]
 use arkret_wire::SignalEnvelope;
 #[cfg(feature = "runtime")]
@@ -47,7 +47,7 @@ use crate::queue::ChannelQueue;
 #[derive(Clone, Debug)]
 pub struct ResolvedActor {
     /// The stable Arkret actor identity.
-    pub actor_id: DidCoreId,
+    pub actor_id: ActorId,
     pub display_name: Option<String>,
     /// Provenance back to the upstream app.
     pub external_ref: Option<ExternalRef>,

@@ -106,9 +106,9 @@ pub(crate) struct DeleteExternalRef {
 /// resolvable Ghost DID this bridge authored for the same subject.
 ///
 /// The two are bound by [`validate_ghost_provision_response`], which requires
-/// the server's stable `ghost_actor_id` core to be exactly the projection of
-/// `did`. Callers that need the resolvable form (event signing, DID
-/// resolution) therefore carry it forward as verified evidence instead of
+/// the server's complete `ghost_actor_id` to match the authored Account,
+/// including the DID principal and Station. Callers that need the resolvable form (event signing,
+/// DID resolution) therefore carry it forward as verified evidence instead of
 /// reconstructing a DID from the core id, which is never permitted.
 pub(crate) struct ProvisionedGhostActor {
     pub(crate) did: Did,
@@ -227,8 +227,11 @@ pub(crate) async fn provision_ghost_actor(
         .client()
         .ghost_actor_provision(&config.arkret.applet_id, &idempotency_key, &request)
         .await?;
-    let requested_core_id = arkret::project_did_to_core_id(&ghost_actor_id)?;
-    let outcome = validate_ghost_provision_response(&requested_core_id, response)?;
+    let requested_actor = arkret::ActorId::account(arkret::AccountId::new(
+        arkret::project_did_to_core_id(&ghost_actor_id)?,
+        authoring_request.actor_station_id.clone(),
+    ));
+    let outcome = validate_ghost_provision_response(&requested_actor, response)?;
     Ok(ProvisionedGhostActor {
         did: ghost_actor_id,
         outcome,
@@ -286,10 +289,10 @@ fn validate_authored_ghost_request(
 }
 
 fn validate_ghost_provision_response(
-    requested_actor: &arkret::DidCoreId,
+    requested_actor: &arkret::ActorId,
     response: GhostActorProvisionOutcome,
 ) -> Result<GhostActorProvisionOutcome> {
-    if response.ghost_actor_id.signing_principal_id() != requested_actor {
+    if &response.ghost_actor_id != requested_actor {
         return Err(BridgeError::Arkret(format!(
             "ghost provisioning returned actor {} but requested {}",
             response.ghost_actor_id, requested_actor
@@ -552,6 +555,39 @@ pub(crate) async fn create_portal_strand(
 #[cfg(test)]
 mod provider_tests {
     use super::*;
+
+    #[test]
+    fn provision_response_cannot_replace_requested_account() {
+        let principal = DidCoreId::new("ak:did_core:web:ghost.example").unwrap();
+        let expected = arkret::ActorId::account(arkret::AccountId::new(
+            principal.clone(),
+            DidCoreId::new("ak:did_core:web:station-a.example").unwrap(),
+        ));
+        for (actor, accepted) in [
+            (expected.clone(), true),
+            (
+                arkret::ActorId::account(arkret::AccountId::new(
+                    principal.clone(),
+                    DidCoreId::new("ak:did_core:web:station-b.example").unwrap(),
+                )),
+                false,
+            ),
+            (arkret::ActorId::service(principal), false),
+        ] {
+            let response: GhostActorProvisionOutcome = serde_json::from_value(serde_json::json!({
+                "ghost_actor_id": actor,
+                "managed_actor_provision_ref": "ak:event:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "principal_control_realm_id": "ak:realm:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "profile_event_ref": "ak:event:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "accountability_grant_ref": "ak:event:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "authorization_ref": "ak:grant:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            })).unwrap();
+            assert_eq!(
+                validate_ghost_provision_response(&expected, response).is_ok(),
+                accepted
+            );
+        }
+    }
 
     struct RejectingProvider;
 

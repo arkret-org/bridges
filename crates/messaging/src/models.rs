@@ -1,6 +1,6 @@
 //! Diesel row models for the messaging helper layer.
 
-use arkret::{Did, DidCoreId};
+use arkret::{ActorId, Did};
 use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -59,7 +59,7 @@ pub struct UserMapping {
     pub protocol: String,
     pub tenant: String,
     pub external_user_id: String,
-    pub arkret_actor_id: DidCoreId,
+    pub arkret_actor_id: ActorId,
     pub arkret_actor_did: Did,
     pub profile_event_ref: String,
     pub accountability_grant_ref: String,
@@ -87,16 +87,25 @@ pub(crate) struct UserMappingRow {
 }
 
 impl TryFrom<UserMappingRow> for UserMapping {
-    type Error = arkret::identifiers::IdentifierError;
+    type Error = arkret_bridge_runtime::BridgeError;
 
     fn try_from(row: UserMappingRow) -> Result<Self, Self::Error> {
+        let actor_id: ActorId = serde_json::from_str(&row.arkret_actor_id)?;
+        let actor_did = Did::new(row.arkret_actor_did)?;
+        if !matches!(&actor_id, ActorId::Account { .. })
+            || actor_id.signing_principal_id() != &arkret::project_did_to_core_id(&actor_did)?
+        {
+            return Err(arkret_bridge_runtime::BridgeError::Database(
+                "stored Ghost Actor is not the Account bound to its DID".to_owned(),
+            ));
+        }
         Ok(Self {
             id: row.id,
             protocol: row.protocol,
             tenant: row.tenant,
             external_user_id: row.external_user_id,
-            arkret_actor_id: DidCoreId::new(row.arkret_actor_id)?,
-            arkret_actor_did: Did::new(row.arkret_actor_did)?,
+            arkret_actor_id: actor_id,
+            arkret_actor_did: actor_did,
             profile_event_ref: row.profile_event_ref,
             accountability_grant_ref: row.accountability_grant_ref,
             authorization_ref: row.authorization_ref,

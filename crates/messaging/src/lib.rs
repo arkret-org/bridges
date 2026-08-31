@@ -701,11 +701,7 @@ impl MessageContext {
                                     protocol.clone(),
                                     tenant.clone(),
                                     external_actor_id.clone(),
-                                    provisioned
-                                        .outcome
-                                        .ghost_actor_id
-                                        .signing_principal_id()
-                                        .clone(),
+                                    provisioned.outcome.ghost_actor_id.clone(),
                                     provisioned.did.clone(),
                                     provisioned.outcome.profile_event_ref.to_string(),
                                     provisioned.outcome.accountability_grant_ref.to_string(),
@@ -868,11 +864,7 @@ impl MessageContext {
                                     protocol.clone(),
                                     tenant.clone(),
                                     external_user_id.clone(),
-                                    provisioned
-                                        .outcome
-                                        .ghost_actor_id
-                                        .signing_principal_id()
-                                        .clone(),
+                                    provisioned.outcome.ghost_actor_id.clone(),
                                     provisioned.did.clone(),
                                     provisioned.outcome.profile_event_ref.to_string(),
                                     provisioned.outcome.accountability_grant_ref.to_string(),
@@ -1135,10 +1127,7 @@ async fn sender_display_for_event(
     executed_by: Option<arkret::ActorId>,
 ) -> Result<String> {
     let actor_id_text = actor_id.to_string();
-    let mut display = match store
-        .user_by_actor_async(actor_id.signing_principal_id().clone())
-        .await?
-    {
+    let mut display = match store.user_by_actor_async(actor_id.clone()).await? {
         Some(row) => row
             .display_name
             .filter(|name| !name.trim().is_empty())
@@ -1372,6 +1361,7 @@ where
         // Install DB-backed actor/realm resolution before the web service starts.
         core_ctx.set_resolver(Arc::new(MessageResolver {
             store: store.clone(),
+            station_id: arkret::project_did_to_core_id(&core_ctx.config.arkret.trusted_server_did)?,
         }));
         // Declare the inbound event kinds this messaging bridge consumes so the
         // applet handler rejects anything else as `capability_denied`

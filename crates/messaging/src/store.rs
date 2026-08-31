@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use arkret::{Did, DidCoreId};
+use arkret::{AccountId, ActorId, Did, DidCoreId};
 use arkret_bridge_runtime::app::{AppletResolver, ResolvedActor, ResolvedRealm};
 use arkret_bridge_runtime::db::DatabaseManager;
 use arkret_bridge_runtime::{BridgeError, Result, run_blocking};
@@ -613,7 +613,7 @@ impl MessageStore {
         protocol: &str,
         tenant: &str,
         external_user_id: &str,
-        actor_id: &DidCoreId,
+        actor_id: &ActorId,
         actor_did: &Did,
         profile_event_ref: &str,
         accountability_grant_ref: &str,
@@ -622,6 +622,14 @@ impl MessageStore {
     ) -> Result<()> {
         use schema::user_mappings::dsl;
 
+        if !matches!(actor_id, ActorId::Account { .. })
+            || actor_id.signing_principal_id() != &arkret::project_did_to_core_id(actor_did)?
+        {
+            return Err(BridgeError::Database(
+                "Ghost mapping requires its exact Account and DID".to_owned(),
+            ));
+        }
+        let actor_key = actor_id.to_string();
         let mut conn = self.db.conn()?;
         // Ghost provisioning races: the same external user can first appear on two
         // channels concurrently (BRG-02-004). The serial domain key is the channel,
@@ -637,7 +645,7 @@ impl MessageStore {
                 protocol,
                 tenant,
                 external_user_id,
-                arkret_actor_id: actor_id.as_str(),
+                arkret_actor_id: &actor_key,
                 arkret_actor_did: actor_did.as_str(),
                 profile_event_ref,
                 accountability_grant_ref,
@@ -652,14 +660,15 @@ impl MessageStore {
                 diesel::result::DatabaseErrorKind::UniqueViolation,
                 _,
             )) => {
-                diesel::update(
+                let updated = diesel::update(
                     dsl::user_mappings
                         .filter(dsl::protocol.eq(protocol))
                         .filter(dsl::tenant.eq(tenant))
-                        .filter(dsl::external_user_id.eq(external_user_id)),
+                        .filter(dsl::external_user_id.eq(external_user_id))
+                        .filter(dsl::arkret_actor_id.eq(&actor_key)),
                 )
                 .set((
-                    dsl::arkret_actor_id.eq(actor_id.as_str()),
+                    dsl::arkret_actor_id.eq(&actor_key),
                     dsl::arkret_actor_did.eq(actor_did.as_str()),
                     dsl::profile_event_ref.eq(profile_event_ref),
                     dsl::accountability_grant_ref.eq(accountability_grant_ref),
@@ -667,6 +676,11 @@ impl MessageStore {
                     dsl::display_name.eq(display),
                 ))
                 .execute(&mut conn)?;
+                if updated != 1 {
+                    return Err(BridgeError::Database(
+                        "Ghost mapping cannot replace its bound Account".to_owned(),
+                    ));
+                }
                 Ok(())
             }
             Err(err) => Err(err.into()),
@@ -692,12 +706,12 @@ impl MessageStore {
     }
 
     /// Reverse lookup for ghost resolution: find the user row by stable Arkret actor identity.
-    pub fn user_by_actor(&self, actor_id: &DidCoreId) -> Result<Option<UserMapping>> {
+    pub fn user_by_actor(&self, actor_id: &ActorId) -> Result<Option<UserMapping>> {
         use schema::user_mappings::dsl;
 
         let mut conn = self.db.conn()?;
         let row = dsl::user_mappings
-            .filter(dsl::arkret_actor_id.eq(actor_id.as_str()))
+            .filter(dsl::arkret_actor_id.eq(actor_id.to_string()))
             .first::<UserMappingRow>(&mut conn)
             .optional()?;
         row.map(typed_user_mapping).transpose()
@@ -793,7 +807,7 @@ impl MessageStore {
         protocol: String,
         tenant: String,
         external_user_id: String,
-        actor_id: DidCoreId,
+        actor_id: ActorId,
         actor_did: Did,
         profile_event_ref: String,
         accountability_grant_ref: String,
@@ -828,7 +842,7 @@ impl MessageStore {
 
     pub async fn user_by_actor_async(
         self: Arc<Self>,
-        actor_id: DidCoreId,
+        actor_id: ActorId,
     ) -> Result<Option<UserMapping>> {
         run_blocking(move || self.user_by_actor(&actor_id)).await
     }
@@ -903,9 +917,116 @@ mod tests {
     }
 
     #[test]
+    fn ghost_mapping_keeps_station_accounts_separate() {
+        let store = Arc::new(sqlite_store("ghost-account-isolation").unwrap());
+        let principal = DidCoreId::new("ak:did_core:web:ghost.example").unwrap();
+        let did = Did::new("did:web:ghost.example").unwrap();
+        let station_a = DidCoreId::new("ak:did_core:web:station-a.example").unwrap();
+        let station_b = DidCoreId::new("ak:did_core:web:station-b.example").unwrap();
+        let actor_a = ActorId::account(AccountId::new(principal.clone(), station_a.clone()));
+        let actor_b = ActorId::account(AccountId::new(principal.clone(), station_b.clone()));
+        for (external, actor) in [("external-a", &actor_a), ("external-b", &actor_b)] {
+            store
+                .upsert_user(
+                    "test",
+                    "tenant",
+                    external,
+                    actor,
+                    &did,
+                    "profile",
+                    "grant",
+                    "authorization",
+                    Some(external),
+                )
+                .unwrap();
+        }
+        assert!(
+            store
+                .upsert_user(
+                    "test",
+                    "tenant",
+                    "external-a",
+                    &actor_b,
+                    &did,
+                    "replacement",
+                    "grant",
+                    "authorization",
+                    None
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .upsert_user(
+                    "test",
+                    "tenant",
+                    "service",
+                    &ActorId::service(principal.clone()),
+                    &did,
+                    "profile",
+                    "grant",
+                    "authorization",
+                    None
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .upsert_user(
+                    "test",
+                    "tenant",
+                    "wrong-did",
+                    &actor_a,
+                    &Did::new("did:web:other.example").unwrap(),
+                    "profile",
+                    "grant",
+                    "authorization",
+                    None
+                )
+                .is_err()
+        );
+        let reopened = Arc::new(MessageStore::new(store.db.clone()).unwrap());
+        assert_eq!(
+            reopened
+                .user_by_actor(&actor_a)
+                .unwrap()
+                .unwrap()
+                .external_user_id,
+            "external-a"
+        );
+        assert_eq!(
+            reopened
+                .user_by_actor(&actor_b)
+                .unwrap()
+                .unwrap()
+                .external_user_id,
+            "external-b"
+        );
+        for (station_id, expected) in [(station_a, actor_a), (station_b, actor_b)] {
+            let resolver = MessageResolver {
+                store: reopened.clone(),
+                station_id,
+            };
+            assert_eq!(
+                resolver.resolve_actor(principal.as_str()).unwrap().actor_id,
+                expected
+            );
+        }
+        assert!(
+            reopened
+                .user_by_actor(&ActorId::service(principal))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn user_mapping_validates_persisted_identity_columns() {
         let store = sqlite_store("user-identity-validation").unwrap();
-        let actor_id = DidCoreId::new("ak:did_core:web:ghost.example").unwrap();
+        let actor_id = ActorId::account(AccountId::new(
+            DidCoreId::new("ak:did_core:web:ghost.example").unwrap(),
+            DidCoreId::new("ak:did_core:web:station.example").unwrap(),
+        ));
         let actor_did = Did::new("did:web:ghost.example").unwrap();
         store
             .upsert_user(
@@ -1027,11 +1148,18 @@ mod tests {
 /// from the messaging mapping tables.
 pub(crate) struct MessageResolver {
     pub(crate) store: Arc<MessageStore>,
+    pub(crate) station_id: DidCoreId,
 }
 
 impl AppletResolver for MessageResolver {
     fn resolve_actor(&self, actor_id: &str) -> Option<ResolvedActor> {
-        let actor_id = DidCoreId::new(actor_id).ok()?;
+        // The path is a principal selector within this resolver's configured
+        // Station namespace. The returned identity comes from the persisted
+        // provision result, never from this lookup key.
+        let actor_id = ActorId::account(AccountId::new(
+            DidCoreId::new(actor_id).ok()?,
+            self.station_id.clone(),
+        ));
         let row = match self.store.user_by_actor(&actor_id) {
             Ok(Some(row)) => row,
             Ok(None) => return None,
