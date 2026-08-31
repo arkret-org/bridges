@@ -362,7 +362,10 @@ impl ArkretEdge {
             ScopeRef::Realm {
                 realm_id: realm_id.clone(),
             },
-            arkret::ActorId::hosted_principal(actor_id, self.service_actor_id.clone()),
+            arkret::ActorId::account(arkret::AccountId::new(
+                actor_id,
+                self.service_actor_id.clone(),
+            )),
             content,
         )?
         .with_executed_by(arkret::ActorId::service(self.service_actor_id.clone()))
