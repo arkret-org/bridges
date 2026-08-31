@@ -332,19 +332,18 @@ impl ManagedActorAuthoringService {
                 .verifying_key()
                 .as_bytes(),
         );
-        let inception = arkret::webvh::prepare_managed_agent_inception(
-            &arkret::webvh::ManagedAgentInceptionInput {
+        let inception =
+            arkret::webvh::prepare_agent_inception(&arkret::webvh::AgentInceptionInput {
                 principal_endpoint: &self.principal_endpoint,
                 local_id: &local_id,
                 controller_id: request.basis.service_id(),
                 version_time: request.issued_at,
                 root_seed: &root_seed,
                 next_root_public_key_multibase: &next_key,
-            },
-        )
-        .map_err(|error| {
-            BridgeError::App(format!("managed actor WebVH inception failed: {error}"))
-        })?;
+            })
+            .map_err(|error| {
+                BridgeError::App(format!("managed actor WebVH inception failed: {error}"))
+            })?;
         let did = Did::new(inception.did.clone())?;
         if !self
             .config
