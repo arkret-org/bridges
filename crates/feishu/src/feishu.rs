@@ -378,14 +378,14 @@ mod tests {
         use base64::Engine as _;
         use cbc::Encryptor;
         use cbc::cipher::block_padding::Pkcs7;
-        use cbc::cipher::{BlockEncryptMut, KeyIvInit};
+        use cbc::cipher::{BlockModeEncrypt, KeyIvInit};
 
         let key = webhook::sha256_bytes(encrypt_key.as_bytes());
         let iv = [0x11u8; 16];
         let mut buf = vec![0u8; plaintext.len() + 16];
         let ct = Encryptor::<aes::Aes256>::new_from_slices(&key, &iv)
             .unwrap()
-            .encrypt_padded_b2b_mut::<Pkcs7>(plaintext.as_bytes(), &mut buf)
+            .encrypt_padded_b2b::<Pkcs7>(plaintext.as_bytes(), &mut buf)
             .unwrap();
         let mut framed = iv.to_vec();
         framed.extend_from_slice(ct);

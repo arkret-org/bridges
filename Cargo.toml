@@ -22,7 +22,7 @@ unimplemented = "deny"
 [workspace.dependencies]
 # Local arkret SDK (protocol side). Path is relative to the workspace root.
 # Applet bridge runtime and chat/social helper layer.
-aes = "0.8"
+aes = "0.9"
 anyhow = "1.0"
 arkret = { version = "0.3.0", path = "../arkret-rust-sdk/crates/sdk", default-features = false, features = [
     "client",
@@ -39,24 +39,24 @@ arkret-models-integration = { version = "0.3.0", path = "../arkret-rust-sdk/crat
 arkret-retry = { version = "0.3.0", path = "../arkret-rust-sdk/crates/retry", default-features = false }
 arkret-wire = { version = "0.3.0", path = "../arkret-rust-sdk/crates/wire", default-features = false }
 async-trait = "0.1"
-base64 = "0.22"
-cbc = { version = "0.1", features = ["block-padding"] }
-chacha20poly1305 = "0.10"
+base64 = "0.23"
+cbc = { version = "0.2", features = ["block-padding"] }
+chacha20poly1305 = "0.11"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.6", features = ["string"] }
 diesel = { version = "2.3", default-features = false, features = ["r2d2", "chrono"] }
 diesel_migrations = "2.3"
-ed25519-dalek = "2.2"
+ed25519-dalek = "3.0"
 futures = "0.3"
-getrandom = "0.3"
+getrandom = "0.4"
 hex = "0.4"
 hmac = "0.13"
-jsonwebtoken = { version = "10.4", features = ["rust_crypto"] }
-libsqlite3-sys = "0.35"
+jsonwebtoken = { version = "11.0", features = ["rust_crypto"] }
+libsqlite3-sys = "0.38"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 parking_lot = "0.12"
-quick-xml = { version = "0.40", features = ["serialize"] }
+quick-xml = { version = "0.42", features = ["serialize"] }
 reqwest = { version = "0.13", default-features = false, features = ["form", "json", "rustls-no-provider", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 salvo = { version = "=0.96.0", default-features = false, features = ["fix-http1-request-uri", "server", "server-handle", "http1", "http2", "oapi", "rfc9457", "affix-state", "rate-limiter"] }
@@ -69,8 +69,8 @@ sha2 = "0.11"
 subtle = "2.6"
 teloxide-core = { version = "0.13", default-features = false }
 thiserror = "2.0"
-tokio = { version = "1.52", default-features = false, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
-tokio-tungstenite = { version = "0.29", default-features = false }
+tokio = { version = "1.53", default-features = false, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite = { version = "0.30", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = "2.5"

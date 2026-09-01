@@ -459,11 +459,13 @@ impl ManagedActorAuthoringService {
         getrandom::fill(&mut nonce).map_err(|error| {
             BridgeError::Runtime(format!("managed actor nonce RNG failed: {error}"))
         })?;
-        let cipher = XChaCha20Poly1305::new(Key::from_slice(&self.key_encryption_key));
+        let key = Key::from(self.key_encryption_key);
+        let nonce = XNonce::from(nonce);
+        let cipher = XChaCha20Poly1305::new(&key);
         let plaintext = canonical_json_bytes(material)?;
         let ciphertext = cipher
             .encrypt(
-                XNonce::from_slice(&nonce),
+                &nonce,
                 Payload {
                     msg: &plaintext,
                     aad: subject_key.as_bytes(),
@@ -495,10 +497,12 @@ impl ManagedActorAuthoringService {
                 "managed actor encrypted key material is malformed".to_owned(),
             ));
         }
-        let cipher = XChaCha20Poly1305::new(Key::from_slice(&self.key_encryption_key));
+        let key = Key::from(self.key_encryption_key);
+        let cipher = XChaCha20Poly1305::new(&key);
+        let nonce = XNonce::try_from(nonce.as_slice()).expect("nonce length was validated");
         let plaintext = cipher
             .decrypt(
-                XNonce::from_slice(&nonce),
+                &nonce,
                 Payload {
                     msg: &ciphertext,
                     aad: subject_key.as_bytes(),

@@ -398,13 +398,12 @@ fn zulip_uploaded_media(site: &str, message: &Value) -> Vec<ZulipUploadedMedia> 
     let mut reader = Reader::from_str(content);
     reader.config_mut().allow_unmatched_ends = true;
     reader.config_mut().check_end_names = false;
-    let decoder = reader.decoder();
     let mut seen = std::collections::HashSet::new();
     let mut media = Vec::new();
     loop {
         let element = match reader.read_event() {
             Ok(XmlEvent::Start(element)) | Ok(XmlEvent::Empty(element))
-                if element.name().as_ref().eq_ignore_ascii_case(b"a") =>
+                if element.name().as_ref().eq_ignore_ascii_case("a") =>
             {
                 element
             }
@@ -416,12 +415,8 @@ fn zulip_uploaded_media(site: &str, message: &Value) -> Vec<ZulipUploadedMedia> 
             attribute
                 .key
                 .as_ref()
-                .eq_ignore_ascii_case(b"href")
-                .then(|| {
-                    attribute
-                        .decoded_and_normalized_value(XmlVersion::Implicit1_0, decoder)
-                        .ok()
-                })
+                .eq_ignore_ascii_case("href")
+                .then(|| attribute.normalized_value(XmlVersion::Implicit1_0).ok())
                 .flatten()
                 .map(|value| value.into_owned())
         }) else {

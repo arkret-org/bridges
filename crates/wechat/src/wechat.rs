@@ -620,7 +620,7 @@ mod tests {
         use base64::Engine as _;
         use cbc::Encryptor;
         use cbc::cipher::block_padding::Pkcs7;
-        use cbc::cipher::{BlockEncryptMut, KeyIvInit};
+        use cbc::cipher::{BlockModeEncrypt, KeyIvInit};
 
         let mut plain = Vec::new();
         plain.extend_from_slice(&[0u8; 16]); // random prefix (fixed for the test)
@@ -632,7 +632,7 @@ mod tests {
         let mut buf = vec![0u8; plain.len() + 16];
         let ct = Encryptor::<aes::Aes256>::new_from_slices(&key.0, iv)
             .unwrap()
-            .encrypt_padded_b2b_mut::<Pkcs7>(&plain, &mut buf)
+            .encrypt_padded_b2b::<Pkcs7>(&plain, &mut buf)
             .unwrap();
         base64::engine::general_purpose::STANDARD.encode(ct)
     }

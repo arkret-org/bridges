@@ -10,7 +10,7 @@ use arkret_bridge_runtime::{BridgeError, ReplayGuardStore, Result as BridgeResul
 use base64::Engine as _;
 use cbc::Decryptor;
 use cbc::cipher::block_padding::Pkcs7;
-use cbc::cipher::{BlockDecryptMut, KeyIvInit};
+use cbc::cipher::{BlockModeDecrypt, KeyIvInit};
 use hmac::{Hmac, KeyInit, Mac};
 use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
@@ -295,11 +295,11 @@ pub fn aes_cbc_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Option<Vec<u
     let plain = match key.len() {
         16 => Decryptor::<Aes128>::new_from_slices(key, iv)
             .ok()?
-            .decrypt_padded_mut::<Pkcs7>(&mut buf)
+            .decrypt_padded::<Pkcs7>(&mut buf)
             .ok()?,
         32 => Decryptor::<Aes256>::new_from_slices(key, iv)
             .ok()?
-            .decrypt_padded_mut::<Pkcs7>(&mut buf)
+            .decrypt_padded::<Pkcs7>(&mut buf)
             .ok()?,
         _ => return None,
     };
@@ -1309,14 +1309,14 @@ OeQdGwud4COtqrs5f1jdPtvd
         // We encrypt with a fresh cipher and confirm `aes_cbc_decrypt` recovers
         // the PKCS#7-padded plaintext.
         use cbc::Encryptor;
-        use cbc::cipher::BlockEncryptMut;
+        use cbc::cipher::BlockModeEncrypt;
         let key = [0x42u8; 32];
         let iv = [0x24u8; 16];
         let plaintext = b"feishu-encrypt-key-mode-sample".to_vec();
         let mut buf = vec![0u8; plaintext.len() + 16];
         let ct = Encryptor::<Aes256>::new_from_slices(&key, &iv)
             .unwrap()
-            .encrypt_padded_b2b_mut::<Pkcs7>(&plaintext, &mut buf)
+            .encrypt_padded_b2b::<Pkcs7>(&plaintext, &mut buf)
             .unwrap()
             .to_vec();
         let recovered = aes_cbc_decrypt(&key, &iv, &ct).expect("decrypt");
