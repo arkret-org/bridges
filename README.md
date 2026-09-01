@@ -63,7 +63,8 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `arkret-bridge-
 - **消息内容**:对齐 SDK 规范类型 `TextMessageContent`(`{body}`)/`MediaContent`
   (`{body,blob,mimetype,filename,size}`)。
 - **媒体**:`MessageContext::{upload_blob,download_blob,forward_external_media}` + `Attachment`;
-  discord/telegram 收发双向、whatsapp/line 入站已接,余者文本(通用能力就绪)。
+  discord/telegram 收发双向,whatsapp/line/slack/messenger/zulip 入站已接,余者文本
+  (通用能力就绪)。
 - **防回声**:`on_arkret_event` 跳过本桥 `external_ref.source` 自发事件、由本桥
   service actor 署名的事件,以及已在消息映射表记录的 event,避免出站回环。
 

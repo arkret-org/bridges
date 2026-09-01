@@ -240,7 +240,7 @@ struct InvalidateDidBindingsRequest {
 /// §5.6: rotation, deactivation, witness fork and explicit revocation MUST
 /// invalidate the affected bindings. A bridge holds no resolver and receives no
 /// rotation notifications, so the runtime trigger for that obligation is the
-/// operator invoking this endpoint (see README「DID binding 失效」).
+/// operator invoking this endpoint (see the README section on DID binding invalidation).
 ///
 /// Protection model: identical to `/health` and `/metrics` — the admin plane
 /// binds loopback by default (BRG-06-004) and carries no request-level

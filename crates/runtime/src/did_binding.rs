@@ -41,7 +41,7 @@
 //! receives or stores an `AppletPackage`, `AppletTransactionRequestBody`
 //! carries no epoch, and there is no config field for one. For the node →
 //! applet direction `applet-integration.md` §12 names the anchor material as
-//! "Arkret node 方向的 source service DID key-state evidence" — which is
+//! source-service DID key-state evidence for the Arkret-node direction, which is
 //! exactly `VerifiedAppletHttpRequest::source_key_state_digest`, already
 //! recorded in the idempotency anchor. That digest is a digest of the source
 //! service's published key material, and the binding pins that same material
@@ -55,8 +55,8 @@
 //! the normative degenerate form, and the pins are recorded as
 //! `method_unsupported` rather than silently omitted. Rotation is handled by an
 //! operator config change and by explicit [`DidAuthority::invalidate_did`]
-//! (§5.6: rotation / deactivation / witness fork / explicit revocation "MUST 使
-//! 受影响 binding 失效"; the `for_did` coarse sweep is the safety floor that
+//! (§5.6: rotation, deactivation, witness fork, or explicit revocation must
+//! invalidate affected bindings; the `for_did` coarse sweep is the safety floor that
 //! section accepts until evidence dependency records land). The runtime trigger
 //! is the operator: `POST /admin/did-bindings/invalidate` on the loopback admin
 //! plane (`web.rs`) reaches [`DidAuthority::invalidate_did`] directly.
@@ -101,8 +101,8 @@ fn inbound_binding_policy() -> ResolverPolicy {
 ///
 /// This is the `policy_digest` dimension of [`VerifiedDidBindingKey`]: a policy
 /// revision changes the digest, which changes the key, so a binding accepted
-/// under an older policy is never silently reused (§5, "Realm resolver policy
-/// 变化 MUST 使受影响 binding 失效").
+/// under an older policy is never silently reused (§5: a Realm resolver-policy
+/// change must invalidate affected bindings).
 ///
 /// The computation itself is the SDK's
 /// [`arkret::identity::policy_digest`] (`ak.did.resolver_policy.v1`), not a
@@ -568,8 +568,8 @@ mod tests {
         );
     }
 
-    /// Source-level regression gate for the §6 layering rule ("业务 reducer、
-    /// projection、query、UI 与 routing 代码 … 不直接持有通用网络 resolver")
+    /// Source-level regression gate for the §6 layering rule (business reducers,
+    /// projections, queries, UI, and routing code do not hold a general network resolver)
     /// and for the ruling that a bridge has **no** DID authority call site at
     /// all: inbound Event proof signer authority is carried by the source
     /// Arkret node, and the HTTP-signature anchor comes from configuration.
