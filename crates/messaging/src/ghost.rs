@@ -452,7 +452,6 @@ pub(crate) async fn find_existing_portal_strand(
                 None,
                 None,
                 Some(PORTAL_STRAND_SCAN_PAGE_LIMIT),
-                None,
             )
             .await?;
         for row in &page.events {
