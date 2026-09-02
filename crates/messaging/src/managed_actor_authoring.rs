@@ -374,7 +374,6 @@ impl ManagedActorAuthoringService {
             to_version_id: inception.version_id.clone(),
         };
         let method_history_evidence = ResolutionMethodHistoryEvidence::WebvhLog {
-            adapter_version: "did:webvh:1.0".to_owned(),
             boundary,
             evidence: ResolutionDidBindingEvidenceReceipt {
                 kind: ResolutionDidBindingEvidenceKind::AkDidBindingEvidenceV1,
