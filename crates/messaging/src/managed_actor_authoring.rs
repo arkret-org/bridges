@@ -336,7 +336,7 @@ impl ManagedActorAuthoringService {
             arkret::webvh::prepare_agent_inception(&arkret::webvh::AgentInceptionInput {
                 principal_endpoint: &self.principal_endpoint,
                 local_id: &local_id,
-                controller_id: request.basis.service_id(),
+                controller_principal_id: request.basis.service_id(),
                 version_time: request.issued_at,
                 root_seed: &root_seed,
                 next_root_public_key_multibase: &next_key,
