@@ -526,10 +526,7 @@ pub(crate) async fn create_portal_strand(
         StrandTrack::discussion_primary(),
     );
     let strand_created_at = strand.created_at;
-    let payload = StrandCreatePayload {
-        object: strand,
-        initial_relations: None,
-    };
+    let payload = StrandCreatePayload { object: strand };
     // Every producer-signed member rides the intent, and the one derived
     // identity covers them all. strand_create_payload semantic validation
     // requires object.created_by == actor_id (both are the stable service identity here)
