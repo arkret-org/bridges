@@ -589,17 +589,8 @@ fn bearer_token(authorization: Option<&str>) -> std::result::Result<&str, String
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "Authorization Bearer JWT is required".to_owned())?;
-    let mut parts = value.splitn(2, char::is_whitespace);
-    let scheme = parts.next().unwrap_or_default();
-    let token = parts
-        .next()
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .ok_or_else(|| "Authorization Bearer JWT is malformed".to_owned())?;
-    if !scheme.eq_ignore_ascii_case("bearer") {
-        return Err("Authorization scheme must be Bearer".to_owned());
-    }
-    Ok(token)
+    arkret::server::authorization_credential(value, arkret::server::AuthorizationScheme::Bearer)
+        .ok_or_else(|| "Authorization scheme must be Bearer and contain one JWT".to_owned())
 }
 
 /// Outcome of forwarding one inbound app message to arkret. The webhook handler

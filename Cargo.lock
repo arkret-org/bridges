@@ -877,6 +877,7 @@ dependencies = [
  "arkret-models-collaboration",
  "arkret-models-crypto",
  "arkret-wire",
+ "async-trait",
  "chrono",
  "hex",
  "serde",
