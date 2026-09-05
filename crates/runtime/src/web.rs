@@ -1127,9 +1127,9 @@ fn request_target_uri(
 /// in `operations-error-mapping.json`, so the `code` must come from the closed
 /// `error-code-registry.json` set rather than being a free-form string.
 fn applet_error(res: &mut Response, status: StatusCode, code: &str, message: impl Into<String>) {
-    let envelope = arkret_wire::ErrorEnvelope::new(code, message)
-        .with_request_id(arkret_wire::new_prefixed_uuid7("ak:request:"));
-    let problem = arkret_wire::Problem::from_error_envelope(&envelope, status.as_u16());
+    let envelope = arkret_wire::Problem::from_code(code, message)
+        .with_instance(arkret_wire::new_prefixed_uuid7("ak:request:"));
+    let problem = envelope.with_status(status.as_u16());
     let mut output = salvo::http::Problem::new(status)
         .kind(problem.problem_type)
         .title(problem.title)

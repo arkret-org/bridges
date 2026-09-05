@@ -1328,10 +1328,19 @@ OeQdGwud4COtqrs5f1jdPtvd
         );
     }
 
+    /// The scheme is case-insensitive, the credential is taken verbatim, and
+    /// anything else is refused.
+    ///
+    /// Padding between the scheme and the credential used to be tolerated by a
+    /// parser local to this file. Since `dd03c86` the SDK parser decides, and
+    /// it rejects a credential that begins with whitespace (RFC 7235 allows one
+    /// separating space, not arbitrary padding). The test kept asserting the
+    /// old shape and had been red ever since.
     #[test]
     fn bearer_token_requires_bearer_scheme() {
         assert_eq!(bearer_token(Some("Bearer abc.def")).unwrap(), "abc.def");
-        assert_eq!(bearer_token(Some("bearer   abc")).unwrap(), "abc");
+        assert_eq!(bearer_token(Some("bearer abc")).unwrap(), "abc");
+        assert!(bearer_token(Some("bearer   abc")).is_err());
         assert!(bearer_token(None).is_err());
         assert!(bearer_token(Some("Basic abc")).is_err());
         assert!(bearer_token(Some("Bearer")).is_err());

@@ -1202,5 +1202,5 @@ impl AppletResolver for MessageResolver {
 }
 
 fn typed_user_mapping(row: UserMappingRow) -> Result<UserMapping> {
-    Ok(row.try_into()?)
+    row.try_into()
 }
