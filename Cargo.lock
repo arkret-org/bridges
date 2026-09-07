@@ -756,6 +756,7 @@ version = "0.3.0"
 dependencies = [
  "arkret-canonical",
  "arkret-locale",
+ "arkret-models-crypto",
  "arkret-wire",
  "chrono",
  "serde",
@@ -849,6 +850,7 @@ dependencies = [
  "arkret-models-collaboration",
  "arkret-models-crypto",
  "arkret-models-identity",
+ "arkret-schema",
  "arkret-state",
  "arkret-wire",
  "base64 0.23.1",
