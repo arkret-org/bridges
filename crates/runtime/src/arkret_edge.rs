@@ -117,7 +117,7 @@ pub struct ArkretEdge {
     config: Arc<Config>,
     client: Client,
     signer: Ed25519PayloadSigner,
-    /// Authority transport for issuer-produced AuthorizationLease/CBA
+    /// Authority transport for issuer-produced AuthorizationLease/CBS
     /// evidence: the authenticated Station submission wrapper.
     submission_provider: StationSubmissionProvider,
     /// Resolvable DID used for key lookup and proof `verification_method`.
