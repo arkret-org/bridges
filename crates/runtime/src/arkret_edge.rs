@@ -837,7 +837,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
         req: AppletTransactionRequestBody,
     ) -> std::result::Result<AppletTransactionOutcome, WireError> {
         let event_count = req.events.len();
-        let mut rejections: Vec<arkret::RejectedItem> = Vec::new();
+        let mut rejections: Vec<arkret::AppletEventRejection> = Vec::new();
         let mut enqueue_failed = false;
         // Set when the bounded inbound queue is full: we ask the server to retry
         // the whole batch shortly (backpressure) rather than buffering without
@@ -852,7 +852,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
             // redeliver, instead of growing memory without bound. Events skipped
             // here were never dedup-recorded, so the redelivery is clean.
             if queue_full {
-                rejections.push(arkret::RejectedItem {
+                rejections.push(arkret::AppletEventRejection {
                     event_id: Some(event.event_id.clone()),
                     reason_code: arkret_wire::ReasonCode::from_wire(
                         arkret_wire::ReasonCode::QUEUE_FULL,
@@ -872,7 +872,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
                     realm = %event.realm_id,
                     "rejecting event: realm is outside this applet's declared namespace"
                 );
-                rejections.push(arkret::RejectedItem {
+                rejections.push(arkret::AppletEventRejection {
                     event_id: Some(event.event_id.clone()),
                     reason_code: arkret_wire::ReasonCode::from_wire(
                         arkret_wire::ReasonCode::APPLET_NAMESPACE_MISMATCH,
@@ -893,7 +893,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
                     kind = %event.kind,
                     "rejecting event: kind is not in this applet's declared capability set"
                 );
-                rejections.push(arkret::RejectedItem {
+                rejections.push(arkret::AppletEventRejection {
                     event_id: Some(event.event_id.clone()),
                     reason_code: arkret_wire::ReasonCode::from_wire(
                         arkret_wire::ErrorCode::CAPABILITY_DENIED,
@@ -912,7 +912,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
                 Ok(permit) => permit,
                 Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {
                     queue_full = true;
-                    rejections.push(arkret::RejectedItem {
+                    rejections.push(arkret::AppletEventRejection {
                         event_id: Some(event.event_id.clone()),
                         reason_code: arkret_wire::ReasonCode::from_wire(
                             arkret_wire::ReasonCode::QUEUE_FULL,
@@ -924,7 +924,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
                     enqueue_failed = true;
                     tracing::error!(%event_id, "failed to enqueue inbound event: consumer gone");
-                    rejections.push(arkret::RejectedItem {
+                    rejections.push(arkret::AppletEventRejection {
                         event_id: Some(event.event_id.clone()),
                         reason_code: arkret_wire::ReasonCode::from_wire(
                             arkret_wire::ReasonCode::INTERNAL_ERROR,
@@ -959,7 +959,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
                         %event_id,
                         "rejecting event: same event_id pushed with conflicting content"
                     );
-                    rejections.push(arkret::RejectedItem {
+                    rejections.push(arkret::AppletEventRejection {
                         event_id: Some(event.event_id.clone()),
                         reason_code: arkret_wire::ReasonCode::from_wire(
                             arkret_wire::ReasonCode::DUPLICATE_CONFLICT,
@@ -971,7 +971,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
                 Err(err) => {
                     enqueue_failed = true;
                     tracing::error!(%event_id, error = %err, "event dedup store failed");
-                    rejections.push(arkret::RejectedItem {
+                    rejections.push(arkret::AppletEventRejection {
                         event_id: Some(event.event_id.clone()),
                         reason_code: arkret_wire::ReasonCode::from_wire(
                             arkret_wire::ReasonCode::INTERNAL_ERROR,
