@@ -1460,7 +1460,7 @@ mod tests {
                 "server_url": "https://station.example", "service_did": "did:webvh:z6mkbridge:bridge.example",
                 "trust_domain": "ak:trust_domain:example.net", "applet_id": "ak:applet:01904100-0000-7000-8000-000000000001",
                 "access_token": "test", "signing_key_seed_hex": "11".repeat(32),
-                "verification_method_fragment": "key-1",
+                "verification_method_fragment": "#key-1",
                 "signer_resolution_evidence_ref": format!("ak:signer_evidence:sha256:{}", "11".repeat(32)),
                 "trusted_server_did": "did:webvh:z6mkstation:station.example",
                 "applet_namespaces": {"actors":[],"realms":[],"handles":[]},
