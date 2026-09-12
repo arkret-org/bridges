@@ -730,13 +730,17 @@ impl MessageContext {
                         &mapping.accountability_grant_ref,
                     )?;
                     require_nonempty_ref("authorization_ref", &mapping.authorization_ref)?;
-                    let actor = mapping.arkret_actor_did;
+                    let actor = mapping.arkret_actor_id.as_account_id().ok_or_else(|| {
+                        BridgeError::Database(
+                            "stored Ghost identity is not a complete Account".into(),
+                        )
+                    })?;
                     let payload =
                         redaction_payload_for_app_delete(&target_event_id, delete.reason)?
                             .expect("delete reason was checked before queue submission");
                     let event_id = edge
                         .submit_redaction_with_external_ref_as(
-                            &actor,
+                            actor,
                             &realm_for_submit,
                             payload,
                             external_ref_for_delete(&config, &delete),
@@ -893,10 +897,14 @@ impl MessageContext {
                         &mapping.accountability_grant_ref,
                     )?;
                     require_nonempty_ref("authorization_ref", &mapping.authorization_ref)?;
-                    let actor = mapping.arkret_actor_did;
+                    let actor = mapping.arkret_actor_id.as_account_id().ok_or_else(|| {
+                        BridgeError::Database(
+                            "stored Ghost identity is not a complete Account".into(),
+                        )
+                    })?;
                     let event_id = edge
                         .submit_with_external_ref_as::<arkret_wire::event_spec::MessageCreate, _>(
-                            &actor,
+                            actor,
                             &realm_for_submit,
                             payload,
                             external_ref,

@@ -317,10 +317,11 @@ impl ArkretEdge {
     }
 
     /// [`Self::service_intent`] with an explicit delegated actor and the
-    /// durable authorization it acts under.
+    /// durable authorization it acts under. The complete Account comes from
+    /// provisioning; the Applet service identity cannot supply its Station.
     pub fn delegated_intent<K>(
         &self,
-        actor: &Did,
+        actor: &arkret::AccountId,
         realm_id: &RealmId,
         content: K::Payload,
         authorization_ref: &str,
@@ -329,15 +330,12 @@ impl ArkretEdge {
         K: EventSpec,
     {
         let authorization_ref = validate_authorization_ref(authorization_ref)?;
-        let actor_id = project_did_to_core_id(actor)?;
+        actor.validate()?;
         Ok(TypedEventDraft::<K>::new(
             ScopeRef::Realm {
                 realm_id: realm_id.clone(),
             },
-            arkret::ActorId::account(arkret::AccountId::new(
-                actor_id,
-                self.service_actor_id.clone(),
-            )),
+            arkret::ActorId::account(actor.clone()),
             content,
         )?
         .with_executed_by(arkret::ActorId::service(self.service_actor_id.clone()))
@@ -505,7 +503,7 @@ impl ArkretEdge {
     /// `external_ref` for bridge-originated events.
     pub async fn submit_with_external_ref_as<K, E>(
         &self,
-        actor: &Did,
+        actor: &arkret::AccountId,
         realm_id: &str,
         content: K::Payload,
         external_ref: E,
@@ -532,7 +530,7 @@ impl ArkretEdge {
     /// by callers before reaching this helper.
     pub async fn submit_redaction_with_external_ref_as<E>(
         &self,
-        actor: &Did,
+        actor: &arkret::AccountId,
         realm_id: &str,
         content: MessageRedactPayload,
         external_ref: E,
@@ -1121,6 +1119,51 @@ impl arkret::AppletHandler for BridgeAppletHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn delegated_intent_preserves_the_provisioned_account_station() {
+        struct NoSequence;
+        impl SeqStore for NoSequence {
+            fn reserve_block(&self, _: &str, _: i64) -> Result<i64> {
+                panic!("building an intent must not reserve an actor position")
+            }
+        }
+        let config: Config = serde_json::from_value(json!({
+            "bridge": {"bridge_id": "test"},
+            "arkret": {
+                "server_url": "https://station.example", "service_did": "did:webvh:z6mkbridge:bridge.example",
+                "trust_domain": "ak:trust_domain:example.net", "applet_id": "ak:applet:01904100-0000-7000-8000-000000000001",
+                "access_token": "test", "signing_key_seed_hex": "11".repeat(32),
+                "verification_method_fragment": "key-1",
+                "signer_resolution_evidence_ref": format!("ak:signer_evidence:sha256:{}", "11".repeat(32)),
+                "trusted_server_did": "did:webvh:z6mkstation:station.example",
+                "applet_namespaces": {"actors":[],"realms":[],"handles":[]},
+                "managed_actor_authoring": {"principal_endpoint":"https://ghost.example", "key_encryption_key_hex":"22".repeat(32)}
+            }
+        })).unwrap();
+        let (sender, _) = tokio::sync::mpsc::channel(1);
+        let edge = ArkretEdge::new(Arc::new(config), Arc::new(NoSequence), sender).unwrap();
+        let account = arkret::AccountId::new(
+            DidCoreId::new("ak:did_core:webvh:z6mkghost").unwrap(),
+            DidCoreId::new("ak:did_core:webvh:z6mkstation").unwrap(),
+        );
+        let realm = RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").unwrap();
+        let payload = arkret::MessageCreatePayload::with_content(
+            arkret::StrandId::new("ak:strand:AT3ARBdH1FM6GjXK9ulTx-YMvQOXys39dlUzZV6KyID9")
+                .unwrap(),
+            "main",
+            arkret::ContentBlock::text("hello"),
+        );
+        let grant = "ak:grant:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let intent = edge
+            .delegated_intent::<event_spec::MessageCreate>(&account, &realm, payload, grant)
+            .unwrap();
+        assert_eq!(intent.actor_id(), &arkret::ActorId::account(account));
+        assert_eq!(
+            intent.executed_by(),
+            Some(&arkret::ActorId::service(edge.service_actor_id.clone()))
+        );
+    }
 
     #[test]
     fn event_fingerprint_ignores_unsigned_and_proofs() {
