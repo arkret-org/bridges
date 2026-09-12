@@ -142,3 +142,28 @@ docker build -f bridges/Dockerfile \
 
 tag 推送会触发 `.github/workflows/release.yml`,矩阵构建 14 个桥镜像并推送到 GHCR,同时生成
 CycloneDX SBOM;tag 发布的镜像会通过 keyless cosign 签名。
+
+
+### Ordinary publication storage
+
+The edge freezes each signed Event under the upstream delivery identity before
+transport. Each Realm and complete Actor has a small accepted-frontier head and
+one unresolved sending slot; immutable Events, receiver observations and outcome
+rows are stored separately. A receiver-local rejection releases the sending slot
+without claiming that the Event was never accepted elsewhere. Retrying that
+logical delivery preserves its exact signed bytes.
+
+Edge-only deployments use `FileAuthoringStore`, backed by redb with immediate,
+two-phase durable transactions. All instances of the same canonical path in one
+process share its database owner. A second process cannot open that file. Use the
+PostgreSQL or SQLite authoring backend for deployments with multiple processes.
+Any storage error poisons the shared file owner: reads and sends stop until every
+owner closes and reopening completes a successful durability barrier. Never copy
+an open database file or treat a failed commit as proof that its changes rolled
+back.
+
+The indexed path does not load or rewrite prior completed publications. The
+ignored `indexed_journal_growth_1000_10000_100000` test records real file growth
+and elapsed time at those sizes; ordinary unit tests do not imply that this
+benchmark has been run. Bootstrap authorization evidence is a separate
+requirement from the publication journal.

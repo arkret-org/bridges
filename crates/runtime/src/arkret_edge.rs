@@ -438,9 +438,16 @@ impl ArkretEdge {
                     continue;
                 }
             };
-            if let Some(record) = state.operations.get(operation_id) {
+            if let Some(record) = self.journal.load_operation(&key, operation_id).await? {
                 // Transport retries retain the original creation time, signature and authority.
-                let retry = intent.clone().with_created_at(record.intent.created_at());
+                let mut retry_refs = intent.prev_refs().to_vec();
+                retry_refs.extend(record.basis.frontier_event_ids.iter().cloned());
+                retry_refs.sort();
+                retry_refs.dedup();
+                let retry = intent
+                    .clone()
+                    .with_prev_refs(retry_refs)
+                    .with_created_at(record.intent.created_at());
                 if !retry.authored_envelope_matches(record.authored.event()) {
                     return Err(BridgeError::App(
                         "operation id is already bound to different publication content".into(),
@@ -457,11 +464,7 @@ impl ArkretEdge {
             if state.frontier.next_actor_seq == u64::MAX {
                 return Err(BridgeError::Arkret("actor sequence exhausted".into()));
             }
-            if state
-                .operations
-                .values()
-                .filter(|record| record.authored.actor_seq == state.frontier.next_actor_seq)
-                .count()
+            if state.candidates.iter().count()
                 >= arkret_wire::event_envelope::MAX_ACTOR_SEQ_TOTAL_SIBLINGS
             {
                 return Err(BridgeError::Arkret(
@@ -475,12 +478,9 @@ impl ArkretEdge {
             prev_refs.dedup();
             // Array equality is exact equality of the canonical prev_refs digest input.
             if state
-                .operations
-                .values()
-                .filter(|record| {
-                    record.authored.actor_seq == state.frontier.next_actor_seq
-                        && record.authored.prev_refs == prev_refs
-                })
+                .candidates
+                .iter()
+                .filter(|record| record.prev_refs == prev_refs)
                 .count()
                 >= arkret_wire::event_envelope::MAX_ACTOR_SEQ_SIBLINGS
             {
@@ -509,6 +509,8 @@ impl ArkretEdge {
                     authored: event.clone(),
                     outcome: None,
                     observations: vec![],
+                    result_raw: None,
+                    observation_count: 0,
                 },
             );
             if self.journal.cas(&key, raw.as_deref(), &state).await? {
@@ -528,12 +530,11 @@ impl ArkretEdge {
         operation_id: &str,
     ) -> Result<Option<AuthoredEvent>> {
         let key = scope_key(realm, actor)?;
-        Ok(self.journal.load(&key).await?.and_then(|(_, state)| {
-            state
-                .operations
-                .get(operation_id)
-                .map(|record| record.authored.clone())
-        }))
+        Ok(self
+            .journal
+            .load_operation(&key, operation_id)
+            .await?
+            .map(|record| record.authored))
     }
 
     /// Resume immutable pending Events after a restart. No authoring/authority lookup occurs.
@@ -592,21 +593,27 @@ impl ArkretEdge {
         let event =
             AuthoredEvent::from_verified_with_digest_suite(submission.event.clone(), digest_suite)?;
         let realm = event
+            .scope_ref
             .realm_id_opt()
             .ok_or_else(|| BridgeError::App("ordinary publication lacks Realm".into()))?;
         let key = scope_key(realm, &event.actor_id)?;
-        let (_, before) = self
+        let (stored_scope, operation) = self
             .journal
-            .load(&key)
+            .operation_for_event(event.event_id())
             .await?
-            .ok_or_else(|| BridgeError::App("publication was not durably frozen".into()))?;
-        let operation = before
-            .operations
-            .iter()
-            .find(|(_, record)| record.authored.event_id() == event.event_id())
-            .map(|(key, _)| key.clone())
-            .ok_or_else(|| BridgeError::App("publication is outside the durable journal".into()))?;
-        let original = &before.operations[&operation];
+            .ok_or_else(|| {
+            BridgeError::App("publication is outside the durable journal".into())
+        })?;
+        if stored_scope != key {
+            return Err(BridgeError::Database(
+                "publication scope index mismatch".into(),
+            ));
+        }
+        let original = self
+            .journal
+            .load_operation(&key, &operation)
+            .await?
+            .ok_or_else(|| BridgeError::Database("frozen publication disappeared".into()))?;
         if original.authored.event() != event.event()
             || submission != &EventInitialSubmission::online(original.authored.event().clone())
         {
@@ -645,9 +652,10 @@ impl ArkretEdge {
                         "another ordinary publication is unresolved".into(),
                     ));
                 }
-                let record = state
-                    .operations
-                    .get_mut(&operation)
+                let mut record = self
+                    .journal
+                    .load_operation(&key, &operation)
+                    .await?
                     .ok_or_else(|| BridgeError::Database("publication disappeared".into()))?;
                 if let Some(outcome) = &record.outcome {
                     if publication_outcome(&event, outcome)?.is_some() {
@@ -658,6 +666,7 @@ impl ArkretEdge {
                     break;
                 }
                 record.outcome = None;
+                state.operations.insert(operation.clone(), record);
                 state.pending = Some(operation.clone());
                 if self.journal.cas(&key, Some(&raw), &state).await? {
                     acquired = true;
@@ -675,9 +684,10 @@ impl ArkretEdge {
                 self.journal.load(&key).await?.ok_or_else(|| {
                     BridgeError::Database("publication journal disappeared".into())
                 })?;
-            let record = state
-                .operations
-                .get_mut(&operation)
+            let mut record = self
+                .journal
+                .load_operation(&key, &operation)
+                .await?
                 .ok_or_else(|| BridgeError::Database("frozen operation disappeared".into()))?;
             if record.authored.event() != event.event() {
                 return Err(BridgeError::Database("frozen publication changed".into()));
@@ -692,6 +702,7 @@ impl ArkretEdge {
                 outcome: outcome.clone(),
             });
             record.outcome = Some(outcome.clone());
+            state.operations.insert(operation.clone(), record);
             if state.pending.as_deref() == Some(operation.as_str()) {
                 state.pending = None;
             }
@@ -709,7 +720,7 @@ impl ArkretEdge {
                     Err(BridgeError::App(format!(
                         "receiver rejected exact publication {}: {}",
                         event.event_id(),
-                        outcome.rejections[0].reason_code
+                        outcome.rejections[0].reason_code.as_str()
                     )))
                 };
             }
@@ -751,12 +762,15 @@ impl ArkretEdge {
             .client
             .seals_resolve(&arkret::SelfSealResolveRequestBody {
                 realm_id: realm_id.clone(),
-                seal_refs: vec![leaf.clone()],
+                selection:
+                    arkret_models_collaboration::http_bodies::SealResolveSelection::SealRefs {
+                        seal_refs: vec![leaf.clone()],
+                    },
                 history_traversal_access: None,
             })
             .await?;
         let seal = resolved
-            .seals
+            .into_seals()?
             .into_iter()
             .find(|seal| seal.id == leaf)
             .ok_or_else(|| {
@@ -1463,24 +1477,36 @@ mod tests {
         fn load(&self, scope: &str) -> Result<Option<String>> {
             Ok(self.0.lock().get(scope).cloned())
         }
-        fn compare_exchange(
+        fn compare_exchange_batch(
             &self,
-            scope: &str,
-            expected: Option<&str>,
-            replacement: &str,
+            expected: &[(String, Option<String>)],
+            writes: &[(String, Option<String>)],
         ) -> Result<bool> {
             let mut entries = self.0.lock();
-            if entries.get(scope).map(String::as_str) != expected {
+            if expected
+                .iter()
+                .any(|(key, value)| entries.get(key) != value.as_ref())
+            {
                 return Ok(false);
             }
-            entries.insert(scope.to_owned(), replacement.to_owned());
+            for (key, value) in writes {
+                match value {
+                    Some(value) => {
+                        entries.insert(key.clone(), value.clone());
+                    }
+                    None => {
+                        entries.remove(key);
+                    }
+                }
+            }
             Ok(true)
         }
-        fn entries(&self) -> Result<Vec<(String, String)>> {
+        fn entries_with_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>> {
             Ok(self
                 .0
                 .lock()
                 .iter()
+                .filter(|(key, _)| key.starts_with(prefix))
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect())
         }
@@ -1491,7 +1517,10 @@ mod tests {
             key_id: arkret::OpaqueLocalId::new("bridge-key").unwrap(),
             key_epoch: 0,
             credential_epoch: None,
-            authority_refs: vec![arkret::SealId::from_digest(DigestSuite::Sha256, [7; 32])],
+            authority_refs: vec![
+                arkret::SealId::new("ak:seal:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+                    .unwrap(),
+            ],
         }
     }
     fn message_intent(edge: &ArkretEdge, realm: &RealmId, text: &str) -> EventIntent {
@@ -1602,7 +1631,17 @@ mod tests {
         let outcome = accepted_outcome(&first, siblings.clone());
         let (raw, mut state) = edge.journal.load(&key).await.unwrap().unwrap();
         state.frontier = publication_outcome(&first, &outcome).unwrap().unwrap();
-        state.operations.get_mut("delivery-one").unwrap().outcome = Some(outcome);
+        state
+            .operations
+            .entry("delivery-one".into())
+            .or_insert(
+                edge.journal
+                    .load_operation(&key, "delivery-one")
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            )
+            .outcome = Some(outcome);
         state.pending = None;
         assert!(edge.journal.cas(&key, Some(&raw), &state).await.unwrap());
         drop(edge);
@@ -1617,6 +1656,18 @@ mod tests {
             .unwrap();
         assert_eq!(second.actor_seq, 1);
         assert_eq!(second.prev_refs, siblings);
+        let retry = edge
+            .author_and_sign(
+                &realm,
+                "delivery-two",
+                message_intent(&edge, &realm, "second"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&retry).unwrap(),
+            serde_json::to_vec(&second).unwrap()
+        );
     }
 
     #[tokio::test]
@@ -1641,7 +1692,14 @@ mod tests {
         let third = seed_empty_scope(&edge, &realm_b, &account_a).await;
         assert_ne!(first, second);
         assert_ne!(first, third);
-        assert_eq!(edge.journal.store.entries().unwrap().len(), 3);
+        assert_eq!(
+            edge.journal
+                .store
+                .entries_with_prefix("head/")
+                .unwrap()
+                .len(),
+            3
+        );
     }
 
     #[tokio::test]
@@ -1709,8 +1767,14 @@ mod tests {
         let (raw, mut state) = edge.journal.load(&key).await.unwrap().unwrap();
         state
             .operations
-            .get_mut("old-key-delivery")
-            .unwrap()
+            .entry("old-key-delivery".into())
+            .or_insert(
+                edge.journal
+                    .load_operation(&key, "old-key-delivery")
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            )
             .outcome = Some(rejected);
         state.pending = None;
         assert!(edge.journal.cas(&key, Some(&raw), &state).await.unwrap());
@@ -1732,8 +1796,14 @@ mod tests {
         let (raw, mut state) = edge.journal.load(&key).await.unwrap().unwrap();
         state
             .operations
-            .get_mut("old-key-delivery")
-            .unwrap()
+            .entry("old-key-delivery".into())
+            .or_insert(
+                edge.journal
+                    .load_operation(&key, "old-key-delivery")
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            )
             .outcome = Some(accepted.clone());
         state.frontier =
             merge_frontier(&state.frontier, &accepted.frontiers[0], old.digest_suite()).unwrap();
@@ -1770,7 +1840,17 @@ mod tests {
                 .await
                 .unwrap();
             let (raw, mut state) = edge.journal.load(&key).await.unwrap().unwrap();
-            state.operations.get_mut(&operation).unwrap().outcome = Some(rejected_outcome(&event));
+            state
+                .operations
+                .entry(operation.clone())
+                .or_insert(
+                    edge.journal
+                        .load_operation(&key, &operation)
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                )
+                .outcome = Some(rejected_outcome(&event));
             state.pending = None;
             assert!(edge.journal.cas(&key, Some(&raw), &state).await.unwrap());
         }
@@ -1791,16 +1871,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn durable_engine_failure_prevents_publication_and_restart_retains_original() {
+        use crate::file_authoring_store::tests::{FaultBackend, fault_store};
+        let backend = FaultBackend::default();
+        let store = Arc::new(fault_store(backend.clone()));
+        let edge = test_edge(store.clone());
+        let realm = RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").unwrap();
+        let intent = message_intent(&edge, &realm, "frozen before transport");
+        let key = seed_empty_scope(&edge, &realm, intent.actor_id()).await;
+        let original = edge
+            .author_and_sign(&realm, "delivery", intent)
+            .await
+            .unwrap();
+        let original_bytes = serde_json::to_vec(&original).unwrap();
+        let (raw, mut state) = edge.journal.load(&key).await.unwrap().unwrap();
+        let mut record = edge
+            .journal
+            .load_operation(&key, "delivery")
+            .await
+            .unwrap()
+            .unwrap();
+        record.outcome = Some(rejected_outcome(&original));
+        state.pending = None;
+        state.operations.insert("delivery".into(), record);
+        backend.fail_sync();
+        assert!(edge.journal.cas(&key, Some(&raw), &state).await.is_err());
+        // This is the real public send path. The poisoned storage read returns
+        // before Client::events_submit; it never retries from visible RAM pages.
+        let error = edge.submit_event(&original).await.unwrap_err();
+        assert!(error.to_string().contains("poisoned"));
+        assert!(
+            edge.retained_publication(&realm, &original.actor_id, "delivery")
+                .await
+                .is_err()
+        );
+        drop(edge);
+        drop(store);
+        backend.power_loss();
+        let edge = test_edge(Arc::new(fault_store(backend)));
+        let recovered = edge
+            .retained_publication(&realm, &original.actor_id, "delivery")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(serde_json::to_vec(&recovered).unwrap(), original_bytes);
+    }
+
+    #[tokio::test]
     async fn delegated_intent_preserves_the_provisioned_account_station() {
         struct NoAuthoring;
         impl AuthoringStore for NoAuthoring {
             fn load(&self, _: &str) -> Result<Option<String>> {
                 panic!("intent must not access authoring state")
             }
-            fn compare_exchange(&self, _: &str, _: Option<&str>, _: &str) -> Result<bool> {
+            fn compare_exchange_batch(
+                &self,
+                _: &[(String, Option<String>)],
+                _: &[(String, Option<String>)],
+            ) -> Result<bool> {
                 panic!("intent must not mutate authoring state")
             }
-            fn entries(&self) -> Result<Vec<(String, String)>> {
+            fn entries_with_prefix(&self, _: &str) -> Result<Vec<(String, String)>> {
                 panic!("intent must not scan authoring state")
             }
         }

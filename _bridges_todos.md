@@ -1,5 +1,7 @@
 # 共享层变更 / 待办登记(bridges)
 
+- 2026-09-13: ordinary authoring 持久层改为 indexed atomic CAS；file 后端使用 redb，删除自制 JSONL 整段历史重写，增加写入/同步失败 poison 与掉电恢复回归。真实 1k/10k/100k 增长测试为显式 ignored benchmark，尚待统一执行。
+
 `_BRIDGE_CONTRACT.md` 要求适配器**勿改两个共享 crate**(`arkret-bridge-runtime` /
 `arkret-bridge-messaging`)。当某项能力确属跨桥共享、必须下沉到共享层时,在此登记,
 让契约约束有一个可承载的记录面(否则共享层会被各桥各自悄悄改动)。

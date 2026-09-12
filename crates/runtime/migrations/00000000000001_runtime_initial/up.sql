@@ -24,8 +24,8 @@ CREATE TABLE IF NOT EXISTS event_dedup (
     expires_at BIGINT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS ordinary_authoring (
-    scope_key TEXT PRIMARY KEY,
-    journal TEXT NOT NULL);
+    entry_key TEXT PRIMARY KEY,
+    entry_value TEXT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS webhook_replay_guard (
     replay_key VARCHAR(191) PRIMARY KEY,
