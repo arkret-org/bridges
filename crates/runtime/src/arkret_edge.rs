@@ -1519,9 +1519,6 @@ mod tests {
 
     fn ordinary_context() -> AuthContext {
         AuthContext {
-            key_id: arkret::OpaqueLocalId::new("bridge-key").unwrap(),
-            key_epoch: 0,
-            credential_epoch: None,
             authority_refs: vec![
                 arkret::SealId::new(format!("ak:seal:sha256:{}", "07".repeat(32))).unwrap(),
             ],
