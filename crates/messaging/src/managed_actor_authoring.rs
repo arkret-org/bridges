@@ -554,6 +554,11 @@ impl ManagedActorAuthoringService {
                 method_history_evidence: identity.method_history_evidence.clone(),
                 service_actor_seq: frontier.next_actor_seq,
                 service_prev_refs: frontier.frontier_event_ids,
+                signer_resolution_evidence_ref: self
+                    .config
+                    .arkret
+                    .signer_resolution_evidence_ref
+                    .clone(),
                 seal_basis,
                 digest_suite,
                 trust_domain: TrustDomainId::new(self.config.arkret.trust_domain.to_string())?,

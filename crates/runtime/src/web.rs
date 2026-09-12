@@ -40,10 +40,12 @@ static PROMETHEUS_HANDLE: OnceLock<std::result::Result<PrometheusHandle, String>
 const APPLET_TRANSACTION_SIGNATURE_MAX_LIFETIME_SECS: i64 = 300;
 const APPLET_TRANSACTION_SIGNATURE_MAX_CLOCK_SKEW_SECS: i64 = 30;
 /// Upper bound on the inbound edge `transactions` body, mirroring the webhook
-/// surface's `MAX_WEBHOOK_BODY_BYTES` (1 MiB). Without it the body is buffered
+/// surface's bounded read. The Applet authoring completion may contain a full
+/// committed installation request, so the protocol ceiling is 16 MiB. Without
+/// it the body is buffered
 /// into memory in full *before* signature verification, an unauthenticated
 /// memory-pressure vector on any deployment that exposes this surface.
-const MAX_APPLET_TRANSACTION_BODY_BYTES: usize = 1024 * 1024;
+const MAX_APPLET_TRANSACTION_BODY_BYTES: usize = 16 * 1024 * 1024;
 const SOURCE_SERVICE_ID_HEADER: &str = "source-service-id";
 const DESTINATION_SERVICE_ID_HEADER: &str = "destination-service-id";
 
@@ -527,13 +529,27 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         }
     };
 
-    let source = body.source_id.clone();
+    let source = body.source_id().clone();
     if source != verified.source_id {
         record_applet_transaction("unauthorized");
         unauthorized_code(
             res,
             "http_signature_invalid",
             "transaction source_id does not match signed origin service DID",
+        );
+        return;
+    }
+    if let AppletTransactionRequestBody::Authoring(authoring) = &body
+        && let Err(error) = authoring.authoring_result.validate_delivery_binding(
+            &authoring.applet_id,
+            &verified.source_id,
+            &verified.destination_id,
+        )
+    {
+        record_applet_transaction("bad_request");
+        bad_request(
+            res,
+            format!("invalid authoring completion binding: {error}"),
         );
         return;
     }
@@ -981,6 +997,15 @@ fn build_delivery_authentication_record_digest(
 fn verify_transaction_events(
     body: &AppletTransactionRequestBody,
 ) -> std::result::Result<(), String> {
+    let body = match body {
+        AppletTransactionRequestBody::Events(body) => body,
+        AppletTransactionRequestBody::Authoring(body) => {
+            return body
+                .authoring_result
+                .validate_bindings()
+                .map_err(|error| error.to_string());
+        }
+    };
     for event in &body.events {
         if event.proofs.len() != 1 {
             return Err(format!(
@@ -1343,15 +1368,17 @@ mod tests {
     }
 
     fn transaction(events: Vec<Event>) -> AppletTransactionRequestBody {
-        AppletTransactionRequestBody {
-            applet_id: arkret::AppletId::new(
-                "ak:applet:01904100-0000-7000-8000-000000000001".to_owned(),
-            )
-            .expect("applet id"),
-            source_id: arkret::project_did_to_core_id(&server_did()).expect("server core id"),
-            events,
-            signals: None,
-        }
+        AppletTransactionRequestBody::Events(
+            arkret_models_collaboration::http_bodies::AppletEventTransactionRequestBody {
+                applet_id: arkret::AppletId::new(
+                    "ak:applet:01904100-0000-7000-8000-000000000001".to_owned(),
+                )
+                .expect("applet id"),
+                source_id: arkret::project_did_to_core_id(&server_did()).expect("server core id"),
+                events,
+                signals: None,
+            },
+        )
     }
 
     fn seed_source_service(authority: &DidAuthority, seed: u8, now: DateTime<Utc>) {

@@ -1207,6 +1207,13 @@ impl arkret::AppletHandler for BridgeAppletHandler {
         _idempotency_key: &str,
         req: AppletTransactionRequestBody,
     ) -> std::result::Result<AppletTransactionOutcome, WireError> {
+        let arkret_models_collaboration::http_bodies::AppletTransactionRequestBody::Events(req) =
+            req
+        else {
+            return Err(WireError::Protocol(
+                "managed Actor authoring completion installation is not available".into(),
+            ));
+        };
         let event_count = req.events.len();
         let mut rejections: Vec<arkret::AppletEventRejection> = Vec::new();
         let mut enqueue_failed = false;
