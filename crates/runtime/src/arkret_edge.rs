@@ -989,6 +989,7 @@ fn validate_authorization_ref(authorization_ref: &str) -> Result<AuthorizationRe
 }
 
 fn default_client(config: &Config) -> Result<Client> {
+    crate::install_default_crypto_provider();
     let base = url::Url::parse(&config.arkret.server_url)
         .map_err(|e| BridgeError::Config(format!("server_url: {e}")))?;
     Client::builder(base)
