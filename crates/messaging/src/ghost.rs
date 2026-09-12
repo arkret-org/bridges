@@ -507,6 +507,24 @@ pub(crate) async fn create_portal_strand(
     location: &Value,
 ) -> Result<String> {
     let realm = RealmId::new(realm_id.to_owned())?;
+    let external_ref = location
+        .as_object()
+        .ok_or_else(|| BridgeError::App("portal location must be an object".into()))?
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    let operation_id = runtime::external_operation_key("ak.strand.create", &external_ref)?;
+    if let Some(event) = edge
+        .retained_publication(
+            &realm,
+            &arkret::ActorId::service(edge.service_actor_id().clone()),
+            &operation_id,
+        )
+        .await?
+    {
+        edge.submit_event(&event).await?;
+        return Ok(StrandId::from_event_id(event.event_id()).to_string());
+    }
     let title = alias
         .filter(|alias| !alias.trim().is_empty())
         .unwrap_or(app_channel);
@@ -542,7 +560,7 @@ pub(crate) async fn create_portal_strand(
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect(),
         );
-    let event = edge.author_and_sign(&realm, intent).await?;
+    let event = edge.author_and_sign(&realm, &operation_id, intent).await?;
     edge.submit_event(&event).await?;
     // The Strand is named by `retype(event_id)` of its own accepted create.
     Ok(StrandId::from_event_id(event.event_id()).to_string())

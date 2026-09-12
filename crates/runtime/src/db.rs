@@ -25,7 +25,7 @@ use crate::idempotency::{
 };
 
 /// Embedded migrations for the runtime-owned tables (`transaction_idempotency`,
-/// `event_dedup`, `bridge_state`). The SQL uses the common subset supported by
+/// `event_dedup`, `ordinary_authoring`). The SQL uses the common subset supported by
 /// SQLite and PostgreSQL, so every backend embeds the same migration.
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
@@ -475,7 +475,7 @@ pub struct DbReplayGuardStore {
 impl DbReplayGuardStore {
     /// Build the store. The `webhook_replay_guard` table is created by the
     /// runtime migrations, which [`crate::run_bridge`] applies at startup (via
-    /// [`crate::DbSeqStore::new`]); standalone hosts and tests must run
+    /// [`crate::DbAuthoringStore::new`]); standalone hosts and tests must run
     /// [`MIGRATIONS`] themselves.
     pub fn new(db: Arc<DatabaseManager>) -> Self {
         Self { db }
@@ -542,7 +542,7 @@ pub struct DbTokenStore {
 impl DbTokenStore {
     /// Build the store. The `token_cache` table is created by the runtime
     /// migrations, which [`crate::run_bridge`] applies at startup (via
-    /// [`crate::DbSeqStore::new`]); standalone hosts and tests must run
+    /// [`crate::DbAuthoringStore::new`]); standalone hosts and tests must run
     /// [`MIGRATIONS`] themselves.
     pub fn new(db: Arc<DatabaseManager>) -> Self {
         Self { db }
@@ -590,7 +590,7 @@ pub struct DbOutboundDeadLetterStore {
 impl DbOutboundDeadLetterStore {
     /// Build the store. The `outbound_dead_letters` table is created by the
     /// runtime migrations, which [`crate::run_bridge`] applies at startup (via
-    /// [`crate::DbSeqStore::new`]); standalone hosts and tests must run
+    /// [`crate::DbAuthoringStore::new`]); standalone hosts and tests must run
     /// [`MIGRATIONS`] themselves.
     pub fn new(db: Arc<DatabaseManager>) -> Self {
         Self { db }

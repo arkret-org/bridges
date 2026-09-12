@@ -8,9 +8,10 @@
 //!
 //! - **Inbound async pump**: turns the SDK's synchronous `AppletHandler` transaction pushes into an
 //!   async [`arkret::Event`] stream + a background consumer ([`app::consume_inbound`]).
-//! - **Outbound mint bookkeeping**: monotonic `actor_seq`, HLC generation, `applet_id` stamping and
-//!   one-pass signing, exposed through [`arkret_edge::ArkretEdge`]'s intent/authoring methods
-//!   (`service_intent`, `delegated_intent`, `author_and_sign`, `submit_event`).
+//! - **Durable ordinary publishing**: accepted Realm/Actor frontiers, exact retry bytes, HLC and
+//!   `applet_id`, with one-pass signing, exposed through [`arkret_edge::ArkretEdge`]'s
+//!   intent/authoring methods (`service_intent`, `delegated_intent`, `author_and_sign`,
+//!   `submit_event`).
 //! - **App-runtime scaffolding**: config loading, a diesel pool + migration runner, a salvo server
 //!   (applet routes + health/metrics + app webhooks), and the [`run_bridge`] orchestration loop.
 //!
@@ -21,13 +22,13 @@
 //!
 //! ## Cargo features
 //!
-//! - `edge` (always available): the protocol edge ([`ArkretEdge`], the [`SeqStore`] trait +
-//!   [`SeqAllocator`], config, errors, cache/queue, and blob helpers) without diesel or salvo. A
-//!   host injects its own [`SeqStore`]. The out-of-repo consumer `savfox`
+//! - `edge` (always available): the protocol edge ([`ArkretEdge`], the [`AuthoringStore`] trait +
+//!   [`AuthoringJournal`], config, errors, cache/queue, and blob helpers) without diesel or salvo.
+//!   A host injects its own [`AuthoringStore`]. The out-of-repo consumer `savfox`
 //!   (`../../../savfox-ai/savfox`) depends on this surface with `default-features = false, features
 //!   = ["edge"]` and calls e.g. `ArkretEdge::new_outbound`; check it before deleting any
 //!   shared-layer pub symbol.
-//! - `db`: the diesel-backed database pool ([`db`]) and [`DbSeqStore`].
+//! - `db`: the diesel-backed database pool ([`db`]) and [`DbAuthoringStore`].
 //! - `web`: the salvo HTTP service ([`web`]).
 //! - `runtime` (= `db` + `web`): [`BridgeContext`] / [`BridgeApp`] / [`run_bridge`].
 //! - `full` (= `db` + `web` + `runtime`) and `default` (= `full` + `sqlite`) keep all historical
@@ -35,6 +36,7 @@
 
 pub mod app;
 mod arkret_edge;
+mod authoring;
 pub mod backoff;
 pub mod blocking;
 pub mod cache;
@@ -43,11 +45,10 @@ pub mod dead_letter;
 #[cfg(any(feature = "web", test))]
 pub mod did_binding;
 mod error;
-mod file_seq_store;
+mod file_authoring_store;
 pub mod idempotency;
 pub mod logging;
 pub mod queue;
-mod seq;
 pub mod telemetry;
 
 #[cfg(feature = "db")]
@@ -62,6 +63,9 @@ pub use app::{AppletResolver, ResolvedActor, ResolvedRealm};
 #[cfg(feature = "runtime")]
 pub use app::{BridgeApp, BridgeContext};
 pub use arkret_edge::ArkretEdge;
+#[cfg(feature = "db")]
+pub use authoring::DbAuthoringStore;
+pub use authoring::{AuthoringJournal, AuthoringStore, external_operation_key};
 pub use backoff::{BRIDGE_RETRY, bridge_retry_delay};
 pub use blocking::run_blocking;
 pub use cache::{PersistedToken, TokenCache, TokenStore};
@@ -80,13 +84,10 @@ pub use error::{BridgeError, Result, redact_sensitive_url_values};
 // operation-control model (PairSlot / PBFT journal) that the SDK retired in
 // `fafb429c`. Nothing outside the module used it, so the adapter is removed
 // rather than kept as a stub against types that no longer exist.
-pub use file_seq_store::FileSeqStore;
+pub use file_authoring_store::FileAuthoringStore;
 pub use idempotency::{DedupVerdict, EventDedupStore, ReplayGuardStore, ReplayGuardVerdict};
 #[cfg(feature = "web")]
 pub use salvo;
-#[cfg(feature = "db")]
-pub use seq::DbSeqStore;
-pub use seq::{SeqAllocator, SeqStore};
 pub use telemetry::increment_counter;
 #[cfg(feature = "runtime")]
 use tokio::sync::mpsc;
@@ -123,10 +124,10 @@ where
     let (signal_tx, signal_rx) = mpsc::channel(arkret_edge::SIGNAL_QUEUE_CAPACITY);
 
     let db = Arc::new(db::DatabaseManager::connect(&config.database)?);
-    // The diesel-backed restart-safe sequence store, injected into the edge.
-    let seq: Arc<dyn SeqStore> = Arc::new(DbSeqStore::new(db.clone())?);
+    // The durable ordinary publication journal, injected into the edge.
+    let store: Arc<dyn AuthoringStore> = Arc::new(DbAuthoringStore::new(db.clone())?);
 
-    let mut edge = ArkretEdge::new(config.clone(), seq, inbound_tx)?;
+    let mut edge = ArkretEdge::new(config.clone(), store, inbound_tx)?;
     edge.set_signal_sender(signal_tx);
     let edge = Arc::new(edge);
 
@@ -153,6 +154,19 @@ where
         let ctx = ctx.clone();
         let app = app.clone();
         tokio::spawn(async move { app::replay_outbound_dead_letters(ctx, app).await })
+    };
+
+    let publication_replayer = {
+        let edge = edge.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+                if let Err(error) = edge.retry_pending_publications().await {
+                    tracing::warn!(%error, "ordinary publication recovery failed");
+                }
+            }
+        })
     };
 
     let runtime_row_cleanup = {
@@ -212,6 +226,7 @@ where
         r = consumer => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,
         r = signal_consumer => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,
         r = dead_letter_replayer => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,
+        r = publication_replayer => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,
         r = runtime_row_cleanup => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,
         r = web => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,
         r = runner => r.map_err(|e| BridgeError::Runtime(e.to_string()))?,

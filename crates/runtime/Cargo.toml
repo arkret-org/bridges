@@ -16,7 +16,7 @@ ignored = ["libsqlite3-sys"]
 default  = ["full", "sqlite"]
 full     = ["db", "web", "runtime"]
 # Intentionally empty and intentionally kept: `edge` names the always-available
-# protocol-edge surface (ArkretEdge / SeqStore / SeqAllocator / Config / errors /
+# protocol-edge surface (ArkretEdge / AuthoringStore / AuthoringJournal / Config / errors /
 # cache / queue), which is what is left when no other feature is on. It enables
 # nothing because that surface is unconditional — see the crate-level docs in
 # src/lib.rs. It is not a dangling feature: the out-of-repo consumer

@@ -34,6 +34,8 @@
 | 2026-08-20 | runtime | 接线 2026-08-19 行保留的 `DidAuthority::invalidate_did` 运行时触发路径：admin 面新增 operator 命令端点 `POST /admin/did-bindings/invalidate`（body `{did, trust_domain?}`，`trust_domain` 为误操作护栏，不匹配则 409 拒绝不清扫），直达 `invalidate_did` 的 §5.6 `for_did` 域内粗清扫，幂等（清扫 0 条也是 200）。选 admin 端点而非 CLI 子命令：bridge 是常驻进程，binding store 在进程内存里，CLI 子命令够不到运行中进程的 store；暴露方式与 `/health`、`/metrics` 一致（默认回环绑定、无请求级鉴权，BRG-06-004）。新增指标 `arkret_bridge_did_binding_invalidations_total`；`did_binding.rs` 模块文档的失效引用「§4 row 7 / policy-change invalidation」（已被 spec 移除）订正为 §5.6；触发责任归属写入 README「DID binding 失效」段。**不含** §5.6 的 evidence dependency 反查 selective invalidation：bridge 的 config 锚定 binding 走 `MethodEvidence::none()`，非 evidence-bearing，该 MUST 不落在 bridges 头上。测试经 salvo `TestClient` 走真实挂载路由覆盖清扫 / trust-domain 护栏 / 非法 DID / 幂等四类路径（runtime dev-dependencies 增 salvo `test` feature，仅测试构建生效）。 |
 | 2026-08-23 | runtime | 死代码清理复核（双仓 grep 本仓 + savfox，全量 pub 符号与依赖均有消费者，无删除）。仅订正过时文档：`arkret_edge.rs` 模块文档与 `lib.rs` crate 文档仍引用已删除的 `mint_event_unsigned_async`/`mint_event_as_unsigned_async`/`resign_event` 与 "asynchronous unsigned-mint methods" 措辞，改为描述现行 `service_intent`/`delegated_intent`/`author_and_sign`/`submit_event` 面。仅注释,无行为变更。 |
 
+| 2026-09-13 | runtime + messaging | 删除全局批量序号预留及旧文件存储，改用 SDK Realm/完整 Actor frontier 与持久 CAS publication journal；发送前冻结完整签名 Event，未知结果原件重试，receiver-local 拒绝释放当前槽但保留历史原件；新 operation 合并完整已观察 siblings，按 16/64 上限限制候选。Savfox 同步使用真实交付 ID 和恢复 worker。静态完成，真实编译及崩溃/多站联合验收仍待执行。 |
+
 ## Todo(尚未落地的共享层待办)
 
 - **(runtime) Event signer binding 的 version / epoch 维度目前为空**
