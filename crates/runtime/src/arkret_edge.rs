@@ -42,7 +42,10 @@ use arkret_models_integration::{
 };
 #[cfg(any(feature = "web", test))]
 use arkret_wire::ProfileId;
-use arkret_wire::{AuthorizationRef, DidUrl, EventInitialSubmission, SignalEnvelope, event_spec};
+use arkret_wire::{
+    AuthContext, AuthorizationRef, DidUrl, EventInitialSubmission, ProofAuthenticatedPublication,
+    SignalEnvelope, event_spec,
+};
 use parking_lot::Mutex;
 use serde::Serialize;
 use serde_json::Value;
@@ -82,48 +85,17 @@ const MAX_REALM_HLC_GENERATORS: usize = 4_096;
 #[cfg(any(feature = "web", test))]
 const INBOUND_QUEUE_FULL_RETRY_MS: u64 = 1000;
 
-/// Submission wrapper backed by the authenticated Station.
-///
-/// The default SDK path returns an online wrapper without an authorization
-/// lease.
-#[derive(Clone)]
-pub struct StationSubmissionProvider {
-    client: Client,
-}
-
-impl StationSubmissionProvider {
-    pub fn new(client: Client) -> Self {
-        Self { client }
-    }
-
-    /// Wrap a fully-authored, fully-signed Event for initial publication,
-    /// returning the exact Event it was given inside an
-    /// [`EventInitialSubmission`]. The runtime validates both the wrapper and
-    /// exact Event identity before sending.
-    async fn initial_submission(
-        &self,
-        event: &Event,
-        digest_suite: DigestSuite,
-    ) -> Result<EventInitialSubmission> {
-        self.client
-            .prepare_initial_submission(event, digest_suite)
-            .await
-            .map_err(Into::into)
-    }
-}
-
 /// The arkret edge client.
 pub struct ArkretEdge {
     config: Arc<Config>,
     client: Client,
     signer: Ed25519PayloadSigner,
-    /// Authority transport for issuer-produced AuthorizationLease/CBS
-    /// evidence: the authenticated Station submission wrapper.
-    submission_provider: StationSubmissionProvider,
     /// Resolvable DID used for key lookup and proof `verification_method`.
     service_did: Did,
     /// Stable service actor core written into Event envelopes.
     service_actor_id: DidCoreId,
+    /// Frozen service signer evidence retained in local configuration.
+    signer_resolution_evidence_ref: arkret::SignerEvidenceRef,
     applet_id: AppletId,
     /// Store-backed, restart-safe actor sequence allocator.
     seq: SeqAllocator,
@@ -234,16 +206,16 @@ impl ArkretEdge {
 
         let applet_id = AppletId::new(config.arkret.applet_id.clone())?;
         let service_actor_id = project_did_to_core_id(&service_did)?;
+        let signer_resolution_evidence_ref = config.arkret.signer_resolution_evidence_ref.clone();
         let hlc_device_id = config.bridge.bridge_id.clone();
 
-        let submission_provider = StationSubmissionProvider::new(client.clone());
         Ok(Self {
             config,
             client,
             signer,
-            submission_provider,
             service_did,
             service_actor_id,
+            signer_resolution_evidence_ref,
             applet_id,
             seq,
             hlc_generators: Mutex::new(HashMap::new()),
@@ -385,10 +357,44 @@ impl ArkretEdge {
         realm_id: &RealmId,
         intent: EventIntent,
     ) -> Result<AuthoredEvent> {
-        let digest_suite = self.realm_digest_suite(realm_id).await?;
+        let auth_context = intent.auth_context().cloned().or_else(|| {
+            self.config
+                .arkret
+                .ordinary_authoring_contexts
+                .get(realm_id.as_str())
+                .cloned()
+        }).ok_or_else(|| {
+            BridgeError::Arkret(format!(
+                "frontier_unavailable: no locally retained authoring authority for Realm {realm_id}"
+            ))
+        })?;
+        self.author_and_sign_with_auth_context(realm_id, intent, auth_context)
+            .await
+    }
+
+    /// Position and sign an ordinary Event using an already verified local
+    /// authority context. No Station read or Seal advancement occurs here.
+    pub async fn author_and_sign_with_auth_context(
+        &self,
+        realm_id: &RealmId,
+        intent: EventIntent,
+        auth_context: AuthContext,
+    ) -> Result<AuthoredEvent> {
+        auth_context
+            .validate()
+            .map_err(|error| BridgeError::Arkret(error.to_string()))?;
+        let digest_suite = authority_digest_suite(&auth_context)?;
+        if let Some(existing) = intent.auth_context()
+            && existing != &auth_context
+        {
+            return Err(BridgeError::Arkret(
+                "ordinary Event intent carries a different authority context".to_owned(),
+            ));
+        }
         let seq = self.seq.alloc_blocking().await?;
         let hlc = self.next_hlc(realm_id)?;
         let mut event = intent
+            .with_auth_context(auth_context)
             .author_with_digest_suite(seq, hlc, digest_suite)
             .map_err(|error| BridgeError::Arkret(error.to_string()))?;
         self.sign_as_service(&mut event)?;
@@ -404,7 +410,7 @@ impl ArkretEdge {
             event,
             &self.signer,
             &verification_method,
-            SignEventOptions::new(),
+            SignEventOptions::new(self.signer_resolution_evidence_ref.clone()),
         )?;
         Ok(())
     }
@@ -432,27 +438,16 @@ impl ArkretEdge {
         Ok(event_id)
     }
 
-    /// Ask the authority provider to wrap an exact signed Event, then submit
-    /// it. The provider calls the authenticated Station.
+    /// Wrap one exact signed ordinary Event locally, then submit it.
     pub async fn submit_event(&self, event: &AuthoredEvent) -> Result<String> {
         let digest_suite = event.digest_suite();
-        let submission = self
-            .submission_provider
-            .initial_submission(event.event(), digest_suite)
-            .await?;
-        if submission.event != *event.event() {
-            return Err(BridgeError::Runtime(
-                "submission wrapper replaced or mutated the signed Event".to_owned(),
-            ));
-        }
-        self.submit_initial(&submission, digest_suite).await
-    }
-
-    /// Resolve the current Realm digest suite from the authenticated
-    /// Seal-frontier projection. The state and control roots must agree; an
-    /// Event or Seal identifier prefix is never used as governance state.
-    pub async fn realm_digest_suite(&self, realm_id: &RealmId) -> Result<DigestSuite> {
-        Ok(self.realm_authoring_basis(realm_id).await?.1)
+        let publication = ProofAuthenticatedPublication::new(
+            EventInitialSubmission::online(event.event().clone()),
+            digest_suite,
+        )
+        .map_err(|error| BridgeError::Arkret(error.to_string()))?;
+        self.submit_initial(publication.submission(), digest_suite)
+            .await
     }
 
     /// Return one coherent accepted Seal basis and its signed digest suite for
@@ -584,6 +579,21 @@ impl ArkretEdge {
         self.submit_event(&event).await
     }
 
+    /// Emit a bridge error from an explicitly retained local authority context.
+    pub async fn submit_bridge_error_with_auth_context(
+        &self,
+        realm_id: &RealmId,
+        builder: arkret_event_draft::AppletBridgeErrorBuilder,
+        auth_context: AuthContext,
+    ) -> Result<String> {
+        let intent = builder
+            .build(chrono::Utc::now())?
+            .with_applet_id(self.applet_id.clone())
+            .with_auth_context(auth_context);
+        let event = self.author_and_sign(realm_id, intent).await?;
+        self.submit_event(&event).await
+    }
+
     /// The configured applet id this bridge presents to arkret.
     pub fn applet_id(&self) -> &str {
         self.applet_id.as_str()
@@ -608,6 +618,31 @@ impl ArkretEdge {
         let r = arkret::BlobRef::new(blob_ref.to_owned())?;
         Ok(self.client.blob_download(&r, None).await?)
     }
+}
+
+fn authority_digest_suite(auth_context: &AuthContext) -> Result<DigestSuite> {
+    let mut suites = auth_context.authority_refs.iter().map(|authority_ref| {
+        let digest = authority_ref
+            .as_str()
+            .strip_prefix("ak:seal:")
+            .ok_or_else(|| {
+                BridgeError::Arkret("authority reference is not a Seal id".to_owned())
+            })?;
+        arkret::Hash::new(digest.to_owned())?
+            .digest_suite()
+            .map_err(|error| BridgeError::Arkret(error.to_string()))
+    });
+    let suite = suites.next().ok_or_else(|| {
+        BridgeError::Arkret("ordinary authority context has no references".to_owned())
+    })??;
+    for candidate in suites {
+        if candidate? != suite {
+            return Err(BridgeError::Arkret(
+                "ordinary authority references use different digest suites".to_owned(),
+            ));
+        }
+    }
+    Ok(suite)
 }
 
 fn validate_authorization_ref(authorization_ref: &str) -> Result<AuthorizationRef> {
@@ -1112,12 +1147,8 @@ mod tests {
         second
             .unsigned
             .insert("delivery".to_owned(), json!({ "attempt": 2 }));
-        first
-            .proofs
-            .push(test_proof("header.payload.signature-a").into());
-        second
-            .proofs
-            .push(test_proof("header.payload.signature-b").into());
+        first.proofs.push(test_proof("header.payload.signature-a"));
+        second.proofs.push(test_proof("header.payload.signature-b"));
 
         assert_eq!(
             event_content_fingerprint(&first),
@@ -1140,7 +1171,13 @@ mod tests {
                 "sha256:0000000000000000000000000000000000000000000000000000000000000000",
             )
             .unwrap(),
-            signer_resolution_evidence_ref: None,
+            signer_resolution_evidence_ref: Some(
+                arkret::SignerEvidenceRef::new(format!(
+                    "ak:signer_evidence:sha256:{}",
+                    "11".repeat(32)
+                ))
+                .expect("fixture signer evidence ref"),
+            ),
             created_at: "2026-04-26T00:00:00Z".parse().unwrap(),
             domain: None,
             audience: None,

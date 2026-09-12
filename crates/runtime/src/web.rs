@@ -982,50 +982,38 @@ fn verify_transaction_events(
     body: &AppletTransactionRequestBody,
 ) -> std::result::Result<(), String> {
     for event in &body.events {
-        if event.proofs.is_empty() {
-            return Err(format!("event {} has no proofs", event.event_id));
-        }
-        let expected_signer = event.executed_by.as_ref().unwrap_or(&event.actor_id);
-        let producer_proofs = event
-            .proofs
-            .iter()
-            .filter_map(arkret_wire::EventProof::as_producer)
-            .collect::<Vec<_>>();
-        if producer_proofs.len() != 1 {
+        if event.proofs.len() != 1 {
             return Err(format!(
                 "event {} must carry exactly one producer proof",
                 event.event_id
             ));
         }
+        let expected_signer = event.executed_by.as_ref().unwrap_or(&event.actor_id);
+        let proof = &event.proofs[0];
         // The bridge checks immutable content-address consistency against the
         // algorithm committed by the unique producer proof. Trusted Realm-suite
         // admission remains the source Arkret node's responsibility; the bridge
         // never infers governance state from the EventId prefix.
-        let selector_suite = producer_proofs[0]
-            .event_digest
-            .digest_suite()
-            .map_err(|error| {
-                format!(
-                    "event {} producer digest suite is invalid: {error}",
-                    event.event_id
-                )
-            })?;
+        let selector_suite = proof.event_digest.digest_suite().map_err(|error| {
+            format!(
+                "event {} producer digest suite is invalid: {error}",
+                event.event_id
+            )
+        })?;
         event
             .validate_proof_bindings_with_digest_suite(selector_suite)
             .map_err(|err| format!("event {} proof binding failed: {err}", event.event_id))?;
-        for proof in producer_proofs {
-            proof.validate_production().map_err(|err| {
-                format!("event {} proof is not production: {err}", event.event_id)
-            })?;
-            let signer_did = verification_method_did(&proof.verification_method)?;
-            let signer_actor_id =
-                arkret::project_did_to_core_id(&signer_did).map_err(|error| error.to_string())?;
-            if &signer_actor_id != expected_signer.signing_principal_id() {
-                return Err(format!(
-                    "event {} proof signer DID does not match actor_id/executed_by",
-                    event.event_id
-                ));
-            }
+        proof
+            .validate_production()
+            .map_err(|err| format!("event {} proof is not production: {err}", event.event_id))?;
+        let signer_did = verification_method_did(&proof.verification_method)?;
+        let signer_actor_id =
+            arkret::project_did_to_core_id(&signer_did).map_err(|error| error.to_string())?;
+        if &signer_actor_id != expected_signer.signing_principal_id() {
+            return Err(format!(
+                "event {} proof signer DID does not match actor_id/executed_by",
+                event.event_id
+            ));
         }
     }
     Ok(())
@@ -1342,7 +1330,13 @@ mod tests {
             &mut event,
             &signer(seed, actor, verification_method),
             verification_method,
-            SignEventOptions::new(),
+            SignEventOptions::new(
+                arkret::SignerEvidenceRef::new(format!(
+                    "ak:signer_evidence:sha256:{}",
+                    "11".repeat(32)
+                ))
+                .expect("fixture signer evidence ref"),
+            ),
         )
         .expect("sign event");
         event.into_event()
@@ -1405,7 +1399,7 @@ mod tests {
         event.proofs.clear();
         let err = verify_transaction_events(&transaction(vec![event]))
             .expect_err("a proofless event must be rejected");
-        assert!(err.contains("has no proofs"), "{err}");
+        assert!(err.contains("exactly one producer proof"), "{err}");
     }
 
     #[test]

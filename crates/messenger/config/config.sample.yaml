@@ -19,6 +19,7 @@ arkret:
   access_token: "CHANGE_ME_ARKRET_ACCESS_TOKEN"
   signing_key_seed_hex: "0000000000000000000000000000000000000000000000000000000000000000"
   verification_method_fragment: "#key-1"
+  signer_resolution_evidence_ref: "ak:signer_evidence:sha256:0000000000000000000000000000000000000000000000000000000000000000"
   trusted_server_did: "did:webvh:arkret-server.example"
   # Copy these claims exactly from the installed canonical Applet package.
   # Empty arrays are fail-closed: no Realm transaction is accepted.
