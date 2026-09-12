@@ -1534,6 +1534,16 @@ mod tests {
             ),
         )
         .unwrap()
+        .with_authorization_ref(
+            AuthorizationRef::new(
+                arkret::GrantId::from_event_id(
+                    &arkret::EventId::new("ak:event:AdkQ-RmB1a8zyc52yl9GWAsodQ_EUle1WAVZqbO7pc19")
+                        .unwrap(),
+                )
+                .to_string(),
+            )
+            .unwrap(),
+        )
         .with_auth_context(ordinary_context())
     }
     async fn seed_empty_scope(
