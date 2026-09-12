@@ -489,7 +489,11 @@ impl ArkretEdge {
                         .into(),
                 ));
             }
-            let positioned = intent.clone().with_prev_refs(prev_refs);
+            // Freeze the same canonical timestamp that SDK Event authoring signs.
+            // Keeping a nanosecond intent would disagree with its millisecond Event.
+            let positioned = intent.clone().with_prev_refs(prev_refs).with_created_at(
+                arkret::canonical::normalize_timestamp_canonical(intent.created_at()),
+            );
             let mut event = positioned.clone().author_with_digest_suite(
                 state.frontier.next_actor_seq,
                 self.next_hlc(realm_id)?,
