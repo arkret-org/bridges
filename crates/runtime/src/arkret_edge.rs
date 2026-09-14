@@ -751,7 +751,7 @@ impl ArkretEdge {
     pub async fn realm_authoring_basis(
         &self,
         realm_id: &RealmId,
-    ) -> Result<(arkret::SealBasis, DigestSuite)> {
+    ) -> Result<(arkret::SealBasis, arkret::SealId, DigestSuite)> {
         // `seals_frontier` fails closed on a realm mismatch or an
         // out-of-bounds frontier before returning.
         let frontier = self.client.seals_frontier(realm_id.clone()).await?.frontier;
@@ -793,7 +793,7 @@ impl ArkretEdge {
                 "Realm Seal frontier roots use different digest suites".to_owned(),
             ));
         }
-        Ok((seal_basis, state_suite))
+        Ok((seal_basis, leaf, state_suite))
     }
 
     /// Outbound convenience with bridge provenance and an explicit delegated

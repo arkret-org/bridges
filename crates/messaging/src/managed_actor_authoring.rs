@@ -541,7 +541,8 @@ impl ManagedActorAuthoringService {
                 "Station returned the wrong service actor frontier variant".to_owned(),
             ));
         };
-        let (seal_basis, digest_suite) = self.edge.realm_authoring_basis(&realm_id).await?;
+        let (seal_basis, data_basis, digest_suite) =
+            self.edge.realm_authoring_basis(&realm_id).await?;
 
         let mut genesis_salt = [0_u8; 32];
         getrandom::fill(&mut genesis_salt)
@@ -560,6 +561,7 @@ impl ManagedActorAuthoringService {
                     .signer_resolution_evidence_ref
                     .clone(),
                 seal_basis,
+                data_basis,
                 digest_suite,
                 trust_domain: TrustDomainId::new(self.config.arkret.trust_domain.to_string())?,
                 security_class: SecurityClass::HighAssurance,
