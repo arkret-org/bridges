@@ -215,6 +215,7 @@ dependencies = [
  "arkret-models-integration",
  "arkret-policy",
  "arkret-push-policy",
+ "arkret-retry",
  "arkret-schema",
  "arkret-server",
  "arkret-signatures",

@@ -90,7 +90,7 @@ pub use dead_letter::{
 };
 pub use error::{BridgeError, Result, redact_sensitive_url_values};
 // `external_effect` is gone: it adapted the Direct Conversation
-// operation-control model (PairSlot / PBFT journal) that the SDK retired in
+// operation-control model (PairSlot / PBFT journal) that the SDK does not define in
 // `fafb429c`. Nothing outside the module used it, so the adapter is removed
 // rather than kept as a stub against types that no longer exist.
 pub use file_authoring_store::FileAuthoringStore;
