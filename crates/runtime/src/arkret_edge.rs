@@ -2,18 +2,21 @@
 //! `MatrixAppservice`).
 //!
 //! - **Outbound (app -> arkret)**: [`ArkretEdge::service_intent`] and
-//!   [`ArkretEdge::delegated_intent`] build `EventIntent`s with everything except the actor chain
-//!   position filled in; [`ArkretEdge::author_and_sign`] positions and signs one, then
-//!   [`ArkretEdge::submit_event`] wraps it in an initial-publication submission and sends it.
+//!   [`ArkretEdge::delegated_intent`] build complete producer `EventIntent`s;
+//!   [`ArkretEdge::author_and_sign`] derives the one content-bound identity and signs it, then
+//!   [`ArkretEdge::submit_event`] hands it to the current governance Station as an
+//!   `EventCommitSubmission` and retains the authority-signed commit reference.
 //! - **Inbound (arkret → app)**: transactions pushed by the arkret server via the applet HTTP
 //!   endpoints are placed into the `inbound_tx` queue by [`BridgeAppletHandler`]; after the core
 //!   consumes them they are forwarded to the app adapter.
 //! - **Media**: [`ArkretEdge::upload_blob`] / [`ArkretEdge::download_blob`].
 //!
-//! A host injects a durable [`crate::AuthoringJournal`] so retries retain exact
-//! signed Events and Realm/Actor accepted frontiers without requiring diesel.
+//! A host injects a durable [`crate::AuthoringJournal`] so retries retain the
+//! exact signed Event bytes and the exact committed reference without requiring
+//! diesel. The producer side holds no predecessor, position, or basis: the
+//! Station's `RealmCommit` is the only ordering fact.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[cfg(any(feature = "web", test))]
@@ -25,16 +28,15 @@ use arkret::identity::public_key_material_from_binding;
 use arkret::signatures::{EventProofBuilder, VerificationMethodDocument};
 use arkret::signatures::{SignEventOptions, sign_event};
 use arkret::{
-    AppletId, AuthoredEvent, Did, DidCoreId, DigestSuite, Ed25519PayloadSigner, Event, EventIntent,
-    Hlc, HlcGenerator, RealmId, ScopeRef, project_did_to_core_id,
+    AppletId, AuthoredEvent, ClientRequestOptions, Did, DidCoreId, DigestSuite,
+    Ed25519PayloadSigner, Event, EventIntent, RealmId, ScopeRef, project_did_to_core_id,
 };
 use arkret_event_draft::{EventSpec, TypedEventDraft};
-use arkret_models_collaboration::event_sync::{EventsFrontierSelector, EventsFrontierView};
 use arkret_models_collaboration::events_payloads::MessageRedactPayload;
 #[cfg(any(feature = "web", test))]
-use arkret_models_collaboration::http_bodies::AppletTransactionRequestBody;
-#[cfg(any(feature = "web", test))]
 use arkret_models_discovery::{ServiceDescribe, TransportBinding};
+#[cfg(any(feature = "web", test))]
+use arkret_models_integration::AppletTransactionRequestBody;
 #[cfg(any(feature = "web", test))]
 use arkret_models_integration::{
     AppletActorView, AppletPingOutcome, AppletProtocolMetadata, AppletRealmView,
@@ -43,10 +45,9 @@ use arkret_models_integration::{
 #[cfg(any(feature = "web", test))]
 use arkret_wire::ProfileId;
 use arkret_wire::{
-    AuthContext, AuthorizationRef, DidUrl, EventInitialSubmission, ProofAuthenticatedPublication,
-    SignalEnvelope, event_spec,
+    AuthorityRejectionStatus, AuthoritySubmitOutcome, AuthoritySubmitRequest, AuthorizationRef,
+    DidUrl, EventCommitSubmission, SignalEnvelope, event_spec,
 };
-use parking_lot::Mutex;
 use serde::Serialize;
 use serde_json::Value;
 #[cfg(test)]
@@ -56,8 +57,8 @@ use tokio::sync::mpsc::Sender;
 #[cfg(any(feature = "web", test))]
 use crate::app::AppletResolver;
 use crate::authoring::{
-    AuthoringJournal, AuthoringStore, PublicationRecord, ReceiverObservation, ScopeJournal,
-    external_operation_key, merge_frontier, publication_outcome, scope_key,
+    AuthoringJournal, AuthoringStore, PublicationRecord, external_operation_key,
+    publication_outcome, scope_key,
 };
 use crate::config::Config;
 #[cfg(any(feature = "web", test))]
@@ -80,8 +81,8 @@ pub const INBOUND_QUEUE_CAPACITY: usize = 1024;
 #[cfg(feature = "runtime")]
 pub const SIGNAL_QUEUE_CAPACITY: usize = 1024;
 
-/// Hard bound for per-Realm HLC generator state retained by one bridge process.
-const MAX_REALM_HLC_GENERATORS: usize = 4_096;
+/// Digest suite used for producer Event identities authored by this bridge.
+const PRODUCER_DIGEST_SUITE: DigestSuite = DigestSuite::Sha256;
 
 /// Retry hint (ms) returned to the server when the inbound queue is full, so it
 /// re-pushes the unaccepted events after a short delay instead of dropping them.
@@ -97,17 +98,12 @@ pub struct ArkretEdge {
     service_did: Did,
     /// Stable service actor core written into Event envelopes.
     service_actor_id: DidCoreId,
-    /// Frozen service signer evidence retained in local configuration.
-    signer_resolution_evidence_ref: arkret::SignerEvidenceRef,
     applet_id: AppletId,
-    /// Durable accepted frontiers and immutable pending publications.
+    /// Immutable frozen publications and their exact committed references.
     journal: AuthoringJournal,
-    /// Realm-scoped SDK HLC generators. The node id derives from
-    /// `(realm_id, bridge_id, signing seed)`, so events from the same bridge are
-    /// not linkable across realms by HLC node id.
-    hlc_generators: Mutex<HashMap<String, HlcGenerator>>,
-    hlc_device_id: String,
-    hlc_secret: [u8; 32],
+    /// Identity of the governance Station this edge submits to. Recorded with
+    /// every observed answer so a Station replacement is visible in the journal.
+    station_id: DidCoreId,
     /// Inbound event queue: arkret server push → core consumer loop. Bounded so
     /// a slow consumer applies backpressure (the handler returns `retry_after_ms`
     /// when full) instead of buffering without limit. `None` for outbound-only
@@ -145,7 +141,6 @@ impl ArkretEdge {
             client,
             signer,
             service_did,
-            seed,
             AuthoringJournal::new(store),
             Some(inbound_tx),
         )
@@ -168,16 +163,7 @@ impl ArkretEdge {
         journal: AuthoringJournal,
     ) -> Result<Self> {
         let service_did = config.arkret.service_did.clone();
-        let hlc_secret = signer.verifying_key().to_bytes();
-        Self::build(
-            config,
-            client,
-            signer,
-            service_did,
-            hlc_secret,
-            journal,
-            None,
-        )
+        Self::build(config, client, signer, service_did, journal, None)
     }
 
     fn build(
@@ -185,7 +171,6 @@ impl ArkretEdge {
         client: Client,
         signer: Ed25519PayloadSigner,
         service_did: Did,
-        hlc_secret: [u8; 32],
         journal: AuthoringJournal,
         inbound_tx: Option<Sender<Event>>,
     ) -> Result<Self> {
@@ -215,10 +200,9 @@ impl ArkretEdge {
             }
         }
 
-        let applet_id = AppletId::new(config.arkret.applet_id.clone())?;
+        let applet_id = AppletId::new(config.arkret.applet_id.as_str())?;
         let service_actor_id = project_did_to_core_id(&service_did)?;
-        let signer_resolution_evidence_ref = config.arkret.signer_resolution_evidence_ref.clone();
-        let hlc_device_id = config.bridge.bridge_id.clone();
+        let station_id = project_did_to_core_id(&config.arkret.trusted_server_did)?;
 
         Ok(Self {
             config,
@@ -226,12 +210,9 @@ impl ArkretEdge {
             signer,
             service_did,
             service_actor_id,
-            signer_resolution_evidence_ref,
             applet_id,
             journal,
-            hlc_generators: Mutex::new(HashMap::new()),
-            hlc_device_id,
-            hlc_secret,
+            station_id,
             inbound_tx,
             signal_tx: None,
         })
@@ -259,21 +240,6 @@ impl ArkretEdge {
         self.verification_method_for_actor(&self.service_did)
     }
 
-    /// Author the closed managed-actor creation unit with the installed Applet
-    /// service authority. Event construction lives in the shared SDK kernel;
-    /// this runtime wrapper keeps the service seed private.
-    pub fn author_managed_actor_bundle(
-        &self,
-        request: &arkret::AppletManagedActorAuthoringRequest,
-        input: arkret::AppletManagedActorBundleAuthoringInput,
-    ) -> Result<arkret::AppletManagedActorAuthoringBundle> {
-        Ok(arkret::author_applet_managed_actor_bundle(
-            request,
-            input,
-            &self.signer,
-        )?)
-    }
-
     /// The inbound event sender (bounded), if this edge was built with one.
     pub fn inbound_sender(&self) -> Option<Sender<Event>> {
         self.inbound_tx.clone()
@@ -284,34 +250,13 @@ impl ArkretEdge {
         self.signal_tx.clone()
     }
 
-    /// Generate the next Realm-scoped HLC through the SDK implementation.
-    pub fn next_hlc(&self, realm_id: &RealmId) -> Result<Hlc> {
-        let mut generators = self.hlc_generators.lock();
-        if !generators.contains_key(realm_id.as_str())
-            && generators.len() >= MAX_REALM_HLC_GENERATORS
-        {
-            return Err(BridgeError::Runtime(format!(
-                "realm HLC generator cache reached the {MAX_REALM_HLC_GENERATORS} realm limit"
-            )));
-        }
-        let generator = generators
-            .entry(realm_id.as_str().to_owned())
-            .or_insert_with(|| {
-                HlcGenerator::new(realm_id.as_str(), &self.hlc_device_id, &self.hlc_secret)
-            });
-        generator
-            .try_generate()
-            .map_err(|e| BridgeError::Arkret(e.to_string()))
-    }
-
-    /// The service-actor write for `content`, with everything except the actor
-    /// chain position filled in. Applet-originated writes carry the top-level
-    /// `applet_id` in the signed envelope.
+    /// The complete service-actor write for `content`. Applet-originated writes
+    /// carry the top-level `applet_id` in the signed envelope.
     ///
-    /// A write is an [`EventIntent`] until [`Self::author_and_sign`] positions
-    /// it: hosts fill in producer-signed members (`created_at`, `external_ref`,
-    /// encrypted content) HERE, because the Event's identity is derived from
-    /// them exactly once at authoring and nothing may rewrite it afterwards.
+    /// A write is an [`EventIntent`] until [`Self::author_and_sign`] derives its
+    /// identity: hosts fill in producer-signed members (`created_at`,
+    /// `external_ref`, encrypted content) HERE, because the Event's identity is
+    /// derived from them exactly once and nothing may rewrite it afterwards.
     pub fn service_intent<K>(&self, realm_id: &RealmId, content: K::Payload) -> Result<EventIntent>
     where
         K: EventSpec,
@@ -355,8 +300,8 @@ impl ArkretEdge {
         .into_intent(chrono::Utc::now())?)
     }
 
-    /// Position `intent` on the service actor chain, derive its one identity,
-    /// and attach the service proof.
+    /// Derive the one content-bound identity of `intent` and attach the service
+    /// proof. The Event carries no predecessor, position, or basis.
     ///
     /// `operation_id` is the upstream delivery identity, stable across retries.
     /// Signed bytes are durable before this method returns.
@@ -366,164 +311,44 @@ impl ArkretEdge {
         operation_id: &str,
         intent: EventIntent,
     ) -> Result<AuthoredEvent> {
-        let auth_context = intent.auth_context().cloned().or_else(|| {
-            self.config
-                .arkret
-                .ordinary_authoring_contexts
-                .get(realm_id.as_str())
-                .cloned()
-        }).ok_or_else(|| {
-            BridgeError::Arkret(format!(
-                "frontier_unavailable: no locally retained authoring authority for Realm {realm_id}"
-            ))
-        })?;
-        self.author_and_sign_with_auth_context(realm_id, operation_id, intent, auth_context)
-            .await
-    }
-
-    /// Freeze an ordinary Event using retained authority and its accepted Actor frontier.
-    /// Only the first use of an unknown scope asks the configured Station for a frontier.
-    pub async fn author_and_sign_with_auth_context(
-        &self,
-        realm_id: &RealmId,
-        operation_id: &str,
-        intent: EventIntent,
-        auth_context: AuthContext,
-    ) -> Result<AuthoredEvent> {
         if operation_id.is_empty() || intent.realm_id_opt() != Some(realm_id) {
             return Err(BridgeError::App(
                 "publication needs a stable operation id and exact Realm".into(),
             ));
         }
-        if arkret::classify_intent_execution(&intent)
-            .map_err(|error| BridgeError::Arkret(error.to_string()))?
-            == Some(arkret::CbsEffectPlane::Control)
-        {
-            return Err(BridgeError::App(
-                "ordinary authoring cannot publish a security command".into(),
-            ));
-        }
-        auth_context.validate()?;
-        let digest_suite = authority_digest_suite(&auth_context)?;
-        if intent
-            .auth_context()
-            .is_some_and(|existing| existing != &auth_context)
-        {
-            return Err(BridgeError::Arkret(
-                "ordinary intent carries a different authority context".into(),
-            ));
-        }
-        let intent = intent.with_auth_context(auth_context);
         let key = scope_key(realm_id, intent.actor_id())?;
-        for _ in 0..16 {
-            let loaded = self.journal.load(&key).await?;
-            let (raw, mut state) = match loaded {
-                Some((raw, state)) => (Some(raw), state),
-                None => {
-                    let selector = EventsFrontierSelector::RealmActor {
-                        realm_id: realm_id.clone(),
-                        actor_id: intent.actor_id().clone(),
-                    };
-                    let resolved = self.client.events_frontier(&selector).await?;
-                    let EventsFrontierView::RealmActor(frontier) = resolved.frontier else {
-                        return Err(BridgeError::Arkret(
-                            "frontier response has the wrong query domain".into(),
-                        ));
-                    };
-                    frontier.validate_with_suite(digest_suite)?;
-                    let state = ScopeJournal::new(frontier);
-                    if !self.journal.cas(&key, None, &state).await? {
-                        continue;
-                    }
-                    continue;
-                }
-            };
-            if let Some(record) = self.journal.load_operation(&key, operation_id).await? {
-                // Transport retries retain the original creation time, signature and authority.
-                let mut retry_refs = intent.prev_refs().to_vec();
-                retry_refs.extend(record.basis.frontier_event_ids.iter().cloned());
-                retry_refs.sort();
-                retry_refs.dedup();
-                let retry = intent
-                    .clone()
-                    .with_prev_refs(retry_refs)
-                    .with_created_at(record.intent.created_at());
-                if !retry.authored_envelope_matches(record.authored.event()) {
-                    return Err(BridgeError::App(
-                        "operation id is already bound to different publication content".into(),
-                    ));
-                }
-                return Ok(record.authored.clone());
-            }
-            if state.pending.is_some() {
-                return Err(BridgeError::Arkret(
-                    "frontier_unavailable: a previous exact publication is unresolved".into(),
+        if let Some(record) = self.journal.load_operation(&key, operation_id).await? {
+            // A transport retry reuses the frozen creation time; everything else
+            // must be identical or the operation id is being reused for new
+            // content, which would silently publish a different Event.
+            let retry = intent.clone().with_created_at(record.intent.created_at());
+            if !retry.matches_authored_event(record.authored.event()) {
+                return Err(BridgeError::App(
+                    "operation id is already bound to different publication content".into(),
                 ));
             }
-            state.frontier.validate_with_suite(digest_suite)?;
-            if state.frontier.next_actor_seq == u64::MAX {
-                return Err(BridgeError::Arkret("actor sequence exhausted".into()));
-            }
-            if state.candidates.iter().count()
-                >= arkret_wire::event_envelope::MAX_ACTOR_SEQ_TOTAL_SIBLINGS
-            {
-                return Err(BridgeError::Arkret(
-                    "frontier_unavailable: observed Actor position reached the sibling bound"
-                        .into(),
-                ));
-            }
-            let mut prev_refs = intent.prev_refs().to_vec();
-            prev_refs.extend(state.frontier.frontier_event_ids.iter().cloned());
-            prev_refs.sort();
-            prev_refs.dedup();
-            // Array equality is exact equality of the canonical prev_refs digest input.
-            if state
-                .candidates
-                .iter()
-                .filter(|record| record.prev_refs == prev_refs)
-                .count()
-                >= arkret_wire::event_envelope::MAX_ACTOR_SEQ_SIBLINGS
-            {
-                return Err(BridgeError::Arkret(
-                    "frontier_unavailable: Actor predecessor bucket reached the sibling bound"
-                        .into(),
-                ));
-            }
-            // Freeze the same canonical timestamp that SDK Event authoring signs.
-            // Keeping a nanosecond intent would disagree with its millisecond Event.
-            let positioned = intent.clone().with_prev_refs(prev_refs).with_created_at(
-                arkret::canonical::normalize_timestamp_canonical(intent.created_at()),
-            );
-            let mut event = positioned.clone().author_with_digest_suite(
-                state.frontier.next_actor_seq,
-                self.next_hlc(realm_id)?,
-                digest_suite,
-            )?;
-            self.sign_as_service(&mut event)?;
-            ProofAuthenticatedPublication::new(
-                EventInitialSubmission::online(event.event().clone()),
-                digest_suite,
-            )?;
-            state.pending = Some(operation_id.to_owned());
-            state.operations.insert(
-                operation_id.to_owned(),
-                PublicationRecord {
-                    basis: state.frontier.clone(),
-                    intent: positioned,
-                    authored: event.clone(),
-                    outcome: None,
-                    observations: vec![],
-                    result_raw: None,
-                    observation_count: 0,
-                },
-            );
-            if self.journal.cas(&key, raw.as_deref(), &state).await? {
-                return Ok(event);
-            }
+            return Ok(record.authored.clone());
         }
-        Err(BridgeError::Runtime(
-            "ordinary authoring contention; retry the same operation".into(),
-        ))
+        // Freeze the same canonical timestamp that SDK Event authoring signs.
+        // Keeping a nanosecond intent would disagree with its millisecond Event.
+        let created_at = arkret::canonical::normalize_timestamp_canonical(intent.created_at());
+        let intent = intent.with_created_at(created_at);
+        let mut event = intent
+            .clone()
+            .author_with_digest_suite(PRODUCER_DIGEST_SUITE)?;
+        self.sign_as_service(&mut event)?;
+        let record = PublicationRecord::new(intent, event.clone());
+        if self.journal.freeze(&key, operation_id, &record).await? {
+            return Ok(event);
+        }
+        // Another writer froze this operation id first. Its bytes win, and the
+        // content equality check above still applies to them.
+        match self.journal.load_operation(&key, operation_id).await? {
+            Some(record) => Ok(record.authored),
+            None => Err(BridgeError::Runtime(
+                "authoring contention; retry the same operation".into(),
+            )),
+        }
     }
 
     /// Recover a delivery before regenerating timestamps, encryption or other producer inputs.
@@ -541,15 +366,11 @@ impl ArkretEdge {
             .map(|record| record.authored))
     }
 
-    /// Resume immutable pending Events after a restart. No authoring/authority lookup occurs.
+    /// Resume immutable pending Events after a restart. No re-authoring occurs.
     pub async fn retry_pending_publications(&self) -> Result<()> {
         for event in self.journal.pending_events().await? {
-            let submission = EventInitialSubmission::online(event.event().clone());
-            if let Err(error) = self
-                .submit_initial_with_policy(&submission, event.digest_suite(), false)
-                .await
-            {
-                tracing::warn!(event_id = %event.event_id(), %error, "ordinary publication remains pending");
+            if let Err(error) = self.submit_to_station(&event, false).await {
+                tracing::warn!(event_id = %event.event_id(), %error, "publication remains pending");
             }
         }
         Ok(())
@@ -559,13 +380,7 @@ impl ArkretEdge {
     /// identity against its own content and fails closed on a mismatch, so
     /// there is no signed-envelope mutation after this point.
     fn sign_as_service(&self, event: &mut AuthoredEvent) -> Result<()> {
-        let verification_method = self.verification_method_for_actor(&self.service_did)?;
-        sign_event(
-            event,
-            &self.signer,
-            &verification_method,
-            SignEventOptions::new(self.signer_resolution_evidence_ref.clone()),
-        )?;
+        sign_event(event, &self.signer, SignEventOptions::new())?;
         Ok(())
     }
 
@@ -573,34 +388,21 @@ impl ArkretEdge {
         self.config.arkret.verification_method_for(actor)
     }
 
-    /// Submit a signed Event in an initial-publication wrapper and return its
-    /// event id.
+    /// Hand one exact signed Event to the current governance Station and return
+    /// its event id once the Station's authority-signed commit covers it.
     ///
-    /// The wrapper must equal the locally frozen SDK online publication.
-    /// An arbitrary signed Event cannot bypass the durable authoring boundary.
-    pub async fn submit_initial(
-        &self,
-        submission: &EventInitialSubmission,
-        digest_suite: DigestSuite,
-    ) -> Result<String> {
-        self.submit_initial_with_policy(submission, digest_suite, true)
-            .await
+    /// Only a publication already frozen in the durable journal can be sent: an
+    /// arbitrary signed Event cannot bypass the authoring boundary.
+    pub async fn submit_event(&self, event: &AuthoredEvent) -> Result<String> {
+        self.submit_to_station(event, true).await
     }
 
-    async fn submit_initial_with_policy(
+    async fn submit_to_station(
         &self,
-        submission: &EventInitialSubmission,
-        digest_suite: DigestSuite,
+        event: &AuthoredEvent,
         retry_rejected: bool,
     ) -> Result<String> {
-        submission.validate_structural(digest_suite)?;
-        let event =
-            AuthoredEvent::from_verified_with_digest_suite(submission.event.clone(), digest_suite)?;
-        let realm = event
-            .scope_ref
-            .realm_id_opt()
-            .ok_or_else(|| BridgeError::App("ordinary publication lacks Realm".into()))?;
-        let key = scope_key(realm, &event.actor_id)?;
+        let key = scope_key(&event.realm_id, &event.actor_id)?;
         let (stored_scope, operation) = self
             .journal
             .operation_for_event(event.event_id())
@@ -618,182 +420,59 @@ impl ArkretEdge {
             .load_operation(&key, &operation)
             .await?
             .ok_or_else(|| BridgeError::Database("frozen publication disappeared".into()))?;
-        if original.authored.event() != event.event()
-            || submission != &EventInitialSubmission::online(original.authored.event().clone())
-        {
-            return Err(BridgeError::App(
-                "frozen publication bytes or wrapper changed".into(),
-            ));
+        if original.authored.event() != event.event() {
+            return Err(BridgeError::App("frozen publication bytes changed".into()));
         }
-        if original.outcome.as_ref().is_some_and(|outcome| {
-            matches!(
-                outcome.status,
-                arkret_models_collaboration::http_bodies::EventsSubmitStatus::Accepted
-                    | arkret_models_collaboration::http_bodies::EventsSubmitStatus::Duplicate
-            )
-        }) {
-            return Ok(event.event_id().to_string());
+        // An accepted publication keeps its exact committed reference forever.
+        if let Some(committed) = &original.committed {
+            return Ok(committed.event_id.to_string());
         }
-        // An explicit retry of a previously rejected delivery becomes pending
-        // again before transport. Its original basis and bytes stay immutable.
+        // An explicit retry of a Station-rejected delivery becomes replayable
+        // again before transport. Its original bytes stay immutable.
         if original.outcome.is_some() {
             if !retry_rejected {
                 return Err(BridgeError::App(
-                    "automatic replay stopped after receiver-local rejection".into(),
+                    "automatic replay stopped after a terminal Station rejection".into(),
                 ));
             }
-            let mut acquired = false;
-            for _ in 0..16 {
-                let (raw, mut state) = self.journal.load(&key).await?.ok_or_else(|| {
-                    BridgeError::Database("publication journal disappeared".into())
-                })?;
-                if state
-                    .pending
-                    .as_ref()
-                    .is_some_and(|pending| pending != &operation)
-                {
-                    return Err(BridgeError::Arkret(
-                        "another ordinary publication is unresolved".into(),
-                    ));
-                }
-                let mut record = self
-                    .journal
-                    .load_operation(&key, &operation)
-                    .await?
-                    .ok_or_else(|| BridgeError::Database("publication disappeared".into()))?;
-                if let Some(outcome) = &record.outcome {
-                    if publication_outcome(&event, outcome)?.is_some() {
-                        return Ok(event.event_id().to_string());
-                    }
-                } else {
-                    acquired = true;
-                    break;
-                }
-                record.outcome = None;
-                state.operations.insert(operation.clone(), record);
-                state.pending = Some(operation.clone());
-                if self.journal.cas(&key, Some(&raw), &state).await? {
-                    acquired = true;
-                    break;
-                }
-            }
-            if !acquired {
+            if !self.journal.reopen(&key, &operation).await? {
                 return Err(BridgeError::Runtime("publication retry contention".into()));
             }
         }
-        let outcome = self.client.events_submit(submission).await?;
-        let accepted = publication_outcome(&event, &outcome)?;
-        for _ in 0..16 {
-            let (raw, mut state) =
-                self.journal.load(&key).await?.ok_or_else(|| {
-                    BridgeError::Database("publication journal disappeared".into())
-                })?;
-            let mut record = self
-                .journal
-                .load_operation(&key, &operation)
-                .await?
-                .ok_or_else(|| BridgeError::Database("frozen operation disappeared".into()))?;
-            if record.authored.event() != event.event() {
-                return Err(BridgeError::Database("frozen publication changed".into()));
-            }
-            if let Some(previous) = &record.outcome {
-                if publication_outcome(&event, previous)?.is_some() {
-                    return Ok(event.event_id().to_string());
-                }
-            }
-            record.observations.push(ReceiverObservation {
-                receiver: self.config.arkret.trusted_server_did.clone(),
-                outcome: outcome.clone(),
-            });
-            record.outcome = Some(outcome.clone());
-            state.operations.insert(operation.clone(), record);
-            if state.pending.as_deref() == Some(operation.as_str()) {
-                state.pending = None;
-            }
-            if let Some(frontier) = &accepted {
-                state.frontier = merge_frontier(&state.frontier, frontier, digest_suite)?;
-            } else {
-                for frontier in &outcome.frontiers {
-                    state.frontier = merge_frontier(&state.frontier, frontier, digest_suite)?;
-                }
-            }
-            if self.journal.cas(&key, Some(&raw), &state).await? {
-                return if accepted.is_some() {
-                    Ok(event.event_id().to_string())
-                } else {
-                    Err(BridgeError::App(format!(
-                        "receiver rejected exact publication {}: {}",
-                        event.event_id(),
-                        outcome.rejections[0].reason_code.as_str()
-                    )))
-                };
-            }
-        }
-        Err(BridgeError::Runtime(
-            "acceptance persistence contention; retry exact publication".into(),
-        ))
-    }
-
-    /// Wrap one exact signed ordinary Event locally, then submit it.
-    pub async fn submit_event(&self, event: &AuthoredEvent) -> Result<String> {
-        let digest_suite = event.digest_suite();
-        let publication = ProofAuthenticatedPublication::new(
-            EventInitialSubmission::online(event.event().clone()),
-            digest_suite,
-        )
-        .map_err(|error| BridgeError::Arkret(error.to_string()))?;
-        self.submit_initial(publication.submission(), digest_suite)
-            .await
-    }
-
-    /// Return one coherent accepted Seal basis and its signed digest suite for
-    /// authoring a Control Move. Both values come from the same frontier read.
-    pub async fn realm_authoring_basis(
-        &self,
-        realm_id: &RealmId,
-    ) -> Result<(arkret::SealBasis, arkret::SealId, DigestSuite)> {
-        // `seals_frontier` fails closed on a realm mismatch or an
-        // out-of-bounds frontier before returning.
-        let frontier = self.client.seals_frontier(realm_id.clone()).await?.frontier;
-        let seal_basis = frontier.seal_basis();
-        // The frontier view carries no service-derived root hint, so the
-        // accepted leaf Seal is resolved and its own signed roots are read.
-        let leaf = frontier
-            .sole_leaf()
-            .map_err(|error| BridgeError::Arkret(error.to_string()))?
-            .clone();
-        let resolved = self
+        let request = AuthoritySubmitRequest::Event(EventCommitSubmission {
+            event: event.event().clone(),
+        });
+        let options = ClientRequestOptions::new().idempotency_key(event.event_id().as_str());
+        let outcome = self
             .client
-            .seals_resolve(&arkret::SelfSealResolveRequestBody {
-                realm_id: realm_id.clone(),
-                selection:
-                    arkret_models_collaboration::http_bodies::SealResolveSelection::SealRefs {
-                        seal_refs: vec![leaf.clone()],
-                    },
-                history_traversal_access: None,
-            })
+            .submit_to_realm_authority(&request, &options)
             .await?;
-        let seal = resolved
-            .into_seals()?
-            .into_iter()
-            .find(|seal| seal.id == leaf)
-            .ok_or_else(|| {
-                BridgeError::Arkret("accepted Realm Seal frontier leaf did not resolve".to_owned())
-            })?;
-        let state_suite = seal
-            .state_root
-            .digest_suite()
-            .map_err(|error| BridgeError::Arkret(error.to_string()))?;
-        let control_suite = seal
-            .control_event_set_root
-            .digest_suite()
-            .map_err(|error| BridgeError::Arkret(error.to_string()))?;
-        if state_suite != control_suite {
-            return Err(BridgeError::Arkret(
-                "Realm Seal frontier roots use different digest suites".to_owned(),
+        // A retryable answer settles nothing: the frozen bytes stay replayable
+        // and the pending index is left in place for the recovery loop.
+        let committed = publication_outcome(event, &outcome)?;
+        if !self
+            .journal
+            .record_outcome(
+                &key,
+                &operation,
+                &self.station_id,
+                &outcome,
+                committed.as_ref(),
+            )
+            .await?
+        {
+            return Err(BridgeError::Runtime(
+                "answer persistence contention; retry the exact publication".into(),
             ));
         }
-        Ok((seal_basis, leaf, state_suite))
+        match committed {
+            Some(committed) => Ok(committed.event_id.to_string()),
+            None => Err(BridgeError::App(format!(
+                "governance Station rejected publication {}: {}",
+                event.event_id(),
+                rejection_reason(&outcome)
+            ))),
+        }
     }
 
     /// Outbound convenience with bridge provenance and an explicit delegated
@@ -878,8 +557,9 @@ impl ArkretEdge {
     /// and auditable rather than silently dropped (applet-integration §14/§16;
     /// Event Draft [`arkret_event_draft::AppletBridgeErrorBuilder`]). The builder is filled with
     /// all required bindings (realm/failed_transaction_ref/retriable/visibility) by
-    /// the caller; this allocates the actor seq + HLC, signs with the service
-    /// key, and submits. Returns the new event_id.
+    /// the caller; this derives the Event identity, signs it with the service
+    /// key, and submits it to the current governance Station. Returns the new
+    /// event_id.
     pub async fn submit_bridge_error(
         &self,
         realm_id: &RealmId,
@@ -892,30 +572,6 @@ impl ArkretEdge {
         let intent = builder
             .build(chrono::Utc::now())?
             .with_applet_id(self.applet_id.clone());
-        let failed = intent
-            .payload()
-            .get("failed_transaction_ref")
-            .ok_or_else(|| {
-                BridgeError::App("bridge error lacks upstream transaction identity".into())
-            })?;
-        let operation_id = serde_json::to_string(&("bridge_error", failed))?;
-        let event = self
-            .author_and_sign(realm_id, &operation_id, intent)
-            .await?;
-        self.submit_event(&event).await
-    }
-
-    /// Emit a bridge error from an explicitly retained local authority context.
-    pub async fn submit_bridge_error_with_auth_context(
-        &self,
-        realm_id: &RealmId,
-        builder: arkret_event_draft::AppletBridgeErrorBuilder,
-        auth_context: AuthContext,
-    ) -> Result<String> {
-        let intent = builder
-            .build(chrono::Utc::now())?
-            .with_applet_id(self.applet_id.clone())
-            .with_auth_context(auth_context);
         let failed = intent
             .payload()
             .get("failed_transaction_ref")
@@ -955,29 +611,15 @@ impl ArkretEdge {
     }
 }
 
-fn authority_digest_suite(auth_context: &AuthContext) -> Result<DigestSuite> {
-    let mut suites = auth_context.authority_refs.iter().map(|authority_ref| {
-        let digest = authority_ref
-            .as_str()
-            .strip_prefix("ak:seal:")
-            .ok_or_else(|| {
-                BridgeError::Arkret("authority reference is not a Seal id".to_owned())
-            })?;
-        arkret::Hash::new(digest.to_owned())?
-            .digest_suite()
-            .map_err(|error| BridgeError::Arkret(error.to_string()))
-    });
-    let suite = suites.next().ok_or_else(|| {
-        BridgeError::Arkret("ordinary authority context has no references".to_owned())
-    })??;
-    for candidate in suites {
-        if candidate? != suite {
-            return Err(BridgeError::Arkret(
-                "ordinary authority references use different digest suites".to_owned(),
-            ));
-        }
+/// The Station reason code carried by a terminal rejection.
+fn rejection_reason(outcome: &AuthoritySubmitOutcome) -> &str {
+    match outcome {
+        AuthoritySubmitOutcome::Rejected {
+            status: AuthorityRejectionStatus::Rejected,
+            reason_code,
+        } => reason_code.as_str(),
+        _ => "unspecified",
     }
-    Ok(suite)
 }
 
 fn validate_authorization_ref(authorization_ref: &str) -> Result<AuthorizationRef> {
@@ -1207,9 +849,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
         _idempotency_key: &str,
         req: AppletTransactionRequestBody,
     ) -> std::result::Result<AppletTransactionOutcome, WireError> {
-        let arkret_models_collaboration::http_bodies::AppletTransactionRequestBody::Events(req) =
-            req
-        else {
+        let AppletTransactionRequestBody::Events(req) = req else {
             return Err(WireError::Protocol(
                 "managed Actor authoring completion installation is not available".into(),
             ));
@@ -1363,8 +1003,8 @@ impl arkret::AppletHandler for BridgeAppletHandler {
 
         // Forward SDK-typed encrypted Signal envelopes one at a time. Signal
         // loss is non-fatal (best-effort) and does not affect the durable ack.
-        if let (Some(tx), Some(envelopes)) = (self.signal_tx.as_ref(), req.signals) {
-            for envelope in envelopes {
+        if let Some(tx) = self.signal_tx.as_ref() {
+            for envelope in req.signals {
                 if let Err(err) = envelope.validate_structural() {
                     tracing::warn!(
                         error = %err,
@@ -1394,6 +1034,9 @@ impl arkret::AppletHandler for BridgeAppletHandler {
             } else {
                 arkret_models_integration::AppletTransactionStatus::Partial
             },
+            // The inbound plane receives already-committed Events; a bridge
+            // never issues an authority commit of its own.
+            committed_event_refs: Vec::new(),
             rejections,
             retry_after_ms,
         })
@@ -1463,6 +1106,13 @@ impl arkret::AppletHandler for BridgeAppletHandler {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    use arkret_wire::{
+        Base64UrlString, CommitStreamRef, DetachedObjectSignature, DetachedSignatureAlgorithm,
+        DetachedSignatureContext, RealmCommit, RealmCommitAuthorityRef,
+    };
+
     use super::*;
 
     fn test_edge(store: Arc<dyn AuthoringStore>) -> ArkretEdge {
@@ -1473,7 +1123,6 @@ mod tests {
                 "trust_domain": "ak:trust_domain:example.net", "applet_id": "ak:applet:01904100-0000-7000-8000-000000000001",
                 "access_token": "test", "signing_key_seed_hex": "11".repeat(32),
                 "verification_method_fragment": "#key-1",
-                "signer_resolution_evidence_ref": format!("ak:signer_evidence:sha256:{}", "11".repeat(32)),
                 "trusted_server_did": "did:webvh:z6mkstation:station.example",
                 "applet_namespaces": {"actors":[],"realms":[],"handles":[]},
                 "managed_actor_authoring": {"principal_endpoint":"https://ghost.example", "key_encryption_key_hex":"22".repeat(32)}
@@ -1486,20 +1135,19 @@ mod tests {
     #[derive(Default)]
     struct MemoryAuthoringStore(Mutex<BTreeMap<String, String>>);
     impl AuthoringStore for MemoryAuthoringStore {
-        fn load(&self, scope: &str) -> Result<Option<String>> {
-            Ok(self.0.lock().get(scope).cloned())
+        fn load(&self, key: &str) -> Result<Option<String>> {
+            Ok(self.0.lock().expect("store lock").get(key).cloned())
         }
         fn compare_exchange_batch(
             &self,
             expected: &[(String, Option<String>)],
             writes: &[(String, Option<String>)],
         ) -> Result<bool> {
-            let mut entries = self.0.lock();
-            if expected
-                .iter()
-                .any(|(key, value)| entries.get(key) != value.as_ref())
-            {
-                return Ok(false);
+            let mut entries = self.0.lock().expect("store lock");
+            for (key, value) in expected {
+                if entries.get(key) != value.as_ref() {
+                    return Ok(false);
+                }
             }
             for (key, value) in writes {
                 match value {
@@ -1514,23 +1162,17 @@ mod tests {
             Ok(true)
         }
         fn entries_with_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>> {
-            Ok(self
-                .0
-                .lock()
+            let entries = self.0.lock().expect("store lock");
+            let mut selected: Vec<(String, String)> = entries
                 .iter()
                 .filter(|(key, _)| key.starts_with(prefix))
                 .map(|(key, value)| (key.clone(), value.clone()))
-                .collect())
+                .collect();
+            selected.sort();
+            Ok(selected)
         }
     }
 
-    fn ordinary_context() -> AuthContext {
-        AuthContext {
-            authority_refs: vec![
-                arkret::SealId::new(format!("ak:seal:sha256:{}", "07".repeat(32))).unwrap(),
-            ],
-        }
-    }
     fn message_intent(edge: &ArkretEdge, realm: &RealmId, text: &str) -> EventIntent {
         edge.service_intent::<event_spec::MessageCreate>(
             realm,
@@ -1552,118 +1194,78 @@ mod tests {
             )
             .unwrap(),
         )
-        .with_auth_context(ordinary_context())
     }
-    async fn seed_empty_scope(
-        edge: &ArkretEdge,
-        realm: &RealmId,
-        actor: &arkret::ActorId,
-    ) -> String {
-        let key = scope_key(realm, actor).unwrap();
-        let frontier = arkret_models_collaboration::event_sync::RealmActorFrontierView::new(
-            realm.clone(),
-            actor.clone(),
-            0,
-            vec![],
-            DigestSuite::Sha256,
-        )
-        .unwrap();
-        assert!(
-            edge.journal
-                .cas(&key, None, &ScopeJournal::new(frontier))
-                .await
-                .unwrap()
-        );
-        key
-    }
-    fn accepted_outcome(
-        event: &AuthoredEvent,
-        siblings: Vec<arkret::EventId>,
-    ) -> arkret_models_collaboration::http_bodies::EventsSubmitOutcome {
-        use arkret_models_collaboration::event_sync::RealmActorFrontierView;
-        use arkret_models_collaboration::http_bodies::{EventsSubmitOutcome, EventsSubmitStatus};
-        EventsSubmitOutcome {
-            status: EventsSubmitStatus::Accepted,
-            accepted: vec![event.event_id().clone()],
-            pending_delivery_count: 0,
-            ingress_receipts: vec![],
-            control_proposal_acks: vec![],
-            duplicate: vec![],
-            rejections: vec![],
-            quarantine: vec![],
-            frontiers: vec![
-                RealmActorFrontierView::new(
-                    event.realm_id.clone(),
-                    event.actor_id.clone(),
-                    event.actor_seq + 1,
-                    siblings,
-                    event.digest_suite(),
-                )
+
+    fn commit_signature(context: DetachedSignatureContext) -> DetachedObjectSignature {
+        DetachedObjectSignature {
+            context,
+            signature_algorithm: DetachedSignatureAlgorithm::Ed25519,
+            verification_method: DidUrl::new("did:webvh:z6mkstation:station.example#key-1")
                 .unwrap(),
-            ],
-            cursor: None,
-            original_outcome: None,
-            agent_membership_cascade: None,
+            signed_digest: arkret::Hash::new(format!("sha256:{}", "00".repeat(32))).unwrap(),
+            created_at: "2026-09-16T00:00:00Z".parse().unwrap(),
+            sig: Base64UrlString::new("c2lnbmF0dXJl").unwrap(),
+        }
+    }
+
+    /// One accepted Realm-stream commit for `event` at `position`.
+    fn accepted(event: &AuthoredEvent, position: u64) -> AuthoritySubmitOutcome {
+        AuthoritySubmitOutcome::Accepted {
+            status: arkret_wire::AuthorityCommitStatus::Committed,
+            commit: RealmCommit {
+                commit_id: arkret::RealmCommitId::from_digest([position as u8 + 1; 32]),
+                realm_id: event.realm_id.clone(),
+                stream_ref: CommitStreamRef::Realm {
+                    realm_id: event.realm_id.clone(),
+                },
+                stream_position: position,
+                previous_commit_ref: (position > 0)
+                    .then(|| arkret::RealmCommitId::from_digest([position as u8; 32])),
+                event_ref: event.event_id().clone(),
+                authority_generation: 1,
+                authority_ref: RealmCommitAuthorityRef::GenesisOrChangeEvent(
+                    arkret::EventId::from_digest(DigestSuite::Sha256, [7; 32]),
+                ),
+                committed_at: "2026-09-16T00:00:00Z".parse().unwrap(),
+                signature: commit_signature(DetachedSignatureContext::RealmCommit),
+            },
+        }
+    }
+
+    fn rejected(reason: &str) -> AuthoritySubmitOutcome {
+        AuthoritySubmitOutcome::Rejected {
+            status: AuthorityRejectionStatus::Rejected,
+            reason_code: reason.to_owned(),
+        }
+    }
+
+    fn unavailable(reason: &str) -> AuthoritySubmitOutcome {
+        AuthoritySubmitOutcome::Rejected {
+            status: AuthorityRejectionStatus::RetryableUnavailable,
+            reason_code: reason.to_owned(),
         }
     }
 
     #[tokio::test]
-    async fn ordinary_authoring_restarts_at_exact_frontier_and_freezes_unknown_bytes() {
+    async fn authoring_freezes_exact_bytes_and_a_restart_replays_them() {
         let store = Arc::new(MemoryAuthoringStore::default());
         let edge = test_edge(store.clone());
         let realm = RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").unwrap();
         let intent = message_intent(&edge, &realm, "first");
-        let key = seed_empty_scope(&edge, &realm, intent.actor_id()).await;
         let first = edge
             .author_and_sign(&realm, "delivery-one", intent.clone())
             .await
             .unwrap();
-        assert_eq!(first.actor_seq, 0);
-        assert!(first.prev_refs.is_empty());
-        assert!(
-            edge.author_and_sign(
-                &realm,
-                "delivery-two",
-                message_intent(&edge, &realm, "second")
-            )
-            .await
-            .is_err()
-        );
         let bytes = serde_json::to_vec(&first).unwrap();
-        drop(edge);
-        let edge = test_edge(store.clone());
-        let retry = edge
-            .author_and_sign(&realm, "delivery-one", intent)
-            .await
-            .unwrap();
-        assert_eq!(serde_json::to_vec(&retry).unwrap(), bytes);
-        assert_eq!(
-            serde_json::to_vec(&edge.journal.pending_events().await.unwrap()[0]).unwrap(),
-            bytes
-        );
-        // Acceptance with an observed concurrent sibling must position the next Event
-        // over the complete set, not just the locally authored predecessor.
-        let sibling = arkret::EventId::from_digest(DigestSuite::Sha256, [4; 32]);
-        let mut siblings = vec![first.event_id().clone(), sibling];
-        siblings.sort();
-        let outcome = accepted_outcome(&first, siblings.clone());
-        let (raw, mut state) = edge.journal.load(&key).await.unwrap().unwrap();
-        state.frontier = publication_outcome(&first, &outcome).unwrap().unwrap();
-        state
-            .operations
-            .entry("delivery-one".into())
-            .or_insert(
-                edge.journal
-                    .load_operation(&key, "delivery-one")
-                    .await
-                    .unwrap()
-                    .unwrap(),
-            )
-            .outcome = Some(outcome);
-        state.pending = None;
-        assert!(edge.journal.cas(&key, Some(&raw), &state).await.unwrap());
-        drop(edge);
-        let edge = test_edge(store);
+
+        // A producer Event carries no predecessor and no position of its own.
+        let value = serde_json::to_value(first.event()).unwrap();
+        for forbidden in ["prev_refs", "actor_seq", "hlc", "auth_context", "basis"] {
+            assert!(value.get(forbidden).is_none(), "{forbidden} must be absent");
+        }
+
+        // A second delivery is independent: no single-slot serialization exists
+        // once ordering belongs to the Station's commit stream.
         let second = edge
             .author_and_sign(
                 &realm,
@@ -1672,24 +1274,37 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(second.actor_seq, 1);
-        assert_eq!(second.prev_refs, siblings);
+        assert_ne!(second.event_id(), first.event_id());
+
+        drop(edge);
+        let edge = test_edge(store);
         let retry = edge
-            .author_and_sign(
-                &realm,
-                "delivery-two",
-                message_intent(&edge, &realm, "second"),
-            )
+            .author_and_sign(&realm, "delivery-one", intent.clone())
             .await
             .unwrap();
-        assert_eq!(
-            serde_json::to_vec(&retry).unwrap(),
-            serde_json::to_vec(&second).unwrap()
+        assert_eq!(serde_json::to_vec(&retry).unwrap(), bytes);
+        let pending = edge.journal.pending_events().await.unwrap();
+        assert_eq!(pending.len(), 2);
+        assert!(
+            pending
+                .iter()
+                .any(|event| event.event_id() == first.event_id())
+        );
+
+        // The same operation id may not be re-used for different content.
+        assert!(
+            edge.author_and_sign(
+                &realm,
+                "delivery-one",
+                message_intent(&edge, &realm, "different content")
+            )
+            .await
+            .is_err()
         );
     }
 
     #[tokio::test]
-    async fn ordinary_frontier_scope_keeps_both_account_station_and_realm() {
+    async fn journal_scope_keeps_both_account_station_and_realm() {
         let store = Arc::new(MemoryAuthoringStore::default());
         let edge = test_edge(store);
         let realm_a =
@@ -1705,98 +1320,96 @@ mod tests {
             principal,
             DidCoreId::new("ak:did_core:web:b.example").unwrap(),
         ));
-        let first = seed_empty_scope(&edge, &realm_a, &account_a).await;
-        let second = seed_empty_scope(&edge, &realm_a, &account_b).await;
-        let third = seed_empty_scope(&edge, &realm_b, &account_a).await;
+        let first = scope_key(&realm_a, &account_a).unwrap();
+        let second = scope_key(&realm_a, &account_b).unwrap();
+        let third = scope_key(&realm_b, &account_a).unwrap();
         assert_ne!(first, second);
         assert_ne!(first, third);
-        assert_eq!(
+        assert_ne!(second, third);
+        // A partition names storage only; it never implies an order between the
+        // publications inside it.
+        assert!(
             edge.journal
-                .store
-                .entries_with_prefix("head/")
+                .load_operation(&first, "none")
+                .await
                 .unwrap()
-                .len(),
-            3
+                .is_none()
         );
     }
 
     #[tokio::test]
-    async fn submit_acceptance_requires_exact_event_and_complete_matching_frontier() {
+    async fn acceptance_requires_a_commit_that_names_the_exact_event() {
         let store = Arc::new(MemoryAuthoringStore::default());
         let edge = test_edge(store);
         let realm = RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").unwrap();
         let intent = message_intent(&edge, &realm, "hello");
-        seed_empty_scope(&edge, &realm, intent.actor_id()).await;
         let event = edge
             .author_and_sign(&realm, "delivery", intent)
             .await
             .unwrap();
-        let good = accepted_outcome(&event, vec![event.event_id().clone()]);
-        assert!(publication_outcome(&event, &good).unwrap().is_some());
-        let mut missing = good.clone();
-        missing.frontiers.clear();
-        assert!(publication_outcome(&event, &missing).is_err());
-        let mut wrong_id = good.clone();
-        wrong_id.accepted[0] = arkret::EventId::from_digest(DigestSuite::Sha256, [8; 32]);
-        assert!(publication_outcome(&event, &wrong_id).is_err());
-        let mut wrong_actor = good.clone();
-        wrong_actor.frontiers[0].actor_id =
-            arkret::ActorId::service(DidCoreId::new("ak:did_core:web:other.example").unwrap());
-        assert!(publication_outcome(&event, &wrong_actor).is_err());
+
+        let good = accepted(&event, 0);
+        let committed = publication_outcome(&event, &good).unwrap().unwrap();
+        assert_eq!(&committed.event_id, event.event_id());
+        assert_eq!(committed.stream_position, 0);
+        assert_eq!(
+            committed.stream_ref,
+            CommitStreamRef::Realm {
+                realm_id: realm.clone()
+            }
+        );
+
+        let AuthoritySubmitOutcome::Accepted { status, mut commit } = good.clone() else {
+            unreachable!("fixture is an acceptance")
+        };
+        commit.event_ref = arkret::EventId::from_digest(DigestSuite::Sha256, [8; 32]);
+        assert!(
+            publication_outcome(
+                &event,
+                &AuthoritySubmitOutcome::Accepted {
+                    status,
+                    commit: commit.clone()
+                }
+            )
+            .is_err()
+        );
+
+        // A terminal rejection settles the publication; an unavailable Station
+        // settles nothing and keeps the frozen bytes replayable.
+        assert!(
+            publication_outcome(&event, &rejected("authz_denied"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(publication_outcome(&event, &unavailable("station_unavailable")).is_err());
+
         assert_eq!(edge.journal.pending_events().await.unwrap().len(), 1);
     }
 
-    fn rejected_outcome(
-        event: &AuthoredEvent,
-    ) -> arkret_models_collaboration::http_bodies::EventsSubmitOutcome {
-        use arkret_models_collaboration::http_bodies::{
-            EventsSubmitRejectedRow, EventsSubmitStatus,
-        };
-        let mut outcome = accepted_outcome(event, vec![event.event_id().clone()]);
-        outcome.status = EventsSubmitStatus::Partial;
-        outcome.accepted.clear();
-        outcome.frontiers.clear();
-        outcome.rejections.push(EventsSubmitRejectedRow {
-            index: Some(0),
-            id: event.event_id().to_string(),
-            reason_code: arkret::ReasonCode::from_wire("actor_signature_revoked"),
-            detail: None,
-            missing_event_ids: vec![],
-            missing_seal_refs: vec![],
-            missing_event_digests: vec![],
-        });
-        outcome
-    }
-
     #[tokio::test]
-    async fn receiver_rejection_releases_slot_without_burning_or_rewriting_old_event() {
+    async fn station_rejection_settles_without_rewriting_the_frozen_event() {
         let store = Arc::new(MemoryAuthoringStore::default());
         let edge = test_edge(store);
         let realm = RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").unwrap();
         let intent = message_intent(&edge, &realm, "identical text");
-        let key = seed_empty_scope(&edge, &realm, intent.actor_id()).await;
+        let key = scope_key(&realm, intent.actor_id()).unwrap();
         let old = edge
             .author_and_sign(&realm, "old-key-delivery", intent)
             .await
             .unwrap();
         let old_bytes = serde_json::to_vec(&old).unwrap();
-        let rejected = rejected_outcome(&old);
-        assert!(publication_outcome(&old, &rejected).unwrap().is_none());
-        let (raw, mut state) = edge.journal.load(&key).await.unwrap().unwrap();
-        state
-            .operations
-            .entry("old-key-delivery".into())
-            .or_insert(
-                edge.journal
-                    .load_operation(&key, "old-key-delivery")
-                    .await
-                    .unwrap()
-                    .unwrap(),
-            )
-            .outcome = Some(rejected);
-        state.pending = None;
-        assert!(edge.journal.cas(&key, Some(&raw), &state).await.unwrap());
+
+        let outcome = rejected("actor_signature_revoked");
+        assert!(
+            edge.journal
+                .record_outcome(&key, "old-key-delivery", &edge.station_id, &outcome, None)
+                .await
+                .unwrap()
+        );
         assert!(edge.journal.pending_events().await.unwrap().is_empty());
+
+        // A different logical delivery of the same text is a different Event and
+        // is never deduplicated against the rejected one.
         let new = edge
             .author_and_sign(
                 &realm,
@@ -1805,28 +1418,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(new.actor_seq, old.actor_seq);
-        assert!(new.prev_refs.is_empty());
-        // Different logical deliveries of the same text are not deduplicated.
         assert_ne!(new.event_id(), old.event_id());
-        // A later acceptance of the old sibling must not rewrite the new frozen basis.
-        let accepted = accepted_outcome(&old, vec![old.event_id().clone()]);
-        let (raw, mut state) = edge.journal.load(&key).await.unwrap().unwrap();
-        state
-            .operations
-            .entry("old-key-delivery".into())
-            .or_insert(
-                edge.journal
-                    .load_operation(&key, "old-key-delivery")
-                    .await
-                    .unwrap()
-                    .unwrap(),
-            )
-            .outcome = Some(accepted.clone());
-        state.frontier =
-            merge_frontier(&state.frontier, &accepted.frontiers[0], old.digest_suite()).unwrap();
-        assert!(edge.journal.cas(&key, Some(&raw), &state).await.unwrap());
-        assert_eq!(edge.journal.pending_events().await.unwrap()[0], new);
+        assert_eq!(edge.journal.pending_events().await.unwrap().len(), 1);
+
+        // The rejected publication keeps its exact signed bytes for an explicit
+        // replay decision.
         assert_eq!(
             serde_json::to_vec(
                 &edge
@@ -1838,54 +1434,32 @@ mod tests {
             .unwrap(),
             old_bytes
         );
-    }
 
-    #[tokio::test]
-    async fn same_predecessor_bucket_limits_new_candidates_but_not_exact_retry() {
-        let store = Arc::new(MemoryAuthoringStore::default());
-        let edge = test_edge(store);
-        let realm = RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").unwrap();
-        let intent = message_intent(&edge, &realm, "first");
-        let key = seed_empty_scope(&edge, &realm, intent.actor_id()).await;
-        for index in 0..arkret_wire::event_envelope::MAX_ACTOR_SEQ_SIBLINGS {
-            let operation = format!("delivery-{index}");
-            let event = edge
-                .author_and_sign(
-                    &realm,
-                    &operation,
-                    message_intent(&edge, &realm, &operation),
-                )
-                .await
-                .unwrap();
-            let (raw, mut state) = edge.journal.load(&key).await.unwrap().unwrap();
-            state
-                .operations
-                .entry(operation.clone())
-                .or_insert(
-                    edge.journal
-                        .load_operation(&key, &operation)
-                        .await
-                        .unwrap()
-                        .unwrap(),
-                )
-                .outcome = Some(rejected_outcome(&event));
-            state.pending = None;
-            assert!(edge.journal.cas(&key, Some(&raw), &state).await.unwrap());
-        }
+        // An accepted answer for the old delivery retains its exact committed
+        // reference and must not disturb the newer frozen publication.
+        assert!(edge.journal.reopen(&key, "old-key-delivery").await.unwrap());
+        let accepted_outcome = accepted(&old, 4);
+        let committed = publication_outcome(&old, &accepted_outcome).unwrap();
         assert!(
-            edge.author_and_sign(&realm, "too-many", message_intent(&edge, &realm, "extra"))
+            edge.journal
+                .record_outcome(
+                    &key,
+                    "old-key-delivery",
+                    &edge.station_id,
+                    &accepted_outcome,
+                    committed.as_ref(),
+                )
                 .await
-                .is_err()
+                .unwrap()
         );
-        assert!(
-            edge.author_and_sign(
-                &realm,
-                "delivery-0",
-                message_intent(&edge, &realm, "delivery-0")
-            )
+        let settled = edge
+            .journal
+            .load_operation(&key, "old-key-delivery")
             .await
-            .is_ok()
-        );
+            .unwrap()
+            .unwrap();
+        assert_eq!(settled.committed.unwrap().stream_position, 4);
+        assert_eq!(edge.journal.pending_events().await.unwrap()[0], new);
     }
 
     #[tokio::test]
@@ -1896,26 +1470,28 @@ mod tests {
         let edge = test_edge(store.clone());
         let realm = RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").unwrap();
         let intent = message_intent(&edge, &realm, "frozen before transport");
-        let key = seed_empty_scope(&edge, &realm, intent.actor_id()).await;
+        let key = scope_key(&realm, intent.actor_id()).unwrap();
         let original = edge
             .author_and_sign(&realm, "delivery", intent)
             .await
             .unwrap();
         let original_bytes = serde_json::to_vec(&original).unwrap();
-        let (raw, mut state) = edge.journal.load(&key).await.unwrap().unwrap();
-        let mut record = edge
-            .journal
-            .load_operation(&key, "delivery")
-            .await
-            .unwrap()
-            .unwrap();
-        record.outcome = Some(rejected_outcome(&original));
-        state.pending = None;
-        state.operations.insert("delivery".into(), record);
+
         backend.fail_sync();
-        assert!(edge.journal.cas(&key, Some(&raw), &state).await.is_err());
+        assert!(
+            edge.journal
+                .record_outcome(
+                    &key,
+                    "delivery",
+                    &edge.station_id,
+                    &rejected("actor_signature_revoked"),
+                    None
+                )
+                .await
+                .is_err()
+        );
         // This is the real public send path. The poisoned storage read returns
-        // before Client::events_submit; it never retries from visible RAM pages.
+        // before the Station request; it never retries from visible RAM pages.
         let error = edge.submit_event(&original).await.unwrap_err();
         assert!(error.to_string().contains("poisoned"));
         assert!(
@@ -1977,30 +1553,21 @@ mod tests {
     }
 
     #[test]
-    fn event_fingerprint_ignores_unsigned_and_proofs() {
+    fn event_fingerprint_ignores_proofs() {
         let realm = RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").unwrap();
         let actor =
             project_did_to_core_id(&Did::new("did:webvh:z6mkfixture:alice.example").unwrap())
                 .unwrap();
-        let hlc = Hlc::new("01970e589d21-0001-a13f9c2e").unwrap();
         let mut first = arkret_wire::test_support::raw_event(
             "ak.message.create",
             ScopeRef::Realm { realm_id: realm },
             actor.clone(),
             actor,
-            1,
-            hlc,
             json!({ "body": "hello" }),
         )
         .unwrap();
         let mut second = first.clone();
 
-        first
-            .unsigned
-            .insert("delivery".to_owned(), json!({ "attempt": 1 }));
-        second
-            .unsigned
-            .insert("delivery".to_owned(), json!({ "attempt": 2 }));
         first.proofs.push(test_proof("header.payload.signature-a"));
         second.proofs.push(test_proof("header.payload.signature-b"));
 
@@ -2025,13 +1592,6 @@ mod tests {
                 "sha256:0000000000000000000000000000000000000000000000000000000000000000",
             )
             .unwrap(),
-            signer_resolution_evidence_ref: Some(
-                arkret::SignerEvidenceRef::new(format!(
-                    "ak:signer_evidence:sha256:{}",
-                    "11".repeat(32)
-                ))
-                .expect("fixture signer evidence ref"),
-            ),
             created_at: "2026-04-26T00:00:00Z".parse().unwrap(),
             domain: None,
             audience: None,

@@ -11,11 +11,11 @@ use arkret::signatures::Ed25519DetachedJwsVerifier;
 use arkret::{
     AppletId, AppletManagedActorAuthorOutcome, AppletManagedActorAuthorRequestBody,
     AppletManagedActorAuthoringBundle, AppletManagedActorAuthoringRequest,
-    AppletManagedActorPurpose, Did, DidCoreId, GenesisSalt, GhostActorProvisionRequestBody,
+    AppletManagedActorPurpose, Did, DidCoreId, GhostActorProvisionRequestBody,
     GhostPreviewRequestBody, Hash, ResolutionCommitment, ResolutionDidBindingEvidenceKind,
     ResolutionDidBindingEvidenceReceipt, ResolutionDidBindingMethodProof,
-    ResolutionMethodEvidenceBoundary, ResolutionMethodHistoryEvidence, SecurityClass,
-    TrustDomainId, namespace_pattern_matches, project_did_to_core_id,
+    ResolutionMethodEvidenceBoundary, ResolutionMethodHistoryEvidence, namespace_pattern_matches,
+    project_did_to_core_id,
 };
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
@@ -442,11 +442,24 @@ impl ManagedActorAuthoringService {
                     "stored managed actor method evidence is invalid: {error}"
                 ))
             })?;
-        Ok(ManagedActorIdentity {
+        let identity = ManagedActorIdentity {
             actor_id,
             initial_resolution,
             method_history_evidence,
-        })
+        };
+        // The three stored columns describe one identity. A row whose actor,
+        // resolution commitment and method evidence disagree cannot be used to
+        // author anything, so it fails here rather than downstream.
+        let boundary = identity.method_history_evidence.boundary();
+        if project_did_to_core_id(&identity.initial_resolution.did)? != identity.actor_id
+            || boundary.to_method_history_head != identity.initial_resolution.method_history_head
+            || boundary.to_version_id != identity.initial_resolution.version_id
+        {
+            return Err(BridgeError::Database(
+                "stored managed actor identity, resolution and method evidence disagree".into(),
+            ));
+        }
+        Ok(identity)
     }
 
     fn encrypt_key_material(
@@ -518,57 +531,31 @@ impl ManagedActorAuthoringService {
         })
     }
 
+    /// Author the closed four-Event Applet-managed actor creation unit.
+    ///
+    /// The unit is a producer-side protocol object: `provision`, PCR genesis,
+    /// accountability grant and profile are cross-bound to each other and to
+    /// the authoring request by `extensions/applet-integration.md` §9.1, and
+    /// `identity/key-management.md` §3.6.3 requires the unified
+    /// `arkret-rust-sdk` authoring API to produce it.
+    ///
+    /// The SDK currently exposes only the verifying half of that contract
+    /// (`AppletManagedActorAuthoringRequest::sign_ghost` on the Station side and
+    /// `AppletManagedActorAuthoringBundle::validate_bindings` on the receiving
+    /// side); there is no producer-side constructor. A bridge must not hand-roll
+    /// one, because the cross-binding rules would then exist in two places and
+    /// drift, so authoring fails closed here rather than emitting a bundle no
+    /// verifier would accept. The identity, its encrypted key custody and the
+    /// authoring ledger around this call are unaffected and stay durable.
     async fn build_ghost_bundle(
         &self,
-        request: &AppletManagedActorAuthoringRequest,
-        identity: &ManagedActorIdentity,
+        _request: &AppletManagedActorAuthoringRequest,
+        _identity: &ManagedActorIdentity,
     ) -> Result<AppletManagedActorAuthoringBundle> {
-        let basis = request.basis.ghost().expect("request validated as Ghost");
-        let realm_id = basis.realm_id.clone();
-        let service_id = basis.service_id.clone();
-        let frontier_selector = arkret::EventsFrontierSelector::RealmActor {
-            realm_id: realm_id.clone(),
-            actor_id: arkret::ActorId::service(service_id.clone()),
-        };
-        let frontier = self
-            .edge
-            .client()
-            .events_frontier(&frontier_selector)
-            .await?
-            .frontier;
-        let arkret::EventsFrontierView::RealmActor(frontier) = frontier else {
-            return Err(BridgeError::Arkret(
-                "Station returned the wrong service actor frontier variant".to_owned(),
-            ));
-        };
-        let (seal_basis, data_basis, digest_suite) =
-            self.edge.realm_authoring_basis(&realm_id).await?;
-
-        let mut genesis_salt = [0_u8; 32];
-        getrandom::fill(&mut genesis_salt)
-            .map_err(|error| BridgeError::Runtime(format!("PCR salt RNG failed: {error}")))?;
-        self.edge.author_managed_actor_bundle(
-            request,
-            arkret::AppletManagedActorBundleAuthoringInput {
-                actor_id: identity.actor_id.clone(),
-                initial_resolution: identity.initial_resolution.clone(),
-                method_history_evidence: identity.method_history_evidence.clone(),
-                service_actor_seq: frontier.next_actor_seq,
-                service_prev_refs: frontier.frontier_event_ids,
-                signer_resolution_evidence_ref: self
-                    .config
-                    .arkret
-                    .signer_resolution_evidence_ref
-                    .clone(),
-                seal_basis,
-                data_basis,
-                digest_suite,
-                trust_domain: TrustDomainId::new(self.config.arkret.trust_domain.to_string())?,
-                security_class: SecurityClass::HighAssurance,
-                genesis_salt: GenesisSalt::new(arkret::base64url_encode(genesis_salt))?,
-                bot_display_name: "Applet Bot".to_owned(),
-            },
-        )
+        Err(BridgeError::Arkret(
+            "applet managed actor bundle authoring is unavailable: the arkret SDK exposes no producer-side constructor for AppletManagedActorAuthoringBundle"
+                .to_owned(),
+        ))
     }
 }
 

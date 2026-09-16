@@ -59,7 +59,10 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `arkret-bridge-
 - **映射 / 解析**:频道↔realm、消息↔event、用户↔actor 持久化于 diesel(sqlite/postgres);
   反查驱动 applet `resolve_actor`/`resolve_realm`(ghost/portal 读侧解析)。用户↔actor 映射
   同时参与 app→arkret 写侧署名。
-- **序号**:服务 actor 的事件 seq 经 DB 块预留持久化,重启后严格单调。
+- **提交与定序**:出站 Event 由桥自己 author + 签名,再提交给当前治理 Station;
+  Station 返回 authority-signed `RealmCommit`,它才是该 Event 的唯一位置事实。
+  Realm、每个 Circle、每个 Sidecar 各有独立 commit stream,桥不合并、也不比较跨 stream 的位置。
+  桥侧持久层只保存冻结的签名字节与 accepted 后的 exact `CommittedEventRef`。
 - **消息内容**:对齐 SDK 规范类型 `TextMessageContent`(`{body}`)/`MediaContent`
   (`{body,blob,mimetype,filename,size}`)。
 - **媒体**:`MessageContext::{upload_blob,download_blob,forward_external_media}` + `Attachment`;
@@ -144,14 +147,15 @@ tag 推送会触发 `.github/workflows/release.yml`,矩阵构建 14 个桥镜像
 CycloneDX SBOM;tag 发布的镜像会通过 keyless cosign 签名。
 
 
-### Ordinary publication storage
+### Publication storage
 
-The edge freezes each signed Event under the upstream delivery identity before
-transport. Each Realm and complete Actor has a small accepted-frontier head and
-one unresolved sending slot; immutable Events, receiver observations and outcome
-rows are stored separately. A receiver-local rejection releases the sending slot
-without claiming that the Event was never accepted elsewhere. Retrying that
-logical delivery preserves its exact signed bytes.
+The edge derives each Event's one content-bound identity, signs it, and freezes
+it under the upstream delivery identity before transport. The frozen bytes, the
+settled Station answer and the exact `CommittedEventRef` of an accepted
+publication are stored in separate rows written in one atomic batch. A terminal
+Station rejection settles the publication without claiming the Event can never
+be accepted; replaying that logical delivery preserves its exact signed bytes,
+and an accepted publication keeps its committed reference forever.
 
 Edge-only deployments use `FileAuthoringStore`, backed by redb with immediate,
 two-phase durable transactions. All instances of the same canonical path in one

@@ -1,10 +1,18 @@
-//! Indexed durable ordinary authoring. Protocol envelopes and frontiers stay SDK-owned.
+//! Indexed durable authoring for authority-commit publication.
+//!
+//! The journal keeps exactly one frozen, producer-signed Event per stable
+//! upstream operation id, plus the exact [`CommittedEventRef`] the current
+//! governance Station returned for it. It carries no predecessor, position,
+//! or basis: Event order is fixed by the Station's `RealmCommit` in one
+//! independent stream and is never reconstructed from producer-side state.
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use arkret::{ActorId, AuthoredEvent, EventIntent, RealmId};
-use arkret_models_collaboration::event_sync::RealmActorFrontierView;
-use arkret_models_collaboration::http_bodies::{EventsSubmitOutcome, EventsSubmitStatus};
+use arkret_identifiers::DidCoreId;
+use arkret_wire::{
+    AuthorityCommitStatus, AuthorityRejectionStatus, AuthoritySubmitOutcome, CommittedEventRef,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{BridgeError, Result};
@@ -20,78 +28,75 @@ pub trait AuthoringStore: Send + Sync + 'static {
     ) -> Result<bool>;
     fn entries_with_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>>;
 }
+
 #[derive(Clone)]
 pub struct AuthoringJournal {
     pub(crate) store: Arc<dyn AuthoringStore>,
 }
 
-/// Only the current height's bounded candidate summaries live in the hot head.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Candidate {
-    pub event_id: arkret::EventId,
-    pub prev_refs: Vec<arkret::EventId>,
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ScopeJournal {
-    pub frontier: RealmActorFrontierView,
-    pub pending: Option<String>,
-    pub candidate_seq: u64,
-    pub candidates: Vec<Candidate>,
-    /// Only records touched by this transaction; never serialized into the head.
-    #[serde(skip)]
-    pub operations: BTreeMap<String, PublicationRecord>,
-}
+/// One frozen publication. `intent` retains the producer-selected content so a
+/// retry under the same operation id can be proven to carry identical content
+/// before the exact signed bytes are sent again.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PublicationRecord {
-    pub basis: RealmActorFrontierView,
     pub intent: EventIntent,
     pub authored: AuthoredEvent,
+    /// Terminal or retryable Station answer; stored in the atomic result row.
     #[serde(skip)]
-    pub outcome: Option<EventsSubmitOutcome>,
+    pub outcome: Option<AuthoritySubmitOutcome>,
+    /// Exact committed reference for an accepted publication.
     #[serde(skip)]
-    pub observations: Vec<ReceiverObservation>,
+    pub committed: Option<CommittedEventRef>,
     #[serde(skip)]
     pub result_raw: Option<String>,
     #[serde(skip)]
     pub observation_count: u64,
 }
+
+/// One answer observed from one governance Station for this publication.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ReceiverObservation {
-    pub receiver: arkret::Did,
-    pub outcome: EventsSubmitOutcome,
+pub(crate) struct StationObservation {
+    pub station: DidCoreId,
+    pub outcome: AuthoritySubmitOutcome,
 }
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RecordedResult {
-    outcome: Option<EventsSubmitOutcome>,
+    outcome: Option<AuthoritySubmitOutcome>,
+    committed: Option<CommittedEventRef>,
     observation_count: u64,
 }
 
+/// Journal partition. It names where a publication is stored, never an order:
+/// two publications in the same partition have no relative position.
 pub(crate) fn scope_key(realm: &RealmId, actor: &ActorId) -> Result<String> {
     Ok(serde_json::to_string(&(realm, actor))?)
 }
-fn head_key(scope: &str) -> String {
-    format!("head/{scope}")
-}
-fn pending_key(scope: &str) -> String {
-    format!("pending/{scope}")
-}
+
 fn operation_key(scope: &str, operation: &str) -> Result<String> {
     Ok(format!(
         "operation/{}",
         serde_json::to_string(&(scope, operation))?
     ))
 }
+
 fn result_key(scope: &str, operation: &str) -> Result<String> {
     Ok(format!(
         "result/{}",
         serde_json::to_string(&(scope, operation))?
     ))
 }
+
+fn pending_key(scope: &str, operation: &str) -> Result<String> {
+    Ok(format!(
+        "pending/{}",
+        serde_json::to_string(&(scope, operation))?
+    ))
+}
+
 fn event_key(event: &arkret::EventId) -> String {
     format!("event/{event}")
 }
@@ -100,21 +105,7 @@ impl AuthoringJournal {
     pub fn new(store: Arc<dyn AuthoringStore>) -> Self {
         Self { store }
     }
-    pub(crate) async fn load(&self, scope: &str) -> Result<Option<(String, ScopeJournal)>> {
-        let store = self.store.clone();
-        let scope = scope.to_owned();
-        crate::run_blocking(move || {
-            store
-                .load(&head_key(&scope))?
-                .map(|raw| {
-                    let state: ScopeJournal = serde_json::from_str(&raw)?;
-                    state.validate(&scope)?;
-                    Ok((raw, state))
-                })
-                .transpose()
-        })
-        .await
-    }
+
     pub(crate) async fn load_operation(
         &self,
         scope: &str,
@@ -125,6 +116,7 @@ impl AuthoringJournal {
         let operation = operation.to_owned();
         crate::run_blocking(move || load_operation(store.as_ref(), &scope, &operation)).await
     }
+
     pub(crate) async fn operation_for_event(
         &self,
         event: &arkret::EventId,
@@ -139,100 +131,155 @@ impl AuthoringJournal {
         })
         .await
     }
-    pub(crate) async fn cas(
+
+    /// Freeze a newly authored publication under `operation`. The signed bytes,
+    /// the result row and the event index become durable in one atomic write,
+    /// before the first transport attempt.
+    pub(crate) async fn freeze(
         &self,
         scope: &str,
-        expected_head: Option<&str>,
-        state: &ScopeJournal,
+        operation: &str,
+        record: &PublicationRecord,
     ) -> Result<bool> {
-        let mut state = state.clone();
-        if state.candidate_seq != state.frontier.next_actor_seq {
-            state.candidate_seq = state.frontier.next_actor_seq;
-            state.candidates.clear();
-        }
-        for record in state.operations.values() {
-            if record.authored.actor_seq == state.candidate_seq
-                && !state
-                    .candidates
-                    .iter()
-                    .any(|candidate| &candidate.event_id == record.authored.event_id())
-            {
-                state.candidates.push(Candidate {
-                    event_id: record.authored.event_id().clone(),
-                    prev_refs: record.authored.prev_refs.clone(),
-                });
-            }
-        }
-        state.validate(scope)?;
+        record.validate(scope)?;
         let store = self.store.clone();
         let scope = scope.to_owned();
-        let expected_head = expected_head.map(str::to_owned);
+        let operation = operation.to_owned();
+        let frozen = serde_json::to_string(record)?;
+        let index = serde_json::to_string(&(&scope, &operation))?;
+        let event_index = event_key(record.authored.event_id());
         crate::run_blocking(move || {
-            let mut expected = vec![(head_key(&scope), expected_head)];
-            let mut writes = vec![
-                (head_key(&scope), Some(serde_json::to_string(&state)?)),
-                (pending_key(&scope), state.pending.clone()),
+            let operation_row = operation_key(&scope, &operation)?;
+            let result_row = result_key(&scope, &operation)?;
+            let pending_row = pending_key(&scope, &operation)?;
+            let expected = vec![
+                (operation_row.clone(), None),
+                (result_row.clone(), None),
+                (event_index.clone(), None),
             ];
-            for (operation, record) in &state.operations {
-                let key = operation_key(&scope, operation)?;
-                let frozen = serde_json::to_string(record)?;
-                match store.load(&key)? {
-                    Some(existing) if existing != frozen => {
-                        return Err(BridgeError::Database(
-                            "immutable publication replacement rejected".into(),
-                        ));
-                    }
-                    Some(_) => {}
-                    None => {
-                        expected.push((key.clone(), None));
-                        writes.push((key, Some(frozen)));
-                        let event_index = event_key(record.authored.event_id());
-                        expected.push((event_index.clone(), None));
-                        writes.push((
-                            event_index,
-                            Some(serde_json::to_string(&(&scope, operation))?),
-                        ));
-                    }
-                }
-                let result = result_key(&scope, operation)?;
-                expected.push((result.clone(), record.result_raw.clone()));
-                let mut count = record.observation_count;
-                for observation in &record.observations {
-                    count = count.checked_add(1).ok_or_else(|| {
-                        BridgeError::Database("observation index exhausted".into())
-                    })?;
-                    let key = format!(
-                        "observation/{}",
-                        serde_json::to_string(&(&scope, operation, count))?
-                    );
-                    expected.push((key.clone(), None));
-                    writes.push((key, Some(serde_json::to_string(observation)?)));
-                }
-                writes.push((
-                    result,
+            let writes = vec![
+                (operation_row, Some(frozen)),
+                (
+                    result_row,
                     Some(serde_json::to_string(&RecordedResult {
-                        outcome: record.outcome.clone(),
-                        observation_count: count,
+                        outcome: None,
+                        committed: None,
+                        observation_count: 0,
                     })?),
-                ));
-            }
+                ),
+                (event_index, Some(index)),
+                (pending_row, Some(operation.clone())),
+            ];
             store.compare_exchange_batch(&expected, &writes)
         })
         .await
     }
+
+    /// Persist one Station answer atomically with the pending index it settles.
+    /// An accepted answer also retains the exact [`CommittedEventRef`].
+    pub(crate) async fn record_outcome(
+        &self,
+        scope: &str,
+        operation: &str,
+        station: &DidCoreId,
+        outcome: &AuthoritySubmitOutcome,
+        committed: Option<&CommittedEventRef>,
+    ) -> Result<bool> {
+        let store = self.store.clone();
+        let scope = scope.to_owned();
+        let operation = operation.to_owned();
+        let station = station.clone();
+        let outcome = outcome.clone();
+        let committed = committed.cloned();
+        crate::run_blocking(move || {
+            let Some(record) = load_operation(store.as_ref(), &scope, &operation)? else {
+                return Err(BridgeError::Database(
+                    "frozen publication disappeared".into(),
+                ));
+            };
+            let result_row = result_key(&scope, &operation)?;
+            let pending_row = pending_key(&scope, &operation)?;
+            let count = record
+                .observation_count
+                .checked_add(1)
+                .ok_or_else(|| BridgeError::Database("observation index exhausted".into()))?;
+            let observation_row = format!(
+                "observation/{}",
+                serde_json::to_string(&(&scope, &operation, count))?
+            );
+            let expected = vec![
+                (result_row.clone(), record.result_raw.clone()),
+                (observation_row.clone(), None),
+            ];
+            let writes = vec![
+                (
+                    result_row,
+                    Some(serde_json::to_string(&RecordedResult {
+                        outcome: Some(outcome.clone()),
+                        committed: committed.clone(),
+                        observation_count: count,
+                    })?),
+                ),
+                (
+                    observation_row,
+                    Some(serde_json::to_string(&StationObservation {
+                        station,
+                        outcome,
+                    })?),
+                ),
+                // A settled publication leaves the restart replay set. Retryable
+                // unavailability is settled by the caller re-opening it.
+                (pending_row, None),
+            ];
+            store.compare_exchange_batch(&expected, &writes)
+        })
+        .await
+    }
+
+    /// Re-open a publication whose last answer was not an acceptance. The frozen
+    /// bytes stay immutable; only the replay index is restored.
+    pub(crate) async fn reopen(&self, scope: &str, operation: &str) -> Result<bool> {
+        let store = self.store.clone();
+        let scope = scope.to_owned();
+        let operation = operation.to_owned();
+        crate::run_blocking(move || {
+            let Some(record) = load_operation(store.as_ref(), &scope, &operation)? else {
+                return Err(BridgeError::Database(
+                    "frozen publication disappeared".into(),
+                ));
+            };
+            if record.committed.is_some() {
+                return Err(BridgeError::Database(
+                    "an accepted publication cannot be re-opened".into(),
+                ));
+            }
+            let pending_row = pending_key(&scope, &operation)?;
+            store.compare_exchange_batch(
+                &[(pending_row.clone(), None)],
+                &[(pending_row, Some(operation.clone()))],
+            )
+        })
+        .await
+    }
+
+    /// Exact signed Events still awaiting a settled Station answer.
     pub async fn pending_events(&self) -> Result<Vec<AuthoredEvent>> {
         let store = self.store.clone();
         crate::run_blocking(move || {
             let mut result = Vec::new();
             for (key, operation) in store.entries_with_prefix("pending/")? {
-                let scope = key
+                let raw = key
                     .strip_prefix("pending/")
                     .ok_or_else(|| BridgeError::Database("invalid pending index".into()))?;
+                let (scope, indexed): (String, String) = serde_json::from_str(raw)?;
+                if indexed != operation {
+                    return Err(BridgeError::Database("pending index mismatch".into()));
+                }
                 // A concurrent completion can remove the pending index after this scan.
-                if let Some(record) = load_operation(store.as_ref(), scope, &operation)? {
-                    if record.outcome.is_none() {
-                        result.push(record.authored);
-                    }
+                if let Some(record) = load_operation(store.as_ref(), &scope, &operation)?
+                    && record.committed.is_none()
+                {
+                    result.push(record.authored);
                 }
             }
             Ok(result)
@@ -240,6 +287,7 @@ impl AuthoringJournal {
         .await
     }
 }
+
 fn load_operation(
     store: &dyn AuthoringStore,
     scope: &str,
@@ -256,59 +304,24 @@ fn load_operation(
         .ok_or_else(|| BridgeError::Database("publication has no atomic result row".into()))?;
     let result: RecordedResult = serde_json::from_str(raw)?;
     record.outcome = result.outcome;
+    record.committed = result.committed;
     record.observation_count = result.observation_count;
     record.validate(scope)?;
     Ok(Some(record))
 }
-impl ScopeJournal {
-    pub fn new(frontier: RealmActorFrontierView) -> Self {
-        Self {
-            candidate_seq: frontier.next_actor_seq,
-            frontier,
-            pending: None,
-            candidates: vec![],
-            operations: BTreeMap::new(),
-        }
-    }
-    fn validate(&self, key: &str) -> Result<()> {
-        self.frontier.validate()?;
-        if scope_key(&self.frontier.realm_id, &self.frontier.actor_id)? != key
-            || self.candidate_seq != self.frontier.next_actor_seq
-        {
-            return Err(BridgeError::Database(
-                "invalid authoring head scope or position".into(),
-            ));
-        }
-        if self.candidates.len() > arkret_wire::event_envelope::MAX_ACTOR_SEQ_TOTAL_SIBLINGS {
-            return Err(BridgeError::Database(
-                "Actor height exceeds sibling bound".into(),
-            ));
-        }
-        for candidate in &self.candidates {
-            if self
-                .candidates
-                .iter()
-                .filter(|other| other.prev_refs == candidate.prev_refs)
-                .count()
-                > arkret_wire::event_envelope::MAX_ACTOR_SEQ_SIBLINGS
-            {
-                return Err(BridgeError::Database(
-                    "Actor predecessor bucket exceeds sibling bound".into(),
-                ));
-            }
-        }
-        for (operation, record) in &self.operations {
-            record.validate(key)?;
-            if record.outcome.is_none() != (self.pending.as_ref() == Some(operation)) {
-                return Err(BridgeError::Database(
-                    "pending publication index mismatch".into(),
-                ));
-            }
-        }
-        Ok(())
-    }
-}
+
 impl PublicationRecord {
+    pub(crate) fn new(intent: EventIntent, authored: AuthoredEvent) -> Self {
+        Self {
+            intent,
+            authored,
+            outcome: None,
+            committed: None,
+            result_raw: None,
+            observation_count: 0,
+        }
+    }
+
     fn validate(&self, scope: &str) -> Result<()> {
         let event = self.authored.event();
         self.authored.verify_identity()?;
@@ -317,148 +330,78 @@ impl PublicationRecord {
             .realm_id_opt()
             .ok_or_else(|| BridgeError::Database("publication has no Realm".into()))?;
         if scope_key(realm, &event.actor_id)? != scope
-            || !self.intent.authored_envelope_matches(event)
+            || !self.intent.matches_authored_event(event)
             || event.proofs.len() != 1
         {
             return Err(BridgeError::Database("invalid frozen publication".into()));
         }
-        self.basis
-            .validate_with_suite(self.authored.digest_suite())?;
-        if &self.basis.realm_id != realm
-            || self.basis.actor_id != event.actor_id
-            || event.actor_seq != self.basis.next_actor_seq
-            || self
-                .basis
-                .frontier_event_ids
-                .iter()
-                .any(|id| !event.prev_refs.contains(id))
-        {
-            return Err(BridgeError::Database(
-                "frozen publication differs from authoring basis".into(),
-            ));
-        }
-        if let Some(outcome) = &self.outcome {
-            publication_outcome(&self.authored, outcome)?;
+        match &self.outcome {
+            Some(outcome) => {
+                let committed = publication_outcome(&self.authored, outcome)?;
+                if committed.as_ref() != self.committed.as_ref() {
+                    return Err(BridgeError::Database(
+                        "retained committed reference disagrees with the recorded answer".into(),
+                    ));
+                }
+            }
+            None if self.committed.is_some() => {
+                return Err(BridgeError::Database(
+                    "committed reference without a recorded answer".into(),
+                ));
+            }
+            None => {}
         }
         Ok(())
     }
 }
 
-/// Only an exact, coherent business acceptance can terminate a pending publication.
-/// Missing or incoherent results retain the pending attempt; no path burns an Actor slot.
-pub(crate) fn accepted_frontier(
-    event: &AuthoredEvent,
-    outcome: &EventsSubmitOutcome,
-) -> Result<RealmActorFrontierView> {
-    outcome.validate_delivery_invariants()?;
-    let id = event.event_id();
-    if !matches!(
-        outcome.status,
-        EventsSubmitStatus::Accepted | EventsSubmitStatus::Duplicate
-    ) || outcome.accepted.len() + outcome.duplicate.len() != 1
-        || !outcome
-            .accepted
-            .iter()
-            .chain(&outcome.duplicate)
-            .any(|value| value == id)
-        || !outcome.rejections.is_empty()
-        || !outcome.quarantine.is_empty()
-        || !outcome.control_proposal_acks.is_empty()
-        || outcome.original_outcome.is_some()
-    {
-        return Err(BridgeError::Arkret(
-            "publication remains pending: no exact ordinary acceptance".into(),
-        ));
-    }
-    let realm = event
-        .scope_ref
-        .realm_id_opt()
-        .ok_or_else(|| BridgeError::Arkret("ordinary publication lacks Realm".into()))?;
-    if outcome.frontiers.len() != 1 {
-        return Err(BridgeError::Arkret(
-            "publication remains pending: missing exact actor frontier".into(),
-        ));
-    }
-    let frontier = &outcome.frontiers[0];
-    frontier.validate_with_suite(event.digest_suite())?;
-    let next = event
-        .actor_seq
-        .checked_add(1)
-        .ok_or_else(|| BridgeError::Arkret("actor sequence exhausted".into()))?;
-    if &frontier.realm_id != realm
-        || frontier.actor_id != event.actor_id
-        || frontier.next_actor_seq < next
-        || (frontier.next_actor_seq == next && !frontier.frontier_event_ids.contains(id))
-    {
-        return Err(BridgeError::Arkret(
-            "publication remains pending: acceptance frontier does not cover Event".into(),
-        ));
-    }
-    Ok(frontier.clone())
-}
-
-/// `None` is a receiver-local rejection, not a claim that the Event cannot
-/// have been accepted elsewhere. A new operation can use the unchanged frontier.
+/// Classify one Station answer for a frozen publication.
+///
+/// `Ok(Some(committed))` is an acceptance carrying the exact committed
+/// reference. `Ok(None)` is a terminal Station rejection: the publication is
+/// settled and must not be replayed automatically. `Err` means the answer
+/// settles nothing, so the exact signed bytes stay replayable.
 pub(crate) fn publication_outcome(
     event: &AuthoredEvent,
-    outcome: &EventsSubmitOutcome,
-) -> Result<Option<RealmActorFrontierView>> {
-    if outcome.status == EventsSubmitStatus::Partial
-        && outcome.pending_delivery_count == 0
-        && outcome.ingress_receipts.is_empty()
-        && outcome.frontiers.len() <= 1
-        && outcome.accepted.is_empty()
-        && outcome.duplicate.is_empty()
-        && outcome.quarantine.is_empty()
-        && outcome.control_proposal_acks.is_empty()
-        && outcome.original_outcome.is_none()
-        && outcome.rejections.len() == 1
-        && outcome.rejections[0].id == event.event_id().as_str()
-        && outcome.rejections[0].index.is_none_or(|index| index == 0)
-    {
-        for frontier in &outcome.frontiers {
-            frontier.validate_with_suite(event.digest_suite())?;
-            if Some(&frontier.realm_id) != event.scope_ref.realm_id_opt()
-                || frontier.actor_id != event.actor_id
+    outcome: &AuthoritySubmitOutcome,
+) -> Result<Option<CommittedEventRef>> {
+    match outcome {
+        AuthoritySubmitOutcome::Accepted { status, commit } => {
+            commit
+                .validate_shape()
+                .map_err(|error| BridgeError::Arkret(error.to_string()))?;
+            if !matches!(
+                status,
+                AuthorityCommitStatus::Committed | AuthorityCommitStatus::Duplicate
+            ) || &commit.event_ref != event.event_id()
             {
                 return Err(BridgeError::Arkret(
-                    "receiver rejection carries an unrelated frontier".into(),
+                    "publication remains pending: the commit does not cover this Event".into(),
                 ));
             }
+            if commit.stream_ref.realm_id() != &event.realm_id {
+                return Err(BridgeError::Arkret(
+                    "publication remains pending: the commit belongs to another Realm".into(),
+                ));
+            }
+            Ok(Some(CommittedEventRef {
+                event_id: event.event_id().clone(),
+                commit_id: commit.commit_id.clone(),
+                stream_ref: commit.stream_ref.clone(),
+                stream_position: commit.stream_position,
+            }))
         }
-        return Ok(None);
+        AuthoritySubmitOutcome::Rejected {
+            status: AuthorityRejectionStatus::Rejected,
+            ..
+        } => Ok(None),
+        AuthoritySubmitOutcome::Rejected {
+            status: AuthorityRejectionStatus::RetryableUnavailable,
+            reason_code,
+        } => Err(BridgeError::Runtime(format!(
+            "governance Station is unavailable: {reason_code}"
+        ))),
     }
-    accepted_frontier(event, outcome).map(Some)
-}
-
-pub(crate) fn merge_frontier(
-    current: &RealmActorFrontierView,
-    observed: &RealmActorFrontierView,
-    suite: arkret::DigestSuite,
-) -> Result<RealmActorFrontierView> {
-    observed.validate_with_suite(suite)?;
-    if current.realm_id != observed.realm_id || current.actor_id != observed.actor_id {
-        return Err(BridgeError::Arkret(
-            "cannot merge different Actor frontier scopes".into(),
-        ));
-    }
-    if observed.next_actor_seq < current.next_actor_seq {
-        return Ok(current.clone());
-    }
-    if observed.next_actor_seq > current.next_actor_seq {
-        return Ok(observed.clone());
-    }
-    let mut siblings = current.frontier_event_ids.clone();
-    siblings.extend(observed.frontier_event_ids.iter().cloned());
-    siblings.sort();
-    siblings.dedup();
-    Ok(RealmActorFrontierView::new(
-        current.realm_id.clone(),
-        current.actor_id.clone(),
-        current.next_actor_seq,
-        siblings,
-        suite,
-    )?)
 }
 
 /// Stable bridge operation identity from the upstream delivery identity, not message content.
@@ -480,7 +423,7 @@ pub struct DbAuthoringStore {
 }
 #[cfg(feature = "db")]
 mod schema {
-    diesel::table! { ordinary_authoring (entry_key) { entry_key -> Text, entry_value -> Text, } }
+    diesel::table! { authoring_journal (entry_key) { entry_key -> Text, entry_value -> Text, } }
 }
 #[cfg(feature = "db")]
 impl DbAuthoringStore {
@@ -493,9 +436,9 @@ impl DbAuthoringStore {
 impl AuthoringStore for DbAuthoringStore {
     fn load(&self, key: &str) -> Result<Option<String>> {
         use diesel::prelude::*;
-        use schema::ordinary_authoring::dsl;
+        use schema::authoring_journal::dsl;
         let mut conn = self.db.conn()?;
-        Ok(dsl::ordinary_authoring
+        Ok(dsl::authoring_journal
             .filter(dsl::entry_key.eq(key))
             .select(dsl::entry_value)
             .first(&mut conn)
@@ -507,7 +450,7 @@ impl AuthoringStore for DbAuthoringStore {
         writes: &[(String, Option<String>)],
     ) -> Result<bool> {
         use diesel::prelude::*;
-        use schema::ordinary_authoring::dsl;
+        use schema::authoring_journal::dsl;
         let mut conn = self.db.conn()?;
         let result = conn.transaction::<(), diesel::result::Error, _>(|conn| {
             // Conditional updates lock existing guards. Inserting absent guards
@@ -517,13 +460,13 @@ impl AuthoringStore for DbAuthoringStore {
             for (key, value) in checks {
                 let count = match value {
                     Some(value) => diesel::update(
-                        dsl::ordinary_authoring
+                        dsl::authoring_journal
                             .filter(dsl::entry_key.eq(key))
                             .filter(dsl::entry_value.eq(value)),
                     )
                     .set(dsl::entry_value.eq(value))
                     .execute(conn)?,
-                    None => diesel::insert_into(dsl::ordinary_authoring)
+                    None => diesel::insert_into(dsl::authoring_journal)
                         .values((dsl::entry_key.eq(key), dsl::entry_value.eq("")))
                         .on_conflict(dsl::entry_key)
                         .do_nothing()
@@ -535,14 +478,14 @@ impl AuthoringStore for DbAuthoringStore {
             }
             for (key, value) in expected {
                 if value.is_none() && !writes.iter().any(|(written, _)| written == key) {
-                    diesel::delete(dsl::ordinary_authoring.filter(dsl::entry_key.eq(key)))
+                    diesel::delete(dsl::authoring_journal.filter(dsl::entry_key.eq(key)))
                         .execute(conn)?;
                 }
             }
             for (key, value) in writes {
                 match value {
                     Some(value) => {
-                        diesel::insert_into(dsl::ordinary_authoring)
+                        diesel::insert_into(dsl::authoring_journal)
                             .values((dsl::entry_key.eq(key), dsl::entry_value.eq(value)))
                             .on_conflict(dsl::entry_key)
                             .do_update()
@@ -550,7 +493,7 @@ impl AuthoringStore for DbAuthoringStore {
                             .execute(conn)?;
                     }
                     None => {
-                        diesel::delete(dsl::ordinary_authoring.filter(dsl::entry_key.eq(key)))
+                        diesel::delete(dsl::authoring_journal.filter(dsl::entry_key.eq(key)))
                             .execute(conn)?;
                     }
                 }
@@ -565,10 +508,10 @@ impl AuthoringStore for DbAuthoringStore {
     }
     fn entries_with_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>> {
         use diesel::prelude::*;
-        use schema::ordinary_authoring::dsl;
+        use schema::authoring_journal::dsl;
         let mut conn = self.db.conn()?;
         // Prefixes are private fixed ASCII namespaces, never caller SQL patterns.
-        Ok(dsl::ordinary_authoring
+        Ok(dsl::authoring_journal
             .filter(dsl::entry_key.ge(prefix))
             .filter(dsl::entry_key.lt(format!("{prefix}\u{10ffff}")))
             .select((dsl::entry_key, dsl::entry_value))

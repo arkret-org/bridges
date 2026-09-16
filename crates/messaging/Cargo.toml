@@ -21,6 +21,7 @@ arkret-egress-reqwest = { workspace = true }
 arkret-event-draft = { workspace = true }
 arkret-models-collaboration = { workspace = true }
 arkret-models-integration = { workspace = true }
+arkret-signatures = { workspace = true }
 arkret-wire = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }

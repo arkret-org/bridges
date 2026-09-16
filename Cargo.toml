@@ -29,14 +29,17 @@ arkret = { version = "0.3.0", path = "../arkret-rust-sdk/crates/sdk", default-fe
     "server",
     "signer",
 ] }
+arkret-canonical = { version = "0.3.0", path = "../arkret-rust-sdk/crates/canonical", default-features = false }
 arkret-bridge-messaging = { path = "crates/messaging", default-features = false }
 arkret-bridge-runtime = { path = "crates/runtime", default-features = false }
 arkret-egress-reqwest = { version = "0.3.0", path = "../arkret-rust-sdk/crates/egress-reqwest" }
 arkret-event-draft = { version = "0.3.0", path = "../arkret-rust-sdk/crates/event-draft", default-features = false }
+arkret-identifiers = { version = "0.3.0", path = "../arkret-rust-sdk/crates/identifiers", default-features = false }
 arkret-models-collaboration = { version = "0.3.0", path = "../arkret-rust-sdk/crates/models-collaboration", default-features = false }
 arkret-models-discovery = { version = "0.3.0", path = "../arkret-rust-sdk/crates/models-discovery", default-features = false }
 arkret-models-integration = { version = "0.3.0", path = "../arkret-rust-sdk/crates/models-integration", default-features = false }
 arkret-retry = { version = "0.3.0", path = "../arkret-rust-sdk/crates/retry", default-features = false }
+arkret-signatures = { version = "0.3.0", path = "../arkret-rust-sdk/crates/signatures", default-features = false, features = ["signer"] }
 arkret-wire = { version = "0.3.0", path = "../arkret-rust-sdk/crates/wire", default-features = false }
 async-trait = "0.1"
 base64 = "0.23"

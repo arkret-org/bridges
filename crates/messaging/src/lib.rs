@@ -132,6 +132,21 @@ fn messaging_bridge_config(config: &runtime::Config) -> Result<MessagingBridgeCo
 pub(crate) const EXTERNAL_REF_SCHEMA: &str = "org.arkret.bridge.external_ref.messaging.v1";
 pub(crate) const MESSAGE_MAPPING_KEY_SEPARATOR: char = '\u{1f}';
 
+/// Persist an authority-signed committed reference as one canonical column
+/// value.
+///
+/// A [`CommittedEventRef`] is closed: it names the Event, the commit that
+/// carries it, the independent stream it landed in, and the position inside
+/// that stream. Storing only the event id would drop the stream coordinate,
+/// so the mapping tables retain the whole reference in canonical JSON.
+pub(crate) fn committed_ref_column(
+    committed_ref: &arkret_wire::CommittedEventRef,
+) -> Result<String> {
+    serde_json::to_string(committed_ref).map_err(|error| {
+        BridgeError::Arkret(format!("committed reference is not serializable: {error}"))
+    })
+}
+
 pub fn json_scalar_id_string(value: &Value) -> Option<String> {
     if let Some(s) = value.as_str() {
         let trimmed = s.trim();
@@ -169,7 +184,7 @@ const BRIDGE_HANDLED_EVENT_KINDS: [EventKind; 2] =
 pub(crate) const PORTAL_STRAND_TRACK: &str = "discussion";
 
 /// Page size for the §10.1 step-2 projection scan over realm history.
-pub(crate) const PORTAL_STRAND_SCAN_PAGE_LIMIT: u32 = 200;
+pub(crate) const PORTAL_STRAND_SCAN_PAGE_LIMIT: u16 = 200;
 /// Page cap for the §10.1 step-2 projection scan (bounds startup cost on large
 /// realms; a fresh portal realm resolves in one page).
 pub(crate) const PORTAL_STRAND_SCAN_MAX_PAGES: usize = 25;
@@ -703,8 +718,10 @@ impl MessageContext {
                                     external_actor_id.clone(),
                                     provisioned.outcome.ghost_actor_id.clone(),
                                     provisioned.did.clone(),
-                                    provisioned.outcome.profile_event_ref.to_string(),
-                                    provisioned.outcome.accountability_grant_ref.to_string(),
+                                    committed_ref_column(&provisioned.outcome.profile_event_ref)?,
+                                    committed_ref_column(
+                                        &provisioned.outcome.accountability_grant_ref,
+                                    )?,
                                     provisioned.outcome.authorization_ref.to_string(),
                                     display_name.map(str::to_owned),
                                 )
@@ -870,8 +887,10 @@ impl MessageContext {
                                     external_user_id.clone(),
                                     provisioned.outcome.ghost_actor_id.clone(),
                                     provisioned.did.clone(),
-                                    provisioned.outcome.profile_event_ref.to_string(),
-                                    provisioned.outcome.accountability_grant_ref.to_string(),
+                                    committed_ref_column(&provisioned.outcome.profile_event_ref)?,
+                                    committed_ref_column(
+                                        &provisioned.outcome.accountability_grant_ref,
+                                    )?,
                                     provisioned.outcome.authorization_ref.to_string(),
                                     display_name.map(str::to_owned),
                                 )

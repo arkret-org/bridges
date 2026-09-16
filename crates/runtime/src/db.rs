@@ -25,7 +25,7 @@ use crate::idempotency::{
 };
 
 /// Embedded migrations for the runtime-owned tables (`transaction_idempotency`,
-/// `event_dedup`, `ordinary_authoring`). The SQL uses the common subset supported by
+/// `event_dedup`, `authoring_journal`). The SQL uses the common subset supported by
 /// SQLite and PostgreSQL, so every backend embeds the same migration.
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
@@ -778,6 +778,7 @@ mod tests {
 
         let response = AppletTransactionOutcome {
             status: arkret_models_integration::AppletTransactionStatus::Accepted,
+            committed_event_refs: Vec::new(),
             rejections: Vec::new(),
             retry_after_ms: None,
         };

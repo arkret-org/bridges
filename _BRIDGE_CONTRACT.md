@@ -79,10 +79,9 @@ pub trait MessageBridge: Send + Sync + 'static {
 ### Provenance 与回环防护(裁决记录)
 
 - spec 现行裁决(applet-integration §8、event-envelope.schema.json):桥接事件的
-  `external_ref`/`applet_id` 是 **签名 envelope 顶层字段**;`unsigned.external_ref` 只能作
-  可丢弃 hint,MUST NOT 用于安全决策。
-- 当前 SDK `Event` 模型已暴露顶层 `external_ref`/`applet_id`;桥侧提交前必须设置这些签名字段,
-  不得把安全相关 provenance 放入 `unsigned`。**回环判据只用签名覆盖的字段**
+  `external_ref`/`applet_id` 是 **签名 envelope 顶层字段**,由 producer 签名覆盖。
+- 当前 SDK `Event` 模型只有签名覆盖的字段,没有任何随手可写的旁路容器;桥侧提交前必须设置
+  这些签名字段。**回环判据只用签名覆盖的字段**
   (`executed_by == service_id` 或 `actor_id == service_id`),不读取 unsigned。portal strand
   的外部 location 同时写入 envelope 顶层 `external_ref` 与 strand 对象签名 metadata
   (`metadata.fields.external_ref`,受 event_digest 覆盖),前者用于 provenance/审计,后者用于

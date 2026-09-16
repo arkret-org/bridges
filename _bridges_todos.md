@@ -38,6 +38,8 @@
 
 | 2026-09-13 | runtime + messaging | 删除全局批量序号预留及旧文件存储，改用 SDK Realm/完整 Actor frontier 与持久 CAS publication journal；发送前冻结完整签名 Event，未知结果原件重试，receiver-local 拒绝释放当前槽但保留历史原件；新 operation 合并完整已观察 siblings，按 16/64 上限限制候选。Savfox 同步使用真实交付 ID 和恢复 worker。静态完成，真实编译及崩溃/多站联合验收仍待执行。 |
 
+| 2026-09-16 | runtime + messaging | authority-commit clean break。出站改为 author + 签名 + 提交当前治理 Station，`EventCommitSubmission` 是唯一提交 DTO，accepted 后保留 exact `CommittedEventRef`；新增 `runtime::authority` 协议核心（submission queue / stream cursor book / join bootstrap / handoff / producer 与 managed-actor proof 校验）。publication journal 改为「每个稳定 operation id 一条不可变冻结记录 + 原子结算行」，表名 `ordinary_authoring` → `authoring_journal`。ghost portal strand 的 §10.1 最早生效判定改用 Realm 自己的 commit stream 升序扫描。`user_mappings.profile_event_ref` / `accountability_grant_ref` 改存完整 canonical `CommittedEventRef`。`scripts/deletion_gate.sh` 增加 22 条零基线禁用标识。**未闭合**：`build_ghost_bundle` fail-closed，因 SDK 只剩验证侧、没有 producer 侧 bundle authoring API，详见 [`CAPABILITY-MIGRATION.md`](CAPABILITY-MIGRATION.md)。 |
+
 ## Todo(尚未落地的共享层待办)
 
 - **(runtime) Event signer binding 的 version / epoch 维度目前为空**

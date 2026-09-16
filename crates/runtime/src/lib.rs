@@ -1,17 +1,19 @@
 //! # arkret-bridge-runtime
 //!
-//! A reusable **Applet bridge runtime** layered on top of the `arkret` SDK. The SDK
-//! already provides the full protocol surface — the `AppletHandler` inbound
-//! path and `events_submit` / event signing on the outbound path — so this
-//! crate adds *no new protocol capability*. What it factors out (so that N
-//! bridges don't each re-implement it) is:
+//! A reusable **Applet bridge runtime** layered on top of the `arkret` SDK. The
+//! SDK owns the protocol surface — the `AppletHandler` inbound path and the
+//! authority-commit submission path on the outbound side — so this crate adds
+//! *no new protocol capability*. What it factors out (so that N bridges do not
+//! each re-implement it) is:
 //!
 //! - **Inbound async pump**: turns the SDK's synchronous `AppletHandler` transaction pushes into an
 //!   async [`arkret::Event`] stream + a background consumer ([`app::consume_inbound`]).
-//! - **Durable ordinary publishing**: accepted Realm/Actor frontiers, exact retry bytes, HLC and
-//!   `applet_id`, with one-pass signing, exposed through [`arkret_edge::ArkretEdge`]'s
-//!   intent/authoring methods (`service_intent`, `delegated_intent`, `author_and_sign`,
-//!   `submit_event`).
+//! - **Authority-commit publishing**: a producer Event is authored, signed, and handed to the
+//!   current governance Station, which returns the authority-signed `RealmCommit` that fixes the
+//!   Event's position in exactly one independent commit stream. The durable [`AuthoringJournal`]
+//!   retains the exact signed bytes and the exact committed reference across retries; see
+//!   [`arkret_edge::ArkretEdge`] (`service_intent`, `delegated_intent`, `author_and_sign`,
+//!   `submit_event`) and [`authority`].
 //! - **App-runtime scaffolding**: config loading, a diesel pool + migration runner, a salvo server
 //!   (applet routes + health/metrics + app webhooks), and the [`run_bridge`] orchestration loop.
 //!
@@ -23,20 +25,21 @@
 //! ## Cargo features
 //!
 //! - `edge` (always available): the protocol edge ([`ArkretEdge`], the [`AuthoringStore`] trait +
-//!   [`AuthoringJournal`], config, errors, cache/queue, and blob helpers) without diesel or salvo.
-//!   A host injects its own [`AuthoringStore`]. The out-of-repo consumer `savfox`
-//!   (`../../../savfox-ai/savfox`) depends on this surface with `default-features = false, features
-//!   = ["edge"]` and calls e.g. `ArkretEdge::new_outbound`; check it before deleting any
-//!   shared-layer pub symbol.
+//!   [`AuthoringJournal`], the [`authority`] commit core, config, errors, cache/queue, and blob
+//!   helpers) without diesel or salvo. A host injects its own [`AuthoringStore`]. The out-of-repo
+//!   consumer `savfox` (`../../../savfox-ai/savfox`) depends on this surface with `default-features
+//!   = false, features = ["edge"]` and calls e.g. `ArkretEdge::new_outbound`; check it before
+//!   deleting any shared-layer pub symbol.
 //! - `db`: the diesel-backed database pool ([`db`]) and [`DbAuthoringStore`].
 //! - `web`: the salvo HTTP service ([`web`]).
 //! - `runtime` (= `db` + `web`): [`BridgeContext`] / [`BridgeApp`] / [`run_bridge`].
-//! - `full` (= `db` + `web` + `runtime`) and `default` (= `full` + `sqlite`) keep all historical
-//!   behavior.
+//! - `full` (= `db` + `web` + `runtime`) and `default` (= `full` + `sqlite`) keep the complete
+//!   bridge process.
 
 pub mod app;
 mod arkret_edge;
 mod authoring;
+pub mod authority;
 pub mod backoff;
 pub mod blocking;
 pub mod cache;
@@ -66,6 +69,12 @@ pub use arkret_edge::ArkretEdge;
 #[cfg(feature = "db")]
 pub use authoring::DbAuthoringStore;
 pub use authoring::{AuthoringJournal, AuthoringStore, external_operation_key};
+pub use authority::{
+    AuthorityMaterialVerifier, BridgeProtocolError, CurrentAuthority, GovernanceStationTransport,
+    JoinBootstrap, ManagedActorProofVerifier, ProducerProofVerifier, QueuedSubmission,
+    StreamCursorBook, StreamTail, SubmissionQueue, SubmissionState, validate_handoff,
+    validate_managed_actor_bundle, validate_producer_event,
+};
 pub use backoff::{BRIDGE_RETRY, bridge_retry_delay};
 pub use blocking::run_blocking;
 pub use cache::{PersistedToken, TokenCache, TokenStore};
@@ -124,7 +133,7 @@ where
     let (signal_tx, signal_rx) = mpsc::channel(arkret_edge::SIGNAL_QUEUE_CAPACITY);
 
     let db = Arc::new(db::DatabaseManager::connect(&config.database)?);
-    // The durable ordinary publication journal, injected into the edge.
+    // The durable publication journal, injected into the edge.
     let store: Arc<dyn AuthoringStore> = Arc::new(DbAuthoringStore::new(db.clone())?);
 
     let mut edge = ArkretEdge::new(config.clone(), store, inbound_tx)?;
@@ -163,7 +172,7 @@ where
             loop {
                 interval.tick().await;
                 if let Err(error) = edge.retry_pending_publications().await {
-                    tracing::warn!(%error, "ordinary publication recovery failed");
+                    tracing::warn!(%error, "publication recovery failed");
                 }
             }
         })

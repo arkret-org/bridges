@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use arkret::Did;
 use arkret::signatures::PublicKeyMaterial;
 use arkret_models_integration::AppletWireNamespaces;
-use arkret_wire::{AuthContext, DidUrl, SignerEvidenceRef};
+use arkret_wire::DidUrl;
 use serde::Deserialize;
 
 use crate::error::{BridgeError, Result};
@@ -156,14 +156,6 @@ pub struct ArkretConfig {
     /// The signing verification method id (the kid on the DID).
     #[serde(default = "default_kid")]
     pub verification_method_fragment: String,
-    /// Content address of the retained, authenticated service signer evidence.
-    /// Ordinary Event authoring is local and must not fetch this from a Station.
-    pub signer_resolution_evidence_ref: SignerEvidenceRef,
-    /// Last verified ordinary authoring authority for each Realm. These values
-    /// are retained locally and have no freshness lease; a missing Realm stays
-    /// pending until verified state supplies one.
-    #[serde(default)]
-    pub ordinary_authoring_contexts: std::collections::BTreeMap<String, AuthContext>,
     /// The only arkret server DID accepted for server -> bridge transaction
     /// pushes.
     pub trusted_server_did: Did,
@@ -295,10 +287,6 @@ impl fmt::Debug for ArkretConfig {
             .field(
                 "verification_method_fragment",
                 &self.verification_method_fragment,
-            )
-            .field(
-                "ordinary_authoring_contexts",
-                &self.ordinary_authoring_contexts,
             )
             .field("trusted_server_did", &self.trusted_server_did)
             .field(
@@ -535,7 +523,6 @@ arkret:
   access_token: "token"
   signing_key_seed_hex: "1111111111111111111111111111111111111111111111111111111111111111"
   verification_method_fragment: "#key-1"
-  signer_resolution_evidence_ref: "ak:signer_evidence:sha256:1111111111111111111111111111111111111111111111111111111111111111"
   trusted_server_did: "did:webvh:server.example"
   applet_namespaces:
     actors: []

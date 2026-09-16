@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS event_dedup (
     fingerprint BIGINT NOT NULL,
     expires_at BIGINT NOT NULL);
 
-CREATE TABLE IF NOT EXISTS ordinary_authoring (
+CREATE TABLE IF NOT EXISTS authoring_journal (
     entry_key TEXT PRIMARY KEY,
     entry_value TEXT NOT NULL);
 

@@ -35,11 +35,14 @@ runtime  = ["db", "web"]
 [dependencies]
 anyhow = { workspace = true }
 arkret = { workspace = true }
+arkret-canonical = { workspace = true }
 arkret-event-draft = { workspace = true }
+arkret-identifiers = { workspace = true }
 arkret-models-collaboration = { workspace = true }
 arkret-models-discovery = { workspace = true }
 arkret-models-integration = { workspace = true }
 arkret-retry = { workspace = true }
+arkret-signatures = { workspace = true }
 arkret-wire = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }

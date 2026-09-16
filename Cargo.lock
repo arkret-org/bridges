@@ -208,7 +208,6 @@ dependencies = [
  "arkret-identifiers",
  "arkret-identity",
  "arkret-keystore",
- "arkret-lattice-registry",
  "arkret-models-collaboration",
  "arkret-models-crypto",
  "arkret-models-discovery",
@@ -245,11 +244,8 @@ name = "arkret-bootstrap"
 version = "0.3.0"
 dependencies = [
  "arkret-canonical",
- "arkret-event-draft",
- "arkret-lattice-registry",
  "arkret-models-collaboration",
  "arkret-models-identity",
- "arkret-state",
  "arkret-wire",
  "chrono",
  "serde_json",
@@ -348,6 +344,7 @@ dependencies = [
  "arkret-event-draft",
  "arkret-models-collaboration",
  "arkret-models-integration",
+ "arkret-signatures",
  "arkret-wire",
  "async-trait",
  "base64 0.23.1",
@@ -406,11 +403,14 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "arkret",
+ "arkret-canonical",
  "arkret-event-draft",
+ "arkret-identifiers",
  "arkret-models-collaboration",
  "arkret-models-discovery",
  "arkret-models-integration",
  "arkret-retry",
+ "arkret-signatures",
  "arkret-wire",
  "async-trait",
  "chrono",
@@ -543,7 +543,6 @@ name = "arkret-crypto"
 version = "0.3.0"
 dependencies = [
  "arkret-canonical",
- "arkret-models-collaboration",
  "arkret-models-crypto",
  "arkret-signatures",
  "arkret-wire",
@@ -683,18 +682,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arkret-lattice-registry"
-version = "0.3.0"
-dependencies = [
- "arkret-models-collaboration",
- "arkret-schema",
- "arkret-state",
- "arkret-wire",
- "serde_json",
- "thiserror 2.0.20",
-]
-
-[[package]]
 name = "arkret-locale"
 version = "0.3.0"
 dependencies = [
@@ -709,7 +696,6 @@ dependencies = [
  "arkret-identifiers",
  "arkret-models-crypto",
  "arkret-models-identity",
- "arkret-models-integration",
  "arkret-schema",
  "arkret-wire",
  "chrono",
@@ -878,17 +864,8 @@ dependencies = [
 name = "arkret-state"
 version = "0.3.0"
 dependencies = [
- "arkret-canonical",
- "arkret-event-draft",
  "arkret-identifiers",
- "arkret-models-collaboration",
- "arkret-models-crypto",
  "arkret-wire",
- "async-trait",
- "chrono",
- "hex",
- "serde",
- "serde_json",
  "thiserror 2.0.20",
 ]
 
@@ -910,6 +887,7 @@ dependencies = [
  "unicode-normalization",
  "unicode-security",
  "url",
+ "uuid",
  "web-time",
 ]
 

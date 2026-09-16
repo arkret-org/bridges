@@ -9,7 +9,7 @@ use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinitio
 
 use crate::{AuthoringStore, BridgeError, Result};
 
-const ENTRIES: TableDefinition<&str, &str> = TableDefinition::new("ordinary_authoring");
+const ENTRIES: TableDefinition<&str, &str> = TableDefinition::new("authoring_journal");
 const BARRIER: TableDefinition<&str, u64> = TableDefinition::new("durability_barrier");
 const CACHE_BYTES: usize = 16 * 1024 * 1024;
 
@@ -24,7 +24,7 @@ pub struct FileAuthoringStore {
 }
 
 fn storage_error(error: impl std::fmt::Display) -> BridgeError {
-    BridgeError::Database(format!("ordinary authoring storage: {error}"))
+    BridgeError::Database(format!("authoring journal storage: {error}"))
 }
 
 fn engines() -> &'static Mutex<BTreeMap<PathBuf, Weak<Engine>>> {

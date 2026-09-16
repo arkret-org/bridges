@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use arkret::{AppletId, Did, DidCoreId, EventId, EventKind, Hlc, RealmId, StrandId, StrandTrack};
+use arkret::{AppletId, Did, DidCoreId, EventKind, RealmId, StrandId, StrandTrack};
 use arkret_bridge_runtime::{BridgeError, Result};
 use arkret_models_collaboration::events_payloads::StrandCreatePayload;
 use arkret_models_collaboration::objects::strand::Strand;
@@ -11,6 +11,7 @@ use arkret_models_integration::{
     AppletBridgeErrorClass, AppletManagedActorProvisionPayload, AppletManagedActorRole,
     GhostActorProvisionOutcome, GhostActorProvisionRequestBody, GhostExternalTuple,
 };
+use arkret_wire::{CommitStreamRef, StreamScanRequest};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -167,9 +168,10 @@ pub(crate) async fn provision_ghost_actor(
     display_name: Option<&str>,
     realm_id: &str,
 ) -> Result<ProvisionedGhostActor> {
-    // Every accountability grant advances the configured service actor's
-    // Realm frontier. Serialize frontier reads through submission so two
-    // concurrent bridge deliveries cannot prepare conflicting actor_seq values.
+    // Provisioning a first-seen external user is a multi-step unit: prepare the
+    // request in the durable ledger, author it, then submit. Serialize it so two
+    // concurrent deliveries for the same user cannot each start their own unit
+    // before either has reached the ledger.
     let _provision_guard = GHOST_PROVISION_LOCK
         .get_or_init(|| tokio::sync::Mutex::new(()))
         .lock()
@@ -422,10 +424,16 @@ pub(crate) fn location_matches(candidate: Option<&Value>, location: &Value) -> b
         .all(|key| candidate.get(*key) == location.get(*key))
 }
 
-/// §10.1 step 2: scan the portal realm's history (a projection over regular
-/// event reads) for an existing portal strand whose recorded external location
-/// matches. Concurrent/retried creates resolve to the earliest strand in
-/// effective (HLC) order, per the §10.1 create-idempotency rule.
+/// §10.1 step 2: scan the portal Realm's own commit stream for an existing
+/// portal strand whose recorded external location matches. Concurrent or
+/// retried creates resolve to the earliest committed create, per the §10.1
+/// create-idempotency rule.
+///
+/// "Earliest" is the lowest `stream_position` in this Realm's single commit
+/// stream: the governance Station fixed that order when it signed the commits,
+/// and the scan returns them in exactly that order. Only the Realm stream is
+/// scanned — Circle and Sidecar streams are independent and carry no portal
+/// strand creates.
 ///
 /// The location is matched against the strand object's signed
 /// `metadata.fields.external_ref` (covered by the event digest). Strand creation
@@ -436,28 +444,21 @@ pub(crate) async fn find_existing_portal_strand(
     realm_id: &str,
     location: &Value,
 ) -> Result<Option<String>> {
-    let mut cursor: Option<String> = None;
-    // (hlc, event_id, strand_id) — keep the earliest in effective order.
-    // BRG-REL-003: compare the *typed* `Hlc`/`EventId` (whose `Ord` parses the
-    // HLC into (physical_ms, logical, node_id)) rather than a lexicographic
-    // `to_string()` comparison, so the §10.1 "earliest effective" tie-break is
-    // the authoritative HLC order regardless of the string encoding.
-    let mut earliest: Option<(Hlc, EventId, String)> = None;
+    let realm_id = RealmId::new(realm_id.to_owned())?;
+    let stream_ref = CommitStreamRef::Realm {
+        realm_id: realm_id.clone(),
+    };
+    let mut after_position: Option<u64> = None;
     for _ in 0..PORTAL_STRAND_SCAN_MAX_PAGES {
-        let page = edge
-            .client()
-            .events_read_outcome(
-                realm_id,
-                cursor.as_deref(),
-                None,
-                None,
-                Some(PORTAL_STRAND_SCAN_PAGE_LIMIT),
-            )
-            .await?;
-        for row in &page.events {
-            let Some(event) = row.event() else {
-                continue;
-            };
+        let request = StreamScanRequest {
+            realm_id: realm_id.clone(),
+            stream_ref: stream_ref.clone(),
+            after_position,
+            limit: PORTAL_STRAND_SCAN_PAGE_LIMIT,
+        };
+        let page = edge.client().scan_commit_stream(&request).await?;
+        for item in &page.commits {
+            let event = &item.event;
             if event.kind != EventKind::StrandCreate {
                 continue;
             }
@@ -470,29 +471,17 @@ pub(crate) async fn find_existing_portal_strand(
             let Some(strand_id) = object.get("id").and_then(Value::as_str) else {
                 continue;
             };
-            let Some(event_hlc) = event.hlc.as_ref() else {
-                continue;
-            };
-            if earliest
-                .as_ref()
-                .is_none_or(|(hlc, event_id, _)| (event_hlc, &event.event_id) < (hlc, event_id))
-            {
-                earliest = Some((
-                    event_hlc.clone(),
-                    event.event_id.clone(),
-                    strand_id.to_owned(),
-                ));
-            }
+            return Ok(Some(strand_id.to_owned()));
         }
-        if page.events.is_empty() {
+        let Some(last) = page.commits.last() else {
+            break;
+        };
+        after_position = Some(last.commit.stream_position);
+        if page.commits.len() < usize::from(PORTAL_STRAND_SCAN_PAGE_LIMIT) {
             break;
         }
-        match page.prev_cursor {
-            Some(prev) => cursor = Some(prev),
-            None => break,
-        }
     }
-    Ok(earliest.map(|(_, _, strand_id)| strand_id))
+    Ok(None)
 }
 
 /// §10.1 step 3: create the portal strand by submitting `ak.strand.create` under
@@ -588,12 +577,29 @@ mod provider_tests {
             ),
             (arkret::ActorId::service(principal), false),
         ] {
+            // Every durable provisioning ref is a closed committed reference:
+            // the Event, the commit that carries it, and its exact coordinate in
+            // that Realm's own stream.
+            let committed = |position: u64| arkret_wire::CommittedEventRef {
+                event_id: arkret::EventId::new(
+                    "ak:event:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                )
+                .unwrap(),
+                commit_id: arkret::RealmCommitId::from_digest([1; 32]),
+                stream_ref: arkret_wire::CommitStreamRef::Realm {
+                    realm_id: RealmId::new(
+                        "ak:realm:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
+                    )
+                    .unwrap(),
+                },
+                stream_position: position,
+            };
             let response: GhostActorProvisionOutcome = serde_json::from_value(serde_json::json!({
                 "ghost_actor_id": actor,
-                "managed_actor_provision_ref": "ak:event:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "managed_actor_provision_ref": committed(0),
                 "principal_control_realm_id": "ak:realm:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-                "profile_event_ref": "ak:event:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-                "accountability_grant_ref": "ak:event:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "profile_event_ref": committed(1),
+                "accountability_grant_ref": committed(2),
                 "authorization_ref": "ak:grant:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
             })).unwrap();
             assert_eq!(

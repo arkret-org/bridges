@@ -15,9 +15,12 @@ use arkret::{
     AppletHandler, Did, DidCoreId, IdempotencyDirection, IdempotencyIdentity, TransactionClaim,
     TransactionIdempotencyStore, project_did_to_core_id,
 };
-use arkret_models_collaboration::http_bodies::AppletTransactionRequestBody;
-use arkret_models_integration::{AppletTransactionOutcome, AppletTransactionStatus};
-use arkret_wire::{DidUrl, ServiceOperationId};
+use arkret_models_integration::{
+    AppletAuthoringTransactionRequestBody, AppletManagedActorAuthoringBasis,
+    AppletManagedActorCommittedRequest, AppletTransactionOutcome, AppletTransactionRequestBody,
+    AppletTransactionStatus,
+};
+use arkret_wire::{CommitStreamRef, DidUrl, ServiceOperationId};
 use chrono::Utc;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use salvo::affix_state;
@@ -334,6 +337,51 @@ async fn claim_transaction(
     run_blocking(move || store.claim(&replay, &hash, &delivery_authentication_record_digest)).await
 }
 
+/// Validate an Applet-managed authoring completion pushed back to this bridge.
+///
+/// Every binding below is an SDK-owned validator; the bridge only composes them
+/// for the exact delivery it received. A completion is authoritative only when
+/// the pushing service is the governance Station the authoring request targeted,
+/// it names this Applet, and the commit it reports lands in that Realm's own
+/// stream rather than a Circle or Sidecar stream.
+fn validate_authoring_completion(
+    body: &AppletAuthoringTransactionRequestBody,
+    source_id: &DidCoreId,
+) -> std::result::Result<(), String> {
+    let (request, bundle) = match &body.authoring_result.committed_request {
+        AppletManagedActorCommittedRequest::Install(install) => {
+            (install.authoring_request(), install.managed_actor_bundle())
+        }
+        AppletManagedActorCommittedRequest::Ghost(ghost) => {
+            (&ghost.authoring_request, Some(&ghost.managed_actor_bundle))
+        }
+    };
+    request
+        .validate_bindings()
+        .map_err(|error| error.to_string())?;
+    if let Some(bundle) = bundle {
+        bundle
+            .validate_bindings(request)
+            .map_err(|error| error.to_string())?;
+    }
+    if request.basis.target_station_id() != source_id {
+        return Err(
+            "authoring completion did not come from the targeted governance Station".to_owned(),
+        );
+    }
+    let applet_id = match &request.basis {
+        AppletManagedActorAuthoringBasis::InstallBot(basis) => &basis.applet_id,
+        AppletManagedActorAuthoringBasis::ProvisionGhost(basis) => &basis.applet_id,
+    };
+    if applet_id != &body.applet_id {
+        return Err("authoring completion names a different Applet".to_owned());
+    }
+    match &body.authoring_result.realm_stream_head.stream_ref {
+        CommitStreamRef::Realm { .. } => Ok(()),
+        _ => Err("authoring completion reports a non-Realm commit stream".to_owned()),
+    }
+}
+
 /// Authenticate every Event before creating the durable idempotency claim.
 ///
 /// The claim is the first transaction-processing side effect. Keeping proof
@@ -540,11 +588,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         return;
     }
     if let AppletTransactionRequestBody::Authoring(authoring) = &body
-        && let Err(error) = authoring.authoring_result.validate_delivery_binding(
-            &authoring.applet_id,
-            &verified.source_id,
-            &verified.destination_id,
-        )
+        && let Err(error) = validate_authoring_completion(authoring, &verified.source_id)
     {
         record_applet_transaction("bad_request");
         bad_request(
@@ -594,6 +638,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
             record_applet_transaction("pending");
             res.render(Json(arkret_models_integration::AppletTransactionOutcome {
                 status: AppletTransactionStatus::Rejected,
+                committed_event_refs: Vec::new(),
                 rejections: Vec::new(),
                 retry_after_ms: Some(1000),
             }));
@@ -999,12 +1044,9 @@ fn verify_transaction_events(
 ) -> std::result::Result<(), String> {
     let body = match body {
         AppletTransactionRequestBody::Events(body) => body,
-        AppletTransactionRequestBody::Authoring(body) => {
-            return body
-                .authoring_result
-                .validate_bindings()
-                .map_err(|error| error.to_string());
-        }
+        // An authoring completion carries no producer Events of its own; its
+        // bindings were already checked at the delivery boundary.
+        AppletTransactionRequestBody::Authoring(_) => return Ok(()),
     };
     for event in &body.events {
         if event.proofs.len() != 1 {
@@ -1240,7 +1282,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use arkret::signatures::{Ed25519PayloadSigner, SignEventOptions, sign_event};
-    use arkret::{Did, DidCoreId, Event, Hlc, RealmId, ScopeRef, TrustDomainId};
+    use arkret::{Did, DidCoreId, Event, RealmId, ScopeRef, TrustDomainId};
     use chrono::DateTime;
 
     use super::*;
@@ -1333,14 +1375,11 @@ mod tests {
     fn signed_event(actor: &Did, verification_method: &DidUrl, seed: u8, seq: u64) -> Event {
         let realm =
             RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").expect("realm");
-        let hlc = Hlc::new(format!("01970e589d2{seq}-0001-a13f9c2e")).expect("hlc");
         let event = arkret_wire::test_support::raw_event(
             "ak.message.create",
             ScopeRef::Realm { realm_id: realm },
             actor_id(actor),
             arkret::project_did_to_core_id(&server_did()).expect("server core id"),
-            seq,
-            hlc,
             json!({ "body": format!("hello {seq}") }),
         )
         .expect("event");
@@ -1354,14 +1393,7 @@ mod tests {
         sign_event(
             &mut event,
             &signer(seed, actor, verification_method),
-            verification_method,
-            SignEventOptions::new(
-                arkret::SignerEvidenceRef::new(format!(
-                    "ak:signer_evidence:sha256:{}",
-                    "11".repeat(32)
-                ))
-                .expect("fixture signer evidence ref"),
-            ),
+            SignEventOptions::new(),
         )
         .expect("sign event");
         event.into_event()
@@ -1369,14 +1401,14 @@ mod tests {
 
     fn transaction(events: Vec<Event>) -> AppletTransactionRequestBody {
         AppletTransactionRequestBody::Events(
-            arkret_models_collaboration::http_bodies::AppletEventTransactionRequestBody {
+            arkret_models_integration::AppletEventTransactionRequestBody {
                 applet_id: arkret::AppletId::new(
                     "ak:applet:01904100-0000-7000-8000-000000000001".to_owned(),
                 )
                 .expect("applet id"),
                 source_id: arkret::project_did_to_core_id(&server_did()).expect("server core id"),
                 events,
-                signals: None,
+                signals: Vec::new(),
             },
         )
     }
