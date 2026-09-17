@@ -11,12 +11,14 @@ use arkret::signatures::Ed25519DetachedJwsVerifier;
 use arkret::{
     AppletId, AppletManagedActorAuthorOutcome, AppletManagedActorAuthorRequestBody,
     AppletManagedActorAuthoringBundle, AppletManagedActorAuthoringRequest,
-    AppletManagedActorPurpose, Did, DidCoreId, GhostActorProvisionRequestBody,
-    GhostPreviewRequestBody, Hash, ResolutionCommitment, ResolutionDidBindingEvidenceKind,
-    ResolutionDidBindingEvidenceReceipt, ResolutionDidBindingMethodProof,
-    ResolutionMethodEvidenceBoundary, ResolutionMethodHistoryEvidence, namespace_pattern_matches,
+    AppletManagedActorBundleAuthoringInput, AppletManagedActorPurpose, Did, DidCoreId, GenesisSalt,
+    GhostActorProvisionRequestBody, GhostPreviewRequestBody, Hash, ResolutionCommitment,
+    ResolutionDidBindingEvidenceKind, ResolutionDidBindingEvidenceReceipt,
+    ResolutionDidBindingMethodProof, ResolutionMethodEvidenceBoundary,
+    ResolutionMethodHistoryEvidence, author_applet_managed_actor_bundle, namespace_pattern_matches,
     project_did_to_core_id,
 };
+use arkret_wire::{Discoverability, HistoryAccess, JoinRule, SecurityClass};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use chrono::Utc;
@@ -539,24 +541,85 @@ impl ManagedActorAuthoringService {
     /// `identity/key-management.md` §3.6.3 requires the unified
     /// `arkret-rust-sdk` authoring API to produce it.
     ///
-    /// The SDK currently exposes only the verifying half of that contract
-    /// (`AppletManagedActorAuthoringRequest::sign_ghost` on the Station side and
-    /// `AppletManagedActorAuthoringBundle::validate_bindings` on the receiving
-    /// side); there is no producer-side constructor. A bridge must not hand-roll
-    /// one, because the cross-binding rules would then exist in two places and
-    /// drift, so authoring fails closed here rather than emitting a bundle no
-    /// verifier would accept. The identity, its encrypted key custody and the
-    /// authoring ledger around this call are unaffected and stay durable.
+    /// The cross-binding rules live in the SDK's producer-side constructor, so
+    /// this calls it rather than assembling them a second time here. The
+    /// bridge contributes only what that API deliberately keeps outside the
+    /// signed request: the independently held managed-actor identity, the
+    /// accepted registration coordinate, and the PCR genesis parameters of its
+    /// own deployment.
+    ///
+    /// `registration_ref` is echoed from the signed Ghost basis. The SDK
+    /// rejects any other value, and taking it from configuration or from the
+    /// live registration read would let an authoring request be answered
+    /// against a registration it did not name.
+    ///
+    /// The control Realm belongs to one principal, so it is closed, secret and
+    /// `since_join`; `models/realm-and-space.md` section 4 fixes
+    /// `history_access = since_join` for every PCR, and a control Realm that
+    /// anyone could join or discover would not be a control Realm. The genesis
+    /// salt is generated once here and travels inside the bundle the store
+    /// persists, so a retry replays the same salt and cannot create a second
+    /// PCR for the same Ghost.
     async fn build_ghost_bundle(
         &self,
-        _request: &AppletManagedActorAuthoringRequest,
-        _identity: &ManagedActorIdentity,
+        request: &AppletManagedActorAuthoringRequest,
+        identity: &ManagedActorIdentity,
     ) -> Result<AppletManagedActorAuthoringBundle> {
-        Err(BridgeError::Arkret(
-            "applet managed actor bundle authoring is unavailable: the arkret SDK exposes no producer-side constructor for AppletManagedActorAuthoringBundle"
-                .to_owned(),
-        ))
+        let input = ghost_bundle_authoring_input(
+            request,
+            identity,
+            self.config.arkret.trust_domain.clone(),
+        )?;
+        author_applet_managed_actor_bundle(request, input, self.edge.signer()).map_err(|error| {
+            BridgeError::Arkret(format!("managed actor bundle authoring failed: {error}"))
+        })
     }
+}
+
+/// The authoring inputs the SDK's API deliberately keeps outside the signed
+/// request, assembled for the Ghost branch.
+///
+/// `registration_ref` is echoed from the signed basis. The SDK rejects any
+/// other value, and taking it from configuration or from a live registration
+/// read would let an authoring request be answered against a registration it
+/// did not name.
+///
+/// The control Realm belongs to one principal, so it is closed, secret and
+/// `since_join`: `models/realm-and-space.md` fixes `history_access =
+/// since_join` for every PCR, and a control Realm anyone could join or
+/// discover would not be a control Realm. `security_class` matches the other
+/// PCR authoring paths in the SDK.
+///
+/// The genesis salt is generated once here and travels inside the bundle the
+/// store persists, so a retry replays the same salt instead of creating a
+/// second PCR for the same Ghost.
+fn ghost_bundle_authoring_input(
+    request: &AppletManagedActorAuthoringRequest,
+    identity: &ManagedActorIdentity,
+    trust_domain: arkret::TrustDomainId,
+) -> Result<AppletManagedActorBundleAuthoringInput> {
+    let basis = request.basis.ghost().ok_or_else(|| {
+        BridgeError::App("managed actor request is not a Ghost authoring branch".to_owned())
+    })?;
+    let genesis_salt = GenesisSalt::generate().map_err(|error| {
+        BridgeError::Runtime(format!("managed actor PCR genesis salt: {error}"))
+    })?;
+    Ok(AppletManagedActorBundleAuthoringInput {
+        actor_id: identity.actor_id.clone(),
+        initial_resolution: identity.initial_resolution.clone(),
+        method_history_evidence: identity.method_history_evidence.clone(),
+        registration_ref: basis.registration_event_ref.clone(),
+        digest_suite: runtime::PRODUCER_DIGEST_SUITE,
+        genesis_salt,
+        trust_domain,
+        security_class: SecurityClass::HighAssurance,
+        initial_join_rule: JoinRule::Closed,
+        initial_history_access: HistoryAccess::SinceJoin,
+        initial_discoverability: Discoverability::Secret,
+        // The Ghost branch takes its display name from the signed basis; this
+        // field is the install-Bot branch's input.
+        bot_display_name: String::new(),
+    })
 }
 
 #[async_trait::async_trait]
@@ -664,4 +727,232 @@ fn render_author_error(res: &mut Response, status: StatusCode, code: &str, detai
         "detail": detail,
         "code": code,
     })));
+}
+
+#[cfg(test)]
+mod ghost_bundle_tests {
+    use arkret::canonical::DigestSuite;
+    use arkret::webvh::{AgentInceptionInput, prepare_agent_inception};
+    use arkret::{
+        AppletAuthoringAuthority, AppletDidMethodVersionEvidence, AppletGhostAuthoringRequestBasis,
+        AppletRegistrationEpochEvidence, DidDocument, GhostExternalTuple,
+        applet_managed_actor_unit_event_kinds, applet_managed_actor_unit_submissions,
+    };
+    use arkret_signatures::Ed25519PayloadSigner;
+    use arkret_wire::{
+        CommitStreamRef, CommittedEventRef, DidUrl, EventId, GrantId, RealmCommitId, RealmId,
+        TrustDomainId,
+    };
+    use chrono::{DateTime, TimeZone};
+
+    use super::*;
+
+    const STATION_DID: &str = "did:webvh:zstationscid:station.example";
+    const SERVICE_DID: &str = "did:webvh:zservicescid:applet.example";
+
+    fn issued_at() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 9, 17, 0, 0, 0).unwrap()
+    }
+
+    fn did(value: &str) -> Did {
+        Did::new(value.to_owned()).unwrap()
+    }
+
+    fn core_id(value: &str) -> DidCoreId {
+        project_did_to_core_id(&did(value)).unwrap()
+    }
+
+    fn signer(seed: u8, subject: &str) -> Ed25519PayloadSigner {
+        Ed25519PayloadSigner::new(
+            SigningKey::from_bytes(&[seed; 32]),
+            did(subject),
+            DidUrl::new(format!("{subject}#key-1")).unwrap(),
+        )
+    }
+
+    fn event_id(byte: u8) -> EventId {
+        EventId::from_digest(DigestSuite::Sha256, [byte; 32])
+    }
+
+    fn realm_id() -> RealmId {
+        RealmId::from_event_id(&event_id(0x21))
+    }
+
+    fn registration_ref() -> CommittedEventRef {
+        CommittedEventRef {
+            event_id: event_id(0x44),
+            commit_id: RealmCommitId::from_digest([0x45; 32]),
+            stream_ref: CommitStreamRef::Realm {
+                realm_id: realm_id(),
+            },
+            stream_position: 7,
+        }
+    }
+
+    fn trust_domain() -> TrustDomainId {
+        TrustDomainId::new("ak:trust_domain:station.example").unwrap()
+    }
+
+    /// A real WebVH inception, prepared exactly the way `generate_identity`
+    /// prepares one, so what is authored against here is the identity shape the
+    /// running bridge stores rather than a hand-written stand-in.
+    fn identity() -> ManagedActorIdentity {
+        let next_key = arkret::ed25519_pubkey_to_did_key_multibase(
+            SigningKey::from_bytes(&[0x52; 32])
+                .verifying_key()
+                .as_bytes(),
+        );
+        let inception = prepare_agent_inception(&AgentInceptionInput {
+            principal_endpoint: &url::Url::parse("https://applet.example/actors/slack").unwrap(),
+            local_id: "u123",
+            controller_principal_id: &core_id(SERVICE_DID),
+            version_time: issued_at(),
+            root_seed: &[0x51; 32],
+            next_root_public_key_multibase: &next_key,
+        })
+        .unwrap();
+        let did_value = Did::new(inception.did.clone()).unwrap();
+        let method_history_head = canonical_sha256(&inception.log_entry).unwrap();
+        let document_digest =
+            Hash::new(canonical_sha256(&inception.log_entry["state"]).unwrap()).unwrap();
+        let witness_records = Vec::<Value>::new();
+        let witness_proofs_digest = Hash::new(canonical_sha256(&witness_records).unwrap()).unwrap();
+        ManagedActorIdentity {
+            actor_id: project_did_to_core_id(&did_value).unwrap(),
+            initial_resolution: ResolutionCommitment {
+                did: did_value,
+                method_history_head: method_history_head.clone(),
+                version_id: inception.version_id.clone(),
+            },
+            method_history_evidence: ResolutionMethodHistoryEvidence::WebvhLog {
+                boundary: ResolutionMethodEvidenceBoundary {
+                    from_method_history_head: method_history_head.clone(),
+                    from_version_id: inception.version_id.clone(),
+                    to_method_history_head: method_history_head.clone(),
+                    to_version_id: inception.version_id,
+                },
+                evidence: ResolutionDidBindingEvidenceReceipt {
+                    kind: ResolutionDidBindingEvidenceKind::AkDidBindingEvidenceV1,
+                    method: "webvh".to_owned(),
+                    document_digest,
+                    method_proofs: vec![ResolutionDidBindingMethodProof {
+                        kind: arkret::ResolutionDidBindingMethodProofKind::WebvhLog,
+                        history_head: method_history_head,
+                        witnesses: Vec::new(),
+                        witness_proofs_digest,
+                    }],
+                },
+                log_entries: vec![inception.log_entry],
+                witness_records,
+            },
+        }
+    }
+
+    /// The Station-signed branch the bridge receives. The registration epoch is
+    /// the Applet service's own registration, so its version identifier belongs
+    /// to the service document above, not to the Ghost being provisioned.
+    fn ghost_request() -> AppletManagedActorAuthoringRequest {
+        let document = DidDocument::new(
+            did(SERVICE_DID),
+            "key-1",
+            "z6MkrJVnaZkeF7EsnJQ9xQY4bqG9tbeFqTzL7uTVs11FwUjT",
+        );
+        let basis = AppletGhostAuthoringRequestBasis {
+            schema: AppletGhostAuthoringRequestBasis::SCHEMA.to_owned(),
+            purpose: AppletManagedActorPurpose::ProvisionGhost,
+            target_station_id: core_id(STATION_DID),
+            applet_id: AppletId::new("ak:applet:01904100-0000-7000-8000-bbbbbbbbbbbb").unwrap(),
+            service_id: core_id(SERVICE_DID),
+            realm_id: realm_id(),
+            external_ref: GhostExternalTuple {
+                protocol: "slack".to_owned(),
+                instance_id: "t123".to_owned(),
+                external_id: "u123".to_owned(),
+            },
+            display_name: Some("Alice on Slack".to_owned()),
+            registration_event_ref: registration_ref(),
+            authorization_ref: GrantId::from_event_id(&event_id(0x33)),
+            registration_epoch_evidence: AppletRegistrationEpochEvidence::from_did_document(
+                &document,
+                AppletDidMethodVersionEvidence::versioned(
+                    "did:webvh",
+                    Some("1-applet-service-registration".to_owned()),
+                    None,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+            package_digest: Hash::new(format!("sha256:{}", "77".repeat(32))).unwrap(),
+        };
+        let authority = AppletAuthoringAuthority {
+            service_id: core_id(STATION_DID),
+            authority_generation: 1,
+            verification_method: DidUrl::new(format!("{STATION_DID}#key-1")).unwrap(),
+        };
+        AppletManagedActorAuthoringRequest::sign_ghost(
+            basis,
+            authority,
+            issued_at(),
+            issued_at() + chrono::Duration::minutes(2),
+            &signer(0x11, STATION_DID),
+        )
+        .unwrap()
+    }
+
+    /// The first-seen external user path has to end in the four cross-bound
+    /// Events, not in a fail-closed error. This authors one for real and puts it
+    /// through the same verifier the receiving Station runs.
+    #[test]
+    fn a_ghost_authoring_request_produces_the_four_event_unit() {
+        let identity = identity();
+        let request = ghost_request();
+        let input = ghost_bundle_authoring_input(&request, &identity, trust_domain()).unwrap();
+
+        let bundle =
+            author_applet_managed_actor_bundle(&request, input, &signer(0x22, SERVICE_DID))
+                .expect("the bridge must be able to author a Ghost creation unit");
+
+        bundle
+            .validate_bindings(&request)
+            .expect("the authored unit must satisfy the receiving Station's verifier");
+
+        let submissions = applet_managed_actor_unit_submissions(&bundle, &request)
+            .expect("the unit must be carried as four ordered submissions");
+        let kinds: Vec<_> = submissions
+            .iter()
+            .map(|submission| submission.event.kind.clone())
+            .collect();
+        assert_eq!(kinds, applet_managed_actor_unit_event_kinds().to_vec());
+    }
+
+    /// The signed basis is the only source of the registration coordinate, and
+    /// a Principal Control Realm is fixed at closed / since_join / secret.
+    #[test]
+    fn the_authoring_input_follows_the_signed_basis_and_the_pcr_rules() {
+        let identity = identity();
+        let request = ghost_request();
+        let input = ghost_bundle_authoring_input(&request, &identity, trust_domain()).unwrap();
+
+        assert_eq!(input.registration_ref, registration_ref());
+        assert_eq!(input.actor_id, identity.actor_id);
+        assert_eq!(input.initial_join_rule, JoinRule::Closed);
+        assert_eq!(input.initial_history_access, HistoryAccess::SinceJoin);
+        assert_eq!(input.initial_discoverability, Discoverability::Secret);
+        assert_eq!(input.security_class, SecurityClass::HighAssurance);
+    }
+
+    /// Two authoring runs must not share a genesis salt, or two Ghosts would
+    /// address one Principal Control Realm. `GenesisSalt` withholds `Debug` so
+    /// the salt cannot reach a log, which rules out `assert_ne!` here.
+    #[test]
+    fn each_authoring_run_draws_its_own_genesis_salt() {
+        let identity = identity();
+        let request = ghost_request();
+        let first = ghost_bundle_authoring_input(&request, &identity, trust_domain()).unwrap();
+        let second = ghost_bundle_authoring_input(&request, &identity, trust_domain()).unwrap();
+        assert!(
+            first.genesis_salt != second.genesis_salt,
+            "each create intent draws its own genesis salt"
+        );
+    }
 }

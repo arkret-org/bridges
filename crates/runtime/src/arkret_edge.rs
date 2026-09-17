@@ -82,7 +82,11 @@ pub const INBOUND_QUEUE_CAPACITY: usize = 1024;
 pub const SIGNAL_QUEUE_CAPACITY: usize = 1024;
 
 /// Digest suite used for producer Event identities authored by this bridge.
-const PRODUCER_DIGEST_SUITE: DigestSuite = DigestSuite::Sha256;
+///
+/// Public so that every producer path in this workspace -- including the
+/// managed-actor authoring unit, which is signed outside this module -- uses
+/// one suite instead of each caller picking its own.
+pub const PRODUCER_DIGEST_SUITE: DigestSuite = DigestSuite::Sha256;
 
 /// Retry hint (ms) returned to the server when the inbound queue is full, so it
 /// re-pushes the unaccepted events after a short delay instead of dropping them.
@@ -226,6 +230,16 @@ impl ArkretEdge {
 
     pub fn client(&self) -> &Client {
         &self.client
+    }
+
+    /// The installed Applet service signing key.
+    ///
+    /// The four-Event managed-actor creation unit is authored by this service
+    /// authority, and `arkret`'s authoring API takes the signer by reference,
+    /// so the key is exposed here rather than copied. Managed-actor root keys
+    /// are separate material and never travel through this accessor.
+    pub fn signer(&self) -> &Ed25519PayloadSigner {
+        &self.signer
     }
 
     /// Stable service actor core used in Event envelopes.

@@ -65,7 +65,7 @@ use std::sync::Arc;
 pub use app::{AppletResolver, ResolvedActor, ResolvedRealm};
 #[cfg(feature = "runtime")]
 pub use app::{BridgeApp, BridgeContext};
-pub use arkret_edge::ArkretEdge;
+pub use arkret_edge::{ArkretEdge, PRODUCER_DIGEST_SUITE};
 #[cfg(feature = "db")]
 pub use authoring::DbAuthoringStore;
 pub use authoring::{AuthoringJournal, AuthoringStore, external_operation_key};

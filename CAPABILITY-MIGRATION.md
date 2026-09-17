@@ -103,30 +103,47 @@ produce or consume.
   were retained; only the journal table name changed. No protocol-only table
   existed in this repository, so none was dropped.
 
-## Open blocker: Applet-managed actor bundle authoring
+## Closed: Applet-managed actor bundle authoring
 
-`ManagedActorAuthoringService::build_ghost_bundle` fails closed and every other
-part of that capability (identity generation, encrypted key custody, the
-authoring ledger, the `managed-actors/author` endpoint, the
-`GhostProvisionRequestProvider` wiring) is intact and durable.
+`ManagedActorAuthoringService::build_ghost_bundle` authors the unit for real as
+of 2026-09-17. A first-seen external user can be materialized as a Ghost actor.
 
-The reason is an SDK gap, not a bridge decision:
+This entry was an SDK gap, not a bridge decision, and the gap is gone:
 
-- `extensions/applet-integration.md` §9.1 defines the managed-actor creation unit
-  as four cross-bound Events plus one aggregate proof, and
-  `identity/key-management.md` §3.6.3 requires the unified `arkret-rust-sdk`
-  authoring API to produce such a unit.
-- `arkret-rust-sdk` currently exposes only the verifying half:
-  `AppletManagedActorAuthoringRequest::sign_ghost` (Station side) and
-  `AppletManagedActorAuthoringBundle::validate_bindings` (receiving side). The
-  producer-side constructor that used to exist
-  (`author_applet_managed_actor_bundle` with
-  `AppletManagedActorBundleAuthoringInput`) is gone with no replacement.
-- Hand-rolling the unit here would put the §9.1 cross-binding rules in two places
-  and let them drift from the verifier, so this repository does not do it.
+- `extensions/applet-integration.md` section 9.1 defines the managed-actor
+  creation unit as four cross-bound Events plus one aggregate proof, and
+  `identity/key-management.md` section 3.6.3 requires the unified
+  `arkret-rust-sdk` authoring API to produce such a unit.
+- `arkret-rust-sdk` restored the producer half in `6fff24d2`:
+  `author_applet_managed_actor_bundle`,
+  `AppletManagedActorBundleAuthoringInput` and
+  `applet_managed_actor_unit_submissions` sit beside the verifying half this
+  repository already used (`AppletManagedActorAuthoringRequest::sign_ghost` on
+  the Station side, `AppletManagedActorAuthoringBundle::validate_bindings` on
+  the receiving side).
+- So the unit is still built in exactly one place. `build_ghost_bundle` only
+  assembles the authoring input and calls the SDK; the section 9.1 cross-binding
+  rules are never restated here and cannot drift from the verifier.
 
-Unblocking requires a producer-side bundle authoring API in `arkret-rust-sdk`.
-Until then a first-seen external user cannot be materialized as a Ghost actor.
+What the bridge contributes to that input, and why:
+
+- The Principal Control Realm genesis triple is fixed by the protocol, not
+  chosen per request: `JoinRule::Closed`, `HistoryAccess::SinceJoin`,
+  `Discoverability::Secret`, `SecurityClass::HighAssurance`.
+  `models/realm-and-space.md:440` fixes `history_access=since_join` for every
+  PCR normatively.
+- The registration coordinate comes from the Station-signed basis
+  (`registration_event_ref`), never from bridge-local state.
+- The genesis salt is drawn per authoring run. A replayed create intent must
+  replay its own persisted salt, or the retry addresses a second PCR.
+- The Applet service signing key authors the unit;
+  `runtime::ArkretEdge::signer` exposes it by reference because the SDK takes a
+  signer by reference. Managed-actor root keys are separate material and never
+  travel through that accessor.
+
+Covered by `managed_actor_authoring::ghost_bundle_tests`, which prepares a real
+WebVH inception the way `generate_identity` does, authors against it, and puts
+the result through the receiving Station's own `validate_bindings`.
 
 ## Verification gates
 
