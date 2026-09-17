@@ -348,7 +348,7 @@ fn validate_authoring_completion(
     body: &AppletAuthoringTransactionRequestBody,
     source_id: &DidCoreId,
 ) -> std::result::Result<(), String> {
-    let (request, bundle) = match &body.authoring_result.committed_request {
+    let (request, bundle) = match &body.authoring_context.committed_request {
         AppletManagedActorCommittedRequest::Install(install) => {
             (install.authoring_request(), install.managed_actor_bundle())
         }
@@ -376,7 +376,7 @@ fn validate_authoring_completion(
     if applet_id != &body.applet_id {
         return Err("authoring completion names a different Applet".to_owned());
     }
-    match &body.authoring_result.realm_stream_head.stream_ref {
+    match &body.authoring_context.realm_stream_head.stream_ref {
         CommitStreamRef::Realm { .. } => Ok(()),
         _ => Err("authoring completion reports a non-Realm commit stream".to_owned()),
     }
