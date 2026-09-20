@@ -32,6 +32,9 @@ use arkret::{
     Ed25519PayloadSigner, Event, EventIntent, RealmId, ScopeRef, project_did_to_core_id,
 };
 use arkret_event_draft::{EventSpec, TypedEventDraft};
+use arkret_models_collaboration::authority_commit::{
+    SelfAuthoritySubmitOutcome, SelfAuthoritySubmitRequest,
+};
 use arkret_models_collaboration::events_payloads::MessageRedactPayload;
 #[cfg(any(feature = "web", test))]
 use arkret_models_discovery::{ServiceDescribe, TransportBinding};
@@ -45,8 +48,8 @@ use arkret_models_integration::{
 #[cfg(any(feature = "web", test))]
 use arkret_wire::ProfileId;
 use arkret_wire::{
-    AuthorityRejectionStatus, AuthoritySubmitOutcome, AuthoritySubmitRequest, AuthorizationRef,
-    DidUrl, EventCommitSubmission, SignalEnvelope, event_spec,
+    AuthorityRejectionStatus, AuthoritySubmitOutcome, AuthorizationRef, DidUrl,
+    EventCommitSubmission, SignalEnvelope, event_spec,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -453,14 +456,19 @@ impl ArkretEdge {
                 return Err(BridgeError::Runtime("publication retry contention".into()));
             }
         }
-        let request = AuthoritySubmitRequest::Event(EventCommitSubmission {
-            event: event.event().clone(),
-        });
+        let request = SelfAuthoritySubmitRequest::Event(EventCommitSubmission::new(
+            event.event().clone(),
+        ));
         let options = ClientRequestOptions::new().idempotency_key(event.event_id().as_str());
         let outcome = self
             .client
             .submit_to_realm_authority(&request, &options)
             .await?;
+        let SelfAuthoritySubmitOutcome::Ordinary(outcome) = outcome else {
+            return Err(BridgeError::Arkret(
+                "ordinary Event submission returned an aggregate outcome".to_owned(),
+            ));
+        };
         // A retryable answer settles nothing: the frozen bytes stay replayable
         // and the pending index is left in place for the recovery loop.
         let committed = publication_outcome(event, &outcome)?;
@@ -1236,7 +1244,7 @@ mod tests {
                 previous_commit_ref: (position > 0)
                     .then(|| arkret::RealmCommitId::from_digest([position as u8; 32])),
                 event_ref: event.event_id().clone(),
-                authority_generation: 1,
+                governance_generation: 1,
                 authority_ref: RealmCommitAuthorityRef::GenesisOrChangeEvent(
                     arkret::EventId::from_digest(DigestSuite::Sha256, [7; 32]),
                 ),

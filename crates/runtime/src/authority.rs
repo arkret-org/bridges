@@ -8,6 +8,9 @@ use std::collections::BTreeMap;
 
 use arkret::{Client, ClientRequestOptions};
 use arkret_identifiers::{DidCoreId, EventId, RealmId};
+use arkret_models_collaboration::authority_commit::{
+    SelfAuthoritySubmitOutcome, SelfAuthoritySubmitRequest,
+};
 use arkret_models_integration::{
     AppletManagedActorAuthoringBasis, AppletManagedActorAuthoringBundle,
     AppletManagedActorAuthoringRequest,
@@ -15,10 +18,9 @@ use arkret_models_integration::{
 use arkret_wire::{
     AuthoredEvent, AuthorityBundleRequest, AuthorityCommitStatus, AuthorityHandoffRequest,
     AuthorityRejectionStatus, AuthoritySubmitOutcome, AuthoritySubmitRequest, CommitStreamHead,
-    CommitStreamRef, CommittedEventRef, CommittedEventResolveOutcome, CommittedEventResolveRequest,
-    DetachedSignatureContext, Event, EventCommitSubmission, MlsCommitSubmission,
-    MlsWelcomeDelivery, ProducerEventProof, RealmAuthorityBundle, RealmCommit, RealmStateSnapshot,
-    StreamScanOutcome, StreamScanRequest,
+    CommitStreamRef, CommittedEventRef, DetachedSignatureContext, Event, EventCommitSubmission,
+    MlsCommitSubmission, MlsWelcomeDelivery, ProducerEventProof, RealmAuthorityBundle,
+    RealmCommit, RealmStateSnapshot, StreamScanOutcome, StreamScanRequest,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -64,11 +66,6 @@ pub trait GovernanceStationTransport: Send + Sync {
     ) -> Result<RealmAuthorityBundle>;
 
     async fn scan_stream(&self, request: &StreamScanRequest) -> Result<StreamScanOutcome>;
-
-    async fn resolve_committed(
-        &self,
-        request: &CommittedEventResolveRequest,
-    ) -> Result<CommittedEventResolveOutcome>;
 }
 
 #[async_trait]
@@ -78,7 +75,20 @@ impl GovernanceStationTransport for Client {
         request: &AuthoritySubmitRequest,
         options: &ClientRequestOptions,
     ) -> Result<AuthoritySubmitOutcome> {
-        protocol(self.submit_to_realm_authority(request, options).await)
+        let request = match request {
+            AuthoritySubmitRequest::Event(value) => {
+                SelfAuthoritySubmitRequest::Event(value.clone())
+            }
+            AuthoritySubmitRequest::MlsCommit(value) => {
+                SelfAuthoritySubmitRequest::MlsCommit(value.clone())
+            }
+        };
+        match protocol(self.submit_to_realm_authority(&request, options).await)? {
+            SelfAuthoritySubmitOutcome::Ordinary(outcome) => Ok(outcome),
+            _ => Err(BridgeProtocolError::Protocol(
+                "ordinary submission returned an aggregate outcome".to_owned(),
+            )),
+        }
     }
 
     async fn authority_bundle(
@@ -90,13 +100,6 @@ impl GovernanceStationTransport for Client {
 
     async fn scan_stream(&self, request: &StreamScanRequest) -> Result<StreamScanOutcome> {
         protocol(self.scan_commit_stream(request).await)
-    }
-
-    async fn resolve_committed(
-        &self,
-        request: &CommittedEventResolveRequest,
-    ) -> Result<CommittedEventResolveOutcome> {
-        protocol(self.resolve_committed_events(request).await)
     }
 }
 
@@ -159,9 +162,9 @@ impl SubmissionQueue {
     }
 
     pub fn enqueue_event(&mut self, event: AuthoredEvent) -> Result<()> {
-        self.enqueue(AuthoritySubmitRequest::Event(EventCommitSubmission {
-            event: event.into_event(),
-        }))
+        self.enqueue(AuthoritySubmitRequest::Event(EventCommitSubmission::new(
+            event.into_event(),
+        )))
     }
 
     pub fn enqueue_mls_commit(&mut self, submission: MlsCommitSubmission) -> Result<()> {
@@ -323,7 +326,7 @@ impl JoinBootstrap {
         verifier.verify_authority_bundle(&self.authority_bundle)?;
         let heads = &self.snapshot.visible_stream_heads;
         if self.snapshot.realm_id != self.authority_bundle.realm_id
-            || self.snapshot.authority_generation != self.authority_bundle.current_generation
+            || self.snapshot.governance_generation != self.authority_bundle.current_generation
             || self.snapshot.signature.context != DetachedSignatureContext::RealmSnapshot
             || heads.is_empty()
             || !heads
@@ -345,9 +348,9 @@ impl JoinBootstrap {
                 return Err(BridgeProtocolError::InvalidBootstrap);
             }
             protocol(tail.outcome.validate_for_request(&tail.request))?;
-            if let Some(first) = tail.outcome.commits.first()
-                && (first.commit.previous_commit_ref.as_ref() != Some(&head.commit_id)
-                    || first.commit.stream_position != head.stream_position.saturating_add(1))
+            if let Some(first) = tail.outcome.committed_events.first()
+                && (first.commit().previous_commit_ref.as_ref() != Some(&head.commit_id)
+                    || first.commit().stream_position != head.stream_position.saturating_add(1))
             {
                 return Err(BridgeProtocolError::InvalidBootstrap);
             }
@@ -394,18 +397,18 @@ impl StreamCursorBook {
         if tail.request.after_position != Some(current.stream_position) {
             return Err(BridgeProtocolError::InvalidStreamTail);
         }
-        if let Some(first) = tail.outcome.commits.first()
-            && first.commit.previous_commit_ref.as_ref() != Some(&current.commit_id)
+        if let Some(first) = tail.outcome.committed_events.first()
+            && first.commit().previous_commit_ref.as_ref() != Some(&current.commit_id)
         {
             return Err(BridgeProtocolError::InvalidStreamTail);
         }
-        if let Some(last) = tail.outcome.commits.last() {
+        if let Some(last) = tail.outcome.committed_events.last() {
             self.heads.insert(
                 tail.request.stream_ref.clone(),
                 CommitStreamHead {
-                    stream_ref: last.commit.stream_ref.clone(),
-                    stream_position: last.commit.stream_position,
-                    commit_id: last.commit.commit_id.clone(),
+                    stream_ref: last.commit().stream_ref.clone(),
+                    stream_position: last.commit().stream_position,
+                    commit_id: last.commit().commit_id.clone(),
                 },
             );
         }
@@ -473,7 +476,7 @@ pub fn validate_managed_actor_bundle<V: ManagedActorProofVerifier>(
         AppletManagedActorAuthoringBasis::InstallBot(basis) => &basis.applet_id,
         AppletManagedActorAuthoringBasis::ProvisionGhost(basis) => &basis.applet_id,
     };
-    let station_id = &request.authoring_authority.service_id;
+    let station_id = &request.governance_station_id;
     let events = [
         &bundle.managed_actor_provision_event,
         &bundle.pcr_genesis_event,
@@ -553,7 +556,7 @@ mod tests {
             applet_id: None,
             external_ref: None,
             created_at: Utc.with_ymd_and_hms(2026, 9, 16, 0, 0, 0).unwrap(),
-            refs: Vec::new(),
+            semantic_refs: Vec::new(),
             payload: BTreeMap::from([("body".to_owned(), json!("hello"))]),
             producer_proof: None,
         };

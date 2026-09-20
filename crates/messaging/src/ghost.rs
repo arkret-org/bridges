@@ -457,8 +457,13 @@ pub(crate) async fn find_existing_portal_strand(
             limit: PORTAL_STRAND_SCAN_PAGE_LIMIT,
         };
         let page = edge.client().scan_commit_stream(&request).await?;
-        for item in &page.commits {
-            let event = &item.event;
+        for item in &page.committed_events {
+            let Some(event) = item.reducer_input() else {
+                return Err(BridgeError::Arkret(
+                    "portal strand scan encountered a withheld Event; earliest-create check is unavailable"
+                        .to_owned(),
+                ));
+            };
             if event.kind != EventKind::StrandCreate {
                 continue;
             }
@@ -473,11 +478,11 @@ pub(crate) async fn find_existing_portal_strand(
             };
             return Ok(Some(strand_id.to_owned()));
         }
-        let Some(last) = page.commits.last() else {
+        let Some(last) = page.committed_events.last() else {
             break;
         };
-        after_position = Some(last.commit.stream_position);
-        if page.commits.len() < usize::from(PORTAL_STRAND_SCAN_PAGE_LIMIT) {
+        after_position = Some(last.commit().stream_position);
+        if page.committed_events.len() < usize::from(PORTAL_STRAND_SCAN_PAGE_LIMIT) {
             break;
         }
     }

@@ -734,7 +734,7 @@ mod ghost_bundle_tests {
     use arkret::canonical::DigestSuite;
     use arkret::webvh::{AgentInceptionInput, prepare_agent_inception};
     use arkret::{
-        AppletAuthoringAuthority, AppletDidMethodVersionEvidence, AppletGhostAuthoringRequestBasis,
+        AppletDidMethodVersionEvidence, AppletGhostAuthoringRequestBasis,
         AppletRegistrationEpochEvidence, DidDocument, GhostExternalTuple,
         applet_managed_actor_unit_event_kinds, applet_managed_actor_unit_submissions,
     };
@@ -884,14 +884,9 @@ mod ghost_bundle_tests {
             .unwrap(),
             package_digest: Hash::new(format!("sha256:{}", "77".repeat(32))).unwrap(),
         };
-        let authority = AppletAuthoringAuthority {
-            service_id: core_id(STATION_DID),
-            authority_generation: 1,
-            verification_method: DidUrl::new(format!("{STATION_DID}#key-1")).unwrap(),
-        };
         AppletManagedActorAuthoringRequest::sign_ghost(
             basis,
-            authority,
+            core_id(STATION_DID),
             issued_at(),
             issued_at() + chrono::Duration::minutes(2),
             &signer(0x11, STATION_DID),
