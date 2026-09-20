@@ -6,10 +6,10 @@ use std::sync::{Arc, OnceLock};
 
 use ::metrics::{counter, describe_counter};
 use arkret::identity::public_key_material_from_binding;
+use arkret::signatures::generated::http_signature_contract::HttpSignatureScenario;
 use arkret::signatures::http_signature::{
-    Component, HttpMessageVerificationError, SignatureInput, SignaturePolicyError,
-    SignatureVerificationPolicy, parse_signature_input, public_key_from_bytes,
-    verify_signed_http_message,
+    Component, HttpMessageVerificationError, SignaturePolicyError, SignatureVerificationPolicy,
+    parse_signature_input, public_key_from_bytes, verify_signed_http_message,
 };
 use arkret::{
     AppletHandler, Did, DidCoreId, IdempotencyDirection, IdempotencyIdentity, TransactionClaim,
@@ -40,8 +40,6 @@ use crate::idempotency::EventDedupStore;
 use crate::run_blocking;
 
 static PROMETHEUS_HANDLE: OnceLock<std::result::Result<PrometheusHandle, String>> = OnceLock::new();
-const APPLET_TRANSACTION_SIGNATURE_MAX_LIFETIME_SECS: i64 = 300;
-const APPLET_TRANSACTION_SIGNATURE_MAX_CLOCK_SKEW_SECS: i64 = 30;
 /// Upper bound on the inbound edge `transactions` body, mirroring the webhook
 /// surface's bounded read. The Applet authoring completion may contain a full
 /// committed installation request, so the protocol ceiling is 16 MiB. Without
@@ -827,7 +825,6 @@ fn verify_http_applet_request(
         .map_err(|err| http_signature_invalid(err.to_string()))?;
     let now = Utc::now();
     let now_unix_seconds = now.timestamp();
-    validate_applet_signature_window(&signature_input, now_unix_seconds)?;
     let key_id_url = DidUrl::new(signature_input.key_id.clone()).map_err(|err| {
         http_signature_invalid(format!(
             "HTTP signature keyid `{}` is not a valid DID URL: {err}",
@@ -908,20 +905,15 @@ fn verify_http_applet_request(
         .map(|value| value.as_str().to_owned())
         .unwrap_or_else(|| "/".to_owned());
     let target_uri = request_target_uri(req, headers, &authority, &path);
-    let mut required_components = vec![
-        Component::Method,
-        Component::TargetUri,
-        Component::Authority,
-        Component::Header(SOURCE_SERVICE_ID_HEADER.to_owned()),
-        Component::Header(DESTINATION_SERVICE_ID_HEADER.to_owned()),
-    ];
-    if require_content_digest {
-        required_components.push(Component::Header("content-digest".to_owned()));
-        required_components.push(Component::Header("idempotency-key".to_owned()));
-    }
-    let policy = SignatureVerificationPolicy::new(required_components)
-        .require_content_digest(require_content_digest)
-        .max_clock_skew_seconds(APPLET_TRANSACTION_SIGNATURE_MAX_CLOCK_SKEW_SECS);
+    let policy = SignatureVerificationPolicy::for_scenario(
+        if require_content_digest {
+            HttpSignatureScenario::AppletTransactionV1
+        } else {
+            HttpSignatureScenario::ServiceToServiceV1
+        },
+        &[],
+    )
+    .map_err(|error| map_http_signature_error(HttpMessageVerificationError::Policy(error)))?;
     let verified = verify_signed_http_message(
         req.method().as_str(),
         &target_uri,
@@ -961,34 +953,6 @@ fn verify_http_applet_request(
         expires,
         canonical_message_digest,
     })
-}
-
-fn validate_applet_signature_window(
-    signature_input: &SignatureInput,
-    now_unix_seconds: i64,
-) -> std::result::Result<(), HttpSignatureReject> {
-    if signature_input.expires < signature_input.created {
-        return Err(signature_window_invalid(
-            "HTTP signature validity window is invalid",
-        ));
-    }
-    if signature_input.expires - signature_input.created
-        > APPLET_TRANSACTION_SIGNATURE_MAX_LIFETIME_SECS
-    {
-        return Err(signature_window_invalid(
-            "HTTP signature validity window exceeds 300 seconds",
-        ));
-    }
-    if signature_input.created
-        < now_unix_seconds.saturating_sub(APPLET_TRANSACTION_SIGNATURE_MAX_CLOCK_SKEW_SECS)
-        || signature_input.created
-            > now_unix_seconds.saturating_add(APPLET_TRANSACTION_SIGNATURE_MAX_CLOCK_SKEW_SECS)
-    {
-        return Err(signature_window_invalid(
-            "HTTP signature created timestamp is outside the accepted clock skew",
-        ));
-    }
-    Ok(())
 }
 
 fn build_delivery_authentication_record_digest(
