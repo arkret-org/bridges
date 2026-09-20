@@ -1049,14 +1049,13 @@ fn verify_transaction_events(
         AppletTransactionRequestBody::Authoring(_) => return Ok(()),
     };
     for event in &body.events {
-        if event.proofs.len() != 1 {
+        let Some(proof) = event.producer_proof.as_ref() else {
             return Err(format!(
                 "event {} must carry exactly one producer proof",
                 event.event_id
             ));
-        }
+        };
         let expected_signer = event.executed_by.as_ref().unwrap_or(&event.actor_id);
-        let proof = &event.proofs[0];
         // The bridge checks immutable content-address consistency against the
         // algorithm committed by the unique producer proof. Trusted Realm-suite
         // admission remains the source Arkret node's responsibility; the bridge
@@ -1453,9 +1452,9 @@ mod tests {
     }
 
     #[test]
-    fn an_event_without_proofs_is_rejected() {
+    fn an_event_without_producer_proof_is_rejected() {
         let mut event = signed_event(&actor_did(), &actor_verification_method(), 42, 1);
-        event.proofs.clear();
+        event.producer_proof = None;
         let err = verify_transaction_events(&transaction(vec![event]))
             .expect_err("a proofless event must be rejected");
         assert!(err.contains("exactly one producer proof"), "{err}");
@@ -1469,7 +1468,7 @@ mod tests {
     #[tokio::test]
     async fn a_malformed_event_proof_creates_no_idempotency_record() {
         let mut event = signed_event(&actor_did(), &actor_verification_method(), 42, 1);
-        event.proofs.clear();
+        event.producer_proof = None;
         let store = Arc::new(CountingIdempotencyStore::default());
         let replay = IdempotencyIdentity::applet_transaction(
             IdempotencyDirection::NodeToApplet,

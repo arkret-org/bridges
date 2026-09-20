@@ -1582,8 +1582,8 @@ mod tests {
         .unwrap();
         let mut second = first.clone();
 
-        first.proofs.push(test_proof("header.payload.signature-a"));
-        second.proofs.push(test_proof("header.payload.signature-b"));
+        first.producer_proof = Some(test_proof("header.payload.signature-a"));
+        second.producer_proof = Some(test_proof("header.payload.signature-b"));
 
         assert_eq!(
             event_content_fingerprint(&first),

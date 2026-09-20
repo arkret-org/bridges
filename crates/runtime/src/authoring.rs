@@ -331,7 +331,7 @@ impl PublicationRecord {
             .ok_or_else(|| BridgeError::Database("publication has no Realm".into()))?;
         if scope_key(realm, &event.actor_id)? != scope
             || !self.intent.matches_authored_event(event)
-            || event.proofs.len() != 1
+            || event.producer_proof.is_none()
         {
             return Err(BridgeError::Database("invalid frozen publication".into()));
         }

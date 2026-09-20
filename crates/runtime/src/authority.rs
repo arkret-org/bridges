@@ -432,7 +432,7 @@ pub fn validate_producer_event<V: ProducerProofVerifier + ?Sized>(
     verifier: &V,
 ) -> Result<()> {
     protocol(event.validate_for_submit_structural())?;
-    let [proof] = event.proofs.as_slice() else {
+    let Some(proof) = event.producer_proof.as_ref() else {
         return Err(BridgeProtocolError::InvalidManagedActorProducer);
     };
     let controller = proof
@@ -555,7 +555,7 @@ mod tests {
             created_at: Utc.with_ymd_and_hms(2026, 9, 16, 0, 0, 0).unwrap(),
             refs: Vec::new(),
             payload: BTreeMap::from([("body".to_owned(), json!("hello"))]),
-            proofs: Vec::new(),
+            producer_proof: None,
         };
         let mut authored =
             AuthoredEvent::finalize_with_digest_suite(event, DigestSuite::Sha256).unwrap();
