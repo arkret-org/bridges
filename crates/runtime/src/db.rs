@@ -345,7 +345,7 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
         let outcome = serde_json::to_string(response)
             .map_err(|err| BridgeError::Database(format!("serialize outcome: {err}")))?;
         let mut conn = self.db.conn()?;
-        diesel::update(
+        let updated = diesel::update(
             dsl::transaction_idempotency
                 .filter(dsl::operation_id.eq(&replay.operation_id))
                 .filter(dsl::direction.eq(replay.direction.as_str()))
@@ -364,6 +364,11 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
             dsl::expires_at.eq(now_ts() + IDEMPOTENCY_TTL_SECS),
         ))
         .execute(&mut conn)?;
+        if updated != 1 {
+            return Err(BridgeError::Database(
+                "idempotency outcome did not update the exact pending claim".to_owned(),
+            ));
+        }
         Ok(())
     }
 
@@ -792,6 +797,54 @@ mod tests {
             ),
             _ => panic!("expected duplicate replay"),
         }
+    }
+
+    #[test]
+    fn db_idempotency_record_requires_the_exact_pending_claim() {
+        let store = DbTransactionIdempotencyStore::new(memory_db()).unwrap();
+        let response = AppletTransactionOutcome {
+            status: arkret_models_integration::AppletTransactionStatus::Accepted,
+            committed_event_refs: Vec::new(),
+            rejections: Vec::new(),
+            retry_after_ms: None,
+        };
+        assert!(
+            store
+                .record(&replay_key("missing"), "hash-a", "anchor-a", &response)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn db_idempotency_stale_pending_can_resume_without_losing_body_binding() {
+        use idempotency_schema::transaction_idempotency::dsl;
+
+        let db = memory_db();
+        let store = DbTransactionIdempotencyStore::new(db.clone()).unwrap();
+        let replay = replay_key("crash-after-cas");
+        assert!(matches!(
+            store.claim(&replay, "hash-a", "anchor-a"),
+            Ok(TransactionClaim::Claimed)
+        ));
+        let mut conn = db.conn().unwrap();
+        diesel::update(
+            dsl::transaction_idempotency
+                .filter(dsl::operation_id.eq(&replay.operation_id))
+                .filter(dsl::idempotency_key.eq(&replay.idempotency_key)),
+        )
+        .set(dsl::created_at.eq(now_ts() - PENDING_TAKEOVER_GRACE_SECS - 1))
+        .execute(&mut conn)
+        .unwrap();
+        drop(conn);
+
+        assert!(matches!(
+            store.claim(&replay, "hash-a", "anchor-a"),
+            Ok(TransactionClaim::Claimed)
+        ));
+        assert!(matches!(
+            store.claim(&replay, "hash-b", "anchor-a"),
+            Ok(TransactionClaim::Conflict)
+        ));
     }
 
     #[test]

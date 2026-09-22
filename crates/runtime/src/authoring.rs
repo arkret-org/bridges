@@ -471,6 +471,26 @@ impl AuthoringJournal {
         }
     }
 
+    /// Whether this exact completion was already durably installed. This is a
+    /// replay-only migration seam for a crash after the completion CAS but
+    /// before the HTTP idempotency outcome was recorded. It never authorizes a
+    /// new body and never writes state.
+    pub(crate) fn is_exact_managed_authoring_replay(
+        &self,
+        identity: &ManagedAuthoringIdentity,
+        body: &AppletAuthoringTransactionRequestBody,
+    ) -> Result<bool> {
+        let request = managed_authoring_request(&body.authoring_context.committed_request);
+        let request_digest = request.canonical_digest()?;
+        let completion_key = managed_authoring_completion_key(identity, &request_digest)?;
+        let Some(installed) = self.store.load(&completion_key)? else {
+            return Ok(false);
+        };
+        let body_raw = String::from_utf8(arkret::canonical::canonical_json_bytes(body)?)
+            .map_err(|error| BridgeError::Arkret(error.to_string()))?;
+        Ok(installed == body_raw)
+    }
+
     pub(crate) fn load_managed_authoring(
         &self,
         identity: &ManagedAuthoringIdentity,

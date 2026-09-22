@@ -668,6 +668,12 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
             .await
             {
                 tracing::warn!(error = %err, "failed to record idempotency outcome");
+                record_applet_transaction("internal_error");
+                internal_error(
+                    res,
+                    "transaction completed but its durable replay outcome was not recorded",
+                );
+                return;
             }
             record_applet_transaction("accepted");
             res.render(Json(response));
