@@ -15,9 +15,10 @@ use arkret_models_integration::{
     AppletManagedActorAuthoringBasis, AppletManagedActorCommittedRequest,
     AppletManagedActorProvisionPayload, AppletManagedActorRole,
 };
+use arkret_signatures::PublicKeyMaterial;
 use arkret_wire::{
     AuthorityCommitStatus, AuthorityRejectionStatus, AuthoritySubmitOutcome, CommitStreamRef,
-    CommittedEventRef, Hash, ScopeRef,
+    CommittedEventRef, DidUrl, Hash, ScopeRef,
 };
 use serde::{Deserialize, Serialize};
 
@@ -52,6 +53,18 @@ pub(crate) struct ManagedAuthoringIdentity {
 pub(crate) enum ManagedAuthoringInstall {
     Installed,
     ExactReplay,
+}
+
+/// Private, durable producer facts frozen before a Ghost request leaves this
+/// process. These are derived from locally encrypted key material and a
+/// method-native inception proof; a later Station completion cannot supply or
+/// replace them.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManagedAuthoringPreparation {
+    committed_request: AppletManagedActorCommittedRequest,
+    managed_actor_verification_method: DidUrl,
+    managed_actor_public_key: PublicKeyMaterial,
 }
 
 /// One frozen publication. `intent` retains the producer-selected content so a
@@ -149,6 +162,23 @@ fn managed_authoring_request(
         AppletManagedActorCommittedRequest::Install(install) => install.authoring_request(),
         AppletManagedActorCommittedRequest::Ghost(ghost) => &ghost.authoring_request,
     }
+}
+
+pub(crate) fn validate_prepared_ghost_signer(
+    verification_method: &DidUrl,
+    public_key: &PublicKeyMaterial,
+) -> Result<[u8; 32]> {
+    let public_key = public_key.ed25519_bytes().map_err(|error| {
+        BridgeError::App(format!("managed Actor preparation key is invalid: {error}"))
+    })?;
+    let multibase = arkret::ed25519_pubkey_to_did_key_multibase(&public_key);
+    let expected_method = format!("did:key:{multibase}#{multibase}");
+    if verification_method.as_str() != expected_method {
+        return Err(BridgeError::App(
+            "managed Actor preparation method does not name its exact public key".into(),
+        ));
+    }
+    Ok(public_key)
 }
 
 fn realm_from_scope(scope: &ScopeRef) -> Option<&RealmId> {
@@ -365,10 +395,20 @@ impl AuthoringJournal {
     pub(crate) fn prepare_managed_authoring(
         &self,
         committed_request: &AppletManagedActorCommittedRequest,
+        managed_actor_verification_method: &DidUrl,
+        managed_actor_public_key: &PublicKeyMaterial,
     ) -> Result<bool> {
+        managed_actor_public_key.ed25519_bytes().map_err(|error| {
+            BridgeError::App(format!("managed Actor preparation key is invalid: {error}"))
+        })?;
         let request_digest = managed_authoring_request(committed_request).canonical_digest()?;
         let key = managed_authoring_preparation_key(&request_digest);
-        let raw = String::from_utf8(arkret::canonical::canonical_json_bytes(committed_request)?)
+        let preparation = ManagedAuthoringPreparation {
+            committed_request: committed_request.clone(),
+            managed_actor_verification_method: managed_actor_verification_method.clone(),
+            managed_actor_public_key: managed_actor_public_key.clone(),
+        };
+        let raw = String::from_utf8(arkret::canonical::canonical_json_bytes(&preparation)?)
             .map_err(|error| BridgeError::Arkret(error.to_string()))?;
         if let Some(existing) = self.store.load(&key)? {
             return if existing == raw {
@@ -391,6 +431,79 @@ impl AuthoringJournal {
         }
     }
 
+    /// Match the Station-carried managed signer leaf to the exact locally
+    /// prepared Ghost signer. The preparation was derived before handoff from
+    /// encrypted producer key material, so the inbound evidence cannot
+    /// bootstrap its own trust root.
+    pub(crate) fn verify_prepared_ghost_signer(
+        &self,
+        body: &AppletAuthoringTransactionRequestBody,
+    ) -> Result<()> {
+        if !matches!(
+            body.authoring_context.committed_request,
+            AppletManagedActorCommittedRequest::Ghost(_)
+        ) {
+            return Err(BridgeError::App(
+                "managed Actor completion is not a locally prepared Ghost request".into(),
+            ));
+        }
+        let request = managed_authoring_request(&body.authoring_context.committed_request);
+        let request_digest = request.canonical_digest()?;
+        let prepared_raw = self
+            .store
+            .load(&managed_authoring_preparation_key(&request_digest))?
+            .ok_or_else(|| {
+                BridgeError::App(
+                    "managed Actor authoring completion has no locally prepared request".into(),
+                )
+            })?;
+        let prepared: ManagedAuthoringPreparation =
+            serde_json::from_str(&prepared_raw).map_err(|error| {
+                BridgeError::Database(format!(
+                    "stored managed Actor preparation is invalid: {error}"
+                ))
+            })?;
+        if arkret::canonical::canonical_json_bytes(&prepared.committed_request)?
+            != arkret::canonical::canonical_json_bytes(&body.authoring_context.committed_request)?
+        {
+            return Err(BridgeError::App(
+                "managed Actor authoring completion differs from the locally prepared request"
+                    .into(),
+            ));
+        }
+
+        let evidence = &body
+            .authoring_context
+            .managed_actor_signer_evidence
+            .authenticated_signer_evidence;
+        let evidence_key = PublicKeyMaterial::Jwk {
+            value: serde_json::to_value(&evidence.public_key_jwk)
+                .map_err(|error| BridgeError::Arkret(error.to_string()))?,
+        };
+        let evidence_key = evidence_key.ed25519_bytes().map_err(|error| {
+            BridgeError::App(format!(
+                "managed Actor completion signer key is invalid: {error}"
+            ))
+        })?;
+        let prepared_key = validate_prepared_ghost_signer(
+            &prepared.managed_actor_verification_method,
+            &prepared.managed_actor_public_key,
+        )
+        .map_err(|error| {
+            BridgeError::Database(format!(
+                "stored managed Actor preparation signer is invalid: {error}"
+            ))
+        })?;
+        if evidence.verification_method != prepared.managed_actor_verification_method
+            || evidence_key != prepared_key
+        {
+            return Err(BridgeError::App(
+                "managed Actor signer evidence differs from the locally prepared Ghost key".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Atomically install one fully validated managed-Actor completion. The
     /// immutable request row makes exact replay distinguishable from a reused
     /// request digest, while the current row advances only within the same
@@ -404,16 +517,20 @@ impl AuthoringJournal {
         let request = managed_authoring_request(&body.authoring_context.committed_request);
         let request_digest = request.canonical_digest()?;
         let prepared_key = managed_authoring_preparation_key(&request_digest);
-        let prepared_request = self.store.load(&prepared_key)?.ok_or_else(|| {
+        let prepared_raw = self.store.load(&prepared_key)?.ok_or_else(|| {
             BridgeError::App(
                 "managed Actor authoring completion has no locally prepared request".into(),
             )
         })?;
-        let committed_request_raw = String::from_utf8(arkret::canonical::canonical_json_bytes(
-            &body.authoring_context.committed_request,
-        )?)
-        .map_err(|error| BridgeError::Arkret(error.to_string()))?;
-        if prepared_request != committed_request_raw {
+        let prepared: ManagedAuthoringPreparation =
+            serde_json::from_str(&prepared_raw).map_err(|error| {
+                BridgeError::Database(format!(
+                    "stored managed Actor preparation is invalid: {error}"
+                ))
+            })?;
+        if arkret::canonical::canonical_json_bytes(&prepared.committed_request)?
+            != arkret::canonical::canonical_json_bytes(&body.authoring_context.committed_request)?
+        {
             return Err(BridgeError::App(
                 "managed Actor authoring completion differs from the locally prepared request"
                     .into(),

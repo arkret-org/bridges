@@ -25,8 +25,8 @@ use arkret::http_client::{Auth, Client};
 #[cfg(any(feature = "web", test))]
 use arkret::identity::public_key_material_from_binding;
 #[cfg(any(feature = "web", test))]
-use arkret::signatures::{EventProofBuilder, PublicKeyMaterial, VerificationMethodDocument};
-use arkret::signatures::{SignEventOptions, sign_event};
+use arkret::signatures::{EventProofBuilder, VerificationMethodDocument};
+use arkret::signatures::{PublicKeyMaterial, SignEventOptions, sign_event};
 use arkret::{
     AppletId, AuthoredEvent, ClientRequestOptions, Did, DidCoreId, DigestSuite,
     Ed25519PayloadSigner, Event, EventIntent, RealmId, ScopeRef, project_did_to_core_id,
@@ -65,6 +65,7 @@ use crate::app::AppletResolver;
 use crate::authoring::{
     AuthoringJournal, AuthoringStore, ManagedAuthoringIdentity, PublicationRecord,
     external_operation_key, publication_outcome, scope_key, validate_managed_authoring_completion,
+    validate_prepared_ghost_signer,
 };
 use crate::config::Config;
 #[cfg(any(feature = "web", test))]
@@ -293,8 +294,26 @@ impl ArkretEdge {
     pub fn prepare_managed_authoring(
         &self,
         committed_request: &AppletManagedActorCommittedRequest,
+        managed_actor_verification_method: &DidUrl,
+        managed_actor_public_key: &PublicKeyMaterial,
     ) -> Result<bool> {
-        self.journal.prepare_managed_authoring(committed_request)
+        if !matches!(
+            committed_request,
+            AppletManagedActorCommittedRequest::Ghost(_)
+        ) {
+            return Err(BridgeError::App(
+                "only locally authored Ghost requests can be prepared by this runtime".into(),
+            ));
+        }
+        validate_prepared_ghost_signer(
+            managed_actor_verification_method,
+            managed_actor_public_key,
+        )?;
+        self.journal.prepare_managed_authoring(
+            committed_request,
+            managed_actor_verification_method,
+            managed_actor_public_key,
+        )
     }
 
     /// The complete service-actor write for `content`. Applet-originated writes
@@ -801,9 +820,11 @@ impl BridgeAppletHandler {
 
     /// Verify the part of the accepted authoring closure this runtime can prove
     /// from local material. The service leaf must name the key actually held by
-    /// this process. Managed-Actor identity keys and their original immutable
-    /// anchors are owned by the host authoring store; until that store is wired
-    /// into this gate, no completion is installable.
+    /// this process. A Ghost leaf must also match the root VM/key derived from
+    /// the locally encrypted identity and frozen before handoff. Station
+    /// attester and producer-proof verification are not yet locally closed, so
+    /// even a matching Ghost remains un-installable here. Bot/Reuse remains
+    /// closed until its original immutable anchors are retained locally.
     fn verify_local_managed_authoring_closure(
         &self,
         body: &AppletAuthoringTransactionRequestBody,
@@ -855,8 +876,12 @@ impl BridgeAppletHandler {
             ));
         }
 
+        self.journal
+            .verify_prepared_ghost_signer(body)
+            .map_err(|error| WireError::Protocol(error.to_string()))?;
+
         Err(WireError::Protocol(
-            "managed Actor local signer and producer-proof closure is not installed".to_owned(),
+            "managed Actor Station attester and producer-proof closure is not installed".to_owned(),
         ))
     }
 
@@ -1714,13 +1739,30 @@ mod tests {
             "authenticated delivery must not replace local authoring preparation"
         );
         assert!(store.0.lock().unwrap().is_empty());
+        let managed_evidence = &body
+            .authoring_context
+            .managed_actor_signer_evidence
+            .authenticated_signer_evidence;
+        let managed_key = PublicKeyMaterial::Jwk {
+            value: serde_json::to_value(&managed_evidence.public_key_jwk).unwrap(),
+        };
         assert!(
-            edge.prepare_managed_authoring(&body.authoring_context.committed_request)
+            edge.journal
+                .prepare_managed_authoring(
+                    &body.authoring_context.committed_request,
+                    &managed_evidence.verification_method,
+                    &managed_key,
+                )
                 .unwrap()
         );
         assert!(
             !edge
-                .prepare_managed_authoring(&body.authoring_context.committed_request)
+                .journal
+                .prepare_managed_authoring(
+                    &body.authoring_context.committed_request,
+                    &managed_evidence.verification_method,
+                    &managed_key,
+                )
                 .unwrap()
         );
 

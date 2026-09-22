@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use arkret::canonical::{canonical_json_bytes, canonical_sha256};
-use arkret::signatures::Ed25519DetachedJwsVerifier;
+use arkret::signatures::{Ed25519DetachedJwsVerifier, PublicKeyMaterial};
 use arkret::{
     AppletId, AppletManagedActorAuthorOutcome, AppletManagedActorAuthorRequestBody,
     AppletManagedActorAuthoringBundle, AppletManagedActorAuthoringRequest,
@@ -18,7 +18,7 @@ use arkret::{
     ResolutionMethodEvidenceBoundary, ResolutionMethodHistoryEvidence,
     author_applet_managed_actor_bundle, namespace_pattern_matches, project_did_to_core_id,
 };
-use arkret_wire::{Discoverability, HistoryAccess, JoinRule, SecurityClass};
+use arkret_wire::{DidUrl, Discoverability, HistoryAccess, JoinRule, SecurityClass};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use chrono::Utc;
@@ -42,10 +42,21 @@ struct ManagedActorKeyMaterial {
     next_root_seed: String,
 }
 
+#[derive(Clone)]
 struct ManagedActorIdentity {
     actor_id: DidCoreId,
     initial_resolution: ResolutionCommitment,
     method_history_evidence: ResolutionMethodHistoryEvidence,
+    root_verification_method: DidUrl,
+    root_public_key: PublicKeyMaterial,
+}
+
+struct VerifiedManagedActorRoot {
+    principal_id: DidCoreId,
+    log_head_digest: Hash,
+    did_version_id: String,
+    verification_method: DidUrl,
+    public_key: PublicKeyMaterial,
 }
 
 /// Durable production authoring authority installed by every messaging bridge.
@@ -428,7 +439,7 @@ impl ManagedActorAuthoringService {
     ) -> Result<ManagedActorIdentity> {
         // Authenticate/decrypt on every load. A deployment with the wrong key
         // must fail before replaying or issuing an identity it cannot control.
-        let _: ManagedActorKeyMaterial =
+        let key_material: ManagedActorKeyMaterial =
             self.decrypt_key_material(subject_key, &record.encrypted_key_material)?;
         let did = Did::new(record.actor_did)?;
         let actor_id = project_did_to_core_id(&did)?;
@@ -444,10 +455,14 @@ impl ManagedActorAuthoringService {
                     "stored managed actor method evidence is invalid: {error}"
                 ))
             })?;
+        let verified_root =
+            verify_managed_actor_root(&did, &method_history_evidence, &key_material)?;
         let identity = ManagedActorIdentity {
             actor_id,
             initial_resolution,
             method_history_evidence,
+            root_verification_method: verified_root.verification_method,
+            root_public_key: verified_root.public_key,
         };
         // The three stored columns describe one identity. A row whose actor,
         // resolution commitment and method evidence disagree cannot be used to
@@ -456,6 +471,10 @@ impl ManagedActorAuthoringService {
         if project_did_to_core_id(&identity.initial_resolution.did)? != identity.actor_id
             || boundary.to_method_history_head != identity.initial_resolution.method_history_head
             || boundary.to_version_id != identity.initial_resolution.version_id
+            || verified_root.principal_id != identity.actor_id
+            || verified_root.log_head_digest.as_str()
+                != identity.initial_resolution.method_history_head
+            || verified_root.did_version_id != identity.initial_resolution.version_id
         {
             return Err(BridgeError::Database(
                 "stored managed actor identity, resolution and method evidence disagree".into(),
@@ -576,6 +595,132 @@ impl ManagedActorAuthoringService {
     }
 }
 
+fn verify_managed_actor_root(
+    did: &Did,
+    method_history_evidence: &ResolutionMethodHistoryEvidence,
+    key_material: &ManagedActorKeyMaterial,
+) -> Result<VerifiedManagedActorRoot> {
+    let ResolutionMethodHistoryEvidence::WebvhLog { log_entries, .. } = method_history_evidence
+    else {
+        return Err(BridgeError::Database(
+            "stored managed actor identity does not carry WebVH inception history".into(),
+        ));
+    };
+    let [entry] = log_entries.as_slice() else {
+        return Err(BridgeError::Database(
+            "stored managed actor identity must carry exactly its WebVH inception entry".into(),
+        ));
+    };
+    let version_time = entry
+        .get("versionTime")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            BridgeError::Database("stored managed actor WebVH inception has no versionTime".into())
+        })?
+        .parse()
+        .map_err(|error| {
+            BridgeError::Database(format!(
+                "stored managed actor WebVH inception versionTime is invalid: {error}"
+            ))
+        })?;
+    let validated = arkret::webvh::validate_webvh_history_at(did, log_entries, version_time)
+        .map_err(|error| {
+            BridgeError::Database(format!(
+                "stored managed actor WebVH inception proof is invalid: {error}"
+            ))
+        })?;
+    arkret::webvh::validate_agent_did_document_profile(
+        did.as_str(),
+        &validated.document,
+        &[validated.active_update_key_multibase.as_str()],
+    )
+    .map_err(|error| {
+        BridgeError::Database(format!(
+            "stored managed actor Agent DID profile is invalid: {error}"
+        ))
+    })?;
+    let verification_method = entry
+        .pointer("/proof/0/verificationMethod")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            BridgeError::Database(
+                "stored managed actor WebVH inception has no root verification method".into(),
+            )
+        })?;
+    let expected_verification_method = format!(
+        "did:key:{}#{}",
+        validated.active_update_key_multibase, validated.active_update_key_multibase
+    );
+    if verification_method != expected_verification_method {
+        return Err(BridgeError::Database(
+            "stored managed actor WebVH proof method differs from its active update key".into(),
+        ));
+    }
+    let verification_method = DidUrl::new(verification_method.to_owned()).map_err(|error| {
+        BridgeError::Database(format!(
+            "stored managed actor root verification method is invalid: {error}"
+        ))
+    })?;
+    let next_root_key_hash = entry
+        .pointer("/parameters/nextKeyHashes/0")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            BridgeError::Database(
+                "stored managed actor WebVH inception has no next-root commitment".into(),
+            )
+        })?;
+    let root_seed = decode_managed_actor_seed("root_seed", &key_material.root_seed)?;
+    let public_key = PublicKeyMaterial::Ed25519Raw {
+        bytes: SigningKey::from_bytes(&root_seed)
+            .verifying_key()
+            .to_bytes()
+            .to_vec(),
+    };
+    let validated_root_key = PublicKeyMaterial::Ed25519Multibase {
+        value: validated.active_update_key_multibase,
+    };
+    if public_key.ed25519_bytes()? != validated_root_key.ed25519_bytes()? {
+        return Err(BridgeError::Database(
+            "stored managed actor root seed does not match its verified WebVH inception".into(),
+        ));
+    }
+    let next_root_seed = decode_managed_actor_seed("next_root_seed", &key_material.next_root_seed)?;
+    let next_root_multibase = arkret::ed25519_pubkey_to_did_key_multibase(
+        SigningKey::from_bytes(&next_root_seed)
+            .verifying_key()
+            .as_bytes(),
+    );
+    if arkret::webvh::webvh_next_key_hash(&next_root_multibase).map_err(|error| {
+        BridgeError::Database(format!(
+            "stored managed actor next-root key is invalid: {error}"
+        ))
+    })? != next_root_key_hash
+    {
+        return Err(BridgeError::Database(
+            "stored managed actor next-root seed does not match its WebVH commitment".into(),
+        ));
+    }
+    Ok(VerifiedManagedActorRoot {
+        principal_id: project_did_to_core_id(did)?,
+        log_head_digest: Hash::new(canonical_sha256(entry)?)?,
+        did_version_id: validated.version_id,
+        verification_method,
+        public_key,
+    })
+}
+
+fn decode_managed_actor_seed(name: &str, encoded: &str) -> Result<[u8; 32]> {
+    let decoded = arkret::base64url_decode(encoded).map_err(|error| {
+        BridgeError::Database(format!("stored managed actor {name} is invalid: {error}"))
+    })?;
+    decoded.try_into().map_err(|value: Vec<u8>| {
+        BridgeError::Database(format!(
+            "stored managed actor {name} must be 32 bytes, got {}",
+            value.len()
+        ))
+    })
+}
+
 /// The authoring inputs the SDK's API deliberately keeps outside the signed
 /// request, assembled for the Ghost branch.
 ///
@@ -640,7 +785,19 @@ impl GhostProvisionRequestProvider for ManagedActorAuthoringService {
                 },
             )
             .await?;
+        let subject_key = managed_actor_subject_key(&preview.authoring_request)?;
         let managed_actor_bundle = self.author(&preview.authoring_request).await?;
+        let identity_record = self
+            .store
+            .clone()
+            .managed_actor_identity_async(subject_key.clone())
+            .await?
+            .ok_or_else(|| {
+                BridgeError::Database(
+                    "completed Ghost authoring has no managed actor identity".to_owned(),
+                )
+            })?;
+        let identity = self.decode_identity(&subject_key, identity_record)?;
         let committed_request = GhostActorProvisionRequestBody {
             authoring_request: preview.authoring_request,
             managed_actor_bundle,
@@ -649,7 +806,7 @@ impl GhostProvisionRequestProvider for ManagedActorAuthoringService {
         // the caller that submits it to the Station. A completion can only echo
         // these durable bytes; retries of the already-completed authoring lease
         // reach the same call and therefore prove the same preparation again.
-        prepare_ghost_completion(&self.edge, &committed_request)?;
+        prepare_ghost_completion(&self.edge, &committed_request, &identity)?;
         Ok(committed_request)
     }
 }
@@ -657,10 +814,13 @@ impl GhostProvisionRequestProvider for ManagedActorAuthoringService {
 fn prepare_ghost_completion(
     edge: &runtime::ArkretEdge,
     committed_request: &GhostActorProvisionRequestBody,
+    identity: &ManagedActorIdentity,
 ) -> Result<()> {
-    edge.prepare_managed_authoring(&AppletManagedActorCommittedRequest::Ghost(Box::new(
-        committed_request.clone(),
-    )))?;
+    edge.prepare_managed_authoring(
+        &AppletManagedActorCommittedRequest::Ghost(Box::new(committed_request.clone())),
+        &identity.root_verification_method,
+        &identity.root_public_key,
+    )?;
     Ok(())
 }
 
@@ -897,6 +1057,14 @@ mod ghost_bundle_tests {
         })
         .unwrap();
         let did_value = Did::new(inception.did.clone()).unwrap();
+        let root_verification_method =
+            DidUrl::new(inception.root_verification_method.clone()).unwrap();
+        let root_public_key = PublicKeyMaterial::Ed25519Raw {
+            bytes: SigningKey::from_bytes(&[0x51; 32])
+                .verifying_key()
+                .to_bytes()
+                .to_vec(),
+        };
         let method_history_head = canonical_sha256(&inception.log_entry).unwrap();
         let document_digest =
             Hash::new(canonical_sha256(&inception.log_entry["state"]).unwrap()).unwrap();
@@ -930,7 +1098,57 @@ mod ghost_bundle_tests {
                 log_entries: vec![inception.log_entry],
                 witness_records,
             },
+            root_verification_method,
+            root_public_key,
         }
+    }
+
+    #[test]
+    fn persisted_root_material_must_match_the_verified_webvh_inception() {
+        let identity = identity();
+        let material = ManagedActorKeyMaterial {
+            root_seed: arkret::base64url_encode([0x51; 32]),
+            next_root_seed: arkret::base64url_encode([0x52; 32]),
+        };
+        let verified = verify_managed_actor_root(
+            &identity.initial_resolution.did,
+            &identity.method_history_evidence,
+            &material,
+        )
+        .unwrap();
+        assert_eq!(
+            verified.verification_method,
+            identity.root_verification_method
+        );
+        assert_eq!(
+            verified.public_key.ed25519_bytes().unwrap(),
+            identity.root_public_key.ed25519_bytes().unwrap()
+        );
+
+        let wrong_root = ManagedActorKeyMaterial {
+            root_seed: arkret::base64url_encode([0x53; 32]),
+            next_root_seed: material.next_root_seed.clone(),
+        };
+        assert!(
+            verify_managed_actor_root(
+                &identity.initial_resolution.did,
+                &identity.method_history_evidence,
+                &wrong_root,
+            )
+            .is_err()
+        );
+        let wrong_next_root = ManagedActorKeyMaterial {
+            root_seed: material.root_seed,
+            next_root_seed: arkret::base64url_encode([0x54; 32]),
+        };
+        assert!(
+            verify_managed_actor_root(
+                &identity.initial_resolution.did,
+                &identity.method_history_evidence,
+                &wrong_next_root,
+            )
+            .is_err()
+        );
     }
 
     /// The Station-signed branch the bridge receives. The registration epoch is
@@ -1008,9 +1226,10 @@ mod ghost_bundle_tests {
     #[test]
     fn production_ghost_result_freezes_the_exact_committed_request() {
         let request = ghost_request();
+        let identity = identity();
         let bundle = author_applet_managed_actor_bundle(
             &request,
-            ghost_bundle_authoring_input(&request, &identity(), trust_domain()).unwrap(),
+            ghost_bundle_authoring_input(&request, &identity, trust_domain()).unwrap(),
             &signer(0x22, SERVICE_DID),
         )
         .unwrap();
@@ -1019,10 +1238,46 @@ mod ghost_bundle_tests {
             managed_actor_bundle: bundle,
         };
         let store = Arc::new(RecordingAuthoringStore::default());
-        let edge = edge(store.clone());
+        let runtime_edge = edge(store.clone());
 
-        prepare_ghost_completion(&edge, &committed).unwrap();
-        prepare_ghost_completion(&edge, &committed).unwrap();
+        prepare_ghost_completion(&runtime_edge, &committed, &identity).unwrap();
+        prepare_ghost_completion(&runtime_edge, &committed, &identity).unwrap();
+
+        drop(runtime_edge);
+        let restarted = edge(store.clone());
+        prepare_ghost_completion(&restarted, &committed, &identity).unwrap();
+        let rows_before_mismatch = store.0.lock().unwrap().clone();
+
+        let wrong_method = DidUrl::new("did:key:z6Mkwrong#z6Mkwrong".to_owned()).unwrap();
+        assert!(
+            restarted
+                .prepare_managed_authoring(
+                    &AppletManagedActorCommittedRequest::Ghost(Box::new(committed.clone())),
+                    &wrong_method,
+                    &identity.root_public_key,
+                )
+                .is_err()
+        );
+        let wrong_key = PublicKeyMaterial::Ed25519Raw {
+            bytes: SigningKey::from_bytes(&[0x61; 32])
+                .verifying_key()
+                .to_bytes()
+                .to_vec(),
+        };
+        assert!(
+            restarted
+                .prepare_managed_authoring(
+                    &AppletManagedActorCommittedRequest::Ghost(Box::new(committed.clone())),
+                    &identity.root_verification_method,
+                    &wrong_key,
+                )
+                .is_err()
+        );
+        assert_eq!(
+            *store.0.lock().unwrap(),
+            rows_before_mismatch,
+            "VM/key mismatches must not mutate the durable preparation"
+        );
 
         let rows = store.0.lock().unwrap();
         assert_eq!(rows.len(), 1, "exact retry must reuse one preparation");
@@ -1030,11 +1285,22 @@ mod ghost_bundle_tests {
             rows.keys()
                 .all(|key| key.starts_with("managed-authoring/prepared/"))
         );
+        let prepared_raw = rows.values().next().unwrap();
+        let prepared: Value = serde_json::from_str(prepared_raw).unwrap();
+        assert_eq!(
+            prepared["managed_actor_verification_method"],
+            identity.root_verification_method.as_str()
+        );
+        let prepared_key: PublicKeyMaterial =
+            serde_json::from_value(prepared["managed_actor_public_key"].clone()).unwrap();
+        assert_eq!(
+            prepared_key.ed25519_bytes().unwrap(),
+            identity.root_public_key.ed25519_bytes().unwrap()
+        );
+        assert!(prepared_raw.contains(&committed.authoring_request.schema));
         assert!(
-            rows.values()
-                .next()
-                .unwrap()
-                .contains(&committed.authoring_request.schema)
+            !prepared_raw.contains("root_seed") && !prepared_raw.contains("next_root_seed"),
+            "the private preparation stores only verified public signer facts"
         );
     }
 
