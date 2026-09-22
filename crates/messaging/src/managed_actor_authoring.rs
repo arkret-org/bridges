@@ -11,12 +11,12 @@ use arkret::signatures::Ed25519DetachedJwsVerifier;
 use arkret::{
     AppletId, AppletManagedActorAuthorOutcome, AppletManagedActorAuthorRequestBody,
     AppletManagedActorAuthoringBundle, AppletManagedActorAuthoringRequest,
-    AppletManagedActorBundleAuthoringInput, AppletManagedActorPurpose, Did, DidCoreId, GenesisSalt,
-    GhostActorProvisionRequestBody, GhostPreviewRequestBody, Hash, ResolutionCommitment,
-    ResolutionDidBindingEvidenceKind, ResolutionDidBindingEvidenceReceipt,
-    ResolutionDidBindingMethodProof, ResolutionMethodEvidenceBoundary,
-    ResolutionMethodHistoryEvidence, author_applet_managed_actor_bundle, namespace_pattern_matches,
-    project_did_to_core_id,
+    AppletManagedActorBundleAuthoringInput, AppletManagedActorCommittedRequest,
+    AppletManagedActorPurpose, Did, DidCoreId, GenesisSalt, GhostActorProvisionRequestBody,
+    GhostPreviewRequestBody, Hash, ResolutionCommitment, ResolutionDidBindingEvidenceKind,
+    ResolutionDidBindingEvidenceReceipt, ResolutionDidBindingMethodProof,
+    ResolutionMethodEvidenceBoundary, ResolutionMethodHistoryEvidence,
+    author_applet_managed_actor_bundle, namespace_pattern_matches, project_did_to_core_id,
 };
 use arkret_wire::{Discoverability, HistoryAccess, JoinRule, SecurityClass};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
@@ -641,11 +641,27 @@ impl GhostProvisionRequestProvider for ManagedActorAuthoringService {
             )
             .await?;
         let managed_actor_bundle = self.author(&preview.authoring_request).await?;
-        Ok(GhostActorProvisionRequestBody {
+        let committed_request = GhostActorProvisionRequestBody {
             authoring_request: preview.authoring_request,
             managed_actor_bundle,
-        })
+        };
+        // Freeze the exact producer-authored Ghost unit before returning it to
+        // the caller that submits it to the Station. A completion can only echo
+        // these durable bytes; retries of the already-completed authoring lease
+        // reach the same call and therefore prove the same preparation again.
+        prepare_ghost_completion(&self.edge, &committed_request)?;
+        Ok(committed_request)
     }
+}
+
+fn prepare_ghost_completion(
+    edge: &runtime::ArkretEdge,
+    committed_request: &GhostActorProvisionRequestBody,
+) -> Result<()> {
+    edge.prepare_managed_authoring(&AppletManagedActorCommittedRequest::Ghost(Box::new(
+        committed_request.clone(),
+    )))?;
+    Ok(())
 }
 
 fn managed_actor_subject_key(request: &AppletManagedActorAuthoringRequest) -> Result<String> {
@@ -731,6 +747,9 @@ fn render_author_error(res: &mut Response, status: StatusCode, code: &str, detai
 
 #[cfg(test)]
 mod ghost_bundle_tests {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
     use arkret::canonical::DigestSuite;
     use arkret::webvh::{AgentInceptionInput, prepare_agent_inception};
     use arkret::{
@@ -746,6 +765,48 @@ mod ghost_bundle_tests {
     use chrono::{DateTime, TimeZone};
 
     use super::*;
+
+    #[derive(Default)]
+    struct RecordingAuthoringStore(Mutex<BTreeMap<String, String>>);
+
+    impl runtime::AuthoringStore for RecordingAuthoringStore {
+        fn load(&self, key: &str) -> Result<Option<String>> {
+            Ok(self.0.lock().unwrap().get(key).cloned())
+        }
+
+        fn compare_exchange_batch(
+            &self,
+            expected: &[(String, Option<String>)],
+            writes: &[(String, Option<String>)],
+        ) -> Result<bool> {
+            let mut rows = self.0.lock().unwrap();
+            if expected
+                .iter()
+                .any(|(key, value)| rows.get(key) != value.as_ref())
+            {
+                return Ok(false);
+            }
+            for (key, value) in writes {
+                if let Some(value) = value {
+                    rows.insert(key.clone(), value.clone());
+                } else {
+                    rows.remove(key);
+                }
+            }
+            Ok(true)
+        }
+
+        fn entries_with_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>> {
+            Ok(self
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(key, _)| key.starts_with(prefix))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect())
+        }
+    }
 
     const STATION_DID: &str = "did:webvh:zstationscid:station.example";
     const SERVICE_DID: &str = "did:webvh:zservicescid:applet.example";
@@ -791,6 +852,30 @@ mod ghost_bundle_tests {
 
     fn trust_domain() -> TrustDomainId {
         TrustDomainId::new("ak:trust_domain:station.example").unwrap()
+    }
+
+    fn edge(store: Arc<dyn runtime::AuthoringStore>) -> runtime::ArkretEdge {
+        let config: runtime::Config = serde_json::from_value(json!({
+            "bridge": {"bridge_id": "ghost-preparation-test"},
+            "arkret": {
+                "server_url": "https://station.example",
+                "service_did": SERVICE_DID,
+                "trust_domain": trust_domain(),
+                "applet_id": "ak:applet:01904100-0000-7000-8000-bbbbbbbbbbbb",
+                "access_token": "test",
+                "signing_key_seed_hex": "22".repeat(32),
+                "verification_method_fragment": "#key-1",
+                "trusted_server_did": STATION_DID,
+                "applet_namespaces": {"actors": [], "realms": [], "handles": []},
+                "managed_actor_authoring": {
+                    "principal_endpoint": "https://applet.example/actors/slack",
+                    "key_encryption_key_hex": "33".repeat(32)
+                }
+            }
+        }))
+        .unwrap();
+        let (sender, _) = tokio::sync::mpsc::channel(1);
+        runtime::ArkretEdge::new(Arc::new(config), store, sender).unwrap()
     }
 
     /// A real WebVH inception, prepared exactly the way `generate_identity`
@@ -918,6 +1003,39 @@ mod ghost_bundle_tests {
             .map(|submission| submission.event.kind.clone())
             .collect();
         assert_eq!(kinds, applet_managed_actor_unit_event_kinds().to_vec());
+    }
+
+    #[test]
+    fn production_ghost_result_freezes_the_exact_committed_request() {
+        let request = ghost_request();
+        let bundle = author_applet_managed_actor_bundle(
+            &request,
+            ghost_bundle_authoring_input(&request, &identity(), trust_domain()).unwrap(),
+            &signer(0x22, SERVICE_DID),
+        )
+        .unwrap();
+        let committed = GhostActorProvisionRequestBody {
+            authoring_request: request,
+            managed_actor_bundle: bundle,
+        };
+        let store = Arc::new(RecordingAuthoringStore::default());
+        let edge = edge(store.clone());
+
+        prepare_ghost_completion(&edge, &committed).unwrap();
+        prepare_ghost_completion(&edge, &committed).unwrap();
+
+        let rows = store.0.lock().unwrap();
+        assert_eq!(rows.len(), 1, "exact retry must reuse one preparation");
+        assert!(
+            rows.keys()
+                .all(|key| key.starts_with("managed-authoring/prepared/"))
+        );
+        assert!(
+            rows.values()
+                .next()
+                .unwrap()
+                .contains(&committed.authoring_request.schema)
+        );
     }
 
     /// The signed basis is the only source of the registration coordinate, and
