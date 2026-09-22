@@ -1279,6 +1279,101 @@ mod ghost_bundle_tests {
             "VM/key mismatches must not mutate the durable preparation"
         );
 
+        let service_signer = signer(0x22, SERVICE_DID);
+        let verifier = runtime::LocalServiceManagedActorProofVerifier::new(
+            core_id(SERVICE_DID),
+            DidUrl::new(format!("{SERVICE_DID}#key-1")).unwrap(),
+            PublicKeyMaterial::Ed25519Raw {
+                bytes: service_signer.verifying_key().to_bytes().to_vec(),
+            },
+        )
+        .unwrap();
+        runtime::validate_managed_actor_bundle(
+            &committed.authoring_request,
+            &committed.managed_actor_bundle,
+            &verifier,
+        )
+        .unwrap();
+        let wrong_local_key = runtime::LocalServiceManagedActorProofVerifier::new(
+            core_id(SERVICE_DID),
+            DidUrl::new(format!("{SERVICE_DID}#key-1")).unwrap(),
+            PublicKeyMaterial::Ed25519Raw {
+                bytes: SigningKey::from_bytes(&[0x23; 32])
+                    .verifying_key()
+                    .to_bytes()
+                    .to_vec(),
+            },
+        )
+        .unwrap();
+        assert!(
+            runtime::validate_managed_actor_bundle(
+                &committed.authoring_request,
+                &committed.managed_actor_bundle,
+                &wrong_local_key,
+            )
+            .is_err()
+        );
+
+        let mut wrong_event_proof = committed.clone();
+        wrong_event_proof
+            .managed_actor_bundle
+            .profile_event
+            .producer_proof
+            .as_mut()
+            .unwrap()
+            .jws = "eyJhbGciOiJFZDI1NTE5In0..AA".to_owned();
+        assert!(
+            runtime::validate_managed_actor_bundle(
+                &wrong_event_proof.authoring_request,
+                &wrong_event_proof.managed_actor_bundle,
+                &verifier,
+            )
+            .is_err()
+        );
+        let mut wrong_ref = committed.clone();
+        wrong_ref
+            .managed_actor_bundle
+            .pcr_genesis_event
+            .semantic_refs
+            .clear();
+        assert!(
+            runtime::validate_managed_actor_bundle(
+                &wrong_ref.authoring_request,
+                &wrong_ref.managed_actor_bundle,
+                &verifier,
+            )
+            .is_err()
+        );
+        let mut wrong_executor = committed.clone();
+        wrong_executor
+            .managed_actor_bundle
+            .profile_event
+            .executed_by = Some(arkret::ActorId::service(core_id(STATION_DID)));
+        assert!(
+            runtime::validate_managed_actor_bundle(
+                &wrong_executor.authoring_request,
+                &wrong_executor.managed_actor_bundle,
+                &verifier,
+            )
+            .is_err()
+        );
+        let mut wrong_bundle_proof = committed.clone();
+        wrong_bundle_proof.managed_actor_bundle.proof.jws =
+            "eyJhbGciOiJFZDI1NTE5In0..AA".to_owned();
+        assert!(
+            runtime::validate_managed_actor_bundle(
+                &wrong_bundle_proof.authoring_request,
+                &wrong_bundle_proof.managed_actor_bundle,
+                &verifier,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            *store.0.lock().unwrap(),
+            rows_before_mismatch,
+            "producer proof and content/ref failures must not mutate preparation"
+        );
+
         let rows = store.0.lock().unwrap();
         assert_eq!(rows.len(), 1, "exact retry must reuse one preparation");
         assert!(

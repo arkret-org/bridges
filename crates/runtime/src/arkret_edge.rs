@@ -67,6 +67,8 @@ use crate::authoring::{
     external_operation_key, publication_outcome, scope_key, validate_managed_authoring_completion,
     validate_prepared_ghost_signer,
 };
+#[cfg(any(feature = "web", test))]
+use crate::authority::{LocalServiceManagedActorProofVerifier, validate_managed_actor_bundle};
 use crate::config::Config;
 #[cfg(any(feature = "web", test))]
 use crate::did_binding::DidAuthority;
@@ -821,10 +823,12 @@ impl BridgeAppletHandler {
     /// Verify the part of the accepted authoring closure this runtime can prove
     /// from local material. The service leaf must name the key actually held by
     /// this process. A Ghost leaf must also match the root VM/key derived from
-    /// the locally encrypted identity and frozen before handoff. Station
-    /// attester and producer-proof verification are not yet locally closed, so
-    /// even a matching Ghost remains un-installable here. Bot/Reuse remains
-    /// closed until its original immutable anchors are retained locally.
+    /// the locally encrypted identity and frozen before handoff. The exact
+    /// prepared four-Event bundle and its aggregate proof must verify under the
+    /// Applet Service key held by this process. Station attester verification
+    /// is not yet locally closed, so even a matching Ghost remains
+    /// un-installable here. Bot/Reuse remains closed until its original
+    /// immutable anchors are retained locally.
     fn verify_local_managed_authoring_closure(
         &self,
         body: &AppletAuthoringTransactionRequestBody,
@@ -880,8 +884,28 @@ impl BridgeAppletHandler {
             .verify_prepared_ghost_signer(body)
             .map_err(|error| WireError::Protocol(error.to_string()))?;
 
+        let AppletManagedActorCommittedRequest::Ghost(ghost) =
+            &body.authoring_context.committed_request
+        else {
+            return Err(WireError::Protocol(
+                "managed Actor Bot creation has no locally retained immutable anchors".to_owned(),
+            ));
+        };
+        let verifier = LocalServiceManagedActorProofVerifier::new(
+            self.service_id.clone(),
+            self.service_verification_method.clone(),
+            self.service_public_key.clone(),
+        )
+        .map_err(|error| WireError::Protocol(error.to_string()))?;
+        validate_managed_actor_bundle(
+            &ghost.authoring_request,
+            &ghost.managed_actor_bundle,
+            &verifier,
+        )
+        .map_err(|error| WireError::Protocol(error.to_string()))?;
+
         Err(WireError::Protocol(
-            "managed Actor Station attester and producer-proof closure is not installed".to_owned(),
+            "managed Actor Station attester closure is not installed".to_owned(),
         ))
     }
 

@@ -71,9 +71,9 @@ pub use authoring::DbAuthoringStore;
 pub use authoring::{AuthoringJournal, AuthoringStore, external_operation_key};
 pub use authority::{
     AuthorityMaterialVerifier, BridgeProtocolError, CurrentAuthority, GovernanceStationTransport,
-    JoinBootstrap, ManagedActorProofVerifier, ProducerProofVerifier, QueuedSubmission,
-    StreamCursorBook, StreamTail, SubmissionQueue, SubmissionState, validate_handoff,
-    validate_managed_actor_bundle, validate_producer_event,
+    JoinBootstrap, LocalServiceManagedActorProofVerifier, ManagedActorProofVerifier,
+    ProducerProofVerifier, QueuedSubmission, StreamCursorBook, StreamTail, SubmissionQueue,
+    SubmissionState, validate_handoff, validate_managed_actor_bundle, validate_producer_event,
 };
 pub use backoff::{BRIDGE_RETRY, bridge_retry_delay};
 pub use blocking::run_blocking;

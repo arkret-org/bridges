@@ -15,12 +15,15 @@ use arkret_models_integration::{
     AppletManagedActorAuthoringBasis, AppletManagedActorAuthoringBundle,
     AppletManagedActorAuthoringRequest,
 };
+use arkret_signatures::{
+    Ed25519DetachedJwsVerifier, PublicKeyMaterial, verify_ed25519_detached_jws_proof,
+};
 use arkret_wire::{
     AuthoredEvent, AuthorityBundleRequest, AuthorityCommitStatus, AuthorityHandoffRequest,
     AuthorityRejectionStatus, AuthoritySubmitOutcome, AuthoritySubmitRequest, CommitStreamHead,
-    CommitStreamRef, CommittedEventRef, DetachedSignatureContext, Event, EventCommitSubmission,
-    MlsCommitSubmission, MlsWelcomeDelivery, ProducerEventProof, RealmAuthorityBundle,
-    RealmCommit, RealmStateSnapshot, StreamScanOutcome, StreamScanRequest,
+    CommitStreamRef, CommittedEventRef, DetachedSignatureContext, DidUrl, Event,
+    EventCommitSubmission, MlsCommitSubmission, MlsWelcomeDelivery, ProducerEventProof,
+    RealmAuthorityBundle, RealmCommit, RealmStateSnapshot, StreamScanOutcome, StreamScanRequest,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -429,6 +432,74 @@ pub trait ProducerProofVerifier {
     fn verify_event_proof(&self, event: &Event, proof: &ProducerEventProof) -> Result<()>;
 }
 
+/// Resolver-free verifier for the exact Applet Service signer held by this
+/// bridge process. Managed-Actor bundles are authored by that service key;
+/// delegated Events keep the managed Actor in `actor_id` and name the service
+/// in `executed_by`, but their producer proof still signs the exact Event
+/// binding including the managed Actor.
+#[derive(Clone)]
+pub struct LocalServiceManagedActorProofVerifier {
+    service_id: DidCoreId,
+    verification_method: DidUrl,
+    public_key: PublicKeyMaterial,
+}
+
+impl LocalServiceManagedActorProofVerifier {
+    pub fn new(
+        service_id: DidCoreId,
+        verification_method: DidUrl,
+        public_key: PublicKeyMaterial,
+    ) -> Result<Self> {
+        let controller = protocol(arkret::verification_method_did(
+            verification_method.as_str(),
+        ))?;
+        if protocol(arkret_wire::project_did_to_core_id(&controller))? != service_id {
+            return Err(BridgeProtocolError::InvalidManagedActorProducer);
+        }
+        public_key
+            .ed25519_bytes()
+            .map_err(|error| BridgeProtocolError::Protocol(error.to_string()))?;
+        Ok(Self {
+            service_id,
+            verification_method,
+            public_key,
+        })
+    }
+}
+
+impl ProducerProofVerifier for LocalServiceManagedActorProofVerifier {
+    fn verify_event_proof(&self, event: &Event, proof: &ProducerEventProof) -> Result<()> {
+        if proof.verification_method != self.verification_method {
+            return Err(BridgeProtocolError::InvalidManagedActorProducer);
+        }
+        let bytes = arkret_canonical::canonical_json_bytes(&protocol(event.digest_payload())?)
+            .map_err(|error| BridgeProtocolError::Protocol(error.to_string()))?;
+        verify_ed25519_detached_jws_proof(proof, &bytes, &event.actor_id, &self.public_key)
+            .map_err(|error| BridgeProtocolError::Protocol(error.to_string()))
+    }
+}
+
+impl ManagedActorProofVerifier for LocalServiceManagedActorProofVerifier {
+    fn verify_bundle_proof(
+        &self,
+        request: &AppletManagedActorAuthoringRequest,
+        bundle: &AppletManagedActorAuthoringBundle,
+    ) -> Result<()> {
+        if request.basis.service_id() != &self.service_id
+            || bundle.proof.verification_method != self.verification_method
+        {
+            return Err(BridgeProtocolError::InvalidManagedActorProducer);
+        }
+        Ed25519DetachedJwsVerifier::new()
+            .verify_detached_jws(
+                &bundle.proof.jws,
+                &protocol(bundle.proof_binding_bytes())?,
+                &self.public_key,
+            )
+            .map_err(|error| BridgeProtocolError::Protocol(error.to_string()))
+    }
+}
+
 pub fn validate_producer_event<V: ProducerProofVerifier + ?Sized>(
     event: &Event,
     forbidden_station_id: Option<&DidCoreId>,
@@ -454,6 +525,34 @@ pub fn validate_producer_event<V: ProducerProofVerifier + ?Sized>(
     verifier.verify_event_proof(event, proof)
 }
 
+fn validate_managed_actor_producer_event<V: ProducerProofVerifier + ?Sized>(
+    event: &Event,
+    forbidden_station_id: &DidCoreId,
+    verifier: &V,
+) -> Result<()> {
+    // This delegated-producer rule is valid only after
+    // `applet_managed_actor_unit_submissions` has locked the exact four-Event
+    // managed-Actor shape. Generic Event callers keep the actor-only rule in
+    // `validate_producer_event`.
+    protocol(event.validate_for_submit_structural())?;
+    let Some(proof) = event.producer_proof.as_ref() else {
+        return Err(BridgeProtocolError::InvalidManagedActorProducer);
+    };
+    let producer_did = protocol(arkret::verification_method_did(
+        proof.verification_method.as_str(),
+    ))?;
+    let producer_id = protocol(arkret_wire::project_did_to_core_id(&producer_did))?;
+    let expected_producer = event
+        .executed_by
+        .as_ref()
+        .unwrap_or(&event.actor_id)
+        .signing_principal_id();
+    if &producer_id != expected_producer || &producer_id == forbidden_station_id {
+        return Err(BridgeProtocolError::InvalidManagedActorProducer);
+    }
+    verifier.verify_event_proof(event, proof)
+}
+
 /// Additional verification for a complete managed-actor authoring unit.
 pub trait ManagedActorProofVerifier: ProducerProofVerifier {
     fn verify_bundle_proof(
@@ -471,7 +570,9 @@ pub fn validate_managed_actor_bundle<V: ManagedActorProofVerifier>(
     verifier: &V,
 ) -> Result<()> {
     protocol(request.validate_bindings())?;
-    protocol(bundle.validate_bindings(request))?;
+    protocol(arkret::applet_managed_actor_unit_submissions(
+        bundle, request,
+    ))?;
     let applet_id = match &request.basis {
         AppletManagedActorAuthoringBasis::InstallBot(basis) => &basis.applet_id,
         AppletManagedActorAuthoringBasis::ProvisionGhost(basis) => &basis.applet_id,
@@ -487,16 +588,11 @@ pub fn validate_managed_actor_bundle<V: ManagedActorProofVerifier>(
         if event.applet_id.as_ref() != Some(applet_id) {
             return Err(BridgeProtocolError::InvalidManagedActorProducer);
         }
-        validate_producer_event(event, Some(station_id), verifier)?;
+        validate_managed_actor_producer_event(event, station_id, verifier)?;
     }
-    let bundle_controller = bundle
-        .proof
-        .verification_method
-        .as_str()
-        .split_once('#')
-        .map(|(controller, _)| controller)
-        .ok_or(BridgeProtocolError::InvalidManagedActorProducer)?;
-    let bundle_controller = protocol(arkret_wire::Did::new(bundle_controller.to_owned()))?;
+    let bundle_controller = protocol(arkret::verification_method_did(
+        bundle.proof.verification_method.as_str(),
+    ))?;
     if protocol(arkret_wire::project_did_to_core_id(&bundle_controller))? == *station_id {
         return Err(BridgeProtocolError::InvalidManagedActorProducer);
     }
