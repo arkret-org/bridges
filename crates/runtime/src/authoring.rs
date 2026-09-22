@@ -8,10 +8,16 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use arkret::{ActorId, AuthoredEvent, EventIntent, RealmId};
+use arkret::{ActorId, AppletId, AuthoredEvent, EventIntent, RealmId};
 use arkret_identifiers::DidCoreId;
+use arkret_models_integration::{
+    AppletAuthoringTransactionRequestBody, AppletInstallRequestBody,
+    AppletManagedActorAuthoringBasis, AppletManagedActorCommittedRequest,
+    AppletManagedActorProvisionPayload, AppletManagedActorRole,
+};
 use arkret_wire::{
-    AuthorityCommitStatus, AuthorityRejectionStatus, AuthoritySubmitOutcome, CommittedEventRef,
+    AuthorityCommitStatus, AuthorityRejectionStatus, AuthoritySubmitOutcome, CommitStreamRef,
+    CommittedEventRef, Hash, ScopeRef,
 };
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +38,20 @@ pub trait AuthoringStore: Send + Sync + 'static {
 #[derive(Clone)]
 pub struct AuthoringJournal {
     pub(crate) store: Arc<dyn AuthoringStore>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ManagedAuthoringIdentity {
+    pub applet_id: AppletId,
+    pub actor_id: ActorId,
+    pub effective_scope: ScopeRef,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ManagedAuthoringInstall {
+    Installed,
+    ExactReplay,
 }
 
 /// One frozen publication. `intent` retains the producer-selected content so a
@@ -101,9 +121,364 @@ fn event_key(event: &arkret::EventId) -> String {
     format!("event/{event}")
 }
 
+fn managed_authoring_current_key(identity: &ManagedAuthoringIdentity) -> Result<String> {
+    Ok(format!(
+        "managed-authoring/current/{}",
+        serde_json::to_string(identity)?
+    ))
+}
+
+fn managed_authoring_completion_key(
+    identity: &ManagedAuthoringIdentity,
+    request_digest: &Hash,
+) -> Result<String> {
+    Ok(format!(
+        "managed-authoring/completion/{}",
+        serde_json::to_string(&(identity, request_digest))?
+    ))
+}
+
+fn managed_authoring_preparation_key(request_digest: &Hash) -> String {
+    format!("managed-authoring/prepared/{request_digest}")
+}
+
+fn managed_authoring_request(
+    committed_request: &AppletManagedActorCommittedRequest,
+) -> &arkret_models_integration::AppletManagedActorAuthoringRequest {
+    match committed_request {
+        AppletManagedActorCommittedRequest::Install(install) => install.authoring_request(),
+        AppletManagedActorCommittedRequest::Ghost(ghost) => &ghost.authoring_request,
+    }
+}
+
+fn realm_from_scope(scope: &ScopeRef) -> Option<&RealmId> {
+    match scope {
+        ScopeRef::Realm { realm_id }
+        | ScopeRef::Circle { realm_id, .. }
+        | ScopeRef::Sidecar { realm_id, .. } => Some(realm_id),
+        _ => None,
+    }
+}
+
+fn provision_payload(
+    event: &arkret::Event,
+) -> std::result::Result<AppletManagedActorProvisionPayload, String> {
+    if event.kind != "ak.applet.managed_actor.provision" {
+        return Err("authoring completion carries the wrong managed Actor provision Event".into());
+    }
+    let payload: AppletManagedActorProvisionPayload = serde_json::from_value(
+        serde_json::to_value(&event.payload).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    payload.validate().map_err(|error| error.to_string())?;
+    Ok(payload)
+}
+
+/// Validate the complete Station-delivered authoring result and derive its one
+/// durable installation identity. This composes SDK-owned closed carriers; it
+/// does not infer authority from transport reachability or invent another
+/// proof format.
+pub(crate) fn validate_managed_authoring_completion(
+    body: &AppletAuthoringTransactionRequestBody,
+    authenticated_source_id: &DidCoreId,
+    expected_applet_id: &AppletId,
+    expected_service_id: &DidCoreId,
+) -> std::result::Result<ManagedAuthoringIdentity, String> {
+    if &body.source_id != authenticated_source_id {
+        return Err("authoring completion source differs from the authenticated Station".into());
+    }
+    if &body.applet_id != expected_applet_id {
+        return Err("authoring completion names a different Applet".into());
+    }
+    body.authoring_context
+        .validate()
+        .map_err(|error| error.to_string())?;
+
+    let (request, bundle, actor_id, effective_scope) = match &body
+        .authoring_context
+        .committed_request
+    {
+        AppletManagedActorCommittedRequest::Install(install) => {
+            let request = install.authoring_request();
+            let basis = request.basis.install().ok_or_else(|| {
+                "install completion carries a non-install authoring basis".to_owned()
+            })?;
+            let realm_id = realm_from_scope(&basis.effective_scope)
+                .ok_or_else(|| "install completion has no executable Realm scope".to_owned())?;
+            if install.applet_package().applet_id != basis.applet_id
+                || install.applet_package().service_id != basis.service_id
+            {
+                return Err("install completion package differs from its authoring basis".into());
+            }
+            match &**install {
+                AppletInstallRequestBody::Create(create) => {
+                    let payload = provision_payload(
+                        &create.managed_actor_bundle.managed_actor_provision_event,
+                    )?;
+                    if payload.applet_id != basis.applet_id
+                        || payload.service_id != basis.service_id
+                        || payload.actor_role != AppletManagedActorRole::Bot
+                        || payload.external_ref.is_some()
+                        || create
+                            .managed_actor_bundle
+                            .managed_actor_provision_event
+                            .realm_id
+                            != *realm_id
+                    {
+                        return Err("install completion managed Actor payload is misbound".into());
+                    }
+                    (
+                        request,
+                        Some(&create.managed_actor_bundle),
+                        payload.actor_id,
+                        basis.effective_scope.clone(),
+                    )
+                }
+                AppletInstallRequestBody::Reuse(reuse) => {
+                    if reuse
+                        .reuse_existing_managed_actor
+                        .initial_package_bot_actor_id
+                        != install.applet_package().bot_actor_id
+                    {
+                        return Err(
+                            "reused managed Actor differs from the original package Bot".into()
+                        );
+                    }
+                    (
+                        request,
+                        None,
+                        reuse.reuse_existing_managed_actor.actor_id.clone(),
+                        basis.effective_scope.clone(),
+                    )
+                }
+            }
+        }
+        AppletManagedActorCommittedRequest::Ghost(ghost) => {
+            let request = &ghost.authoring_request;
+            let basis = request
+                .basis
+                .ghost()
+                .ok_or_else(|| "Ghost completion carries a non-Ghost authoring basis".to_owned())?;
+            let payload = ghost
+                .managed_actor_provision_payload()
+                .map_err(|error| error.to_string())?;
+            payload.validate().map_err(|error| error.to_string())?;
+            if ghost
+                .managed_actor_bundle
+                .managed_actor_provision_event
+                .kind
+                != "ak.applet.managed_actor.provision"
+                || payload.applet_id != basis.applet_id
+                || payload.service_id != basis.service_id
+                || payload.actor_role != AppletManagedActorRole::Ghost
+                || payload.external_ref.as_ref() != Some(&basis.external_ref)
+                || ghost
+                    .managed_actor_bundle
+                    .managed_actor_provision_event
+                    .realm_id
+                    != basis.realm_id
+            {
+                return Err("Ghost completion managed Actor payload is misbound".into());
+            }
+            (
+                request,
+                Some(&ghost.managed_actor_bundle),
+                payload.actor_id,
+                ScopeRef::Realm {
+                    realm_id: basis.realm_id.clone(),
+                },
+            )
+        }
+    };
+
+    request
+        .validate_bindings()
+        .map_err(|error| error.to_string())?;
+    if let Some(bundle) = bundle {
+        bundle
+            .validate_bindings(request)
+            .map_err(|error| error.to_string())?;
+    }
+    if request.basis.target_station_id() != authenticated_source_id {
+        return Err(
+            "authoring completion did not come from the targeted governance Station".into(),
+        );
+    }
+    let Some(account_id) = actor_id.as_account_id() else {
+        return Err("managed Actor completion does not carry a complete Account identity".into());
+    };
+    if &account_id.station_id != authenticated_source_id {
+        return Err("managed Actor Account belongs to a different Station".into());
+    }
+    if request.basis.service_id() != expected_service_id {
+        return Err("authoring completion targets a different Applet Service".into());
+    }
+    let basis_applet_id = match &request.basis {
+        AppletManagedActorAuthoringBasis::InstallBot(basis) => &basis.applet_id,
+        AppletManagedActorAuthoringBasis::ProvisionGhost(basis) => &basis.applet_id,
+    };
+    if basis_applet_id != expected_applet_id {
+        return Err("authoring completion basis names a different Applet".into());
+    }
+    let CommitStreamRef::Realm { realm_id } = &body.authoring_context.realm_stream_head.stream_ref
+    else {
+        return Err("authoring completion reports a non-Realm commit stream".into());
+    };
+    if Some(realm_id) != realm_from_scope(&effective_scope) {
+        return Err("authoring completion Realm stream differs from its request scope".into());
+    }
+
+    let applet_evidence = &body
+        .authoring_context
+        .applet_service_signer_evidence
+        .authenticated_signer_evidence;
+    let managed_evidence = &body
+        .authoring_context
+        .managed_actor_signer_evidence
+        .authenticated_signer_evidence;
+    let attester_evidence = &body
+        .authoring_context
+        .managed_actor_signer_evidence
+        .attester_signer_evidence;
+    if &applet_evidence.subject_id != expected_service_id
+        || &managed_evidence.subject_id != actor_id.signing_principal_id()
+        || &attester_evidence.subject_id != authenticated_source_id
+    {
+        return Err("authoring completion signer evidence is bound to another identity".into());
+    }
+    Ok(ManagedAuthoringIdentity {
+        applet_id: expected_applet_id.clone(),
+        actor_id,
+        effective_scope,
+    })
+}
+
 impl AuthoringJournal {
     pub fn new(store: Arc<dyn AuthoringStore>) -> Self {
         Self { store }
+    }
+
+    /// Freeze the exact request/bundle authored by this runtime before it is
+    /// handed to a Station. A completion is never installable unless this row
+    /// already exists byte-for-byte; authenticated delivery alone is not an
+    /// authority to substitute a different managed identity or bundle.
+    pub(crate) fn prepare_managed_authoring(
+        &self,
+        committed_request: &AppletManagedActorCommittedRequest,
+    ) -> Result<bool> {
+        let request_digest = managed_authoring_request(committed_request).canonical_digest()?;
+        let key = managed_authoring_preparation_key(&request_digest);
+        let raw = String::from_utf8(arkret::canonical::canonical_json_bytes(committed_request)?)
+            .map_err(|error| BridgeError::Arkret(error.to_string()))?;
+        if let Some(existing) = self.store.load(&key)? {
+            return if existing == raw {
+                Ok(false)
+            } else {
+                Err(BridgeError::App(
+                    "authoring request digest is already prepared with different bytes".into(),
+                ))
+            };
+        }
+        if self
+            .store
+            .compare_exchange_batch(&[(key.clone(), None)], &[(key, Some(raw))])?
+        {
+            Ok(true)
+        } else {
+            Err(BridgeError::Runtime(
+                "managed Actor authoring preparation contended; retry the same request".into(),
+            ))
+        }
+    }
+
+    /// Atomically install one fully validated managed-Actor completion. The
+    /// immutable request row makes exact replay distinguishable from a reused
+    /// request digest, while the current row advances only within the same
+    /// Realm stream. A late valid completion is retained for historical proof
+    /// verification without moving the current pointer backwards.
+    pub(crate) fn install_managed_authoring(
+        &self,
+        identity: &ManagedAuthoringIdentity,
+        body: &AppletAuthoringTransactionRequestBody,
+    ) -> Result<ManagedAuthoringInstall> {
+        let request = managed_authoring_request(&body.authoring_context.committed_request);
+        let request_digest = request.canonical_digest()?;
+        let prepared_key = managed_authoring_preparation_key(&request_digest);
+        let prepared_request = self.store.load(&prepared_key)?.ok_or_else(|| {
+            BridgeError::App(
+                "managed Actor authoring completion has no locally prepared request".into(),
+            )
+        })?;
+        let committed_request_raw = String::from_utf8(arkret::canonical::canonical_json_bytes(
+            &body.authoring_context.committed_request,
+        )?)
+        .map_err(|error| BridgeError::Arkret(error.to_string()))?;
+        if prepared_request != committed_request_raw {
+            return Err(BridgeError::App(
+                "managed Actor authoring completion differs from the locally prepared request"
+                    .into(),
+            ));
+        }
+        let completion_key = managed_authoring_completion_key(identity, &request_digest)?;
+        let current_key = managed_authoring_current_key(identity)?;
+        let body_raw = String::from_utf8(arkret::canonical::canonical_json_bytes(body)?)
+            .map_err(|error| BridgeError::Arkret(error.to_string()))?;
+
+        if let Some(existing) = self.store.load(&completion_key)? {
+            return if existing == body_raw {
+                Ok(ManagedAuthoringInstall::ExactReplay)
+            } else {
+                Err(BridgeError::App(
+                    "authoring request digest is already bound to a different completion".into(),
+                ))
+            };
+        }
+
+        let current_raw = self.store.load(&current_key)?;
+        let mut expected = vec![(completion_key.clone(), None)];
+        let mut writes = vec![(completion_key, Some(body_raw.clone()))];
+        if let Some(current_raw) = current_raw {
+            let current: AppletAuthoringTransactionRequestBody =
+                serde_json::from_str(&current_raw)?;
+            let old_head = &current.authoring_context.realm_stream_head;
+            let new_head = &body.authoring_context.realm_stream_head;
+            if old_head.stream_ref != new_head.stream_ref {
+                return Err(BridgeError::App(
+                    "authoring completion cannot replace a different commit stream".into(),
+                ));
+            }
+            if old_head.stream_position == new_head.stream_position {
+                if old_head.commit_id != new_head.commit_id || current_raw != body_raw {
+                    return Err(BridgeError::App(
+                        "authoring completion conflicts at the current stream position".into(),
+                    ));
+                }
+            } else if old_head.stream_position < new_head.stream_position {
+                expected.push((current_key.clone(), Some(current_raw)));
+                writes.push((current_key, Some(body_raw)));
+            }
+        } else {
+            expected.push((current_key.clone(), None));
+            writes.push((current_key, Some(body_raw)));
+        }
+
+        if self.store.compare_exchange_batch(&expected, &writes)? {
+            Ok(ManagedAuthoringInstall::Installed)
+        } else {
+            Err(BridgeError::Runtime(
+                "managed Actor authoring installation contended; retry the same completion".into(),
+            ))
+        }
+    }
+
+    pub(crate) fn load_managed_authoring(
+        &self,
+        identity: &ManagedAuthoringIdentity,
+    ) -> Result<Option<AppletAuthoringTransactionRequestBody>> {
+        self.store
+            .load(&managed_authoring_current_key(identity)?)?
+            .map(|raw| serde_json::from_str(&raw).map_err(Into::into))
+            .transpose()
     }
 
     pub(crate) async fn load_operation(

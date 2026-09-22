@@ -16,11 +16,10 @@ use arkret::{
     TransactionIdempotencyStore, project_did_to_core_id,
 };
 use arkret_models_integration::{
-    AppletAuthoringTransactionRequestBody, AppletManagedActorAuthoringBasis,
-    AppletManagedActorCommittedRequest, AppletTransactionOutcome, AppletTransactionRequestBody,
+    AppletAuthoringTransactionRequestBody, AppletTransactionOutcome, AppletTransactionRequestBody,
     AppletTransactionStatus,
 };
-use arkret_wire::{CommitStreamRef, DidUrl, ServiceOperationId};
+use arkret_wire::{DidUrl, ServiceOperationId};
 use chrono::Utc;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use salvo::affix_state;
@@ -345,39 +344,19 @@ async fn claim_transaction(
 fn validate_authoring_completion(
     body: &AppletAuthoringTransactionRequestBody,
     source_id: &DidCoreId,
+    config: &Config,
 ) -> std::result::Result<(), String> {
-    let (request, bundle) = match &body.authoring_context.committed_request {
-        AppletManagedActorCommittedRequest::Install(install) => {
-            (install.authoring_request(), install.managed_actor_bundle())
-        }
-        AppletManagedActorCommittedRequest::Ghost(ghost) => {
-            (&ghost.authoring_request, Some(&ghost.managed_actor_bundle))
-        }
-    };
-    request
-        .validate_bindings()
+    let service_id =
+        project_did_to_core_id(&config.arkret.service_did).map_err(|error| error.to_string())?;
+    let applet_id = arkret::AppletId::new(config.arkret.applet_id.clone())
         .map_err(|error| error.to_string())?;
-    if let Some(bundle) = bundle {
-        bundle
-            .validate_bindings(request)
-            .map_err(|error| error.to_string())?;
-    }
-    if request.basis.target_station_id() != source_id {
-        return Err(
-            "authoring completion did not come from the targeted governance Station".to_owned(),
-        );
-    }
-    let applet_id = match &request.basis {
-        AppletManagedActorAuthoringBasis::InstallBot(basis) => &basis.applet_id,
-        AppletManagedActorAuthoringBasis::ProvisionGhost(basis) => &basis.applet_id,
-    };
-    if applet_id != &body.applet_id {
-        return Err("authoring completion names a different Applet".to_owned());
-    }
-    match &body.authoring_context.realm_stream_head.stream_ref {
-        CommitStreamRef::Realm { .. } => Ok(()),
-        _ => Err("authoring completion reports a non-Realm commit stream".to_owned()),
-    }
+    crate::authoring::validate_managed_authoring_completion(
+        body,
+        source_id,
+        &applet_id,
+        &service_id,
+    )
+    .map(|_| ())
 }
 
 /// Authenticate every Event before creating the durable idempotency claim.
@@ -586,7 +565,8 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         return;
     }
     if let AppletTransactionRequestBody::Authoring(authoring) = &body
-        && let Err(error) = validate_authoring_completion(authoring, &verified.source_id)
+        && let Err(error) =
+            validate_authoring_completion(authoring, &verified.source_id, &state.config)
     {
         record_applet_transaction("bad_request");
         bad_request(

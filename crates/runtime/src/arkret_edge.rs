@@ -45,6 +45,9 @@ use arkret_models_integration::{
     AppletActorView, AppletPingOutcome, AppletProtocolMetadata, AppletRealmView,
     AppletTransactionOutcome, AppletWireNamespaces,
 };
+use arkret_models_integration::{
+    AppletAuthoringTransactionRequestBody, AppletManagedActorCommittedRequest,
+};
 #[cfg(any(feature = "web", test))]
 use arkret_wire::ProfileId;
 use arkret_wire::{
@@ -60,8 +63,8 @@ use tokio::sync::mpsc::Sender;
 #[cfg(any(feature = "web", test))]
 use crate::app::AppletResolver;
 use crate::authoring::{
-    AuthoringJournal, AuthoringStore, PublicationRecord, external_operation_key,
-    publication_outcome, scope_key,
+    AuthoringJournal, AuthoringStore, ManagedAuthoringIdentity, PublicationRecord,
+    external_operation_key, publication_outcome, scope_key, validate_managed_authoring_completion,
 };
 use crate::config::Config;
 #[cfg(any(feature = "web", test))]
@@ -267,6 +270,33 @@ impl ArkretEdge {
         self.signal_tx.clone()
     }
 
+    /// Current validated managed-Actor authoring material for one exact Actor
+    /// in one effective security scope. The result is read from the same
+    /// durable store used by the inbound completion CAS, so rebuilding the
+    /// edge does not lose it.
+    pub fn installed_managed_authoring(
+        &self,
+        effective_scope: &ScopeRef,
+        actor_id: &arkret::ActorId,
+    ) -> Result<Option<AppletAuthoringTransactionRequestBody>> {
+        self.journal
+            .load_managed_authoring(&ManagedAuthoringIdentity {
+                applet_id: self.applet_id.clone(),
+                actor_id: actor_id.clone(),
+                effective_scope: effective_scope.clone(),
+            })
+    }
+
+    /// Freeze the exact locally authored install/Ghost request and bundle that
+    /// a later Station completion must echo. Returns `true` only for the first
+    /// durable preparation and `false` for an exact replay.
+    pub fn prepare_managed_authoring(
+        &self,
+        committed_request: &AppletManagedActorCommittedRequest,
+    ) -> Result<bool> {
+        self.journal.prepare_managed_authoring(committed_request)
+    }
+
     /// The complete service-actor write for `content`. Applet-originated writes
     /// carry the top-level `applet_id` in the signed envelope.
     ///
@@ -456,9 +486,8 @@ impl ArkretEdge {
                 return Err(BridgeError::Runtime("publication retry contention".into()));
             }
         }
-        let request = SelfAuthoritySubmitRequest::Event(EventCommitSubmission::new(
-            event.event().clone(),
-        ));
+        let request =
+            SelfAuthoritySubmitRequest::Event(EventCommitSubmission::new(event.event().clone()));
         let options = ClientRequestOptions::new().idempotency_key(event.event_id().as_str());
         let outcome = self
             .client
@@ -704,6 +733,7 @@ fn event_content_fingerprint(event: &Event) -> i64 {
 /// inbound queue; the business forwarding is done in the core consumer loop.
 pub struct BridgeAppletHandler {
     applet_id: AppletId,
+    service_id: DidCoreId,
     service_did: Did,
     trust_domain: arkret::TrustDomainId,
     transport_base_url: String,
@@ -724,6 +754,9 @@ pub struct BridgeAppletHandler {
     /// owns no resolver: it holds the operator-configured acceptances and
     /// nothing else, and every lookup from here is in-memory.
     did_authority: Arc<DidAuthority>,
+    /// Durable managed-Actor completion installation shares the edge's atomic
+    /// store with frozen outbound authoring material.
+    journal: AuthoringJournal,
 }
 
 #[cfg(any(feature = "web", test))]
@@ -739,8 +772,11 @@ impl BridgeAppletHandler {
         did_authority: Arc<DidAuthority>,
     ) -> Result<Self> {
         let service_did = edge.service_did.clone();
+        let service_id = project_did_to_core_id(&service_did)
+            .map_err(|error| BridgeError::Config(error.to_string()))?;
         Ok(Self {
             applet_id: edge.applet_id.clone(),
+            service_id,
             service_did: service_did.clone(),
             trust_domain: edge.config.arkret.trust_domain.clone(),
             transport_base_url: format!("http://{}", edge.config.bridge.admin_addr()),
@@ -753,6 +789,7 @@ impl BridgeAppletHandler {
             dedup,
             handled_event_kinds,
             did_authority,
+            journal: edge.journal.clone(),
         })
     }
 
@@ -871,10 +908,26 @@ impl arkret::AppletHandler for BridgeAppletHandler {
         _idempotency_key: &str,
         req: AppletTransactionRequestBody,
     ) -> std::result::Result<AppletTransactionOutcome, WireError> {
-        let AppletTransactionRequestBody::Events(req) = req else {
-            return Err(WireError::Protocol(
-                "managed Actor authoring completion installation is not available".into(),
-            ));
+        let req = match req {
+            AppletTransactionRequestBody::Authoring(body) => {
+                let identity = validate_managed_authoring_completion(
+                    &body,
+                    &body.source_id,
+                    &self.applet_id,
+                    &self.service_id,
+                )
+                .map_err(WireError::Protocol)?;
+                self.journal
+                    .install_managed_authoring(&identity, &body)
+                    .map_err(|error| WireError::Protocol(error.to_string()))?;
+                return Ok(AppletTransactionOutcome {
+                    status: arkret_models_integration::AppletTransactionStatus::Accepted,
+                    committed_event_refs: Vec::new(),
+                    rejections: Vec::new(),
+                    retry_after_ms: None,
+                });
+            }
+            AppletTransactionRequestBody::Events(req) => req,
         };
         let event_count = req.events.len();
         let mut rejections: Vec<arkret::AppletEventRejection> = Vec::new();
@@ -1130,9 +1183,23 @@ impl arkret::AppletHandler for BridgeAppletHandler {
 mod tests {
     use std::sync::Mutex;
 
+    use arkret::{
+        DidDocument, NonEmptyJsonObject, PayloadSigner, build_principal_signer_evidence,
+        build_service_signer_evidence,
+    };
+    use arkret_models_integration::{
+        AppletApprovalRequest, AppletDidMethodVersionEvidence, AppletEndpointAuth,
+        AppletEndpointEntry, AppletEndpointMethod, AppletGhostActorMode,
+        AppletInstallAuthoringRequestBasis, AppletInstallRequestBody,
+        AppletInstallReuseRequestBody, AppletManagedActorAuthoringContext,
+        AppletManagedActorAuthoringRequest, AppletManagedActorCommittedRequest,
+        AppletManagedActorPurpose, AppletPackage, AppletRegistrationEpochEvidence,
+        AppletServiceSignerEvidence, AppletWireNamespaces, ManagedActorPrincipalSignerEvidence,
+        ReuseExistingManagedActor,
+    };
     use arkret_wire::{
         Base64UrlString, CommitStreamRef, DetachedObjectSignature, DetachedSignatureAlgorithm,
-        DetachedSignatureContext, RealmCommit, RealmCommitAuthorityRef,
+        DetachedSignatureContext, EventId, PayloadSignature, RealmCommit, RealmCommitAuthorityRef,
     };
 
     use super::*;
@@ -1193,6 +1260,338 @@ mod tests {
             selected.sort();
             Ok(selected)
         }
+    }
+
+    struct StubPayloadSigner {
+        did: Did,
+        verification_method: DidUrl,
+    }
+
+    impl PayloadSigner for StubPayloadSigner {
+        fn signer_did(&self) -> &Did {
+            &self.did
+        }
+
+        fn verification_method_id(&self) -> &DidUrl {
+            &self.verification_method
+        }
+
+        fn sign_payload(&self, canonical_bytes: &[u8]) -> arkret_wire::Result<PayloadSignature> {
+            let payload_digest =
+                arkret::Hash::new(arkret::canonical::sha256_digest(canonical_bytes))?;
+            Ok(PayloadSignature {
+                verification_method: self.verification_method.clone(),
+                payload_digest: payload_digest.clone(),
+                created_at: "2026-09-16T00:00:00Z".parse().unwrap(),
+                jws: format!(
+                    "eyJhbGciOiJFZDI1NTE5In0..{}",
+                    payload_digest
+                        .as_str()
+                        .strip_prefix("sha256:")
+                        .expect("test digest has the registered prefix")
+                ),
+            })
+        }
+    }
+
+    fn test_jwk() -> NonEmptyJsonObject {
+        NonEmptyJsonObject::new(BTreeMap::from([
+            ("kty".to_owned(), json!("OKP")),
+            ("crv".to_owned(), json!("Ed25519")),
+            (
+                "x".to_owned(),
+                json!("11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"),
+            ),
+        ]))
+        .unwrap()
+    }
+
+    fn test_committed_ref(realm_id: &RealmId, seed: u8) -> arkret::CommittedEventRef {
+        arkret::CommittedEventRef {
+            event_id: EventId::from_digest(DigestSuite::Sha256, [seed; 32]),
+            commit_id: arkret::RealmCommitId::from_digest([seed.wrapping_add(1); 32]),
+            stream_ref: CommitStreamRef::Realm {
+                realm_id: realm_id.clone(),
+            },
+            stream_position: u64::from(seed),
+        }
+    }
+
+    fn managed_authoring_fixture(
+        edge: &ArkretEdge,
+    ) -> (AppletAuthoringTransactionRequestBody, arkret::ActorId) {
+        let realm_id =
+            RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").unwrap();
+        let managed_principal = DidCoreId::new("ak:did_core:webvh:z6mkmanagedbot").unwrap();
+        let managed_actor = arkret::ActorId::account(arkret::AccountId::new(
+            managed_principal.clone(),
+            edge.station_id.clone(),
+        ));
+        let controller = DidCoreId::new("ak:did_core:webvh:z6mkcontroller").unwrap();
+        let mut package = AppletPackage::new(
+            "test-managed-authoring",
+            edge.applet_id.clone(),
+            edge.service_actor_id.clone(),
+            edge.service_did.clone(),
+            controller,
+            "https://bridge.example",
+            managed_actor.clone(),
+            vec!["test".into()],
+            AppletWireNamespaces::default(),
+        );
+        package.requested_scopes = vec!["ak.message.create".into()];
+        package.endpoint_policy.endpoints.push(AppletEndpointEntry {
+            method: AppletEndpointMethod::Post,
+            path: "/_arkret/edge/applet/transactions".into(),
+            auth: Some(AppletEndpointAuth::WebhookSignature),
+            description: None,
+            extra: Default::default(),
+        });
+        let registration_epoch_evidence = AppletRegistrationEpochEvidence::from_did_document(
+            &DidDocument::new(
+                edge.service_did.clone(),
+                "applet-webhook",
+                "z6MkrJVnaZkeF7EsnJQ9xQY4bqG9tbeFqTzL7uTVs11FwUjT",
+            ),
+            AppletDidMethodVersionEvidence::versioned(
+                "did:webvh",
+                Some("test-registration-version".into()),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        package
+            .stamp_registration_epoch(&registration_epoch_evidence)
+            .unwrap();
+        package.stamp_package_digest().unwrap();
+        let requested_at = "2026-09-16T00:00:00Z".parse().unwrap();
+        let scope = ScopeRef::Realm {
+            realm_id: realm_id.clone(),
+        };
+        let registration_event = arkret_wire::test_support::raw_event_at(
+            "ak.applet.registration",
+            scope.clone(),
+            edge.service_actor_id.clone(),
+            edge.station_id.clone(),
+            json!({"manifest": {"registration_epoch_evidence": registration_epoch_evidence}}),
+            requested_at,
+        )
+        .unwrap();
+        let grant_event = arkret_wire::test_support::raw_event_at(
+            "ak.capability.grant",
+            scope.clone(),
+            edge.service_actor_id.clone(),
+            edge.station_id.clone(),
+            json!({}),
+            requested_at,
+        )
+        .unwrap();
+        let basis = AppletInstallAuthoringRequestBasis {
+            schema: AppletInstallAuthoringRequestBasis::SCHEMA.to_owned(),
+            purpose: AppletManagedActorPurpose::InstallBot,
+            target_station_id: edge.station_id.clone(),
+            install_actor_id: arkret::ActorId::service(edge.service_actor_id.clone()),
+            applet_id: edge.applet_id.clone(),
+            service_id: edge.service_actor_id.clone(),
+            package_digest: package.package_digest.clone().unwrap(),
+            effective_scope: scope,
+            approval_request: AppletApprovalRequest {
+                approve_actions: vec!["ak.message.create".into()],
+                ghost_actor_mode: AppletGhostActorMode::Disallowed,
+                delegated_native_actors_allowed: false,
+                e2ee_join_allowed: false,
+                widget_allowed: false,
+            },
+            actor_policy: None,
+            e2ee_policy: None,
+            widget_policy: None,
+            registration_event,
+            capability_grant_events: vec![grant_event],
+        };
+        let station_did = Did::new("did:webvh:z6mkstation:station.example").unwrap();
+        let signer = StubPayloadSigner {
+            did: station_did.clone(),
+            verification_method: DidUrl::new(format!("{station_did}#key-1")).unwrap(),
+        };
+        let request = AppletManagedActorAuthoringRequest::sign(
+            basis,
+            arkret::Hash::new(format!("sha256:{}", "44".repeat(32))).unwrap(),
+            edge.station_id.clone(),
+            requested_at,
+            requested_at + chrono::Duration::minutes(5),
+            &signer,
+        )
+        .unwrap();
+        let reuse = ReuseExistingManagedActor {
+            actor_id: managed_actor.clone(),
+            managed_actor_provision_ref: test_committed_ref(&realm_id, 1),
+            pcr_genesis_ref: test_committed_ref(&realm_id, 2),
+            accountability_grant_ref: test_committed_ref(&realm_id, 3),
+            profile_event_ref: test_committed_ref(&realm_id, 4),
+            initial_package_bot_actor_id: managed_actor.clone(),
+        };
+        let committed_request =
+            AppletInstallRequestBody::Reuse(Box::new(AppletInstallReuseRequestBody {
+                applet_package: package,
+                authoring_request: request,
+                reuse_existing_managed_actor: reuse,
+            }));
+        let commit_id = arkret::RealmCommitId::from_digest([0x2c; 32]);
+        let applet_evidence = build_service_signer_evidence(
+            edge.service_actor_id.clone(),
+            edge.service_verification_method().unwrap(),
+            test_jwk(),
+            commit_id.clone(),
+            requested_at,
+        )
+        .unwrap();
+        let principal_evidence = build_principal_signer_evidence(
+            managed_principal,
+            DidUrl::new("did:webvh:z6mkmanagedbot:bot.example#key-1").unwrap(),
+            test_jwk(),
+            commit_id.clone(),
+            requested_at,
+        )
+        .unwrap();
+        let attester_evidence = build_service_signer_evidence(
+            edge.station_id.clone(),
+            signer.verification_method,
+            test_jwk(),
+            commit_id.clone(),
+            requested_at,
+        )
+        .unwrap();
+        (
+            AppletAuthoringTransactionRequestBody {
+                applet_id: edge.applet_id.clone(),
+                source_id: edge.station_id.clone(),
+                authoring_context: AppletManagedActorAuthoringContext {
+                    committed_request: AppletManagedActorCommittedRequest::Install(Box::new(
+                        committed_request,
+                    )),
+                    realm_stream_head: arkret::CommitStreamHead {
+                        stream_ref: CommitStreamRef::Realm { realm_id },
+                        stream_position: 41,
+                        commit_id,
+                    },
+                    applet_service_signer_evidence: AppletServiceSignerEvidence {
+                        signer_resolution_evidence_ref: applet_evidence
+                            .signer_evidence_ref()
+                            .unwrap(),
+                        authenticated_signer_evidence: applet_evidence,
+                    },
+                    managed_actor_signer_evidence: ManagedActorPrincipalSignerEvidence {
+                        signer_resolution_evidence_ref: principal_evidence
+                            .signer_evidence_ref()
+                            .unwrap(),
+                        authenticated_signer_evidence: principal_evidence,
+                        attester_signer_evidence: attester_evidence,
+                    },
+                },
+            },
+            managed_actor,
+        )
+    }
+
+    #[test]
+    fn managed_authoring_completion_is_durable_exact_and_fail_closed() {
+        let store = Arc::new(MemoryAuthoringStore::default());
+        let edge = test_edge(store.clone());
+        let (body, managed_actor) = managed_authoring_fixture(&edge);
+        let identity = validate_managed_authoring_completion(
+            &body,
+            &edge.station_id,
+            &edge.applet_id,
+            &edge.service_actor_id,
+        )
+        .unwrap();
+
+        let mut invalid = body.clone();
+        invalid
+            .authoring_context
+            .managed_actor_signer_evidence
+            .signer_resolution_evidence_ref = arkret::SignerEvidenceRef::new(format!(
+            "ak:signer_evidence:sha256:{}",
+            "00".repeat(32)
+        ))
+        .unwrap();
+        assert!(
+            validate_managed_authoring_completion(
+                &invalid,
+                &edge.station_id,
+                &edge.applet_id,
+                &edge.service_actor_id,
+            )
+            .is_err()
+        );
+        assert!(
+            store.0.lock().unwrap().is_empty(),
+            "invalid evidence wrote state"
+        );
+
+        assert!(
+            edge.journal
+                .install_managed_authoring(&identity, &body)
+                .is_err(),
+            "authenticated delivery must not replace local authoring preparation"
+        );
+        assert!(store.0.lock().unwrap().is_empty());
+        assert!(
+            edge.prepare_managed_authoring(&body.authoring_context.committed_request)
+                .unwrap()
+        );
+        assert!(
+            !edge
+                .prepare_managed_authoring(&body.authoring_context.committed_request)
+                .unwrap()
+        );
+
+        assert_eq!(
+            edge.journal
+                .install_managed_authoring(&identity, &body)
+                .unwrap(),
+            crate::authoring::ManagedAuthoringInstall::Installed
+        );
+        let rows_after_first = store.0.lock().unwrap().clone();
+        assert_eq!(rows_after_first.len(), 3);
+        assert_eq!(
+            edge.journal
+                .install_managed_authoring(&identity, &body)
+                .unwrap(),
+            crate::authoring::ManagedAuthoringInstall::ExactReplay
+        );
+        assert_eq!(*store.0.lock().unwrap(), rows_after_first);
+
+        let mut conflict = body.clone();
+        conflict.authoring_context.realm_stream_head.stream_position += 1;
+        assert!(
+            edge.journal
+                .install_managed_authoring(&identity, &conflict)
+                .is_err()
+        );
+        assert_eq!(*store.0.lock().unwrap(), rows_after_first);
+
+        drop(edge);
+        let restarted = test_edge(store);
+        let realm_id = body
+            .authoring_context
+            .realm_stream_head
+            .stream_ref
+            .realm_id();
+        let retained = restarted
+            .installed_managed_authoring(
+                &ScopeRef::Realm {
+                    realm_id: realm_id.clone(),
+                },
+                &managed_actor,
+            )
+            .unwrap()
+            .expect("completion survives rebuilding the edge over the same durable store");
+        assert_eq!(
+            arkret::canonical::canonical_json_bytes(&retained).unwrap(),
+            arkret::canonical::canonical_json_bytes(&body).unwrap()
+        );
     }
 
     fn message_intent(edge: &ArkretEdge, realm: &RealmId, text: &str) -> EventIntent {
