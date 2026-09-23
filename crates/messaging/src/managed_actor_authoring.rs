@@ -918,10 +918,7 @@ mod ghost_bundle_tests {
         applet_managed_actor_unit_event_kinds, applet_managed_actor_unit_submissions,
     };
     use arkret_signatures::Ed25519PayloadSigner;
-    use arkret_wire::{
-        CommitStreamRef, CommittedEventRef, DidUrl, EventId, GrantId, RealmCommitId, RealmId,
-        TrustDomainId,
-    };
+    use arkret_wire::{DidUrl, EventId, GrantId, RealmId, TrustDomainId};
     use chrono::{DateTime, TimeZone};
 
     use super::*;
@@ -999,15 +996,8 @@ mod ghost_bundle_tests {
         RealmId::from_event_id(&event_id(0x21))
     }
 
-    fn registration_ref() -> CommittedEventRef {
-        CommittedEventRef {
-            event_id: event_id(0x44),
-            commit_id: RealmCommitId::from_digest([0x45; 32]),
-            stream_ref: CommitStreamRef::Realm {
-                realm_id: realm_id(),
-            },
-            stream_position: 7,
-        }
+    fn registration_ref() -> EventId {
+        event_id(0x44)
     }
 
     fn trust_domain() -> TrustDomainId {

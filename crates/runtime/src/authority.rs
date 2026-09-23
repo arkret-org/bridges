@@ -22,7 +22,7 @@ use arkret_wire::{
     AuthoredEvent, AuthorityBundleRequest, AuthorityCommitStatus, AuthorityHandoffRequest,
     AuthorityRejectionStatus, AuthoritySubmitOutcome, AuthoritySubmitRequest, CommitStreamHead,
     CommitStreamRef, CommittedEventRef, DetachedSignatureContext, DidUrl, Event,
-    EventCommitSubmission, MlsCommitSubmission, MlsWelcomeDelivery, ProducerEventProof,
+    EventAdmissionSubmission, MlsCommitSubmission, MlsWelcomeDelivery, ProducerEventProof,
     RealmAuthorityBundle, RealmCommit, RealmStateSnapshot, StreamScanOutcome, StreamScanRequest,
 };
 use async_trait::async_trait;
@@ -165,7 +165,7 @@ impl SubmissionQueue {
     }
 
     pub fn enqueue_event(&mut self, event: AuthoredEvent) -> Result<()> {
-        self.enqueue(AuthoritySubmitRequest::Event(EventCommitSubmission::new(
+        self.enqueue(AuthoritySubmitRequest::Event(EventAdmissionSubmission::new(
             event.into_event(),
         )))
     }

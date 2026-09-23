@@ -5,7 +5,7 @@
 //!   [`ArkretEdge::delegated_intent`] build complete producer `EventIntent`s;
 //!   [`ArkretEdge::author_and_sign`] derives the one content-bound identity and signs it, then
 //!   [`ArkretEdge::submit_event`] hands it to the current governance Station as an
-//!   `EventCommitSubmission` and retains the authority-signed commit reference.
+//!   `EventAdmissionSubmission` and retains the authority-signed commit reference.
 //! - **Inbound (arkret → app)**: transactions pushed by the arkret server via the applet HTTP
 //!   endpoints are placed into the `inbound_tx` queue by [`BridgeAppletHandler`]; after the core
 //!   consumes them they are forwarded to the app adapter.
@@ -52,7 +52,7 @@ use arkret_models_integration::{
 use arkret_wire::ProfileId;
 use arkret_wire::{
     AuthorityRejectionStatus, AuthoritySubmitOutcome, AuthorizationRef, DidUrl,
-    EventCommitSubmission, SignalEnvelope, event_spec,
+    EventAdmissionSubmission, SignalEnvelope, event_spec,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -508,7 +508,7 @@ impl ArkretEdge {
             }
         }
         let request =
-            SelfAuthoritySubmitRequest::Event(EventCommitSubmission::new(event.event().clone()));
+            SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(event.event().clone()));
         let options = ClientRequestOptions::new().idempotency_key(event.event_id().as_str());
         let outcome = self
             .client
