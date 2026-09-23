@@ -1357,6 +1357,7 @@ mod tests {
                 .expect("applet id"),
                 source_id: arkret::project_did_to_core_id(&server_did()).expect("server core id"),
                 events,
+                committed_events: Vec::new(),
                 signals: Vec::new(),
             },
         )
