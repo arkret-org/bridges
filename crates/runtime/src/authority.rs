@@ -22,7 +22,7 @@ use arkret_wire::{
     AuthoredEvent, AuthorityBundleRequest, AuthorityCommitStatus, AuthorityHandoffRequest,
     AuthorityRejectionStatus, AuthoritySubmitOutcome, AuthoritySubmitRequest, CommitStreamHead,
     CommitStreamRef, CommittedEventRef, DetachedSignatureContext, DidUrl, Event,
-    EventCommitSubmission, MlsCommitSubmission, MlsWelcomeDelivery, ProducerEventProof,
+    EventAdmissionSubmission, MlsCommitSubmission, MlsWelcomeDelivery, ProducerEventProof,
     RealmAuthorityBundle, RealmCommit, RealmStateSnapshot, StreamScanDirection, StreamScanOutcome,
     StreamScanRequest,
 };
@@ -166,9 +166,9 @@ impl SubmissionQueue {
     }
 
     pub fn enqueue_event(&mut self, event: AuthoredEvent) -> Result<()> {
-        self.enqueue(AuthoritySubmitRequest::Event(EventCommitSubmission::new(
-            event.into_event(),
-        )))
+        self.enqueue(AuthoritySubmitRequest::Event(
+            EventAdmissionSubmission::new(event.into_event()),
+        ))
     }
 
     pub fn enqueue_mls_commit(&mut self, submission: MlsCommitSubmission) -> Result<()> {
