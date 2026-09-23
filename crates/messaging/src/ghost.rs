@@ -11,7 +11,7 @@ use arkret_models_integration::{
     AppletBridgeErrorClass, AppletManagedActorProvisionPayload, AppletManagedActorRole,
     GhostActorProvisionOutcome, GhostActorProvisionRequestBody, GhostExternalTuple,
 };
-use arkret_wire::{CommitStreamRef, StreamScanRequest};
+use arkret_wire::{CommitStreamRef, StreamScanDirection, StreamScanRequest};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -453,7 +453,7 @@ pub(crate) async fn find_existing_portal_strand(
         let request = StreamScanRequest {
             realm_id: realm_id.clone(),
             stream_ref: stream_ref.clone(),
-            after_position,
+            direction: StreamScanDirection::After(after_position),
             limit: PORTAL_STRAND_SCAN_PAGE_LIMIT,
         };
         let page = edge.client().scan_commit_stream(&request).await?;

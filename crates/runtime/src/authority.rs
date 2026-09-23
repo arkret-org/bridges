@@ -23,7 +23,8 @@ use arkret_wire::{
     AuthorityRejectionStatus, AuthoritySubmitOutcome, AuthoritySubmitRequest, CommitStreamHead,
     CommitStreamRef, CommittedEventRef, DetachedSignatureContext, DidUrl, Event,
     EventCommitSubmission, MlsCommitSubmission, MlsWelcomeDelivery, ProducerEventProof,
-    RealmAuthorityBundle, RealmCommit, RealmStateSnapshot, StreamScanOutcome, StreamScanRequest,
+    RealmAuthorityBundle, RealmCommit, RealmStateSnapshot, StreamScanDirection, StreamScanOutcome,
+    StreamScanRequest,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -346,7 +347,7 @@ impl JoinBootstrap {
         for (head, tail) in heads.iter().zip(&self.stream_tails) {
             if tail.request.realm_id != self.snapshot.realm_id
                 || tail.request.stream_ref != head.stream_ref
-                || tail.request.after_position != Some(head.stream_position)
+                || tail.request.direction != StreamScanDirection::After(Some(head.stream_position))
             {
                 return Err(BridgeProtocolError::InvalidBootstrap);
             }
@@ -397,7 +398,7 @@ impl StreamCursorBook {
             .heads
             .get(&tail.request.stream_ref)
             .ok_or(BridgeProtocolError::InvalidStreamTail)?;
-        if tail.request.after_position != Some(current.stream_position) {
+        if tail.request.direction != StreamScanDirection::After(Some(current.stream_position)) {
             return Err(BridgeProtocolError::InvalidStreamTail);
         }
         if let Some(first) = tail.outcome.committed_events.first()
