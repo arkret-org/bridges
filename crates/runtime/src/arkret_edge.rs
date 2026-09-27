@@ -2083,14 +2083,12 @@ mod tests {
         );
         assert!(edge.journal.pending_events().await.unwrap().is_empty());
 
-        // A different logical delivery of the same text is a different Event and
-        // is never deduplicated against the rejected one.
+        // A later authored delivery of the same text has a different canonical
+        // identity. Operation ids alone are not part of the Event preimage.
+        let later_intent = message_intent(&edge, &realm, "identical text")
+            .with_created_at(old.event().created_at + chrono::TimeDelta::milliseconds(1));
         let new = edge
-            .author_and_sign(
-                &realm,
-                "new-key-delivery",
-                message_intent(&edge, &realm, "identical text"),
-            )
+            .author_and_sign(&realm, "new-key-delivery", later_intent)
             .await
             .unwrap();
         assert_ne!(new.event_id(), old.event_id());
