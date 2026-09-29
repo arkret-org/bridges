@@ -582,29 +582,15 @@ mod provider_tests {
             ),
             (arkret::ActorId::service(principal), false),
         ] {
-            // Every durable provisioning ref is a closed committed reference:
-            // the Event, the commit that carries it, and its exact coordinate in
-            // that Realm's own stream.
-            let committed = |position: u64| arkret_wire::CommittedEventRef {
-                event_id: arkret::EventId::new(
-                    "ak:event:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-                )
-                .unwrap(),
-                commit_id: arkret::RealmCommitId::from_digest([1; 32]),
-                stream_ref: arkret_wire::CommitStreamRef::Realm {
-                    realm_id: RealmId::new(
-                        "ak:realm:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
-                    )
-                    .unwrap(),
-                },
-                stream_position: position,
-            };
+            // Every durable provisioning ref is the accepted Event id
+            // (`applet-ghost-operations.schema.json#/$defs/event_ref`).
+            let event_ref = "ak:event:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
             let response: GhostActorProvisionOutcome = serde_json::from_value(serde_json::json!({
                 "ghost_actor_id": actor,
-                "managed_actor_provision_ref": committed(0),
+                "managed_actor_provision_ref": event_ref,
                 "principal_control_realm_id": "ak:realm:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-                "profile_event_ref": committed(1),
-                "accountability_grant_ref": committed(2),
+                "profile_event_ref": event_ref,
+                "accountability_grant_ref": event_ref,
                 "authorization_ref": "ak:grant:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
             })).unwrap();
             assert_eq!(

@@ -132,21 +132,6 @@ fn messaging_bridge_config(config: &runtime::Config) -> Result<MessagingBridgeCo
 pub(crate) const EXTERNAL_REF_SCHEMA: &str = "org.arkret.bridge.external_ref.messaging.v1";
 pub(crate) const MESSAGE_MAPPING_KEY_SEPARATOR: char = '\u{1f}';
 
-/// Persist an authority-signed committed reference as one canonical column
-/// value.
-///
-/// A [`CommittedEventRef`] is closed: it names the Event, the commit that
-/// carries it, the independent stream it landed in, and the position inside
-/// that stream. Storing only the event id would drop the stream coordinate,
-/// so the mapping tables retain the whole reference in canonical JSON.
-pub(crate) fn committed_ref_column(
-    committed_ref: &arkret_wire::CommittedEventRef,
-) -> Result<String> {
-    serde_json::to_string(committed_ref).map_err(|error| {
-        BridgeError::Arkret(format!("committed reference is not serializable: {error}"))
-    })
-}
-
 pub fn json_scalar_id_string(value: &Value) -> Option<String> {
     if let Some(s) = value.as_str() {
         let trimmed = s.trim();
@@ -718,10 +703,8 @@ impl MessageContext {
                                     external_actor_id.clone(),
                                     provisioned.outcome.ghost_actor_id.clone(),
                                     provisioned.did.clone(),
-                                    committed_ref_column(&provisioned.outcome.profile_event_ref)?,
-                                    committed_ref_column(
-                                        &provisioned.outcome.accountability_grant_ref,
-                                    )?,
+                                    provisioned.outcome.profile_event_ref.to_string(),
+                                    provisioned.outcome.accountability_grant_ref.to_string(),
                                     provisioned.outcome.authorization_ref.to_string(),
                                     display_name.map(str::to_owned),
                                 )
@@ -887,10 +870,8 @@ impl MessageContext {
                                     external_user_id.clone(),
                                     provisioned.outcome.ghost_actor_id.clone(),
                                     provisioned.did.clone(),
-                                    committed_ref_column(&provisioned.outcome.profile_event_ref)?,
-                                    committed_ref_column(
-                                        &provisioned.outcome.accountability_grant_ref,
-                                    )?,
+                                    provisioned.outcome.profile_event_ref.to_string(),
+                                    provisioned.outcome.accountability_grant_ref.to_string(),
                                     provisioned.outcome.authorization_ref.to_string(),
                                     display_name.map(str::to_owned),
                                 )
