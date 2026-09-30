@@ -501,6 +501,102 @@ impl ManagedActorProofVerifier for LocalServiceManagedActorProofVerifier {
     }
 }
 
+/// Verify an accepted delivery with actual producer and governance keys. The
+/// host supplies these from its installed trust material, never from the pair.
+pub fn validate_applet_committed_delivery(
+    pair: &arkret_models_integration::AppletCommittedEvent,
+    digest_suite: arkret_canonical::DigestSuite,
+    producer_key: &PublicKeyMaterial,
+    governance_key: &PublicKeyMaterial,
+) -> Result<CommittedEventRef> {
+    protocol(pair.validate_shape())?;
+    protocol(
+        pair.event
+            .verify_event_id_matches_content_with_digest_suite(digest_suite),
+    )?;
+    let proof = pair.event.producer_proof.as_ref().ok_or_else(|| {
+        BridgeProtocolError::Protocol("accepted delivery has no original producer proof".into())
+    })?;
+    let producer_did = protocol(arkret::verification_method_did(
+        proof.verification_method.as_str(),
+    ))?;
+    let producer_id = protocol(arkret_wire::project_did_to_core_id(&producer_did))?;
+    if let Some(actual) = committed_delivery_device_key(&proof.verification_method)? {
+        if actual
+            .ed25519_bytes()
+            .map_err(|error| BridgeProtocolError::Protocol(error.to_string()))?
+            != producer_key
+                .ed25519_bytes()
+                .map_err(|error| BridgeProtocolError::Protocol(error.to_string()))?
+        {
+            return Err(BridgeProtocolError::Protocol(
+                "Device producer key differs from its immutable DID".into(),
+            ));
+        }
+    }
+    if producer_did.method() != "key"
+        && &producer_id
+            != pair
+                .event
+                .executed_by
+                .as_ref()
+                .unwrap_or(&pair.event.actor_id)
+                .signing_principal_id()
+    {
+        return Err(BridgeProtocolError::Protocol(
+            "accepted delivery producer is bound to another actor".into(),
+        ));
+    }
+    let payload = protocol(pair.event.digest_payload())?;
+    let bytes = protocol(arkret_canonical::canonical_json_bytes(&payload))?;
+    protocol(verify_ed25519_detached_jws_proof(
+        proof,
+        &bytes,
+        &pair.event.actor_id,
+        producer_key,
+    ))?;
+    let unsigned = protocol(arkret_canonical::unsigned_value(
+        &pair.commit,
+        &["signature"],
+    ))?;
+    protocol(
+        arkret_signatures::detached_object::verify_detached_object_signature(
+            &pair.commit.signature,
+            &unsigned,
+            DetachedSignatureContext::RealmCommit,
+            governance_key,
+        ),
+    )?;
+    Ok(CommittedEventRef {
+        event_id: pair.event.event_id.clone(),
+        commit_id: pair.commit.commit_id.clone(),
+        stream_ref: pair.commit.stream_ref.clone(),
+        stream_position: pair.commit.stream_position,
+    })
+}
+
+/// Resolve the immutable original Device key from its self-certifying DID.
+/// The accepted governance Commit remains mandatory: did:key possession alone
+/// does not establish Account membership or authorize the submitted Event.
+pub fn committed_delivery_device_key(method: &arkret::DidUrl) -> Result<Option<PublicKeyMaterial>> {
+    use arkret::DidResolver as _;
+    let did = protocol(arkret::verification_method_did(method.as_str()))?;
+    if did.method() != "key" {
+        return Ok(None);
+    }
+    let resolved = arkret::DidKeyResolver::new()
+        .resolve_did(&did)
+        .map_err(|error| BridgeProtocolError::Protocol(error.to_string()))?;
+    let key = arkret::identity::jws::resolve_ed25519_pubkey_from_document(
+        &resolved.document,
+        method.as_str(),
+    )
+    .map_err(|error| BridgeProtocolError::Protocol(error.to_string()))?;
+    Ok(Some(PublicKeyMaterial::Ed25519Raw {
+        bytes: key.as_bytes().to_vec(),
+    }))
+}
+
 pub fn validate_producer_event<V: ProducerProofVerifier + ?Sized>(
     event: &Event,
     forbidden_station_id: Option<&DidCoreId>,
@@ -666,6 +762,151 @@ mod tests {
         };
         sign_event(&mut authored, &signer, SignEventOptions::new()).unwrap();
         (authored.into_event(), CryptoProofVerifier(public_key))
+    }
+
+    #[test]
+    fn committed_delivery_verifies_both_signatures_and_returns_exact_coordinates() {
+        use arkret_signatures::detached_object::sign_detached_object;
+        let (event, producer) = signed_event(
+            "did:web:producer.example",
+            "ak:did_core:web:producer.example",
+            [9; 32],
+        );
+        let key = arkret_signatures::development_signing_key("did:web:station.example");
+        let public = PublicKeyMaterial::Ed25519Raw {
+            bytes: key.verifying_key().to_bytes().to_vec(),
+        };
+        let method = DidUrl::new("did:web:station.example#commit").unwrap();
+        let at = event.created_at;
+        let placeholder = sign_detached_object(
+            &json!({}),
+            DetachedSignatureContext::RealmCommit,
+            method.clone(),
+            at,
+            &key,
+        )
+        .unwrap();
+        let mut commit = RealmCommit {
+            commit_id: RealmCommitId::from_digest([0x85; 32]),
+            realm_id: event.realm_id.clone(),
+            stream_ref: CommitStreamRef::Realm {
+                realm_id: event.realm_id.clone(),
+            },
+            stream_position: 3,
+            previous_commit_ref: Some(RealmCommitId::from_digest([0x84; 32])),
+            event_ref: event.event_id.clone(),
+            governance_generation: 1,
+            authority_ref: arkret_wire::RealmCommitAuthorityRef::GenesisOrChangeEvent(event_id(
+                0x83,
+            )),
+            committed_at: at,
+            signature: placeholder,
+        };
+        commit.signature = sign_detached_object(
+            &arkret_canonical::unsigned_value(&commit, &["signature"]).unwrap(),
+            DetachedSignatureContext::RealmCommit,
+            method,
+            at,
+            &key,
+        )
+        .unwrap();
+        let pair = arkret_models_integration::AppletCommittedEvent { commit, event };
+        let reference =
+            validate_applet_committed_delivery(&pair, DigestSuite::Sha256, &producer.0, &public)
+                .unwrap();
+        assert_eq!(reference.event_id, pair.event.event_id);
+        assert_eq!(reference.commit_id, pair.commit.commit_id);
+        assert_eq!(reference.stream_position, 3);
+        let mut wrong_event = pair.clone();
+        wrong_event
+            .event
+            .payload
+            .insert("body".into(), json!("changed"));
+        assert!(
+            validate_applet_committed_delivery(
+                &wrong_event,
+                DigestSuite::Sha256,
+                &producer.0,
+                &public
+            )
+            .is_err()
+        );
+        let mut wrong_commit = pair.clone();
+        wrong_commit.commit.stream_position += 1;
+        assert!(
+            validate_applet_committed_delivery(
+                &wrong_commit,
+                DigestSuite::Sha256,
+                &producer.0,
+                &public
+            )
+            .is_err()
+        );
+        assert!(
+            validate_applet_committed_delivery(&pair, DigestSuite::Sha256, &public, &public)
+                .is_err()
+        );
+        assert!(
+            validate_applet_committed_delivery(
+                &pair,
+                DigestSuite::Sha256,
+                &producer.0,
+                &producer.0
+            )
+            .is_err()
+        );
+        // A self-certifying Device signs for a full Account. Its Device DID
+        // differs from the Account principal, while the accepted Station
+        // Commit establishes that this exact original proof was admitted.
+        let device_seed = [0x31; 32];
+        let device_key =
+            Ed25519DetachedJwsSigner::from_seed(device_seed, "did:web:device.example#key");
+        let multibase =
+            arkret::ed25519_pubkey_to_did_key_multibase(&device_key.verifying_key().to_bytes());
+        let method = DidUrl::new(format!("did:key:{multibase}#{multibase}")).unwrap();
+        let mut event = pair.event.clone();
+        event.actor_id = ActorId::account(arkret_wire::AccountId::new(
+            DidCoreId::new("ak:did_core:web:user.example").unwrap(),
+            DidCoreId::new("ak:did_core:web:station.example").unwrap(),
+        ));
+        event.producer_proof = None;
+        let mut authored =
+            AuthoredEvent::finalize_with_digest_suite(event, DigestSuite::Sha256).unwrap();
+        let signer = Ed25519DetachedJwsSigner::from_seed(device_seed, method.as_str());
+        sign_event(&mut authored, &signer, SignEventOptions::new()).unwrap();
+        let event = authored.into_event();
+        let mut commit = pair.commit.clone();
+        commit.event_ref = event.event_id.clone();
+        commit.signature = sign_detached_object(
+            &arkret_canonical::unsigned_value(&commit, &["signature"]).unwrap(),
+            DetachedSignatureContext::RealmCommit,
+            commit.signature.verification_method.clone(),
+            at,
+            &key,
+        )
+        .unwrap();
+        let device_pair = arkret_models_integration::AppletCommittedEvent { event, commit };
+        let actual_device = committed_delivery_device_key(&method).unwrap().unwrap();
+        assert_eq!(
+            validate_applet_committed_delivery(
+                &device_pair,
+                DigestSuite::Sha256,
+                &actual_device,
+                &public
+            )
+            .unwrap()
+            .event_id,
+            device_pair.event.event_id
+        );
+        assert!(
+            validate_applet_committed_delivery(
+                &device_pair,
+                DigestSuite::Sha256,
+                &producer.0,
+                &public
+            )
+            .is_err()
+        );
     }
 
     #[test]

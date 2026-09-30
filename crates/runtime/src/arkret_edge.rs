@@ -19,8 +19,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-#[cfg(any(feature = "web", test))]
-use arkret::WireError;
 use arkret::http_client::{Auth, Client};
 #[cfg(any(feature = "web", test))]
 use arkret::identity::public_key_material_from_binding;
@@ -29,7 +27,7 @@ use arkret::signatures::{EventProofBuilder, VerificationMethodDocument};
 use arkret::signatures::{PublicKeyMaterial, SignEventOptions, sign_event};
 use arkret::{
     AppletId, AuthoredEvent, ClientRequestOptions, Did, DidCoreId, DigestSuite,
-    Ed25519PayloadSigner, Event, EventIntent, RealmId, ScopeRef, project_did_to_core_id,
+    Ed25519PayloadSigner, Event, EventIntent, RealmId, ScopeRef, WireError, project_did_to_core_id,
 };
 use arkret_event_draft::{EventSpec, TypedEventDraft};
 use arkret_models_collaboration::authority_commit::{
@@ -67,7 +65,6 @@ use crate::authoring::{
     external_operation_key, publication_outcome, scope_key, validate_managed_authoring_completion,
     validate_prepared_ghost_signer,
 };
-#[cfg(any(feature = "web", test))]
 use crate::authority::{LocalServiceManagedActorProofVerifier, validate_managed_actor_bundle};
 use crate::config::Config;
 #[cfg(any(feature = "web", test))]
@@ -299,12 +296,17 @@ impl ArkretEdge {
         managed_actor_verification_method: &DidUrl,
         managed_actor_public_key: &PublicKeyMaterial,
     ) -> Result<bool> {
-        if !matches!(
-            committed_request,
-            AppletManagedActorCommittedRequest::Ghost(_)
-        ) {
+        let locally_created = match committed_request {
+            AppletManagedActorCommittedRequest::Ghost(_) => true,
+            AppletManagedActorCommittedRequest::Install(install) => matches!(
+                install.as_ref(),
+                arkret_models_integration::AppletInstallRequestBody::Create(_)
+            ),
+        };
+        if !locally_created {
             return Err(BridgeError::App(
-                "only locally authored Ghost requests can be prepared by this runtime".into(),
+                "only locally authored creation requests can prepare new managed identity material"
+                    .into(),
             ));
         }
         validate_prepared_ghost_signer(
@@ -316,6 +318,52 @@ impl ArkretEdge {
             managed_actor_verification_method,
             managed_actor_public_key,
         )
+    }
+
+    /// Install a managed Actor completion using the host's configured own-Station
+    /// verification method and actual key. This shares the bridge HTTP verifier
+    /// and atomic journal with outbound-only hosts such as Savfox.
+    pub fn install_managed_authoring_completion(
+        &self,
+        body: &AppletAuthoringTransactionRequestBody,
+        source_verification_method: &DidUrl,
+        source_public_key: &PublicKeyMaterial,
+    ) -> Result<()> {
+        let identity = validate_managed_authoring_completion(
+            body,
+            &self.station_id,
+            &self.applet_id,
+            &self.service_actor_id,
+        )
+        .map_err(BridgeError::App)?;
+        if self
+            .journal
+            .is_exact_managed_authoring_replay(&identity, body)?
+        {
+            return Ok(());
+        }
+        let attester = &body
+            .authoring_context
+            .managed_actor_signer_evidence
+            .attester_signer_evidence;
+        if &attester.verification_method != source_verification_method {
+            return Err(BridgeError::App(
+                "completion attester differs from configured own-Station method".into(),
+            ));
+        }
+        verify_managed_authoring_closure(
+            body,
+            &self.service_actor_id,
+            &self.service_verification_method()?,
+            &PublicKeyMaterial::Ed25519Raw {
+                bytes: self.signer.verifying_key().to_bytes().to_vec(),
+            },
+            &self.journal,
+            source_public_key,
+        )
+        .map_err(|error| BridgeError::App(error.to_string()))?;
+        self.journal.install_managed_authoring(&identity, body)?;
+        Ok(())
     }
 
     /// The complete service-actor write for `content`. Applet-originated writes
@@ -353,12 +401,75 @@ impl ArkretEdge {
     where
         K: EventSpec,
     {
-        let authorization_ref = validate_authorization_ref(authorization_ref)?;
-        actor.validate()?;
-        Ok(TypedEventDraft::<K>::new(
-            ScopeRef::Realm {
+        self.delegated_intent_in_scope::<K>(
+            actor,
+            &ScopeRef::Realm {
                 realm_id: realm_id.clone(),
             },
+            content,
+            authorization_ref,
+        )
+    }
+
+    /// A Circle completion authorizes that exact Circle; a Realm completion
+    /// cannot substitute for its scope-specific installed authoring context.
+    pub fn delegated_intent_in_scope<K>(
+        &self,
+        actor: &arkret::AccountId,
+        scope: &ScopeRef,
+        content: K::Payload,
+        authorization_ref: &str,
+    ) -> Result<EventIntent>
+    where
+        K: EventSpec,
+    {
+        let authorization_ref = validate_authorization_ref(authorization_ref)?;
+        actor.validate()?;
+        let actor_id = arkret::ActorId::account(actor.clone());
+        if self.journal.is_locally_managed_actor(&actor_id)? {
+            let installed = self.installed_managed_authoring(scope, &actor_id)?.ok_or_else(||
+                BridgeError::Runtime("managed Actor completion remains pending; retain the original publication for retry".into()))?;
+            let grant_is_installed = match &installed.authoring_context.committed_request {
+                // A Ghost's creation grant only authorizes provisioning. Its
+                // ordinary action-specific capability comes from the host's
+                // original authorization record and the receiving Station gate.
+                AppletManagedActorCommittedRequest::Ghost(_) => true,
+                AppletManagedActorCommittedRequest::Install(install) => install
+                    .authoring_request()
+                    .basis
+                    .install()
+                    .is_some_and(|basis| {
+                        basis.capability_grant_events.iter().any(|event| {
+                            arkret_wire::GrantId::from_event_id(&event.event_id).as_str()
+                                == authorization_ref.as_str()
+                        })
+                    }),
+            };
+            if !grant_is_installed {
+                return Err(BridgeError::App(
+                    "managed Actor authorization is outside its exact installed scope grants"
+                        .into(),
+                ));
+            }
+            let root = &installed
+                .authoring_context
+                .applet_service_signer_evidence
+                .authenticated_signer_evidence;
+            let actual = PublicKeyMaterial::Jwk {
+                value: serde_json::to_value(&root.public_key_jwk)?,
+            };
+            if root.subject_id != self.service_actor_id
+                || root.verification_method != self.service_verification_method()?
+                || actual.ed25519_bytes()? != *self.signer.verifying_key().as_bytes()
+            {
+                return Err(BridgeError::App(
+                    "managed Actor ordinary authoring requires its installed exact Service root"
+                        .into(),
+                ));
+            }
+        }
+        Ok(TypedEventDraft::<K>::new(
+            scope.clone(),
             arkret::ActorId::account(actor.clone()),
             content,
         )?
@@ -662,7 +773,7 @@ impl ArkretEdge {
         self.applet_id.as_str()
     }
 
-    /// Media upload: returns the blob reference string.
+    /// Plaintext media upload: returns the blob reference string.
     pub async fn upload_blob(&self, bytes: &[u8], mime: &str) -> Result<String> {
         let meta = arkret_models_collaboration::objects::blob::BlobUploadMetadata {
             realm_id: None,
@@ -670,7 +781,7 @@ impl ArkretEdge {
             size_bytes: bytes.len() as u64,
             media_type: Some(mime.to_owned()),
             filename: None,
-            purpose: None,
+            encryption: None,
         };
         let res = self.client.blob_upload_bytes(&meta, bytes.to_vec()).await?;
         Ok(res.blob_ref.to_string())
@@ -825,88 +936,36 @@ impl BridgeAppletHandler {
     /// this process. A Ghost leaf must also match the root VM/key derived from
     /// the locally encrypted identity and frozen before handoff. The exact
     /// prepared four-Event bundle and its aggregate proof must verify under the
-    /// Applet Service key held by this process. Station attester verification
-    /// is not yet locally closed, so even a matching Ghost remains
-    /// un-installable here. Bot/Reuse remains closed until its original
-    /// immutable anchors are retained locally.
+    /// Applet Service key held by this process. The attester leaf is rebuilt
+    /// from the accepted own-Station Service binding. Create and Ghost require
+    /// their locally prepared exact unit; reuse requires the original anchors.
     fn verify_local_managed_authoring_closure(
         &self,
         body: &AppletAuthoringTransactionRequestBody,
     ) -> std::result::Result<(), WireError> {
-        let service_evidence = &body
-            .authoring_context
-            .applet_service_signer_evidence
-            .authenticated_signer_evidence;
-        let reported_key = PublicKeyMaterial::Jwk {
-            value: serde_json::to_value(&service_evidence.public_key_jwk)
-                .map_err(|error| WireError::Protocol(error.to_string()))?,
-        };
-        let reported_key = reported_key
-            .ed25519_bytes()
-            .map_err(|error| WireError::Protocol(error.to_string()))?;
-        let local_key = self
-            .service_public_key
-            .ed25519_bytes()
-            .map_err(|error| WireError::Protocol(error.to_string()))?;
-        if service_evidence.verification_method != self.service_verification_method
-            || reported_key != local_key
-        {
-            return Err(WireError::Protocol(
-                "authoring completion Applet Service evidence differs from the local signing key"
-                    .to_owned(),
-            ));
-        }
-
-        let managed_evidence = &body
+        let attester = &body
             .authoring_context
             .managed_actor_signer_evidence
-            .authenticated_signer_evidence;
-        if managed_evidence.authority_commit_id
-            != body.authoring_context.realm_stream_head.commit_id
-        {
+            .attester_signer_evidence;
+        let accepted = self
+            .did_authority
+            .service_verification_method(&attester.verification_method, chrono::Utc::now())
+            .map_err(WireError::Protocol)?;
+        if project_did_to_core_id(accepted.binding().did())? != body.source_id {
             return Err(WireError::Protocol(
-                "managed Actor signer evidence is not bound to the reported Realm head".to_owned(),
+                "managed Actor attester is not its own Station".into(),
             ));
         }
-
-        if matches!(
-            body.authoring_context.committed_request,
-            AppletManagedActorCommittedRequest::Install(ref install)
-                if matches!(&**install, arkret_models_integration::AppletInstallRequestBody::Reuse(_))
-        ) {
-            return Err(WireError::Protocol(
-                "managed Actor reuse has no locally retained original Bot identity anchors"
-                    .to_owned(),
-            ));
-        }
-
-        self.journal
-            .verify_prepared_ghost_signer(body)
+        let source_key = public_key_material_from_binding(&accepted, &attester.verification_method)
             .map_err(|error| WireError::Protocol(error.to_string()))?;
-
-        let AppletManagedActorCommittedRequest::Ghost(ghost) =
-            &body.authoring_context.committed_request
-        else {
-            return Err(WireError::Protocol(
-                "managed Actor Bot creation has no locally retained immutable anchors".to_owned(),
-            ));
-        };
-        let verifier = LocalServiceManagedActorProofVerifier::new(
-            self.service_id.clone(),
-            self.service_verification_method.clone(),
-            self.service_public_key.clone(),
+        verify_managed_authoring_closure(
+            body,
+            &self.service_id,
+            &self.service_verification_method,
+            &self.service_public_key,
+            &self.journal,
+            &source_key,
         )
-        .map_err(|error| WireError::Protocol(error.to_string()))?;
-        validate_managed_actor_bundle(
-            &ghost.authoring_request,
-            &ghost.managed_actor_bundle,
-            &verifier,
-        )
-        .map_err(|error| WireError::Protocol(error.to_string()))?;
-
-        Err(WireError::Protocol(
-            "managed Actor Station attester closure is not installed".to_owned(),
-        ))
     }
 
     /// Whether this applet consumes `kind` on the inbound path. Permissive when
@@ -943,6 +1002,160 @@ fn host_is_loopback(host: Option<&str>) -> bool {
         }
         None => false,
     }
+}
+
+fn verify_managed_authoring_closure(
+    body: &AppletAuthoringTransactionRequestBody,
+    service_id: &DidCoreId,
+    service_verification_method: &DidUrl,
+    service_public_key: &PublicKeyMaterial,
+    journal: &AuthoringJournal,
+    source_public_key: &PublicKeyMaterial,
+) -> std::result::Result<(), WireError> {
+    let service_evidence = &body
+        .authoring_context
+        .applet_service_signer_evidence
+        .authenticated_signer_evidence;
+    let reported_key = PublicKeyMaterial::Jwk {
+        value: serde_json::to_value(&service_evidence.public_key_jwk)
+            .map_err(|error| WireError::Protocol(error.to_string()))?,
+    };
+    let reported_key = reported_key
+        .ed25519_bytes()
+        .map_err(|error| WireError::Protocol(error.to_string()))?;
+    let local_key = service_public_key
+        .ed25519_bytes()
+        .map_err(|error| WireError::Protocol(error.to_string()))?;
+    if service_evidence.verification_method != *service_verification_method
+        || reported_key != local_key
+    {
+        return Err(WireError::Protocol(
+            "authoring completion Applet Service evidence differs from the local signing key"
+                .to_owned(),
+        ));
+    }
+
+    let canonical_jwk =
+        |key: [u8; 32]| -> std::result::Result<arkret_wire::NonEmptyJsonObject, WireError> {
+            serde_json::from_value(serde_json::json!({"kty":"OKP", "crv":"Ed25519", "x":arkret::canonical::base64url_encode(key)}))
+                .map_err(|error| WireError::Protocol(error.to_string()))
+        };
+    let recomputed_service = arkret::build_service_signer_evidence(
+        service_id.clone(),
+        service_verification_method.clone(),
+        canonical_jwk(local_key)?,
+        service_evidence.authority_commit_id.clone(),
+        service_evidence.resolved_at,
+    )?;
+    if recomputed_service != *service_evidence {
+        return Err(WireError::Protocol(
+            "Applet Service root differs from exact local material".into(),
+        ));
+    }
+
+    let managed_evidence = &body
+        .authoring_context
+        .managed_actor_signer_evidence
+        .authenticated_signer_evidence;
+    if managed_evidence.authority_commit_id
+        != body.authoring_context.principal_control_commit.commit_id
+    {
+        return Err(WireError::Protocol(
+            "managed Actor signer evidence is not bound to the reported Realm head".to_owned(),
+        ));
+    }
+
+    journal
+        .verify_prepared_managed_signer(body)
+        .map_err(|error| WireError::Protocol(error.to_string()))?;
+    let key = PublicKeyMaterial::Jwk {
+        value: serde_json::to_value(&managed_evidence.public_key_jwk)
+            .map_err(|error| WireError::Protocol(error.to_string()))?,
+    };
+    let key = key
+        .ed25519_bytes()
+        .map_err(|error| WireError::Protocol(error.to_string()))?;
+    let recomputed_principal = arkret::build_principal_signer_evidence(
+        managed_evidence.subject_id.clone(),
+        managed_evidence.verification_method.clone(),
+        canonical_jwk(key)?,
+        body.authoring_context
+            .principal_control_commit
+            .commit_id
+            .clone(),
+        managed_evidence.resolved_at,
+    )?;
+    if recomputed_principal != *managed_evidence {
+        return Err(WireError::Protocol(
+            "managed Principal root differs from exact prepared material".into(),
+        ));
+    }
+
+    let creation = match &body.authoring_context.committed_request {
+        AppletManagedActorCommittedRequest::Ghost(ghost) => {
+            Some((&ghost.authoring_request, &ghost.managed_actor_bundle))
+        }
+        AppletManagedActorCommittedRequest::Install(install) => match install.as_ref() {
+            arkret_models_integration::AppletInstallRequestBody::Create(create) => {
+                Some((&create.authoring_request, &create.managed_actor_bundle))
+            }
+            _ => None,
+        },
+    };
+    let verifier = LocalServiceManagedActorProofVerifier::new(
+        service_id.clone(),
+        service_verification_method.clone(),
+        service_public_key.clone(),
+    )
+    .map_err(|error| WireError::Protocol(error.to_string()))?;
+    if let Some((request, bundle)) = creation {
+        validate_managed_actor_bundle(request, bundle, &verifier)
+            .map_err(|error| WireError::Protocol(error.to_string()))?;
+    }
+
+    // An ordinary producer consumes the exact own-Station result. The
+    // accepted Service binding authenticates that source key; this does
+    // not install independent governance trust or authorize another Realm.
+    let attester = &body
+        .authoring_context
+        .managed_actor_signer_evidence
+        .attester_signer_evidence;
+    let actual = source_public_key
+        .ed25519_bytes()
+        .map_err(|error| WireError::Protocol(error.to_string()))?;
+    let jwk: arkret_wire::NonEmptyJsonObject = serde_json::from_value(serde_json::json!({
+        "kty":"OKP", "crv":"Ed25519", "x":arkret::canonical::base64url_encode(actual),
+    }))
+    .map_err(|error| WireError::Protocol(error.to_string()))?;
+    let recomputed = arkret::build_service_signer_evidence(
+        body.source_id.clone(),
+        attester.verification_method.clone(),
+        jwk,
+        body.authoring_context
+            .principal_control_commit
+            .commit_id
+            .clone(),
+        attester.resolved_at,
+    )?;
+    if recomputed != *attester {
+        return Err(WireError::Protocol(
+            "managed Actor attester root differs from accepted Station material".into(),
+        ));
+    }
+    let pcr = &body.authoring_context.principal_control_commit;
+    if pcr.signature.verification_method != attester.verification_method {
+        return Err(WireError::Protocol(
+            "PCR Commit is signed by another Station method".into(),
+        ));
+    }
+    arkret::signatures::detached_object::verify_detached_object_signature(
+        &pcr.signature,
+        &arkret::canonical::unsigned_value(pcr, &["signature"])?,
+        arkret::DetachedSignatureContext::RealmCommit,
+        source_public_key,
+    )
+    .map_err(|error| WireError::Protocol(error.to_string()))?;
+    Ok(())
 }
 
 /// Match a spec namespace pattern against a candidate id. Supports a trailing
@@ -1058,7 +1271,64 @@ impl arkret::AppletHandler for BridgeAppletHandler {
             }
             AppletTransactionRequestBody::Events(req) => req,
         };
-        let event_count = req.events.len();
+        if !req.events.is_empty() {
+            return Err(WireError::Protocol(
+                "Station-to-Applet delivery requires full committed Event pairs".into(),
+            ));
+        }
+        let mut delivery_refs = BTreeMap::new();
+        let mut delivery_events = Vec::with_capacity(req.committed_events.len());
+        for pair in req.committed_events {
+            let proof = pair.event.producer_proof.as_ref().ok_or_else(|| {
+                WireError::Protocol("accepted delivery lacks producer proof".into())
+            })?;
+            let producer_key = if let Some(key) =
+                crate::authority::committed_delivery_device_key(&proof.verification_method)
+                    .map_err(|error| WireError::Protocol(error.to_string()))?
+            {
+                key
+            } else if proof.verification_method == self.service_verification_method {
+                self.service_public_key.clone()
+            } else {
+                let accepted = self
+                    .did_authority
+                    .service_verification_method(&proof.verification_method, chrono::Utc::now())
+                    .map_err(WireError::Protocol)?;
+                public_key_material_from_binding(&accepted, &proof.verification_method)
+                    .map_err(|error| WireError::Protocol(error.to_string()))?
+            };
+            let accepted_governance = self
+                .did_authority
+                .service_verification_method(
+                    &pair.commit.signature.verification_method,
+                    chrono::Utc::now(),
+                )
+                .map_err(WireError::Protocol)?;
+            let governance_key = public_key_material_from_binding(
+                &accepted_governance,
+                &pair.commit.signature.verification_method,
+            )
+            .map_err(|error| WireError::Protocol(error.to_string()))?;
+            let reference = crate::authority::validate_applet_committed_delivery(
+                &pair,
+                PRODUCER_DIGEST_SUITE,
+                &producer_key,
+                &governance_key,
+            )
+            .map_err(|error| WireError::Protocol(error.to_string()))?;
+            if delivery_refs
+                .get(&pair.event.event_id)
+                .is_some_and(|existing| existing != &reference)
+            {
+                return Err(WireError::Protocol(
+                    "one delivery Event has conflicting Commit coordinates".into(),
+                ));
+            }
+            delivery_refs.insert(pair.event.event_id.clone(), reference);
+            delivery_events.push(pair.event);
+        }
+        let event_count = delivery_events.len();
+        let mut committed_event_refs = Vec::new();
         let mut rejections: Vec<arkret::AppletEventRejection> = Vec::new();
         let mut enqueue_failed = false;
         // Set when the bounded inbound queue is full: we ask the server to retry
@@ -1066,7 +1336,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
         // limit or dropping events.
         let mut queue_full = false;
 
-        for event in req.events {
+        for event in delivery_events {
             let event_id = event.event_id.to_string();
 
             // Backpressure (BRG-02-001): once the bounded inbound queue is full we
@@ -1169,6 +1439,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
             {
                 Ok(DedupVerdict::Fresh) => {
                     // Enqueue for the core consumer loop via the reserved permit.
+                    committed_event_refs.push(delivery_refs[&event.event_id].clone());
                     permit.send(event);
                 }
                 Ok(DedupVerdict::DuplicateSameContent) => {
@@ -1238,9 +1509,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
             } else {
                 arkret_models_integration::AppletTransactionStatus::Partial
             },
-            // The inbound plane receives already-committed Events; a bridge
-            // never issues an authority commit of its own.
-            committed_event_refs: Vec::new(),
+            committed_event_refs,
             rejections,
             retry_after_ms,
         })
@@ -1574,10 +1843,10 @@ mod tests {
         .unwrap();
         let reuse = ReuseExistingManagedActor {
             actor_id: managed_actor.clone(),
-            managed_actor_provision_ref: test_committed_ref(&realm_id, 1),
-            pcr_genesis_ref: test_committed_ref(&realm_id, 2),
-            accountability_grant_ref: test_committed_ref(&realm_id, 3),
-            profile_event_ref: test_committed_ref(&realm_id, 4),
+            managed_actor_provision_ref: test_committed_ref(&realm_id, 1).event_id,
+            pcr_genesis_ref: test_committed_ref(&realm_id, 2).event_id,
+            accountability_grant_ref: test_committed_ref(&realm_id, 3).event_id,
+            profile_event_ref: test_committed_ref(&realm_id, 4).event_id,
             initial_package_bot_actor_id: managed_actor.clone(),
         };
         let committed_request =
@@ -1620,10 +1889,29 @@ mod tests {
                         committed_request,
                     )),
                     realm_stream_head: arkret::CommitStreamHead {
-                        stream_ref: CommitStreamRef::Realm { realm_id },
+                        stream_ref: CommitStreamRef::Realm {
+                            realm_id: realm_id.clone(),
+                        },
                         stream_position: 41,
                         commit_id,
                     },
+                    principal_control_commit: RealmCommit {
+                        commit_id: arkret::RealmCommitId::from_digest([0x2c; 32]),
+                        realm_id: realm_id.clone(),
+                        stream_ref: CommitStreamRef::Realm {
+                            realm_id: realm_id.clone(),
+                        },
+                        stream_position: 0,
+                        previous_commit_ref: None,
+                        event_ref: test_committed_ref(&realm_id, 2).event_id,
+                        governance_generation: 0,
+                        authority_ref: RealmCommitAuthorityRef::GenesisOrChangeEvent(
+                            test_committed_ref(&realm_id, 2).event_id,
+                        ),
+                        committed_at: requested_at,
+                        signature: commit_signature(DetachedSignatureContext::RealmCommit),
+                    },
+                    resolution_update: None,
                     applet_service_signer_evidence: AppletServiceSignerEvidence {
                         signer_resolution_evidence_ref: applet_evidence
                             .signer_evidence_ref()
@@ -1644,7 +1932,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_authoring_completion_is_durable_exact_and_fail_closed() {
+    fn managed_authoring_reuse_requires_original_creation_and_exact_roots() {
         let store = Arc::new(MemoryAuthoringStore::default());
         let edge = test_edge(store.clone());
         let (body, managed_actor) = managed_authoring_fixture(&edge);
@@ -1790,61 +2078,18 @@ mod tests {
                 .unwrap()
         );
 
-        assert_eq!(
-            edge.journal
-                .install_managed_authoring(&identity, &body)
-                .unwrap(),
-            crate::authoring::ManagedAuthoringInstall::Installed
-        );
-        let rows_after_first = store.0.lock().unwrap().clone();
-        assert_eq!(rows_after_first.len(), 3);
-        assert_eq!(
-            edge.journal
-                .install_managed_authoring(&identity, &body)
-                .unwrap(),
-            crate::authoring::ManagedAuthoringInstall::ExactReplay
-        );
-        assert_eq!(*store.0.lock().unwrap(), rows_after_first);
-        let replay = arkret::AppletHandler::handle_transaction(
-            &handler,
-            "crash-after-cas",
-            AppletTransactionRequestBody::Authoring(Box::new(body.clone())),
-        )
-        .expect("the exact durable completion must recover after outcome-record crash");
-        assert_eq!(
-            replay.status,
-            arkret_models_integration::AppletTransactionStatus::Accepted
-        );
-        assert_eq!(*store.0.lock().unwrap(), rows_after_first);
-
-        let mut conflict = body.clone();
-        conflict.authoring_context.realm_stream_head.stream_position += 1;
+        let rows_after_preparation = store.0.lock().unwrap().clone();
         assert!(
             edge.journal
-                .install_managed_authoring(&identity, &conflict)
-                .is_err()
+                .install_managed_authoring(&identity, &body)
+                .is_err(),
+            "preparing a Reuse request cannot manufacture its original Bot creation"
         );
-        assert_eq!(*store.0.lock().unwrap(), rows_after_first);
-
-        drop(edge);
-        let restarted = test_edge(store);
-        let realm_id = body
-            .authoring_context
-            .realm_stream_head
-            .stream_ref
-            .realm_id();
-        let retained = restarted
-            .installed_managed_authoring(
-                &ScopeRef::Realm {
-                    realm_id: realm_id.clone(),
-                },
-                &managed_actor,
-            )
-            .unwrap()
-            .expect("completion survives rebuilding the edge over the same durable store");
-        assert_eq!(
-            arkret::canonical::canonical_json_bytes(&retained).unwrap(),
-            arkret::canonical::canonical_json_bytes(&body).unwrap()
+        assert_eq!(*store.0.lock().unwrap(), rows_after_preparation);
+        assert!(
+            edge.installed_managed_authoring(&identity.effective_scope, &managed_actor)
+                .unwrap()
+                .is_none()
         );
     }
 
@@ -2186,10 +2431,21 @@ mod tests {
 
     #[tokio::test]
     async fn delegated_intent_preserves_the_provisioned_account_station() {
-        struct NoAuthoring;
+        struct NoAuthoring {
+            expected_index: String,
+            reads: std::sync::atomic::AtomicUsize,
+        }
         impl AuthoringStore for NoAuthoring {
-            fn load(&self, _: &str) -> Result<Option<String>> {
-                panic!("intent must not access authoring state")
+            fn load(&self, key: &str) -> Result<Option<String>> {
+                assert_eq!(
+                    key, self.expected_index,
+                    "intent may only classify the exact local Actor"
+                );
+                assert_eq!(
+                    self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+                    0
+                );
+                Ok(None)
             }
             fn compare_exchange_batch(
                 &self,
@@ -2202,11 +2458,18 @@ mod tests {
                 panic!("intent must not scan authoring state")
             }
         }
-        let edge = test_edge(Arc::new(NoAuthoring));
         let account = arkret::AccountId::new(
             DidCoreId::new("ak:did_core:webvh:z6mkghost").unwrap(),
             DidCoreId::new("ak:did_core:webvh:z6mkstation").unwrap(),
         );
+        let store = Arc::new(NoAuthoring {
+            expected_index: format!(
+                "managed-authoring/local-actor/{}",
+                serde_json::to_string(&arkret::ActorId::account(account.clone())).unwrap()
+            ),
+            reads: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let edge = test_edge(store.clone());
         let realm = RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").unwrap();
         let payload = arkret::MessageCreatePayload::with_content(
             arkret::StrandId::new("ak:strand:AT3ARBdH1FM6GjXK9ulTx-YMvQOXys39dlUzZV6KyID9")
@@ -2219,6 +2482,7 @@ mod tests {
             .delegated_intent::<event_spec::MessageCreate>(&account, &realm, payload, grant)
             .unwrap();
         assert_eq!(intent.actor_id(), &arkret::ActorId::account(account));
+        assert_eq!(store.reads.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(
             intent.executed_by(),
             Some(&arkret::ActorId::service(edge.service_actor_id.clone()))

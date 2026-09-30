@@ -1213,6 +1213,251 @@ mod ghost_bundle_tests {
         assert_eq!(kinds, applet_managed_actor_unit_event_kinds().to_vec());
     }
 
+    #[tokio::test]
+    async fn real_ghost_completion_installs_and_restarts_with_exact_roots() {
+        let identity = identity();
+        let request = ghost_request();
+        let bundle = author_applet_managed_actor_bundle(
+            &request,
+            ghost_bundle_authoring_input(&request, &identity, trust_domain()).unwrap(),
+            &signer(0x22, SERVICE_DID),
+        )
+        .unwrap();
+        let committed = GhostActorProvisionRequestBody {
+            authoring_request: request,
+            managed_actor_bundle: bundle,
+        };
+        let store = Arc::new(RecordingAuthoringStore::default());
+        let runtime_edge = edge(store.clone());
+        prepare_ghost_completion(&runtime_edge, &committed, &identity).unwrap();
+        let commit_id = arkret::RealmCommitId::from_digest([0x81; 32]);
+        let pcr_commit_id = arkret::RealmCommitId::from_digest([0x82; 32]);
+        let jwk = |bytes: [u8; 32]| -> arkret_wire::NonEmptyJsonObject {
+            serde_json::from_value(
+                json!({"kty":"OKP", "crv":"Ed25519", "x":arkret::base64url_encode(bytes)}),
+            )
+            .unwrap()
+        };
+        let service = arkret::build_service_signer_evidence(
+            core_id(SERVICE_DID),
+            DidUrl::new(format!("{SERVICE_DID}#key-1")).unwrap(),
+            jwk(signer(0x22, SERVICE_DID).verifying_key().to_bytes()),
+            commit_id.clone(),
+            issued_at(),
+        )
+        .unwrap();
+        let principal = arkret::build_principal_signer_evidence(
+            identity.actor_id.clone(),
+            identity.root_verification_method.clone(),
+            jwk(identity.root_public_key.ed25519_bytes().unwrap()),
+            pcr_commit_id.clone(),
+            issued_at(),
+        )
+        .unwrap();
+        let source_method = DidUrl::new(format!("{STATION_DID}#key-1")).unwrap();
+        let source_key = PublicKeyMaterial::Ed25519Raw {
+            bytes: signer(0x11, STATION_DID)
+                .verifying_key()
+                .to_bytes()
+                .to_vec(),
+        };
+        let attester = arkret::build_service_signer_evidence(
+            core_id(STATION_DID),
+            source_method.clone(),
+            jwk(source_key.ed25519_bytes().unwrap()),
+            pcr_commit_id.clone(),
+            issued_at(),
+        )
+        .unwrap();
+        let genesis = &committed.managed_actor_bundle.pcr_genesis_event;
+        let mut pcr_commit = arkret::RealmCommit {
+            commit_id: pcr_commit_id,
+            realm_id: genesis.realm_id.clone(),
+            stream_ref: arkret::CommitStreamRef::Realm {
+                realm_id: genesis.realm_id.clone(),
+            },
+            stream_position: 0,
+            previous_commit_ref: None,
+            event_ref: genesis.event_id.clone(),
+            governance_generation: 0,
+            authority_ref: arkret::RealmCommitAuthorityRef::GenesisOrChangeEvent(
+                genesis.event_id.clone(),
+            ),
+            committed_at: issued_at(),
+            signature: arkret::signatures::detached_object::sign_detached_object(
+                &json!({}),
+                arkret::DetachedSignatureContext::RealmCommit,
+                source_method.clone(),
+                issued_at(),
+                &ed25519_dalek::SigningKey::from_bytes(&[0x11; 32]),
+            )
+            .unwrap(),
+        };
+        pcr_commit.signature = arkret::signatures::detached_object::sign_detached_object(
+            &arkret::canonical::unsigned_value(&pcr_commit, &["signature"]).unwrap(),
+            arkret::DetachedSignatureContext::RealmCommit,
+            source_method.clone(),
+            issued_at(),
+            &ed25519_dalek::SigningKey::from_bytes(&[0x11; 32]),
+        )
+        .unwrap();
+        let initial_resolution_event = genesis.clone();
+        let body = arkret::AppletAuthoringTransactionRequestBody {
+            applet_id: AppletId::new(runtime_edge.applet_id()).unwrap(),
+            source_id: core_id(STATION_DID),
+            authoring_context: arkret::AppletManagedActorAuthoringContext {
+                committed_request: AppletManagedActorCommittedRequest::Ghost(Box::new(committed)),
+                realm_stream_head: arkret::CommitStreamHead {
+                    stream_ref: arkret::CommitStreamRef::Realm {
+                        realm_id: realm_id(),
+                    },
+                    stream_position: 12,
+                    commit_id,
+                },
+                principal_control_commit: pcr_commit,
+                resolution_update: None,
+                applet_service_signer_evidence: arkret::AppletServiceSignerEvidence {
+                    signer_resolution_evidence_ref: service.signer_evidence_ref().unwrap(),
+                    authenticated_signer_evidence: service,
+                },
+                managed_actor_signer_evidence: arkret::ManagedActorPrincipalSignerEvidence {
+                    signer_resolution_evidence_ref: principal.signer_evidence_ref().unwrap(),
+                    authenticated_signer_evidence: principal,
+                    attester_signer_evidence: attester,
+                },
+            },
+        };
+        let prepared_rows = store.0.lock().unwrap().clone();
+        // An unimplemented rotation must not bypass the first-install PCR
+        // anchor checks or mutate the durable locally prepared identity.
+        let mut unsupported_update = serde_json::to_value(&body).unwrap();
+        unsupported_update["authoring_context"]["resolution_update"] = serde_json::json!({
+            "resolution_event": initial_resolution_event,
+            "commits": [body.authoring_context.principal_control_commit.clone()],
+            "method_history_evidence": identity.method_history_evidence,
+            "attester_resolution": arkret::AuthenticatedServiceResolution {
+                service_id: core_id(STATION_DID),
+                service_kind: "station".to_owned(),
+                method_history_evidence: identity.method_history_evidence.clone(),
+                normalized_did_document: DidDocument::new(
+                    did(STATION_DID), "key-1",
+                    "z6MkrJVnaZkeF7EsnJQ9xQY4bqG9tbeFqTzL7uTVs11FwUjT",
+                ),
+            },
+        });
+        let unsupported_update = serde_json::from_value(unsupported_update).unwrap();
+        let error = runtime_edge
+            .install_managed_authoring_completion(&unsupported_update, &source_method, &source_key)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unavailable native rotation installer")
+        );
+        assert_eq!(*store.0.lock().unwrap(), prepared_rows);
+        let wrong_key = PublicKeyMaterial::Ed25519Raw {
+            bytes: signer(0x12, STATION_DID)
+                .verifying_key()
+                .to_bytes()
+                .to_vec(),
+        };
+        assert!(
+            runtime_edge
+                .install_managed_authoring_completion(&body, &source_method, &wrong_key)
+                .is_err()
+        );
+        assert_eq!(*store.0.lock().unwrap(), prepared_rows);
+        runtime_edge
+            .install_managed_authoring_completion(&body, &source_method, &source_key)
+            .unwrap();
+        let installed_rows = store.0.lock().unwrap().clone();
+        runtime_edge
+            .install_managed_authoring_completion(&body, &source_method, &source_key)
+            .unwrap();
+        assert_eq!(*store.0.lock().unwrap(), installed_rows);
+        drop(runtime_edge);
+        let restarted = edge(store.clone());
+        let actor = arkret::ActorId::account(arkret::AccountId::new(
+            identity.actor_id,
+            core_id(STATION_DID),
+        ));
+        let retained = restarted
+            .installed_managed_authoring(
+                &arkret::ScopeRef::Realm {
+                    realm_id: realm_id(),
+                },
+                &actor,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            arkret::canonical::canonical_json_bytes(&retained).unwrap(),
+            arkret::canonical::canonical_json_bytes(&body).unwrap()
+        );
+        let payload = arkret::MessageCreatePayload::with_content(
+            arkret::StrandId::from_event_id(&event_id(0x92)),
+            "main",
+            arkret::ContentBlock::text("offline after restart"),
+        );
+        let authorization = match &body.authoring_context.committed_request {
+            AppletManagedActorCommittedRequest::Ghost(ghost) => ghost
+                .authoring_request
+                .basis
+                .ghost()
+                .unwrap()
+                .authorization_ref
+                .to_string(),
+            _ => unreachable!(),
+        };
+        let account = actor.as_account_id().unwrap();
+        assert!(
+            restarted
+                .delegated_intent::<arkret_wire::event_spec::MessageCreate>(
+                    account,
+                    &realm_id(),
+                    payload.clone(),
+                    ""
+                )
+                .is_err()
+        );
+        assert!(
+            restarted
+                .delegated_intent::<arkret_wire::event_spec::MessageCreate>(
+                    account,
+                    &RealmId::from_event_id(&event_id(0x94)),
+                    payload.clone(),
+                    &authorization
+                )
+                .is_err()
+        );
+        let intent = restarted
+            .delegated_intent::<arkret_wire::event_spec::MessageCreate>(
+                account,
+                &realm_id(),
+                payload,
+                &authorization,
+            )
+            .unwrap();
+        let frozen = restarted
+            .author_and_sign(&realm_id(), "offline-operation", intent.clone())
+            .await
+            .unwrap();
+        let exact_retry = restarted
+            .author_and_sign(&realm_id(), "offline-operation", intent)
+            .await
+            .unwrap();
+        assert_eq!(frozen.event(), exact_retry.event());
+        let installed_rows = store.0.lock().unwrap().clone();
+        let mut conflict = body.clone();
+        conflict.authoring_context.realm_stream_head.stream_position += 1;
+        assert!(
+            restarted
+                .install_managed_authoring_completion(&conflict, &source_method, &source_key)
+                .is_err()
+        );
+        assert_eq!(*store.0.lock().unwrap(), installed_rows);
+    }
+
     #[test]
     fn production_ghost_result_freezes_the_exact_committed_request() {
         let request = ghost_request();
@@ -1365,12 +1610,29 @@ mod ghost_bundle_tests {
         );
 
         let rows = store.0.lock().unwrap();
-        assert_eq!(rows.len(), 1, "exact retry must reuse one preparation");
-        assert!(
-            rows.keys()
-                .all(|key| key.starts_with("managed-authoring/prepared/"))
+        assert_eq!(
+            rows.len(),
+            2,
+            "exact retry must reuse one preparation and its actor index"
         );
-        let prepared_raw = rows.values().next().unwrap();
+        let preparation_rows: Vec<_> = rows
+            .iter()
+            .filter(|(key, _)| key.starts_with("managed-authoring/prepared/"))
+            .collect();
+        assert_eq!(preparation_rows.len(), 1);
+        let actor = committed
+            .managed_actor_provision_payload()
+            .unwrap()
+            .actor_id;
+        let actor_key = format!(
+            "managed-authoring/local-actor/{}",
+            serde_json::to_string(&actor).unwrap()
+        );
+        assert_eq!(
+            serde_json::from_str::<arkret::ActorId>(&rows[&actor_key]).unwrap(),
+            actor
+        );
+        let prepared_raw = preparation_rows[0].1;
         let prepared: Value = serde_json::from_str(prepared_raw).unwrap();
         assert_eq!(
             prepared["managed_actor_verification_method"],
