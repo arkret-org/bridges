@@ -69,6 +69,7 @@ url = { workspace = true }
 
 [dev-dependencies]
 arkret-wire = { workspace = true, features = ["test-support"] }
+rand_chacha = { workspace = true }
 # `test` adds salvo's in-process `TestClient`, used by the web.rs admin-plane
 # trigger-path tests. Dev-only: production builds keep the lean feature set.
 salvo = { workspace = true, features = ["test"] }

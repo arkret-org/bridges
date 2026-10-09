@@ -46,7 +46,6 @@ use arkret_models_integration::{
     AppletAuthoringTransactionRequestBody, AppletManagedActorCommittedRequest,
 };
 #[cfg(any(feature = "web", test))]
-use arkret_wire::ProfileId;
 use arkret_wire::{
     AuthorityRejectionStatus, AuthoritySubmitOutcome, AuthorizationRef, DidUrl,
     EventAdmissionSubmission, SignalEnvelope, event_spec,
@@ -1225,7 +1224,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
             .expect("Applet service describe bundle is registered")
             .operation_bundle_id
             .to_owned();
-        let mut description = ServiceDescribe::development(
+        let description = ServiceDescribe::development(
             self.service_did.clone(),
             self.trust_domain.clone(),
             service_kind,
@@ -1235,7 +1234,6 @@ impl arkret::AppletHandler for BridgeAppletHandler {
                 extension_profile_required: (),
             }],
         );
-        description.supported_profiles = vec![ProfileId::APPLET_SERVICE_V1.to_owned()];
         description.validate()?;
         Ok(description)
     }
@@ -1412,6 +1410,21 @@ mod tests {
             selected.sort();
             Ok(selected)
         }
+    }
+
+    #[test]
+    fn development_descriptor_does_not_claim_unimplemented_applet_profile() {
+        let edge = test_edge(Arc::new(MemoryAuthoringStore::default()));
+        let handler = BridgeAppletHandler::new(
+            &edge,
+            None,
+            Arc::new(DidAuthority::new(edge.config.arkret.trust_domain.clone()).unwrap()),
+        )
+        .unwrap();
+        let description = arkret::AppletHandler::describe(&handler).unwrap();
+        description.validate().unwrap();
+        assert!(description.supported_profiles.is_empty());
+        assert_eq!(description.service_kind, arkret::ServiceKind::AppletService);
     }
 
     #[test]
