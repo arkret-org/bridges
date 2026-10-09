@@ -13,10 +13,10 @@ bridge:
 
 arkret:
   server_url: "http://localhost:8008"
+  applet_base_url: "https://bridge.example"
   service_did: "did:webvh:qq-bridge.example"
   trust_domain: "ak:trust_domain:example.net"
   applet_id: "ak:applet:00000000-0000-7000-8000-0000000000qq"
-  access_token: "CHANGE_ME_ARKRET_ACCESS_TOKEN"
   signing_key_seed_hex: "0000000000000000000000000000000000000000000000000000000000000000"
   verification_method_fragment: "#key-1"
   signer_resolution_evidence_ref: "ak:signer_evidence:sha256:0000000000000000000000000000000000000000000000000000000000000000"
@@ -57,7 +57,6 @@ app:
   # OneBot 实现(如 go-cqhttp / NapCat / Lagrange)的 HTTP API 基址。
   onebot_url: "http://127.0.0.1:5700"
   # OneBot access_token(可选,作 Bearer 鉴权)。
-  access_token: "CHANGE_ME_ONEBOT_ACCESS_TOKEN"
   # OneBot HTTP POST 上报签名密钥:校验 X-Signature: sha1=HMAC-SHA1(signing_secret, 原始 body)。
   signing_secret: "CHANGE_ME_ONEBOT_SIGNING_SECRET"
   # —— 若改用 QQ 官方机器人,改填以下两项,并调整 send_to_app 的 endpoint:

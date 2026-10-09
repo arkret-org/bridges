@@ -77,12 +77,6 @@ impl ManagedActorAuthoringService {
     ) -> Result<Self> {
         let principal_endpoint = config.arkret.managed_actor_authoring.principal_endpoint()?;
         let key_encryption_key = config.arkret.managed_actor_authoring.key_encryption_key()?;
-        if config.arkret.applet_namespaces.actors.is_empty() {
-            return Err(BridgeError::Config(
-                "applet_namespaces.actors must contain the installed managed-actor namespace"
-                    .to_owned(),
-            ));
-        }
         let expected_station_id = project_did_to_core_id(&config.arkret.trusted_server_did)?;
         Ok(Self {
             edge,
@@ -107,12 +101,15 @@ impl ManagedActorAuthoringService {
         request: &AppletManagedActorAuthoringRequest,
     ) -> Result<AppletManagedActorAuthoringBundle> {
         self.validate_request(request, false)?;
-        request.basis.ghost().ok_or_else(|| {
-            BridgeError::App(
-                "this running Applet service authors provision_ghost requests; install_bot uses the package build authority"
-                    .to_owned(),
-            )
-        })?;
+        if request
+            .basis
+            .ghost()
+            .is_some_and(|basis| basis.existing_managed_actor.is_some())
+        {
+            return Err(BridgeError::App(
+                "Ghost reuse does not create another authoring bundle".into(),
+            ));
+        }
         let subject_key = managed_actor_subject_key(request)?;
         let request_digest = request.canonical_digest()?.to_string();
         let request_json = String::from_utf8(canonical_json_bytes(request)?).map_err(|error| {
@@ -138,12 +135,14 @@ impl ManagedActorAuthoringService {
                         "completed authoring has no managed actor identity".to_owned(),
                     )
                 })?;
-            let _ = self.decode_identity(&subject_key, record)?;
-            return serde_json::from_str(&bundle_json).map_err(|error| {
+            let identity = self.decode_identity(&subject_key, record)?;
+            let bundle = serde_json::from_str(&bundle_json).map_err(|error| {
                 BridgeError::Database(format!(
                     "stored managed actor authoring bundle is invalid: {error}"
                 ))
-            });
+            })?;
+            self.freeze_creation(request, &bundle, &identity)?;
+            return Ok(bundle);
         }
         self.validate_request(request, true)?;
         let identity = self.identity_for(&subject_key, request).await?;
@@ -168,6 +167,7 @@ impl ManagedActorAuthoringService {
                             "stored managed actor authoring bundle is invalid: {error}"
                         ))
                     })?;
+                    self.freeze_creation(request, &bundle, &identity)?;
                     return Ok(bundle);
                 }
                 ManagedActorAuthoringClaim::Busy => {
@@ -192,6 +192,7 @@ impl ManagedActorAuthoringService {
                                     bundle_json,
                                 )
                                 .await?;
+                            self.freeze_creation(request, &bundle, &identity)?;
                             return Ok(bundle);
                         }
                         Err(error) => {
@@ -218,6 +219,42 @@ impl ManagedActorAuthoringService {
         ))
     }
 
+    fn freeze_creation(
+        &self,
+        request: &AppletManagedActorAuthoringRequest,
+        bundle: &AppletManagedActorAuthoringBundle,
+        identity: &ManagedActorIdentity,
+    ) -> Result<()> {
+        let committed = match request.purpose {
+            AppletManagedActorPurpose::ProvisionBot => AppletManagedActorCommittedRequest::Bot(
+                Box::new(arkret::AppletBotProvisionRequestBody {
+                    authoring_request: request.clone(),
+                    managed_actor_bundle: bundle.clone(),
+                    approval_signatures: Vec::new(),
+                }),
+            ),
+            AppletManagedActorPurpose::ProvisionGhost => AppletManagedActorCommittedRequest::Ghost(
+                Box::new(GhostActorProvisionRequestBody {
+                    authoring_request: request.clone(),
+                    managed_actor_bundle: Some(bundle.clone()),
+                    approval_signatures: Vec::new(),
+                    existing_managed_actor: None,
+                }),
+            ),
+            AppletManagedActorPurpose::InstallService => {
+                return Err(BridgeError::App(
+                    "Service installation has no managed identity".into(),
+                ));
+            }
+        };
+        self.edge.prepare_managed_authoring(
+            &committed,
+            &identity.root_verification_method,
+            &identity.root_public_key,
+        )?;
+        Ok(())
+    }
+
     fn validate_request(
         &self,
         request: &AppletManagedActorAuthoringRequest,
@@ -238,18 +275,31 @@ impl ManagedActorAuthoringService {
                 "managed actor authoring proof is in the future".to_owned(),
             ));
         }
-        let basis = request.basis.ghost().ok_or_else(|| {
-            BridgeError::App("managed actor request is not a Ghost authoring branch".to_owned())
-        })?;
+        let (applet_id, service_id, target_station_id, epoch, purpose) = match &request.basis {
+            arkret::AppletManagedActorAuthoringBasis::ProvisionBot(basis) => (
+                &basis.applet_id,
+                &basis.service_id,
+                &basis.target_station_id,
+                &basis.registration_epoch_evidence,
+                AppletManagedActorPurpose::ProvisionBot,
+            ),
+            arkret::AppletManagedActorAuthoringBasis::ProvisionGhost(basis) => (
+                &basis.applet_id,
+                &basis.service_id,
+                &basis.target_station_id,
+                &basis.registration_epoch_evidence,
+                AppletManagedActorPurpose::ProvisionGhost,
+            ),
+        };
         let configured_applet_id = AppletId::new(self.config.arkret.applet_id.clone())?;
-        if basis.applet_id != configured_applet_id
-            || basis.service_id != *self.edge.service_actor_id()
-            || basis.target_station_id != self.expected_station_id
-            || request.purpose != AppletManagedActorPurpose::ProvisionGhost
+        if *applet_id != configured_applet_id
+            || service_id != self.edge.service_actor_id()
+            || *target_station_id != self.expected_station_id
+            || request.purpose != purpose
         {
             return Err(BridgeError::App(
                 "managed actor authoring request coordinates do not match this Applet service"
-                    .to_owned(),
+                    .into(),
             ));
         }
         let trusted = self
@@ -288,10 +338,7 @@ impl ManagedActorAuthoringService {
                 ))
             })?;
         let service_method = self.edge.service_verification_method()?;
-        if !basis
-            .registration_epoch_evidence
-            .contains_signing_key(service_method.as_str())
-        {
+        if !epoch.contains_signing_key(service_method.as_str()) {
             return Err(BridgeError::App(
                 "Applet service signing key is outside the request registration epoch".to_owned(),
             ));
@@ -358,19 +405,20 @@ impl ManagedActorAuthoringService {
                 BridgeError::App(format!("managed actor WebVH inception failed: {error}"))
             })?;
         let did = Did::new(inception.did.clone())?;
-        if !self
-            .config
-            .arkret
-            .applet_namespaces
-            .actors
-            .iter()
-            .any(|entry| {
-                namespace_pattern_matches(
-                    arkret::AppletNamespaceDomain::Actors,
-                    &entry.pattern,
-                    did.as_str(),
-                )
-            })
+        if request.purpose == AppletManagedActorPurpose::ProvisionGhost
+            && !self
+                .config
+                .arkret
+                .applet_namespaces
+                .actors
+                .iter()
+                .any(|entry| {
+                    namespace_pattern_matches(
+                        arkret::AppletNamespaceDomain::Actors,
+                        &entry.pattern,
+                        did.as_str(),
+                    )
+                })
         {
             return Err(BridgeError::Config(format!(
                 "generated managed actor DID `{did}` is outside applet_namespaces.actors"
@@ -743,9 +791,15 @@ fn ghost_bundle_authoring_input(
     identity: &ManagedActorIdentity,
     trust_domain: arkret::TrustDomainId,
 ) -> Result<AppletManagedActorBundleAuthoringInput> {
-    let basis = request.basis.ghost().ok_or_else(|| {
-        BridgeError::App("managed actor request is not a Ghost authoring branch".to_owned())
-    })?;
+    let (registration_ref, display_name) = match &request.basis {
+        arkret::AppletManagedActorAuthoringBasis::ProvisionBot(basis) => (
+            &basis.registration_event_ref,
+            basis.display_name.clone().unwrap_or_default(),
+        ),
+        arkret::AppletManagedActorAuthoringBasis::ProvisionGhost(basis) => {
+            (&basis.registration_event_ref, String::new())
+        }
+    };
     let genesis_salt = GenesisSalt::generate().map_err(|error| {
         BridgeError::Runtime(format!("managed actor PCR genesis salt: {error}"))
     })?;
@@ -753,7 +807,7 @@ fn ghost_bundle_authoring_input(
         actor_id: identity.actor_id.clone(),
         initial_resolution: identity.initial_resolution.clone(),
         method_history_evidence: identity.method_history_evidence.clone(),
-        registration_ref: basis.registration_event_ref.clone(),
+        registration_ref: registration_ref.clone(),
         digest_suite: runtime::PRODUCER_DIGEST_SUITE,
         genesis_salt,
         trust_domain,
@@ -761,9 +815,7 @@ fn ghost_bundle_authoring_input(
         initial_join_rule: JoinRule::Closed,
         initial_history_access: HistoryAccess::SinceJoin,
         initial_discoverability: Discoverability::Secret,
-        // The Ghost branch takes its display name from the signed basis; this
-        // field is the install-Bot branch's input.
-        bot_display_name: String::new(),
+        bot_display_name: display_name,
     })
 }
 
@@ -779,12 +831,25 @@ impl GhostProvisionRequestProvider for ManagedActorAuthoringService {
             .ghost_actor_preview(
                 request.applet_id.as_str(),
                 &GhostPreviewRequestBody {
-                    realm_id: request.realm_id.clone(),
+                    effective_scope: arkret::ScopeRef::Realm {
+                        realm_id: request.realm_id.clone(),
+                    },
                     external_ref: request.external_ref.clone(),
                     display_name: request.display_name.clone(),
                 },
             )
             .await?;
+        if let Some(existing) = preview.existing_managed_actor {
+            self.validate_request(&preview.authoring_request, true)?;
+            let request = GhostActorProvisionRequestBody {
+                authoring_request: preview.authoring_request,
+                managed_actor_bundle: None,
+                approval_signatures: Vec::new(),
+                existing_managed_actor: Some(existing),
+            };
+            self.edge.reused_ghost_did(&request)?;
+            return Ok(request);
+        }
         let subject_key = managed_actor_subject_key(&preview.authoring_request)?;
         let managed_actor_bundle = self.author(&preview.authoring_request).await?;
         let identity_record = self
@@ -800,7 +865,9 @@ impl GhostProvisionRequestProvider for ManagedActorAuthoringService {
         let identity = self.decode_identity(&subject_key, identity_record)?;
         let committed_request = GhostActorProvisionRequestBody {
             authoring_request: preview.authoring_request,
-            managed_actor_bundle,
+            managed_actor_bundle: Some(managed_actor_bundle),
+            approval_signatures: Vec::new(),
+            existing_managed_actor: None,
         };
         // Freeze the exact producer-authored Ghost unit before returning it to
         // the caller that submits it to the Station. A completion can only echo
@@ -825,15 +892,19 @@ fn prepare_ghost_completion(
 }
 
 fn managed_actor_subject_key(request: &AppletManagedActorAuthoringRequest) -> Result<String> {
-    let basis = request.basis.ghost().ok_or_else(|| {
-        BridgeError::App("managed actor subject requires a Ghost basis".to_owned())
-    })?;
-    Ok(canonical_sha256(&json!({
-        "purpose": request.purpose,
-        "applet_id": basis.applet_id,
-        "target_station_id": basis.target_station_id,
-        "external_ref": basis.external_ref,
-    }))?)
+    let material = match &request.basis {
+        arkret::AppletManagedActorAuthoringBasis::ProvisionBot(basis) => json!({
+            "purpose": request.purpose, "applet_id": basis.applet_id,
+            "target_station_id": basis.target_station_id,
+            "effective_scope": basis.effective_scope, "request_id": basis.request_id,
+        }),
+        arkret::AppletManagedActorAuthoringBasis::ProvisionGhost(basis) => json!({
+            "purpose": request.purpose, "applet_id": basis.applet_id,
+            "target_station_id": basis.target_station_id,
+            "effective_scope": basis.effective_scope, "external_ref": basis.external_ref,
+        }),
+    };
+    Ok(canonical_sha256(&material)?)
 }
 
 fn random_token(bytes: usize) -> Result<String> {
@@ -1012,7 +1083,7 @@ mod ghost_bundle_tests {
                 "service_did": SERVICE_DID,
                 "trust_domain": trust_domain(),
                 "applet_id": "ak:applet:01904100-0000-7000-8000-bbbbbbbbbbbb",
-                "access_token": "test",
+
                 "signing_key_seed_hex": "22".repeat(32),
                 "verification_method_fragment": "#key-1",
                 "trusted_server_did": STATION_DID,
@@ -1156,7 +1227,10 @@ mod ghost_bundle_tests {
             target_station_id: core_id(STATION_DID),
             applet_id: AppletId::new("ak:applet:01904100-0000-7000-8000-bbbbbbbbbbbb").unwrap(),
             service_id: core_id(SERVICE_DID),
-            realm_id: realm_id(),
+            effective_scope: arkret::ScopeRef::Realm {
+                realm_id: realm_id(),
+            },
+            existing_managed_actor: None,
             external_ref: GhostExternalTuple {
                 protocol: "slack".to_owned(),
                 instance_id: "t123".to_owned(),
@@ -1213,6 +1287,90 @@ mod ghost_bundle_tests {
         assert_eq!(kinds, applet_managed_actor_unit_event_kinds().to_vec());
     }
 
+    fn bot_request(request_id: &str) -> AppletManagedActorAuthoringRequest {
+        let ghost = ghost_request();
+        let basis = ghost.basis.ghost().unwrap();
+        AppletManagedActorAuthoringRequest::sign_bot(
+            arkret::AppletBotAuthoringRequestBasis {
+                schema: arkret::AppletBotAuthoringRequestBasis::SCHEMA.into(),
+                purpose: AppletManagedActorPurpose::ProvisionBot,
+                target_station_id: basis.target_station_id.clone(),
+                applet_id: basis.applet_id.clone(),
+                service_id: basis.service_id.clone(),
+                display_name: Some("Service Bot".into()),
+                registration_event_ref: basis.registration_event_ref.clone(),
+                authorization_ref: basis.authorization_ref.clone(),
+                registration_epoch_evidence: basis.registration_epoch_evidence.clone(),
+                package_digest: basis.package_digest.clone(),
+                effective_scope: basis.effective_scope.clone(),
+                request_id: request_id.into(),
+            },
+            core_id(STATION_DID),
+            issued_at(),
+            issued_at() + chrono::Duration::minutes(2),
+            &signer(0x11, STATION_DID),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn independent_bot_request_ids_and_scopes_partition_identity_custody() {
+        let first = bot_request("bot-a");
+        let second = bot_request("bot-b");
+        assert_ne!(
+            managed_actor_subject_key(&first).unwrap(),
+            managed_actor_subject_key(&second).unwrap()
+        );
+        assert_eq!(
+            managed_actor_subject_key(&first).unwrap(),
+            managed_actor_subject_key(&first).unwrap()
+        );
+        let mut scope = first.clone();
+        let arkret::AppletManagedActorAuthoringBasis::ProvisionBot(basis) = &mut scope.basis else {
+            unreachable!()
+        };
+        basis.effective_scope = arkret::ScopeRef::Circle {
+            realm_id: realm_id(),
+            circle_id: arkret::CircleId::from_event_id(&event_id(0x72)),
+        };
+        assert_ne!(
+            managed_actor_subject_key(&first).unwrap(),
+            managed_actor_subject_key(&scope).unwrap()
+        );
+        let identity = identity();
+        let bundle = author_applet_managed_actor_bundle(
+            &first,
+            ghost_bundle_authoring_input(&first, &identity, trust_domain()).unwrap(),
+            &signer(0x22, SERVICE_DID),
+        )
+        .unwrap();
+        bundle.validate_bindings(&first).unwrap();
+        let payload: arkret::AppletManagedActorProvisionPayload = serde_json::from_value(
+            serde_json::to_value(&bundle.managed_actor_provision_event.payload).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(payload.actor_role, arkret::AppletManagedActorRole::Bot);
+        assert!(payload.external_ref.is_none());
+    }
+
+    #[test]
+    fn ghost_custody_and_preparation_keys_include_the_full_scope() {
+        let first = ghost_request();
+        let mut circle = first.clone();
+        let arkret::AppletManagedActorAuthoringBasis::ProvisionGhost(basis) = &mut circle.basis
+        else {
+            unreachable!()
+        };
+        basis.effective_scope = arkret::ScopeRef::Circle {
+            realm_id: realm_id(),
+            circle_id: arkret::CircleId::from_event_id(&event_id(0x72)),
+        };
+        assert_ne!(
+            managed_actor_subject_key(&first).unwrap(),
+            managed_actor_subject_key(&circle).unwrap()
+        );
+    }
+
     #[tokio::test]
     async fn real_ghost_completion_installs_and_restarts_with_exact_roots() {
         let identity = identity();
@@ -1225,7 +1383,9 @@ mod ghost_bundle_tests {
         .unwrap();
         let committed = GhostActorProvisionRequestBody {
             authoring_request: request,
-            managed_actor_bundle: bundle,
+            managed_actor_bundle: Some(bundle),
+            approval_signatures: Vec::new(),
+            existing_managed_actor: None,
         };
         let store = Arc::new(RecordingAuthoringStore::default());
         let runtime_edge = edge(store.clone());
@@ -1246,14 +1406,6 @@ mod ghost_bundle_tests {
             issued_at(),
         )
         .unwrap();
-        let principal = arkret::build_principal_signer_evidence(
-            identity.actor_id.clone(),
-            identity.root_verification_method.clone(),
-            jwk(identity.root_public_key.ed25519_bytes().unwrap()),
-            pcr_commit_id.clone(),
-            issued_at(),
-        )
-        .unwrap();
         let source_method = DidUrl::new(format!("{STATION_DID}#key-1")).unwrap();
         let source_key = PublicKeyMaterial::Ed25519Raw {
             bytes: signer(0x11, STATION_DID)
@@ -1261,15 +1413,11 @@ mod ghost_bundle_tests {
                 .to_bytes()
                 .to_vec(),
         };
-        let attester = arkret::build_service_signer_evidence(
-            core_id(STATION_DID),
-            source_method.clone(),
-            jwk(source_key.ed25519_bytes().unwrap()),
-            pcr_commit_id.clone(),
-            issued_at(),
-        )
-        .unwrap();
-        let genesis = &committed.managed_actor_bundle.pcr_genesis_event;
+        let genesis = &committed
+            .managed_actor_bundle
+            .as_ref()
+            .unwrap()
+            .pcr_genesis_event;
         let mut pcr_commit = arkret::RealmCommit {
             commit_id: pcr_commit_id,
             realm_id: genesis.realm_id.clone(),
@@ -1284,6 +1432,7 @@ mod ghost_bundle_tests {
                 genesis.event_id.clone(),
             ),
             committed_at: issued_at(),
+            producer_signer_fact_digest: None,
             signature: arkret::signatures::detached_object::sign_detached_object(
                 &json!({}),
                 arkret::DetachedSignatureContext::RealmCommit,
@@ -1293,6 +1442,13 @@ mod ghost_bundle_tests {
             )
             .unwrap(),
         };
+        pcr_commit.commit_id = arkret::RealmCommitId::from_digest(arkret::canonical::sha256_bytes(
+            &arkret::canonical::canonical_json_bytes(
+                &arkret::canonical::unsigned_value(&pcr_commit, &["commit_id", "signature"])
+                    .unwrap(),
+            )
+            .unwrap(),
+        ));
         pcr_commit.signature = arkret::signatures::detached_object::sign_detached_object(
             &arkret::canonical::unsigned_value(&pcr_commit, &["signature"]).unwrap(),
             arkret::DetachedSignatureContext::RealmCommit,
@@ -1301,12 +1457,31 @@ mod ghost_bundle_tests {
             &ed25519_dalek::SigningKey::from_bytes(&[0x11; 32]),
         )
         .unwrap();
+        let pcr_commit_id = pcr_commit.commit_id.clone();
+        let principal = arkret::build_principal_signer_evidence(
+            identity.actor_id.clone(),
+            identity.root_verification_method.clone(),
+            jwk(identity.root_public_key.ed25519_bytes().unwrap()),
+            pcr_commit_id.clone(),
+            issued_at(),
+        )
+        .unwrap();
+        let attester = arkret::build_service_signer_evidence(
+            core_id(STATION_DID),
+            source_method.clone(),
+            jwk(source_key.ed25519_bytes().unwrap()),
+            pcr_commit_id.clone(),
+            issued_at(),
+        )
+        .unwrap();
         let initial_resolution_event = genesis.clone();
         let body = arkret::AppletAuthoringTransactionRequestBody {
             applet_id: AppletId::new(runtime_edge.applet_id()).unwrap(),
             source_id: core_id(STATION_DID),
             authoring_context: arkret::AppletManagedActorAuthoringContext {
-                committed_request: AppletManagedActorCommittedRequest::Ghost(Box::new(committed)),
+                committed_request: AppletManagedActorCommittedRequest::Ghost(Box::new(
+                    committed.clone(),
+                )),
                 realm_stream_head: arkret::CommitStreamHead {
                     stream_ref: arkret::CommitStreamRef::Realm {
                         realm_id: realm_id(),
@@ -1370,6 +1545,56 @@ mod ghost_bundle_tests {
         runtime_edge
             .install_managed_authoring_completion(&body, &source_method, &source_key)
             .unwrap();
+        let creation = committed.managed_actor_bundle.as_ref().unwrap();
+        let anchors = arkret::ExistingManagedActor {
+            ghost_actor_id: arkret::ActorId::account(arkret::AccountId::new(
+                identity.actor_id.clone(),
+                core_id(STATION_DID),
+            )),
+            managed_actor_provision_ref: creation.managed_actor_provision_event.event_id.clone(),
+            principal_control_realm_id: creation.pcr_genesis_event.realm_id.clone(),
+            profile_event_ref: creation.profile_event.event_id.clone(),
+            accountability_grant_ref: creation.accountability_grant_event.event_id.clone(),
+        };
+        let mut reuse_basis = committed.authoring_request.basis.ghost().unwrap().clone();
+        reuse_basis.effective_scope = arkret::ScopeRef::Circle {
+            realm_id: realm_id(),
+            circle_id: arkret::CircleId::from_event_id(&event_id(0x73)),
+        };
+        reuse_basis.existing_managed_actor = Some(anchors.clone());
+        let reuse_request = AppletManagedActorAuthoringRequest::sign_ghost(
+            reuse_basis,
+            core_id(STATION_DID),
+            issued_at(),
+            issued_at() + chrono::Duration::minutes(2),
+            &signer(0x11, STATION_DID),
+        )
+        .unwrap();
+        let mut reuse = GhostActorProvisionRequestBody {
+            authoring_request: reuse_request,
+            managed_actor_bundle: None,
+            approval_signatures: Vec::new(),
+            existing_managed_actor: Some(anchors),
+        };
+        assert_eq!(
+            runtime_edge.reused_ghost_did(&reuse).unwrap(),
+            identity.initial_resolution.did
+        );
+        assert!(
+            runtime_edge
+                .prepare_managed_authoring(
+                    &AppletManagedActorCommittedRequest::Ghost(Box::new(reuse.clone())),
+                    &identity.root_verification_method,
+                    &identity.root_public_key
+                )
+                .is_err()
+        );
+        reuse
+            .existing_managed_actor
+            .as_mut()
+            .unwrap()
+            .profile_event_ref = event_id(0x79);
+        assert!(runtime_edge.reused_ghost_did(&reuse).is_err());
         let installed_rows = store.0.lock().unwrap().clone();
         runtime_edge
             .install_managed_authoring_completion(&body, &source_method, &source_key)
@@ -1428,7 +1653,7 @@ mod ghost_bundle_tests {
                     payload.clone(),
                     &authorization
                 )
-                .is_err()
+                .is_ok()
         );
         let intent = restarted
             .delegated_intent::<arkret_wire::event_spec::MessageCreate>(
@@ -1470,7 +1695,9 @@ mod ghost_bundle_tests {
         .unwrap();
         let committed = GhostActorProvisionRequestBody {
             authoring_request: request,
-            managed_actor_bundle: bundle,
+            managed_actor_bundle: Some(bundle),
+            approval_signatures: Vec::new(),
+            existing_managed_actor: None,
         };
         let store = Arc::new(RecordingAuthoringStore::default());
         let runtime_edge = edge(store.clone());
@@ -1525,7 +1752,7 @@ mod ghost_bundle_tests {
         .unwrap();
         runtime::validate_managed_actor_bundle(
             &committed.authoring_request,
-            &committed.managed_actor_bundle,
+            committed.managed_actor_bundle.as_ref().unwrap(),
             &verifier,
         )
         .unwrap();
@@ -1543,7 +1770,7 @@ mod ghost_bundle_tests {
         assert!(
             runtime::validate_managed_actor_bundle(
                 &committed.authoring_request,
-                &committed.managed_actor_bundle,
+                committed.managed_actor_bundle.as_ref().unwrap(),
                 &wrong_local_key,
             )
             .is_err()
@@ -1552,6 +1779,8 @@ mod ghost_bundle_tests {
         let mut wrong_event_proof = committed.clone();
         wrong_event_proof
             .managed_actor_bundle
+            .as_mut()
+            .unwrap()
             .profile_event
             .producer_proof
             .as_mut()
@@ -1560,7 +1789,7 @@ mod ghost_bundle_tests {
         assert!(
             runtime::validate_managed_actor_bundle(
                 &wrong_event_proof.authoring_request,
-                &wrong_event_proof.managed_actor_bundle,
+                &wrong_event_proof.managed_actor_bundle.as_ref().unwrap(),
                 &verifier,
             )
             .is_err()
@@ -1568,13 +1797,15 @@ mod ghost_bundle_tests {
         let mut wrong_ref = committed.clone();
         wrong_ref
             .managed_actor_bundle
+            .as_mut()
+            .unwrap()
             .pcr_genesis_event
             .semantic_refs
             .clear();
         assert!(
             runtime::validate_managed_actor_bundle(
                 &wrong_ref.authoring_request,
-                &wrong_ref.managed_actor_bundle,
+                &wrong_ref.managed_actor_bundle.as_ref().unwrap(),
                 &verifier,
             )
             .is_err()
@@ -1582,23 +1813,29 @@ mod ghost_bundle_tests {
         let mut wrong_executor = committed.clone();
         wrong_executor
             .managed_actor_bundle
+            .as_mut()
+            .unwrap()
             .profile_event
             .executed_by = Some(arkret::ActorId::service(core_id(STATION_DID)));
         assert!(
             runtime::validate_managed_actor_bundle(
                 &wrong_executor.authoring_request,
-                &wrong_executor.managed_actor_bundle,
+                &wrong_executor.managed_actor_bundle.as_ref().unwrap(),
                 &verifier,
             )
             .is_err()
         );
         let mut wrong_bundle_proof = committed.clone();
-        wrong_bundle_proof.managed_actor_bundle.proof.jws =
-            "eyJhbGciOiJFZDI1NTE5In0..AA".to_owned();
+        wrong_bundle_proof
+            .managed_actor_bundle
+            .as_mut()
+            .unwrap()
+            .proof
+            .jws = "eyJhbGciOiJFZDI1NTE5In0..AA".to_owned();
         assert!(
             runtime::validate_managed_actor_bundle(
                 &wrong_bundle_proof.authoring_request,
-                &wrong_bundle_proof.managed_actor_bundle,
+                &wrong_bundle_proof.managed_actor_bundle.as_ref().unwrap(),
                 &verifier,
             )
             .is_err()

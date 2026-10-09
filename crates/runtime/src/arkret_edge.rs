@@ -6,9 +6,8 @@
 //!   [`ArkretEdge::author_and_sign`] derives the one content-bound identity and signs it, then
 //!   [`ArkretEdge::submit_event`] hands it to the current governance Station as an
 //!   `EventAdmissionSubmission` and retains the authority-signed commit reference.
-//! - **Inbound (arkret → app)**: transactions pushed by the arkret server via the applet HTTP
-//!   endpoints are placed into the `inbound_tx` queue by [`BridgeAppletHandler`]; after the core
-//!   consumes them they are forwarded to the app adapter.
+//! - **Inbound (arkret → app)**: group content requires an accepted native managed Device. The
+//!   Applet management transaction endpoint accepts authoring completion only.
 //! - **Media**: [`ArkretEdge::upload_blob`] / [`ArkretEdge::download_blob`].
 //!
 //! A host injects a durable [`crate::AuthoringJournal`] so retries retain the
@@ -19,11 +18,11 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use arkret::http_client::{Auth, Client};
+use arkret::http_client::Client;
 #[cfg(any(feature = "web", test))]
 use arkret::identity::public_key_material_from_binding;
 #[cfg(any(feature = "web", test))]
-use arkret::signatures::{EventProofBuilder, VerificationMethodDocument};
+use arkret::signatures::VerificationMethodDocument;
 use arkret::signatures::{PublicKeyMaterial, SignEventOptions, sign_event};
 use arkret::{
     AppletId, AuthoredEvent, ClientRequestOptions, Did, DidCoreId, DigestSuite,
@@ -41,7 +40,7 @@ use arkret_models_integration::AppletTransactionRequestBody;
 #[cfg(any(feature = "web", test))]
 use arkret_models_integration::{
     AppletActorView, AppletPingOutcome, AppletProtocolMetadata, AppletRealmView,
-    AppletTransactionOutcome, AppletWireNamespaces,
+    AppletTransactionOutcome,
 };
 use arkret_models_integration::{
     AppletAuthoringTransactionRequestBody, AppletManagedActorCommittedRequest,
@@ -70,8 +69,6 @@ use crate::config::Config;
 #[cfg(any(feature = "web", test))]
 use crate::did_binding::DidAuthority;
 use crate::error::{BridgeError, Result};
-#[cfg(any(feature = "web", test))]
-use crate::idempotency::{DedupVerdict, EventDedupStore};
 
 /// Bound on the inbound (arkret → app) event queue. Past this depth the applet
 /// handler stops accepting events and asks the server to retry (backpressure)
@@ -93,11 +90,6 @@ pub const SIGNAL_QUEUE_CAPACITY: usize = 1024;
 /// managed-actor authoring unit, which is signed outside this module -- uses
 /// one suite instead of each caller picking its own.
 pub const PRODUCER_DIGEST_SUITE: DigestSuite = DigestSuite::Sha256;
-
-/// Retry hint (ms) returned to the server when the inbound queue is full, so it
-/// re-pushes the unaccepted events after a short delay instead of dropping them.
-#[cfg(any(feature = "web", test))]
-const INBOUND_QUEUE_FULL_RETRY_MS: u64 = 1000;
 
 /// The arkret edge client.
 pub struct ArkretEdge {
@@ -214,6 +206,24 @@ impl ArkretEdge {
         let service_actor_id = project_did_to_core_id(&service_did)?;
         let station_id = project_did_to_core_id(&config.arkret.trusted_server_did)?;
 
+        let http_key = ed25519_dalek::SigningKey::from_bytes(&config.signing_seed()?);
+        if http_key.verifying_key() != signer.verifying_key() {
+            return Err(BridgeError::Config(
+                "Service HTTP key differs from the producer key".into(),
+            ));
+        }
+        let client = client.with_service_http_signer(
+            service_actor_id.clone(),
+            station_id.clone(),
+            arkret::http_client::HttpMessageSigner::new(
+                config
+                    .arkret
+                    .verification_method_for(&service_did)?
+                    .to_string(),
+                http_key,
+            ),
+        );
+
         Ok(Self {
             config,
             client,
@@ -236,6 +246,85 @@ impl ArkretEdge {
 
     pub fn client(&self) -> &Client {
         &self.client
+    }
+
+    /// Prepare one independent Bot using the installed Service transport identity.
+    /// Retain the returned exact body before admission; retries must reuse its
+    /// request id, signed request and candidate rather than generating another Bot.
+    pub async fn prepare_bot_provision(
+        &self,
+        request: &arkret_models_integration::AppletBotPreviewRequestBody,
+    ) -> Result<arkret_models_integration::AppletBotProvisionRequestBody> {
+        let preview = self
+            .client
+            .applet_bot_preview(&self.config.arkret.applet_id, request)
+            .await?;
+        let base = url::Url::parse(&self.config.arkret.applet_base_url)
+            .map_err(|error| BridgeError::Config(format!("applet_base_url: {error}")))?;
+        if base.scheme() != "https"
+            || !base.username().is_empty()
+            || base.password().is_some()
+            || base.fragment().is_some()
+        {
+            return Err(BridgeError::Config(
+                "Applet management base_url must be HTTPS without credentials or fragment".into(),
+            ));
+        }
+        let authored = self
+            .client
+            .applet_managed_actor_author_at(
+                &base,
+                &arkret_models_integration::AppletManagedActorAuthorRequestBody {
+                    authoring_request: preview.authoring_request.clone(),
+                },
+            )
+            .await?;
+        Ok(arkret_models_integration::AppletBotProvisionRequestBody {
+            authoring_request: preview.authoring_request,
+            managed_actor_bundle: authored.managed_actor_bundle,
+            approval_signatures: Vec::new(),
+        })
+    }
+
+    /// Admit a retained creation body. Review-required outcomes must be resolved
+    /// through the separate management review contract before retrying admission.
+    pub async fn provision_bot(
+        &self,
+        body: &arkret_models_integration::AppletBotProvisionRequestBody,
+    ) -> Result<arkret_models_integration::AppletBotProvisionOutcome> {
+        let digest = body.authoring_request.canonical_digest()?;
+        Ok(self
+            .client
+            .applet_bot_provision(&self.config.arkret.applet_id, &digest.to_string(), body)
+            .await?)
+    }
+
+    /// Compose the SDK's restricted native self-operation transport for an
+    /// already accepted managed Device. It grants no session or group secrets.
+    pub fn managed_device_client(
+        &self,
+        metadata: arkret_models_integration::AppletManagedDeviceMetadata,
+        device_key: ed25519_dalek::SigningKey,
+    ) -> Result<Client> {
+        metadata.validate()?;
+        if metadata.applet_id != self.applet_id
+            || metadata.account_id.station_id != self.station_id
+            || device_key.verifying_key() == self.signer.verifying_key()
+        {
+            return Err(BridgeError::App(
+                "managed Device transport identity or key is misbound".into(),
+            ));
+        }
+        let fingerprint =
+            arkret::ed25519_pubkey_to_did_key_multibase(device_key.verifying_key().as_bytes());
+        Ok(self.client.clone().with_managed_device_http_signer(
+            metadata,
+            self.station_id.clone(),
+            arkret::http_client::HttpMessageSigner::new(
+                format!("did:key:{fingerprint}#{fingerprint}"),
+                device_key,
+            ),
+        )?)
     }
 
     /// The installed Applet service signing key.
@@ -287,23 +376,25 @@ impl ArkretEdge {
             })
     }
 
-    /// Freeze the exact locally authored install/Ghost request and bundle that
-    /// a later Station completion must echo. Returns `true` only for the first
-    /// durable preparation and `false` for an exact replay.
+    /// Reuse a Station-selected Ghost only after comparing all immutable
+    /// anchors to this runtime's accepted original creation evidence.
+    pub fn reused_ghost_did(
+        &self,
+        request: &arkret_models_integration::GhostActorProvisionRequestBody,
+    ) -> Result<Did> {
+        self.journal.reused_ghost_did(request)
+    }
+
+    /// Freeze the exact producer creation material before Station admission.
     pub fn prepare_managed_authoring(
         &self,
         committed_request: &AppletManagedActorCommittedRequest,
         managed_actor_verification_method: &DidUrl,
         managed_actor_public_key: &PublicKeyMaterial,
     ) -> Result<bool> {
-        let locally_created = match committed_request {
-            AppletManagedActorCommittedRequest::Ghost(_) => true,
-            AppletManagedActorCommittedRequest::Install(install) => matches!(
-                install.as_ref(),
-                arkret_models_integration::AppletInstallRequestBody::Create(_)
-            ),
-        };
-        if !locally_created {
+        if matches!(committed_request, AppletManagedActorCommittedRequest::Ghost(ghost)
+                if ghost.managed_actor_bundle.is_none())
+        {
             return Err(BridgeError::App(
                 "only locally authored creation requests can prepare new managed identity material"
                     .into(),
@@ -427,30 +518,10 @@ impl ArkretEdge {
         actor.validate()?;
         let actor_id = arkret::ActorId::account(actor.clone());
         if self.journal.is_locally_managed_actor(&actor_id)? {
-            let installed = self.installed_managed_authoring(scope, &actor_id)?.ok_or_else(||
+            let installed = self.journal.accepted_managed_creation(&actor_id)?.ok_or_else(||
                 BridgeError::Runtime("managed Actor completion remains pending; retain the original publication for retry".into()))?;
-            let grant_is_installed = match &installed.authoring_context.committed_request {
-                // A Ghost's creation grant only authorizes provisioning. Its
-                // ordinary action-specific capability comes from the host's
-                // original authorization record and the receiving Station gate.
-                AppletManagedActorCommittedRequest::Ghost(_) => true,
-                AppletManagedActorCommittedRequest::Install(install) => install
-                    .authoring_request()
-                    .basis
-                    .install()
-                    .is_some_and(|basis| {
-                        basis.capability_grant_events.iter().any(|event| {
-                            arkret_wire::GrantId::from_event_id(&event.event_id).as_str()
-                                == authorization_ref.as_str()
-                        })
-                    }),
-            };
-            if !grant_is_installed {
-                return Err(BridgeError::App(
-                    "managed Actor authorization is outside its exact installed scope grants"
-                        .into(),
-                ));
-            }
+            // Creation is provenance, not business authority. The exact supplied
+            // child grant is evaluated against its Service parent by the Station.
             let root = &installed
                 .authoring_context
                 .applet_service_signer_evidence
@@ -821,10 +892,7 @@ fn default_client(config: &Config) -> Result<Client> {
     crate::install_default_crypto_provider();
     let base = url::Url::parse(&config.arkret.server_url)
         .map_err(|e| BridgeError::Config(format!("server_url: {e}")))?;
-    Client::builder(base)
-        .auth(Auth::Bearer(config.arkret.access_token.clone()))
-        .build()
-        .map_err(Into::into)
+    Client::builder(base).build().map_err(Into::into)
 }
 
 fn spec_external_ref_map<T>(external_ref: T) -> Result<BTreeMap<String, Value>>
@@ -843,26 +911,7 @@ where
 }
 
 #[cfg(any(feature = "web", test))]
-/// Stable 64-bit FNV-1a fingerprint over an event's signed canonical envelope,
-/// bit-cast to `i64` for storage. Used only for same-id content-equality
-/// comparison in an [`EventDedupStore`]; not a security primitive (a mismatch
-/// only ever leads to a safe rejection).
-fn event_content_fingerprint(event: &Event) -> i64 {
-    let canonical = EventProofBuilder::new()
-        .envelope_bytes(event)
-        .unwrap_or_default();
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in canonical {
-        hash ^= b as u64;
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash as i64
-}
-
-#[cfg(any(feature = "web", test))]
-/// The receiver for transactions pushed by the arkret server (implements
-/// [`arkret::AppletHandler`]). It delivers the events in a transaction to the
-/// inbound queue; the business forwarding is done in the core consumer loop.
+/// Signed management completion receiver. Group data belongs to managed Devices.
 pub struct BridgeAppletHandler {
     applet_id: AppletId,
     service_id: DidCoreId,
@@ -871,17 +920,7 @@ pub struct BridgeAppletHandler {
     service_did: Did,
     trust_domain: arkret::TrustDomainId,
     transport_base_url: String,
-    namespaces: AppletWireNamespaces,
-    inbound_tx: Sender<Event>,
-    signal_tx: Option<Sender<SignalEnvelope>>,
     resolver: Option<Arc<dyn AppletResolver>>,
-    /// Event kinds this bridge consumes on the inbound path. `None` ⇒ permissive
-    /// (accept all). When `Some`, a pushed event whose kind is not listed is
-    /// rejected as `capability_denied` (applet-integration §7/§13).
-    handled_event_kinds: Option<Vec<String>>,
-    /// Durable single-event-level dedup store (applet-integration §7.3; the
-    /// runtime path injects [`crate::db::DbEventDedupStore`]).
-    dedup: Arc<dyn EventDedupStore>,
     /// Inbound DID **binding store** (`did-usage-and-verification.md` §6).
     ///
     /// A bridge has no registered DID authority call site, so [`DidAuthority`]
@@ -895,16 +934,25 @@ pub struct BridgeAppletHandler {
 
 #[cfg(any(feature = "web", test))]
 impl BridgeAppletHandler {
-    /// Build the handler from an inbound-capable edge. The edge must have been
-    /// constructed with an inbound sender (the run_bridge/web path always is).
-    /// `dedup` is the durable event-dedup store enforcing §7.3.
+    /// Build the signed management receiver from the actual Service key and
+    /// durable authoring journal. Group queues are not a management capability.
     pub fn new(
         edge: &ArkretEdge,
         resolver: Option<Arc<dyn AppletResolver>>,
-        dedup: Arc<dyn EventDedupStore>,
-        handled_event_kinds: Option<Vec<String>>,
         did_authority: Arc<DidAuthority>,
     ) -> Result<Self> {
+        let management_url = url::Url::parse(&edge.config.arkret.applet_base_url)
+            .map_err(|error| BridgeError::Config(format!("applet_base_url: {error}")))?;
+        if management_url.scheme() != "https"
+            || management_url.host_str().is_none()
+            || !management_url.username().is_empty()
+            || management_url.password().is_some()
+            || management_url.fragment().is_some()
+        {
+            return Err(BridgeError::Config(
+                "applet_base_url requires HTTPS without credentials or fragment".into(),
+            ));
+        }
         let service_did = edge.service_did.clone();
         let service_id = project_did_to_core_id(&service_did)
             .map_err(|error| BridgeError::Config(error.to_string()))?;
@@ -917,15 +965,8 @@ impl BridgeAppletHandler {
             },
             service_did: service_did.clone(),
             trust_domain: edge.config.arkret.trust_domain.clone(),
-            transport_base_url: format!("http://{}", edge.config.bridge.admin_addr()),
-            namespaces: edge.config.arkret.applet_namespaces.clone(),
-            inbound_tx: edge.inbound_sender().ok_or_else(|| {
-                BridgeError::Config("applet handler requires an inbound-enabled edge".into())
-            })?,
-            signal_tx: edge.signal_sender(),
+            transport_base_url: management_url.to_string(),
             resolver,
-            dedup,
-            handled_event_kinds,
             did_authority,
             journal: edge.journal.clone(),
         })
@@ -937,7 +978,7 @@ impl BridgeAppletHandler {
     /// the locally encrypted identity and frozen before handoff. The exact
     /// prepared four-Event bundle and its aggregate proof must verify under the
     /// Applet Service key held by this process. The attester leaf is rebuilt
-    /// from the accepted own-Station Service binding. Create and Ghost require
+    /// from the accepted own-Station Service binding. Bot and Ghost creation require
     /// their locally prepared exact unit; reuse requires the original anchors.
     fn verify_local_managed_authoring_closure(
         &self,
@@ -966,26 +1007,6 @@ impl BridgeAppletHandler {
             &self.journal,
             &source_key,
         )
-    }
-
-    /// Whether this applet consumes `kind` on the inbound path. Permissive when
-    /// no kind set was declared (a generic bridge that did not constrain kinds).
-    fn handles_event_kind(&self, kind: &str) -> bool {
-        match &self.handled_event_kinds {
-            Some(kinds) => kinds.iter().any(|k| k == kind),
-            None => true,
-        }
-    }
-
-    /// Whether `realm_id` falls inside one of the realm namespace patterns this
-    /// applet declared in `describe` (applet-integration §7/§13 namespace
-    /// matching). Patterns use the spec's trailing `*` suffix-glob form. An
-    /// empty explicit Realm namespace accepts no Realm.
-    fn realm_in_namespace(&self, realm_id: &str) -> bool {
-        self.namespaces
-            .realms
-            .iter()
-            .any(|entry| glob_suffix_match(&entry.pattern, realm_id))
     }
 }
 
@@ -1092,15 +1113,13 @@ fn verify_managed_authoring_closure(
     }
 
     let creation = match &body.authoring_context.committed_request {
-        AppletManagedActorCommittedRequest::Ghost(ghost) => {
-            Some((&ghost.authoring_request, &ghost.managed_actor_bundle))
+        AppletManagedActorCommittedRequest::Ghost(ghost) => ghost
+            .managed_actor_bundle
+            .as_ref()
+            .map(|bundle| (&ghost.authoring_request, bundle)),
+        AppletManagedActorCommittedRequest::Bot(bot) => {
+            Some((&bot.authoring_request, &bot.managed_actor_bundle))
         }
-        AppletManagedActorCommittedRequest::Install(install) => match install.as_ref() {
-            arkret_models_integration::AppletInstallRequestBody::Create(create) => {
-                Some((&create.authoring_request, &create.managed_actor_bundle))
-            }
-            _ => None,
-        },
     };
     let verifier = LocalServiceManagedActorProofVerifier::new(
         service_id.clone(),
@@ -1156,17 +1175,6 @@ fn verify_managed_authoring_closure(
     )
     .map_err(|error| WireError::Protocol(error.to_string()))?;
     Ok(())
-}
-
-/// Match a spec namespace pattern against a candidate id. Supports a trailing
-/// `*` wildcard (prefix match) and exact equality otherwise; an interior `*` is
-/// treated literally (the spec only uses trailing globs for namespaces).
-#[cfg(any(feature = "web", test))]
-fn glob_suffix_match(pattern: &str, candidate: &str) -> bool {
-    match pattern.strip_suffix('*') {
-        Some(prefix) => candidate.starts_with(prefix),
-        None => pattern == candidate,
-    }
 }
 
 #[cfg(any(feature = "web", test))]
@@ -1251,8 +1259,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
                     .is_exact_managed_authoring_replay(&identity, &body)
                     .map_err(|error| WireError::Protocol(error.to_string()))?
                 {
-                    return Ok(AppletTransactionOutcome {
-                        status: arkret_models_integration::AppletTransactionStatus::Accepted,
+                    return Ok(AppletTransactionOutcome::Accepted {
                         committed_event_refs: Vec::new(),
                         rejections: Vec::new(),
                         retry_after_ms: None,
@@ -1262,8 +1269,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
                 self.journal
                     .install_managed_authoring(&identity, &body)
                     .map_err(|error| WireError::Protocol(error.to_string()))?;
-                return Ok(AppletTransactionOutcome {
-                    status: arkret_models_integration::AppletTransactionStatus::Accepted,
+                return Ok(AppletTransactionOutcome::Accepted {
                     committed_event_refs: Vec::new(),
                     rejections: Vec::new(),
                     retry_after_ms: None,
@@ -1271,248 +1277,10 @@ impl arkret::AppletHandler for BridgeAppletHandler {
             }
             AppletTransactionRequestBody::Events(req) => req,
         };
-        if !req.events.is_empty() {
-            return Err(WireError::Protocol(
-                "Station-to-Applet delivery requires full committed Event pairs".into(),
-            ));
-        }
-        let mut delivery_refs = BTreeMap::new();
-        let mut delivery_events = Vec::with_capacity(req.committed_events.len());
-        for pair in req.committed_events {
-            let proof = pair.event.producer_proof.as_ref().ok_or_else(|| {
-                WireError::Protocol("accepted delivery lacks producer proof".into())
-            })?;
-            let producer_key = if let Some(key) =
-                crate::authority::committed_delivery_device_key(&proof.verification_method)
-                    .map_err(|error| WireError::Protocol(error.to_string()))?
-            {
-                key
-            } else if proof.verification_method == self.service_verification_method {
-                self.service_public_key.clone()
-            } else {
-                let accepted = self
-                    .did_authority
-                    .service_verification_method(&proof.verification_method, chrono::Utc::now())
-                    .map_err(WireError::Protocol)?;
-                public_key_material_from_binding(&accepted, &proof.verification_method)
-                    .map_err(|error| WireError::Protocol(error.to_string()))?
-            };
-            let accepted_governance = self
-                .did_authority
-                .service_verification_method(
-                    &pair.commit.signature.verification_method,
-                    chrono::Utc::now(),
-                )
-                .map_err(WireError::Protocol)?;
-            let governance_key = public_key_material_from_binding(
-                &accepted_governance,
-                &pair.commit.signature.verification_method,
-            )
-            .map_err(|error| WireError::Protocol(error.to_string()))?;
-            let reference = crate::authority::validate_applet_committed_delivery(
-                &pair,
-                PRODUCER_DIGEST_SUITE,
-                &producer_key,
-                &governance_key,
-            )
-            .map_err(|error| WireError::Protocol(error.to_string()))?;
-            if delivery_refs
-                .get(&pair.event.event_id)
-                .is_some_and(|existing| existing != &reference)
-            {
-                return Err(WireError::Protocol(
-                    "one delivery Event has conflicting Commit coordinates".into(),
-                ));
-            }
-            delivery_refs.insert(pair.event.event_id.clone(), reference);
-            delivery_events.push(pair.event);
-        }
-        let event_count = delivery_events.len();
-        let mut committed_event_refs = Vec::new();
-        let mut rejections: Vec<arkret::AppletEventRejection> = Vec::new();
-        let mut enqueue_failed = false;
-        // Set when the bounded inbound queue is full: we ask the server to retry
-        // the whole batch shortly (backpressure) rather than buffering without
-        // limit or dropping events.
-        let mut queue_full = false;
-
-        for event in delivery_events {
-            let event_id = event.event_id.to_string();
-
-            // Backpressure (BRG-02-001): once the bounded inbound queue is full we
-            // stop accepting the remainder of this batch and ask the server to
-            // redeliver, instead of growing memory without bound. Events skipped
-            // here were never dedup-recorded, so the redelivery is clean.
-            if queue_full {
-                rejections.push(arkret::AppletEventRejection {
-                    event_id: Some(event.event_id.clone()),
-                    reason_code: arkret_wire::ReasonCode::from_wire(
-                        arkret_wire::ReasonCode::QUEUE_FULL,
-                    ),
-                    retry_after_ms: None,
-                });
-                continue;
-            }
-
-            // Namespace enforcement (applet-integration §7 / §13): the pushed
-            // event's realm MUST fall inside the realm namespace this applet
-            // declared in `describe`. A trusted-channel event for a realm outside
-            // our namespace is rejected before it can be forwarded to the app.
-            if !self.realm_in_namespace(event.realm_id.as_ref()) {
-                tracing::warn!(
-                    %event_id,
-                    realm = %event.realm_id,
-                    "rejecting event: realm is outside this applet's declared namespace"
-                );
-                rejections.push(arkret::AppletEventRejection {
-                    event_id: Some(event.event_id.clone()),
-                    reason_code: arkret_wire::ReasonCode::from_wire(
-                        arkret_wire::ReasonCode::APPLET_NAMESPACE_MISMATCH,
-                    ),
-                    retry_after_ms: None,
-                });
-                continue;
-            }
-
-            // Capability enforcement (applet-integration §7 / §13; BRG-01-009):
-            // reject event kinds this bridge did not declare it handles, so an
-            // unsupported kind is surfaced to the server rather than forwarded
-            // and silently ignored by the adapter. Permissive when no kind set
-            // was declared (generic bridges).
-            if !self.handles_event_kind(event.kind.as_str()) {
-                tracing::warn!(
-                    %event_id,
-                    kind = %event.kind,
-                    "rejecting event: kind is not in this applet's declared capability set"
-                );
-                rejections.push(arkret::AppletEventRejection {
-                    event_id: Some(event.event_id.clone()),
-                    reason_code: arkret_wire::ReasonCode::from_wire(
-                        arkret_wire::ErrorCode::CAPABILITY_DENIED,
-                    ),
-                    retry_after_ms: None,
-                });
-                continue;
-            }
-
-            // Reserve a slot in the bounded queue BEFORE recording dedup, so an
-            // event that cannot be enqueued is never marked as seen (otherwise a
-            // server redelivery would be silently dropped as a duplicate). A full
-            // queue switches the rest of the batch to the backpressure path; a
-            // closed receiver means the consumer is gone (internal error).
-            let permit = match self.inbound_tx.try_reserve() {
-                Ok(permit) => permit,
-                Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {
-                    queue_full = true;
-                    rejections.push(arkret::AppletEventRejection {
-                        event_id: Some(event.event_id.clone()),
-                        reason_code: arkret_wire::ReasonCode::from_wire(
-                            arkret_wire::ReasonCode::QUEUE_FULL,
-                        ),
-                        retry_after_ms: None,
-                    });
-                    continue;
-                }
-                Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
-                    enqueue_failed = true;
-                    tracing::error!(%event_id, "failed to enqueue inbound event: consumer gone");
-                    rejections.push(arkret::AppletEventRejection {
-                        event_id: Some(event.event_id.clone()),
-                        reason_code: arkret_wire::ReasonCode::from_wire(
-                            arkret_wire::ReasonCode::INTERNAL_ERROR,
-                        ),
-                        retry_after_ms: None,
-                    });
-                    continue;
-                }
-            };
-
-            // Single-event-level dedup (§7.3): identical re-push is accepted
-            // without re-forwarding; a conflicting body under the same id is
-            // rejected. The store is durable, so the rule holds across
-            // restarts. A store failure must not silently double-deliver:
-            // signal a retry instead. The reserved permit is released (dropped)
-            // on every non-Fresh path, returning the queue slot.
-            match self
-                .dedup
-                .check_and_record(&event_id, event_content_fingerprint(&event))
-            {
-                Ok(DedupVerdict::Fresh) => {
-                    // Enqueue for the core consumer loop via the reserved permit.
-                    committed_event_refs.push(delivery_refs[&event.event_id].clone());
-                    permit.send(event);
-                }
-                Ok(DedupVerdict::DuplicateSameContent) => {
-                    // Already processed with identical content — accept silently,
-                    // do not fan out again.
-                    continue;
-                }
-                Ok(DedupVerdict::DuplicateConflict) => {
-                    tracing::warn!(
-                        %event_id,
-                        "rejecting event: same event_id pushed with conflicting content"
-                    );
-                    rejections.push(arkret::AppletEventRejection {
-                        event_id: Some(event.event_id.clone()),
-                        reason_code: arkret_wire::ReasonCode::from_wire(
-                            arkret_wire::ReasonCode::DUPLICATE_CONFLICT,
-                        ),
-                        retry_after_ms: None,
-                    });
-                    continue;
-                }
-                Err(err) => {
-                    enqueue_failed = true;
-                    tracing::error!(%event_id, error = %err, "event dedup store failed");
-                    rejections.push(arkret::AppletEventRejection {
-                        event_id: Some(event.event_id.clone()),
-                        reason_code: arkret_wire::ReasonCode::from_wire(
-                            arkret_wire::ReasonCode::INTERNAL_ERROR,
-                        ),
-                        retry_after_ms: None,
-                    });
-                    continue;
-                }
-            }
-        }
-
-        // Forward SDK-typed encrypted Signal envelopes one at a time. Signal
-        // loss is non-fatal (best-effort) and does not affect the durable ack.
-        if let Some(tx) = self.signal_tx.as_ref() {
-            for envelope in req.signals {
-                if let Err(err) = envelope.validate_structural() {
-                    tracing::warn!(
-                        error = %err,
-                        "dropping invalid Signal envelope"
-                    );
-                    continue;
-                }
-                if let Err(err) = tx.try_send(envelope) {
-                    tracing::warn!(
-                        error = %err,
-                        "dropping Signal envelope because the best-effort queue is full or closed"
-                    );
-                }
-            }
-        }
-
-        // `status` reflects whether every durable event was accepted (either freshly
-        // enqueued or de-duplicated). When enqueueing failed or the queue is full
-        // (backpressure), signal a retry so the server re-pushes the unaccepted
-        // events rather than dropping the batch.
-        let retry_after_ms = (enqueue_failed || queue_full).then_some(INBOUND_QUEUE_FULL_RETRY_MS);
-        Ok(AppletTransactionOutcome {
-            status: if rejections.is_empty() {
-                arkret_models_integration::AppletTransactionStatus::Accepted
-            } else if rejections.len() == event_count {
-                arkret_models_integration::AppletTransactionStatus::Rejected
-            } else {
-                arkret_models_integration::AppletTransactionStatus::Partial
-            },
-            committed_event_refs,
-            rejections,
-            retry_after_ms,
-        })
+        let _ = req;
+        Err(WireError::Protocol(
+            "Station-to-Applet Event and Signal subscriptions are prohibited; use an authorized managed Device".into(),
+        ))
     }
 
     fn resolve_actor(&self, actor_id: &str) -> std::result::Result<AppletActorView, WireError> {
@@ -1581,42 +1349,20 @@ impl arkret::AppletHandler for BridgeAppletHandler {
 mod tests {
     use std::sync::Mutex;
 
-    use arkret::{
-        DidDocument, NonEmptyJsonObject, PayloadSigner, build_principal_signer_evidence,
-        build_service_signer_evidence,
-    };
-    use arkret_models_integration::{
-        AppletApprovalRequest, AppletDidMethodVersionEvidence, AppletEndpointAuth,
-        AppletEndpointEntry, AppletEndpointMethod, AppletGhostActorMode,
-        AppletInstallAuthoringRequestBasis, AppletInstallRequestBody,
-        AppletInstallReuseRequestBody, AppletManagedActorAuthoringContext,
-        AppletManagedActorAuthoringRequest, AppletManagedActorCommittedRequest,
-        AppletManagedActorPurpose, AppletPackage, AppletRegistrationEpochEvidence,
-        AppletServiceSignerEvidence, AppletWireNamespaces, ManagedActorPrincipalSignerEvidence,
-        ReuseExistingManagedActor,
-    };
     use arkret_wire::{
         Base64UrlString, CommitStreamRef, DetachedObjectSignature, DetachedSignatureAlgorithm,
-        DetachedSignatureContext, EventId, PayloadSignature, RealmCommit, RealmCommitAuthorityRef,
+        DetachedSignatureContext, RealmCommit, RealmCommitAuthorityRef,
     };
 
     use super::*;
-
-    struct AlwaysFreshDedup;
-
-    impl EventDedupStore for AlwaysFreshDedup {
-        fn check_and_record(&self, _event_id: &str, _fingerprint: i64) -> Result<DedupVerdict> {
-            Ok(DedupVerdict::Fresh)
-        }
-    }
 
     fn test_edge(store: Arc<dyn AuthoringStore>) -> ArkretEdge {
         let config: Config = serde_json::from_value(json!({
             "bridge": {"bridge_id": "test"},
             "arkret": {
-                "server_url": "https://station.example", "service_did": "did:webvh:z6mkbridge:bridge.example",
+                "server_url": "https://station.example", "applet_base_url":"https://bridge.example", "service_did": "did:webvh:z6mkbridge:bridge.example",
                 "trust_domain": "ak:trust_domain:example.net", "applet_id": "ak:applet:01904100-0000-7000-8000-000000000001",
-                "access_token": "test", "signing_key_seed_hex": "11".repeat(32),
+                "signing_key_seed_hex": "11".repeat(32),
                 "verification_method_fragment": "#key-1",
                 "trusted_server_did": "did:webvh:z6mkstation:station.example",
                 "applet_namespaces": {"actors":[],"realms":[],"handles":[]},
@@ -1668,429 +1414,64 @@ mod tests {
         }
     }
 
-    struct StubPayloadSigner {
-        did: Did,
-        verification_method: DidUrl,
-    }
-
-    impl PayloadSigner for StubPayloadSigner {
-        fn signer_did(&self) -> &Did {
-            &self.did
-        }
-
-        fn verification_method_id(&self) -> &DidUrl {
-            &self.verification_method
-        }
-
-        fn sign_payload(&self, canonical_bytes: &[u8]) -> arkret_wire::Result<PayloadSignature> {
-            let payload_digest =
-                arkret::Hash::new(arkret::canonical::sha256_digest(canonical_bytes))?;
-            Ok(PayloadSignature {
-                verification_method: self.verification_method.clone(),
-                payload_digest: payload_digest.clone(),
-                created_at: "2026-09-16T00:00:00Z".parse().unwrap(),
-                jws: format!(
-                    "eyJhbGciOiJFZDI1NTE5In0..{}",
-                    payload_digest
-                        .as_str()
-                        .strip_prefix("sha256:")
-                        .expect("test digest has the registered prefix")
-                ),
-            })
-        }
-    }
-
-    fn test_jwk() -> NonEmptyJsonObject {
-        NonEmptyJsonObject::new(BTreeMap::from([
-            ("kty".to_owned(), json!("OKP")),
-            ("crv".to_owned(), json!("Ed25519")),
-            (
-                "x".to_owned(),
-                json!("11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"),
-            ),
-        ]))
-        .unwrap()
-    }
-
-    fn test_jwk_for_key(key: [u8; 32]) -> NonEmptyJsonObject {
-        NonEmptyJsonObject::new(BTreeMap::from([
-            ("kty".to_owned(), json!("OKP")),
-            ("crv".to_owned(), json!("Ed25519")),
-            (
-                "x".to_owned(),
-                json!(arkret::canonical::base64url_encode(key)),
-            ),
-        ]))
-        .unwrap()
-    }
-
-    fn test_committed_ref(realm_id: &RealmId, seed: u8) -> arkret::CommittedEventRef {
-        arkret::CommittedEventRef {
-            event_id: EventId::from_digest(DigestSuite::Sha256, [seed; 32]),
-            commit_id: arkret::RealmCommitId::from_digest([seed.wrapping_add(1); 32]),
-            stream_ref: CommitStreamRef::Realm {
-                realm_id: realm_id.clone(),
-            },
-            stream_position: u64::from(seed),
-        }
-    }
-
-    fn managed_authoring_fixture(
-        edge: &ArkretEdge,
-    ) -> (AppletAuthoringTransactionRequestBody, arkret::ActorId) {
-        let realm_id =
-            RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").unwrap();
-        let managed_principal = DidCoreId::new("ak:did_core:webvh:z6mkmanagedbot").unwrap();
-        let managed_actor = arkret::ActorId::account(arkret::AccountId::new(
-            managed_principal.clone(),
-            edge.station_id.clone(),
-        ));
-        let controller = DidCoreId::new("ak:did_core:webvh:z6mkcontroller").unwrap();
-        let mut package = AppletPackage::new(
-            "test-managed-authoring",
-            edge.applet_id.clone(),
-            edge.service_actor_id.clone(),
-            edge.service_did.clone(),
-            controller,
-            "https://bridge.example",
-            managed_actor.clone(),
-            vec!["test".into()],
-            AppletWireNamespaces::default(),
-        );
-        package.requested_scopes = vec!["ak.message.create".into()];
-        package.endpoint_policy.endpoints.push(AppletEndpointEntry {
-            method: AppletEndpointMethod::Post,
-            path: "/_arkret/edge/applet/transactions".into(),
-            auth: Some(AppletEndpointAuth::WebhookSignature),
-            description: None,
-            extra: Default::default(),
-        });
-        let registration_epoch_evidence = AppletRegistrationEpochEvidence::from_did_document(
-            &DidDocument::new(
-                edge.service_did.clone(),
-                "applet-webhook",
-                "z6MkrJVnaZkeF7EsnJQ9xQY4bqG9tbeFqTzL7uTVs11FwUjT",
-            ),
-            AppletDidMethodVersionEvidence::versioned(
-                "did:webvh",
-                Some("test-registration-version".into()),
-                None,
+    #[test]
+    fn managed_device_transport_rejects_service_key_and_other_station() {
+        let edge = test_edge(Arc::new(MemoryAuthoringStore::default()));
+        let metadata: arkret_models_integration::AppletManagedDeviceMetadata = serde_json::from_value(json!({
+            "account_id": { "principal_id":"ak:did_core:webvh:z6mkbot", "station_id":edge.station_id },
+            "device_id":"ak:device:01904100-0000-7000-8000-000000000003",
+            "authorization_event_id":"ak:event:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "applet_id":edge.applet_id,
+            "effective_scope": {"kind":"realm","realm_id":"ak:realm:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
+            "nonce":"AAAAAAAAAAAAAAAAAAAAAA"
+        })).unwrap();
+        assert!(
+            edge.managed_device_client(
+                metadata.clone(),
+                ed25519_dalek::SigningKey::from_bytes(&[0x11; 32])
             )
-            .unwrap(),
-        )
-        .unwrap();
-        package
-            .stamp_registration_epoch(&registration_epoch_evidence)
-            .unwrap();
-        package.stamp_package_digest().unwrap();
-        let requested_at = "2026-09-16T00:00:00Z".parse().unwrap();
-        let scope = ScopeRef::Realm {
-            realm_id: realm_id.clone(),
-        };
-        let registration_event = arkret_wire::test_support::raw_event_at(
-            "ak.applet.registration",
-            scope.clone(),
-            edge.service_actor_id.clone(),
-            edge.station_id.clone(),
-            json!({"manifest": {"registration_epoch_evidence": registration_epoch_evidence}}),
-            requested_at,
-        )
-        .unwrap();
-        let grant_event = arkret_wire::test_support::raw_event_at(
-            "ak.capability.grant",
-            scope.clone(),
-            edge.service_actor_id.clone(),
-            edge.station_id.clone(),
-            json!({}),
-            requested_at,
-        )
-        .unwrap();
-        let basis = AppletInstallAuthoringRequestBasis {
-            schema: AppletInstallAuthoringRequestBasis::SCHEMA.to_owned(),
-            purpose: AppletManagedActorPurpose::InstallBot,
-            target_station_id: edge.station_id.clone(),
-            install_actor_id: arkret::ActorId::service(edge.service_actor_id.clone()),
-            applet_id: edge.applet_id.clone(),
-            service_id: edge.service_actor_id.clone(),
-            package_digest: package.package_digest.clone().unwrap(),
-            effective_scope: scope,
-            approval_request: AppletApprovalRequest {
-                approve_actions: vec!["ak.message.create".into()],
-                ghost_actor_mode: AppletGhostActorMode::Disallowed,
-                delegated_native_actors_allowed: false,
-                e2ee_join_allowed: false,
-                widget_allowed: false,
-            },
-            actor_policy: None,
-            e2ee_policy: None,
-            widget_policy: None,
-            registration_event,
-            capability_grant_events: vec![grant_event],
-        };
-        let station_did = Did::new("did:webvh:z6mkstation:station.example").unwrap();
-        let signer = StubPayloadSigner {
-            did: station_did.clone(),
-            verification_method: DidUrl::new(format!("{station_did}#key-1")).unwrap(),
-        };
-        let request = AppletManagedActorAuthoringRequest::sign(
-            basis,
-            arkret::Hash::new(format!("sha256:{}", "44".repeat(32))).unwrap(),
-            edge.station_id.clone(),
-            requested_at,
-            requested_at + chrono::Duration::minutes(5),
-            &signer,
-        )
-        .unwrap();
-        let reuse = ReuseExistingManagedActor {
-            actor_id: managed_actor.clone(),
-            managed_actor_provision_ref: test_committed_ref(&realm_id, 1).event_id,
-            pcr_genesis_ref: test_committed_ref(&realm_id, 2).event_id,
-            accountability_grant_ref: test_committed_ref(&realm_id, 3).event_id,
-            profile_event_ref: test_committed_ref(&realm_id, 4).event_id,
-            initial_package_bot_actor_id: managed_actor.clone(),
-        };
-        let committed_request =
-            AppletInstallRequestBody::Reuse(Box::new(AppletInstallReuseRequestBody {
-                applet_package: package,
-                authoring_request: request,
-                reuse_existing_managed_actor: reuse,
-            }));
-        let commit_id = arkret::RealmCommitId::from_digest([0x2c; 32]);
-        let applet_evidence = build_service_signer_evidence(
-            edge.service_actor_id.clone(),
-            edge.service_verification_method().unwrap(),
-            test_jwk_for_key(edge.signer.verifying_key().to_bytes()),
-            commit_id.clone(),
-            requested_at,
-        )
-        .unwrap();
-        let principal_evidence = build_principal_signer_evidence(
-            managed_principal,
-            DidUrl::new("did:webvh:z6mkmanagedbot:bot.example#key-1").unwrap(),
-            test_jwk(),
-            commit_id.clone(),
-            requested_at,
-        )
-        .unwrap();
-        let attester_evidence = build_service_signer_evidence(
-            edge.station_id.clone(),
-            signer.verification_method,
-            test_jwk(),
-            commit_id.clone(),
-            requested_at,
-        )
-        .unwrap();
-        (
-            AppletAuthoringTransactionRequestBody {
-                applet_id: edge.applet_id.clone(),
-                source_id: edge.station_id.clone(),
-                authoring_context: AppletManagedActorAuthoringContext {
-                    committed_request: AppletManagedActorCommittedRequest::Install(Box::new(
-                        committed_request,
-                    )),
-                    realm_stream_head: arkret::CommitStreamHead {
-                        stream_ref: CommitStreamRef::Realm {
-                            realm_id: realm_id.clone(),
-                        },
-                        stream_position: 41,
-                        commit_id,
-                    },
-                    principal_control_commit: RealmCommit {
-                        commit_id: arkret::RealmCommitId::from_digest([0x2c; 32]),
-                        realm_id: realm_id.clone(),
-                        stream_ref: CommitStreamRef::Realm {
-                            realm_id: realm_id.clone(),
-                        },
-                        stream_position: 0,
-                        previous_commit_ref: None,
-                        event_ref: test_committed_ref(&realm_id, 2).event_id,
-                        governance_generation: 0,
-                        authority_ref: RealmCommitAuthorityRef::GenesisOrChangeEvent(
-                            test_committed_ref(&realm_id, 2).event_id,
-                        ),
-                        committed_at: requested_at,
-                        signature: commit_signature(DetachedSignatureContext::RealmCommit),
-                    },
-                    resolution_update: None,
-                    applet_service_signer_evidence: AppletServiceSignerEvidence {
-                        signer_resolution_evidence_ref: applet_evidence
-                            .signer_evidence_ref()
-                            .unwrap(),
-                        authenticated_signer_evidence: applet_evidence,
-                    },
-                    managed_actor_signer_evidence: ManagedActorPrincipalSignerEvidence {
-                        signer_resolution_evidence_ref: principal_evidence
-                            .signer_evidence_ref()
-                            .unwrap(),
-                        authenticated_signer_evidence: principal_evidence,
-                        attester_signer_evidence: attester_evidence,
-                    },
-                },
-            },
-            managed_actor,
-        )
+            .is_err()
+        );
+        assert!(
+            edge.managed_device_client(
+                metadata.clone(),
+                ed25519_dalek::SigningKey::from_bytes(&[0x23; 32])
+            )
+            .is_ok()
+        );
+        let mut wrong = metadata;
+        wrong.account_id.station_id = DidCoreId::new("ak:did_core:webvh:z6mkother").unwrap();
+        assert!(
+            edge.managed_device_client(wrong, ed25519_dalek::SigningKey::from_bytes(&[0x23; 32]))
+                .is_err()
+        );
     }
 
     #[test]
-    fn managed_authoring_reuse_requires_original_creation_and_exact_roots() {
+    fn management_endpoint_never_subscribes_to_group_events_or_signals() {
         let store = Arc::new(MemoryAuthoringStore::default());
         let edge = test_edge(store.clone());
-        let (body, managed_actor) = managed_authoring_fixture(&edge);
         let handler = BridgeAppletHandler::new(
             &edge,
-            None,
-            Arc::new(AlwaysFreshDedup),
             None,
             Arc::new(DidAuthority::new(edge.config.arkret.trust_domain.clone()).unwrap()),
         )
         .unwrap();
-        let identity = validate_managed_authoring_completion(
-            &body,
-            &edge.station_id,
-            &edge.applet_id,
-            &edge.service_actor_id,
-        )
-        .unwrap();
-
-        assert!(
-            arkret::AppletHandler::handle_transaction(
-                &handler,
-                "cold-reuse",
-                AppletTransactionRequestBody::Authoring(Box::new(body.clone())),
-            )
-            .is_err(),
-            "Reuse without the first Bot identity anchors must remain unresolved"
-        );
-        assert!(store.0.lock().unwrap().is_empty());
-
-        let mut fake_jwk = body.clone();
-        let service_evidence = &mut fake_jwk.authoring_context.applet_service_signer_evidence;
-        service_evidence
-            .authenticated_signer_evidence
-            .public_key_jwk = test_jwk();
-        service_evidence.signer_resolution_evidence_ref = service_evidence
-            .authenticated_signer_evidence
-            .signer_evidence_ref()
-            .unwrap();
-        assert!(
-            arkret::AppletHandler::handle_transaction(
-                &handler,
-                "fake-jwk",
-                AppletTransactionRequestBody::Authoring(Box::new(fake_jwk)),
-            )
-            .is_err()
-        );
-        assert!(store.0.lock().unwrap().is_empty());
-
-        let mut fake_method = body.clone();
-        let service_evidence = &mut fake_method.authoring_context.applet_service_signer_evidence;
-        service_evidence
-            .authenticated_signer_evidence
-            .verification_method =
-            DidUrl::new("did:webvh:z6mkbridge:bridge.example#other-key".to_owned()).unwrap();
-        service_evidence.signer_resolution_evidence_ref = service_evidence
-            .authenticated_signer_evidence
-            .signer_evidence_ref()
-            .unwrap();
-        assert!(
-            arkret::AppletHandler::handle_transaction(
-                &handler,
-                "fake-method",
-                AppletTransactionRequestBody::Authoring(Box::new(fake_method)),
-            )
-            .is_err()
-        );
-        assert!(store.0.lock().unwrap().is_empty());
-
-        let mut fake_commit = body.clone();
-        let evidence = &mut fake_commit.authoring_context.managed_actor_signer_evidence;
-        let wrong_commit = arkret::RealmCommitId::from_digest([0x7f; 32]);
-        evidence.authenticated_signer_evidence.authority_commit_id = wrong_commit.clone();
-        evidence.attester_signer_evidence.authority_commit_id = wrong_commit;
-        evidence.signer_resolution_evidence_ref = evidence
-            .authenticated_signer_evidence
-            .signer_evidence_ref()
-            .unwrap();
-        assert!(
-            arkret::AppletHandler::handle_transaction(
-                &handler,
-                "fake-commit",
-                AppletTransactionRequestBody::Authoring(Box::new(fake_commit)),
-            )
-            .is_err()
-        );
-        assert!(store.0.lock().unwrap().is_empty());
-
-        let mut invalid = body.clone();
-        invalid
-            .authoring_context
-            .managed_actor_signer_evidence
-            .signer_resolution_evidence_ref = arkret::SignerEvidenceRef::new(format!(
-            "ak:signer_evidence:sha256:{}",
-            "00".repeat(32)
-        ))
+        let request = serde_json::from_value(json!({
+            "applet_id": edge.applet_id,
+            "source_id": edge.station_id,
+            "events": [], "committed_events": [], "signals": []
+        }))
         .unwrap();
         assert!(
-            validate_managed_authoring_completion(
-                &invalid,
-                &edge.station_id,
-                &edge.applet_id,
-                &edge.service_actor_id,
+            arkret::AppletHandler::handle_transaction(
+                &handler,
+                "group-subscription",
+                AppletTransactionRequestBody::Events(request)
             )
             .is_err()
         );
-        assert!(
-            store.0.lock().unwrap().is_empty(),
-            "invalid evidence wrote state"
-        );
-
-        assert!(
-            edge.journal
-                .install_managed_authoring(&identity, &body)
-                .is_err(),
-            "authenticated delivery must not replace local authoring preparation"
-        );
         assert!(store.0.lock().unwrap().is_empty());
-        let managed_evidence = &body
-            .authoring_context
-            .managed_actor_signer_evidence
-            .authenticated_signer_evidence;
-        let managed_key = PublicKeyMaterial::Jwk {
-            value: serde_json::to_value(&managed_evidence.public_key_jwk).unwrap(),
-        };
-        assert!(
-            edge.journal
-                .prepare_managed_authoring(
-                    &body.authoring_context.committed_request,
-                    &managed_evidence.verification_method,
-                    &managed_key,
-                )
-                .unwrap()
-        );
-        assert!(
-            !edge
-                .journal
-                .prepare_managed_authoring(
-                    &body.authoring_context.committed_request,
-                    &managed_evidence.verification_method,
-                    &managed_key,
-                )
-                .unwrap()
-        );
-
-        let rows_after_preparation = store.0.lock().unwrap().clone();
-        assert!(
-            edge.journal
-                .install_managed_authoring(&identity, &body)
-                .is_err(),
-            "preparing a Reuse request cannot manufacture its original Bot creation"
-        );
-        assert_eq!(*store.0.lock().unwrap(), rows_after_preparation);
-        assert!(
-            edge.installed_managed_authoring(&identity.effective_scope, &managed_actor)
-                .unwrap()
-                .is_none()
-        );
     }
 
     fn message_intent(edge: &ArkretEdge, realm: &RealmId, text: &str) -> EventIntent {
@@ -2147,6 +1528,7 @@ mod tests {
                     arkret::EventId::from_digest(DigestSuite::Sha256, [7; 32]),
                 ),
                 committed_at: "2026-09-16T00:00:00Z".parse().unwrap(),
+                producer_signer_fact_digest: None,
                 signature: commit_signature(DetachedSignatureContext::RealmCommit),
             },
         }
@@ -2487,53 +1869,5 @@ mod tests {
             intent.executed_by(),
             Some(&arkret::ActorId::service(edge.service_actor_id.clone()))
         );
-    }
-
-    #[test]
-    fn event_fingerprint_ignores_proofs() {
-        let realm = RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").unwrap();
-        let actor =
-            project_did_to_core_id(&Did::new("did:webvh:z6mkfixture:alice.example").unwrap())
-                .unwrap();
-        let mut first = arkret_wire::test_support::raw_event(
-            "ak.message.create",
-            ScopeRef::Realm { realm_id: realm },
-            actor.clone(),
-            actor,
-            json!({ "body": "hello" }),
-        )
-        .unwrap();
-        let mut second = first.clone();
-
-        first.producer_proof = Some(test_proof("header.payload.signature-a"));
-        second.producer_proof = Some(test_proof("header.payload.signature-b"));
-
-        assert_eq!(
-            event_content_fingerprint(&first),
-            event_content_fingerprint(&second)
-        );
-
-        second.payload = BTreeMap::from([("body".to_owned(), json!("changed"))]);
-        assert_ne!(
-            event_content_fingerprint(&first),
-            event_content_fingerprint(&second)
-        );
-    }
-
-    fn test_proof(jws: &str) -> arkret::ProducerEventProof {
-        arkret::ProducerEventProof {
-            kind: "detached_jws".to_owned(),
-            verification_method: DidUrl::new("did:webvh:z6mkfixture:alice.example#key-1")
-                .expect("fixture verification method is a valid DID URL"),
-            event_digest: arkret::Hash::new(
-                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            )
-            .unwrap(),
-            created_at: "2026-04-26T00:00:00Z".parse().unwrap(),
-            domain: None,
-            audience: None,
-            proof_purpose: None,
-            jws: jws.to_owned(),
-        }
     }
 }

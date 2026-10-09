@@ -48,6 +48,7 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 diesel = { workspace = true, optional = true }
 diesel_migrations = { workspace = true, optional = true }
+ed25519-dalek = { workspace = true }
 hex = { workspace = true }
 libsqlite3-sys = { workspace = true, features = ["bundled"], optional = true }
 metrics = { workspace = true, optional = true }

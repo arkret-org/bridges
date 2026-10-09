@@ -13,10 +13,10 @@ bridge:
 
 arkret:
   server_url: "http://localhost:8008"
+  applet_base_url: "https://bridge.example"
   service_did: "did:webvh:wechat-bridge.example"
   trust_domain: "ak:trust_domain:example.net"
   applet_id: "ak:applet:00000000-0000-7000-8000-0000000000d5"
-  access_token: "CHANGE_ME_ARKRET_ACCESS_TOKEN"
   signing_key_seed_hex: "0000000000000000000000000000000000000000000000000000000000000000"
   verification_method_fragment: "#key-1"
   signer_resolution_evidence_ref: "ak:signer_evidence:sha256:0000000000000000000000000000000000000000000000000000000000000000"

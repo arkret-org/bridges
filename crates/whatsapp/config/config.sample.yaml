@@ -13,10 +13,10 @@ bridge:
 
 arkret:
   server_url: "http://localhost:8008"
+  applet_base_url: "https://bridge.example"
   service_did: "did:webvh:whatsapp-bridge.example"
   trust_domain: "ak:trust_domain:example.net"
   applet_id: "ak:applet:00000000-0000-7000-8000-0000000000d8"
-  access_token: "CHANGE_ME_ARKRET_ACCESS_TOKEN"
   signing_key_seed_hex: "0000000000000000000000000000000000000000000000000000000000000000"
   verification_method_fragment: "#key-1"
   signer_resolution_evidence_ref: "ak:signer_evidence:sha256:0000000000000000000000000000000000000000000000000000000000000000"
@@ -55,7 +55,6 @@ logging:
 # WhatsApp 适配器专属:Cloud API 凭据。
 app:
   phone_number_id: "CHANGE_ME_WHATSAPP_PHONE_NUMBER_ID"
-  access_token: "CHANGE_ME_WHATSAPP_ACCESS_TOKEN"
   verify_token: "CHANGE_ME_WHATSAPP_WEBHOOK_VERIFY_TOKEN"
   # Meta App Secret:用于校验每条 POST 投递的 X-Hub-Signature-256(HMAC-SHA256(app_secret, 原始 body))。
   app_secret: "CHANGE_ME_WHATSAPP_APP_SECRET"

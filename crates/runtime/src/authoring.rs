@@ -11,9 +11,8 @@ use std::sync::Arc;
 use arkret::{ActorId, AppletId, AuthoredEvent, EventIntent, RealmId};
 use arkret_identifiers::DidCoreId;
 use arkret_models_integration::{
-    AppletAuthoringTransactionRequestBody, AppletInstallRequestBody,
-    AppletManagedActorAuthoringBasis, AppletManagedActorCommittedRequest,
-    AppletManagedActorProvisionPayload, AppletManagedActorRole,
+    AppletAuthoringTransactionRequestBody, AppletManagedActorAuthoringBasis,
+    AppletManagedActorCommittedRequest, AppletManagedActorProvisionPayload, AppletManagedActorRole,
 };
 use arkret_signatures::PublicKeyMaterial;
 use arkret_wire::{
@@ -167,11 +166,22 @@ fn managed_actor_original_key(actor: &ActorId) -> Result<String> {
     ))
 }
 
+/// Approval decisions belong to Station admission; immutable local producer
+/// preparation covers the exact request and four signed Events before review.
+fn producer_creation_bytes(request: &AppletManagedActorCommittedRequest) -> Result<Vec<u8>> {
+    let mut request = request.clone();
+    match &mut request {
+        AppletManagedActorCommittedRequest::Bot(bot) => bot.approval_signatures.clear(),
+        AppletManagedActorCommittedRequest::Ghost(ghost) => ghost.approval_signatures.clear(),
+    }
+    Ok(arkret::canonical::canonical_json_bytes(&request)?)
+}
+
 fn managed_authoring_request(
     committed_request: &AppletManagedActorCommittedRequest,
 ) -> &arkret_models_integration::AppletManagedActorAuthoringRequest {
     match committed_request {
-        AppletManagedActorCommittedRequest::Install(install) => install.authoring_request(),
+        AppletManagedActorCommittedRequest::Bot(bot) => &bot.authoring_request,
         AppletManagedActorCommittedRequest::Ghost(ghost) => &ghost.authoring_request,
     }
 }
@@ -242,102 +252,68 @@ pub(crate) fn validate_managed_authoring_completion(
         .validate()
         .map_err(|error| error.to_string())?;
 
-    let (request, bundle, actor_id, effective_scope) = match &body
-        .authoring_context
-        .committed_request
-    {
-        AppletManagedActorCommittedRequest::Install(install) => {
-            let request = install.authoring_request();
-            let basis = request.basis.install().ok_or_else(|| {
-                "install completion carries a non-install authoring basis".to_owned()
-            })?;
-            let realm_id = realm_from_scope(&basis.effective_scope)
-                .ok_or_else(|| "install completion has no executable Realm scope".to_owned())?;
-            if install.applet_package().applet_id != basis.applet_id
-                || install.applet_package().service_id != basis.service_id
-            {
-                return Err("install completion package differs from its authoring basis".into());
-            }
-            match &**install {
-                AppletInstallRequestBody::Create(create) => {
-                    let payload = provision_payload(
-                        &create.managed_actor_bundle.managed_actor_provision_event,
-                    )?;
-                    if payload.applet_id != basis.applet_id
-                        || payload.service_id != basis.service_id
-                        || payload.actor_role != AppletManagedActorRole::Bot
-                        || payload.external_ref.is_some()
-                        || create
-                            .managed_actor_bundle
-                            .managed_actor_provision_event
-                            .realm_id
-                            != *realm_id
-                    {
-                        return Err("install completion managed Actor payload is misbound".into());
-                    }
-                    (
-                        request,
-                        Some(&create.managed_actor_bundle),
-                        payload.actor_id,
-                        basis.effective_scope.clone(),
-                    )
+    let (request, bundle, actor_id, effective_scope) =
+        match &body.authoring_context.committed_request {
+            AppletManagedActorCommittedRequest::Bot(bot) => {
+                let request = &bot.authoring_request;
+                let basis = request
+                    .basis
+                    .bot()
+                    .ok_or_else(|| "Bot completion carries a non-Bot authoring basis".to_owned())?;
+                let realm_id = realm_from_scope(&basis.effective_scope)
+                    .ok_or_else(|| "Bot completion has no executable Realm scope".to_owned())?;
+                let payload =
+                    provision_payload(&bot.managed_actor_bundle.managed_actor_provision_event)?;
+                if payload.applet_id != basis.applet_id
+                    || payload.service_id != basis.service_id
+                    || payload.actor_role != AppletManagedActorRole::Bot
+                    || payload.external_ref.is_some()
+                    || bot
+                        .managed_actor_bundle
+                        .managed_actor_provision_event
+                        .realm_id
+                        != *realm_id
+                {
+                    return Err("Bot completion managed Actor payload is misbound".into());
                 }
-                AppletInstallRequestBody::Reuse(reuse) => {
-                    if reuse
-                        .reuse_existing_managed_actor
-                        .initial_package_bot_actor_id
-                        != install.applet_package().bot_actor_id
-                    {
-                        return Err(
-                            "reused managed Actor differs from the original package Bot".into()
-                        );
-                    }
-                    (
-                        request,
-                        None,
-                        reuse.reuse_existing_managed_actor.actor_id.clone(),
-                        basis.effective_scope.clone(),
-                    )
+                (
+                    request,
+                    Some(&bot.managed_actor_bundle),
+                    payload.actor_id,
+                    basis.effective_scope.clone(),
+                )
+            }
+            AppletManagedActorCommittedRequest::Ghost(ghost) => {
+                let request = &ghost.authoring_request;
+                let basis = request.basis.ghost().ok_or_else(|| {
+                    "Ghost completion carries a non-Ghost authoring basis".to_owned()
+                })?;
+                let payload = ghost
+                    .managed_actor_provision_payload()
+                    .map_err(|error| error.to_string())?;
+                payload.validate().map_err(|error| error.to_string())?;
+                let ghost_bundle = ghost.managed_actor_bundle.as_ref().ok_or_else(|| {
+                    "Ghost reuse cannot carry a new authoring completion".to_owned()
+                })?;
+                if ghost_bundle.managed_actor_provision_event.kind
+                    != "ak.applet.managed_actor.provision"
+                    || payload.applet_id != basis.applet_id
+                    || payload.service_id != basis.service_id
+                    || payload.actor_role != AppletManagedActorRole::Ghost
+                    || payload.external_ref.as_ref() != Some(&basis.external_ref)
+                    || Some(&ghost_bundle.managed_actor_provision_event.realm_id)
+                        != realm_from_scope(&basis.effective_scope)
+                {
+                    return Err("Ghost completion managed Actor payload is misbound".into());
                 }
+                (
+                    request,
+                    Some(ghost_bundle),
+                    payload.actor_id,
+                    basis.effective_scope.clone(),
+                )
             }
-        }
-        AppletManagedActorCommittedRequest::Ghost(ghost) => {
-            let request = &ghost.authoring_request;
-            let basis = request
-                .basis
-                .ghost()
-                .ok_or_else(|| "Ghost completion carries a non-Ghost authoring basis".to_owned())?;
-            let payload = ghost
-                .managed_actor_provision_payload()
-                .map_err(|error| error.to_string())?;
-            payload.validate().map_err(|error| error.to_string())?;
-            if ghost
-                .managed_actor_bundle
-                .managed_actor_provision_event
-                .kind
-                != "ak.applet.managed_actor.provision"
-                || payload.applet_id != basis.applet_id
-                || payload.service_id != basis.service_id
-                || payload.actor_role != AppletManagedActorRole::Ghost
-                || payload.external_ref.as_ref() != Some(&basis.external_ref)
-                || ghost
-                    .managed_actor_bundle
-                    .managed_actor_provision_event
-                    .realm_id
-                    != basis.realm_id
-            {
-                return Err("Ghost completion managed Actor payload is misbound".into());
-            }
-            (
-                request,
-                Some(&ghost.managed_actor_bundle),
-                payload.actor_id,
-                ScopeRef::Realm {
-                    realm_id: basis.realm_id.clone(),
-                },
-            )
-        }
-    };
+        };
 
     request
         .validate_bindings()
@@ -362,7 +338,7 @@ pub(crate) fn validate_managed_authoring_completion(
         return Err("authoring completion targets a different Applet Service".into());
     }
     let basis_applet_id = match &request.basis {
-        AppletManagedActorAuthoringBasis::InstallBot(basis) => &basis.applet_id,
+        AppletManagedActorAuthoringBasis::ProvisionBot(basis) => &basis.applet_id,
         AppletManagedActorAuthoringBasis::ProvisionGhost(basis) => &basis.applet_id,
     };
     if basis_applet_id != expected_applet_id {
@@ -457,8 +433,8 @@ impl AuthoringJournal {
         let mut expected = vec![(key.clone(), None)];
         let mut writes = vec![(key, Some(raw))];
         let bundle = match committed_request {
-            AppletManagedActorCommittedRequest::Ghost(ghost) => Some(&ghost.managed_actor_bundle),
-            AppletManagedActorCommittedRequest::Install(install) => install.managed_actor_bundle(),
+            AppletManagedActorCommittedRequest::Ghost(ghost) => ghost.managed_actor_bundle.as_ref(),
+            AppletManagedActorCommittedRequest::Bot(bot) => Some(&bot.managed_actor_bundle),
         };
         if let Some(bundle) = bundle {
             let provision = provision_payload(&bundle.managed_actor_provision_event)
@@ -486,21 +462,7 @@ impl AuthoringJournal {
         &self,
         body: &AppletAuthoringTransactionRequestBody,
     ) -> Result<()> {
-        let locally_created = match &body.authoring_context.committed_request {
-            AppletManagedActorCommittedRequest::Ghost(_) => true,
-            AppletManagedActorCommittedRequest::Install(install) => {
-                matches!(install.as_ref(), AppletInstallRequestBody::Create(_))
-            }
-        };
-        let original = if locally_created {
-            None
-        } else {
-            Some(self.verify_reused_creation(body)?)
-        };
-        let prepared_request = original
-            .as_ref()
-            .map(|body| &body.authoring_context.committed_request)
-            .unwrap_or(&body.authoring_context.committed_request);
+        let prepared_request = &body.authoring_context.committed_request;
         let request = managed_authoring_request(prepared_request);
         let request_digest = request.canonical_digest()?;
         let prepared_raw = self
@@ -517,8 +479,8 @@ impl AuthoringJournal {
                     "stored managed Actor preparation is invalid: {error}"
                 ))
             })?;
-        if arkret::canonical::canonical_json_bytes(&prepared.committed_request)?
-            != arkret::canonical::canonical_json_bytes(prepared_request)?
+        if producer_creation_bytes(&prepared.committed_request)?
+            != producer_creation_bytes(prepared_request)?
         {
             return Err(BridgeError::App(
                 "managed Actor authoring completion differs from the locally prepared request"
@@ -570,11 +532,7 @@ impl AuthoringJournal {
     ) -> Result<ManagedAuthoringInstall> {
         let request = managed_authoring_request(&body.authoring_context.committed_request);
         let request_digest = request.canonical_digest()?;
-        let is_reuse = matches!(&body.authoring_context.committed_request,
-            AppletManagedActorCommittedRequest::Install(install) if matches!(install.as_ref(),AppletInstallRequestBody::Reuse(_)));
-        if is_reuse {
-            self.verify_reused_creation(body)?;
-        } else {
+        {
             let prepared_key = managed_authoring_preparation_key(&request_digest);
             let prepared_raw = self.store.load(&prepared_key)?.ok_or_else(|| {
                 BridgeError::App(
@@ -587,10 +545,8 @@ impl AuthoringJournal {
                         "stored managed Actor preparation is invalid: {error}"
                     ))
                 })?;
-            if arkret::canonical::canonical_json_bytes(&prepared.committed_request)?
-                != arkret::canonical::canonical_json_bytes(
-                    &body.authoring_context.committed_request,
-                )?
+            if producer_creation_bytes(&prepared.committed_request)?
+                != producer_creation_bytes(&body.authoring_context.committed_request)?
             {
                 return Err(BridgeError::App(
                     "managed Actor authoring completion differs from the locally prepared request"
@@ -616,8 +572,6 @@ impl AuthoringJournal {
         let current_raw = self.store.load(&current_key)?;
         let mut expected = vec![(completion_key.clone(), None)];
         let mut writes = vec![(completion_key, Some(body_raw.clone()))];
-        if matches!(&body.authoring_context.committed_request,
-            AppletManagedActorCommittedRequest::Install(install) if matches!(install.as_ref(),AppletInstallRequestBody::Create(_)))
         {
             let original_key = managed_actor_original_key(&identity.actor_id)?;
             if let Some(original) = self.store.load(&original_key)? {
@@ -685,64 +639,67 @@ impl AuthoringJournal {
         Ok(installed == body_raw)
     }
 
-    /// Reuse establishes a new scope but never establishes another identity.
-    /// Compare the bare immutable Event IDs to the original signed creation unit.
-    pub(crate) fn verify_reused_creation(
+    pub(crate) fn reused_ghost_did(
         &self,
-        body: &AppletAuthoringTransactionRequestBody,
-    ) -> Result<AppletAuthoringTransactionRequestBody> {
-        let AppletManagedActorCommittedRequest::Install(install) =
-            &body.authoring_context.committed_request
-        else {
+        request: &arkret_models_integration::GhostActorProvisionRequestBody,
+    ) -> Result<arkret::Did> {
+        request.validate()?;
+        let basis = request
+            .authoring_basis()
+            .ok_or_else(|| BridgeError::App("Ghost reuse lacks its signed basis".into()))?;
+        let anchors = request
+            .existing_managed_actor
+            .as_ref()
+            .ok_or_else(|| BridgeError::App("Ghost reuse lacks original anchors".into()))?;
+        if basis.existing_managed_actor.as_ref() != Some(anchors) {
             return Err(BridgeError::App(
-                "managed reuse is not an install request".into(),
+                "Ghost reuse differs from its Station-signed identity".into(),
             ));
-        };
-        let AppletInstallRequestBody::Reuse(reuse) = install.as_ref() else {
-            return Err(BridgeError::App(
-                "managed reuse has no identity anchors".into(),
-            ));
-        };
-        let anchors = &reuse.reuse_existing_managed_actor;
+        }
         let raw = self
             .store
-            .load(&managed_actor_original_key(&anchors.actor_id)?)?
+            .load(&managed_actor_original_key(&anchors.ghost_actor_id)?)?
             .ok_or_else(|| {
-                BridgeError::App(
-                    "managed Actor reuse has no durably installed original Bot identity".into(),
-                )
+                BridgeError::App("Ghost reuse has no accepted original local identity".into())
             })?;
         let original: AppletAuthoringTransactionRequestBody = serde_json::from_str(&raw)?;
-        let AppletManagedActorCommittedRequest::Install(first) =
+        let AppletManagedActorCommittedRequest::Ghost(ghost) =
             &original.authoring_context.committed_request
         else {
             return Err(BridgeError::Database(
-                "original Bot identity is not an install".into(),
+                "Ghost reuse names another managed Actor role".into(),
             ));
         };
-        let AppletInstallRequestBody::Create(first) = first.as_ref() else {
-            return Err(BridgeError::Database(
-                "original Bot identity has no creation bundle".into(),
-            ));
-        };
-        let bundle = &first.managed_actor_bundle;
+        let bundle = ghost.managed_actor_bundle.as_ref().ok_or_else(|| {
+            BridgeError::Database("original Ghost has no creation evidence".into())
+        })?;
         let provision = provision_payload(&bundle.managed_actor_provision_event)
             .map_err(BridgeError::Database)?;
-        if original.applet_id != body.applet_id
-            || original.source_id != body.source_id
-            || first.applet_package.service_id != reuse.applet_package.service_id
-            || anchors.actor_id != provision.actor_id
-            || anchors.initial_package_bot_actor_id != first.applet_package.bot_actor_id
+        if original.applet_id != basis.applet_id
+            || original.source_id != basis.target_station_id
+            || provision.service_id != basis.service_id
+            || provision.actor_id != anchors.ghost_actor_id
+            || provision.external_ref.as_ref() != Some(&basis.external_ref)
             || anchors.managed_actor_provision_ref != bundle.managed_actor_provision_event.event_id
-            || anchors.pcr_genesis_ref != bundle.pcr_genesis_event.event_id
-            || anchors.accountability_grant_ref != bundle.accountability_grant_event.event_id
+            || anchors.principal_control_realm_id != bundle.pcr_genesis_event.realm_id
             || anchors.profile_event_ref != bundle.profile_event.event_id
+            || anchors.accountability_grant_ref != bundle.accountability_grant_event.event_id
         {
             return Err(BridgeError::App(
-                "managed Actor reuse differs from its original four identity anchors".into(),
+                "Ghost reuse differs from its immutable creation anchors".into(),
             ));
         }
-        Ok(original)
+        Ok(provision.initial_resolution.did)
+    }
+
+    pub(crate) fn accepted_managed_creation(
+        &self,
+        actor: &ActorId,
+    ) -> Result<Option<AppletAuthoringTransactionRequestBody>> {
+        self.store
+            .load(&managed_actor_original_key(actor)?)?
+            .map(|raw| serde_json::from_str(&raw).map_err(Into::into))
+            .transpose()
     }
 
     pub(crate) fn is_locally_managed_actor(&self, actor: &ActorId) -> Result<bool> {

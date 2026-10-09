@@ -58,13 +58,14 @@ pub(crate) fn bridge_tenant(config: &runtime::Config) -> String {
 /// external user reuse the same key). Hashed to satisfy the 128-char bound.
 fn ghost_provision_idempotency_key(
     applet_id: &str,
+    realm_id: &str,
     protocol: &str,
     tenant: &str,
     external_user_id: &str,
 ) -> String {
     use sha2::{Digest, Sha256};
 
-    let material = [applet_id, protocol, tenant, external_user_id]
+    let material = [applet_id, realm_id, protocol, tenant, external_user_id]
         .join(&MESSAGE_MAPPING_KEY_SEPARATOR.to_string());
     format!(
         "ghost-provision-{}",
@@ -199,6 +200,7 @@ pub(crate) async fn provision_ghost_actor(
     };
     let idempotency_key = ghost_provision_idempotency_key(
         &config.arkret.applet_id,
+        realm_id,
         protocol,
         tenant,
         external_user_id,
@@ -211,7 +213,7 @@ pub(crate) async fn provision_ghost_actor(
         Some(request_json) => request_json,
         None => {
             let request = provider.author_request(&authoring_request).await?;
-            let _ = validate_authored_ghost_request(&authoring_request, &request)?;
+            let _ = validate_authored_ghost_request(&authoring_request, &request, edge)?;
             let request_json = serde_json::to_string(&request).map_err(|error| {
                 BridgeError::App(format!("Ghost provision encode failed: {error}"))
             })?;
@@ -224,7 +226,7 @@ pub(crate) async fn provision_ghost_actor(
         serde_json::from_str(&request_json).map_err(|error| {
             BridgeError::Database(format!("stored Ghost provision invalid: {error}"))
         })?;
-    let ghost_actor_id = validate_authored_ghost_request(&authoring_request, &request)?;
+    let ghost_actor_id = validate_authored_ghost_request(&authoring_request, &request, edge)?;
     let response: GhostActorProvisionOutcome = edge
         .client()
         .ghost_actor_provision(&config.arkret.applet_id, &idempotency_key, &request)
@@ -243,6 +245,7 @@ pub(crate) async fn provision_ghost_actor(
 fn validate_authored_ghost_request(
     expected: &GhostProvisionAuthoringRequest,
     request: &GhostActorProvisionRequestBody,
+    edge: &runtime::ArkretEdge,
 ) -> Result<Did> {
     request
         .authoring_request
@@ -250,17 +253,16 @@ fn validate_authored_ghost_request(
         .map_err(|error| {
             BridgeError::Arkret(format!("invalid Ghost authoring request: {error}"))
         })?;
-    request
-        .managed_actor_bundle
-        .validate_bindings(&request.authoring_request)
-        .map_err(|error| BridgeError::Arkret(format!("invalid Ghost authoring bundle: {error}")))?;
     let basis = request.authoring_basis().ok_or_else(|| {
         BridgeError::Arkret("Ghost authoring provider returned a non-Ghost basis".to_owned())
     })?;
     if basis.applet_id != expected.applet_id
         || basis.service_id != expected.service_id
         || basis.target_station_id != expected.actor_station_id
-        || basis.realm_id != expected.realm_id
+        || basis.effective_scope
+            != (arkret::ScopeRef::Realm {
+                realm_id: expected.realm_id.clone(),
+            })
         || basis.external_ref != expected.external_ref
         || basis.display_name != expected.display_name
     {
@@ -268,6 +270,15 @@ fn validate_authored_ghost_request(
             "Ghost authoring provider returned a request for different coordinates".to_owned(),
         ));
     }
+    request.validate()?;
+    if request.existing_managed_actor.is_some() {
+        return edge.reused_ghost_did(request);
+    }
+    request
+        .managed_actor_bundle
+        .as_ref()
+        .ok_or_else(|| BridgeError::Arkret("Ghost creation lacks its authoring bundle".into()))?
+        .validate_bindings(&request.authoring_request)?;
     let payload: AppletManagedActorProvisionPayload =
         request.managed_actor_provision_payload().map_err(|error| {
             BridgeError::Arkret(format!("invalid managed-actor provision: {error}"))

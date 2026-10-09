@@ -41,15 +41,14 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `arkret-bridge-
 
 每个桥都是一个 arkret **Applet**:
 
-- **入站(arkret → app)**:arkret server 经 `POST /_arkret/edge/applet/transactions`
-  推送事件 → runtime `BridgeAppletHandler` 入队 → `consume_inbound` 消费循环 →
-  `MessageBridge::on_arkret_event` → 适配器 `send_to_app`。
+- **管理接入**：HTTPS `arkret.applet_base_url` 用于发现、主体 authoring 与签名 completion。安装只接纳 Service，独立 Bot／Ghost 通过四 Event provision 接入。
+- **入站(arkret → app)**：群 Event／Signal 只能由具体受管 Account 的 accepted Device 从原生数据面获取。`BridgeAppletHandler` 已禁止旧群 transaction 推送；新的 Device reader／MLS Welcome／Blob 执行器尚未接线，当前不会降级到 Service 群订阅。
 - **出站(app → arkret)**:适配器收到 app 消息(gateway/长轮询/webhook)→
   `MessageContext::submit_app_message` → 查找已持久化的 per-user Ghost Actor 映射；首次用户通过
   Station preview → Applet `managed-actors/author` → Station commit 创建正式
   Ghost，再构造带 `external_ref` 溯源的 `ak.message.create` 事件并提交。Ghost WebVH root/next key
   使用独立随机材料和配置的 32-byte key 加密落库；author ledger 按完整请求 digest 保存 exact
-  bundle，支持并发、重启和成功请求过期后的逐字重放。纯 HTTP 桥的入站经各自
+  bundle，按完整 scope 与外部 tuple 隔离身份，支持并发、重启和成功请求过期后的逐字重放；已接受 Ghost 只复用原四项身份锚点，不创建新的 authoring completion。纯 HTTP 桥的入站经各自
   `MessageBridge::webhook_router` 挂到 web 服务,平台来源验签在 handler 解析 JSON 前完成。
   部分桥(WeChat / Feishu / DingTalk / iMessage / QQ / LINE 等)的入站还需要 body-bound
   验签材料(EncodingAESKey / Encrypt Key / 注入式 HMAC secret / signing secret);缺失时入站面
@@ -58,7 +57,7 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `arkret-bridge-
   无入站面的“健康”进程)。配齐 access token 不等于入站可用,还须配齐这些 body 验签材料。
 - **映射 / 解析**:频道↔realm、消息↔event、用户↔actor 持久化于 diesel(sqlite/postgres);
   反查驱动 applet `resolve_actor`/`resolve_realm`(ghost/portal 读侧解析)。用户↔actor 映射
-  同时参与 app→arkret 写侧署名。
+  同时参与 app→arkret 写侧署名。创建身份不授予消息权限，实际业务必须由有效的 Service parent／terminal child 和 Station 持续准入证明。
 - **提交与定序**:出站 Event 由桥自己 author + 签名,再提交给当前治理 Station;
   Station 返回 authority-signed `RealmCommit`,它才是该 Event 的唯一位置事实。
   Realm、每个 Circle、每个 Sidecar 各有独立 commit stream,桥不合并、也不比较跨 stream 的位置。
@@ -171,3 +170,9 @@ ignored `indexed_journal_growth_1000_10000_100000` test records real file growth
 and elapsed time at those sizes; ordinary unit tests do not imply that this
 benchmark has been run. Bootstrap authorization evidence is a separate
 requirement from the publication journal.
+
+## 正式治理同步（0160）
+
+`ArkretEdge::prepare_bot_provision` 在已安装 Service 身份下运行 Station preview → HTTPS base_url author，并返回必须原样持久保存的 creation body；`provision_bot` 使用原 signed request digest 重试提交，不隐式追加业务 grant。
+
+Service 管理请求使用 SDK RFC9421 来源／目标签名，不申请 Applet session。`ArkretEdge::managed_device_client` 组合 SDK 的受限 Device HTTP transport，要求完整 Account、accepted authorization Event、scope 与独立 Device key；真实接纳和 21 项原生 operation allowlist 仍由 SDK／Station 校验。当前已实现 Bot／Ghost producer authoring 和持久 completion，尚未实现首 Device 私有状态／possession、自动 Welcome／ACK／MLS／Blob reader、native resolution rotation installer 与跨 scope current refresh；不声明完整群内容运行时。

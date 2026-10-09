@@ -419,6 +419,7 @@ dependencies = [
  "chrono",
  "diesel",
  "diesel_migrations",
+ "ed25519-dalek 3.0.0",
  "hex",
  "libsqlite3-sys",
  "metrics",

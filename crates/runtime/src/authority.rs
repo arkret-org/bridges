@@ -670,7 +670,7 @@ pub fn validate_managed_actor_bundle<V: ManagedActorProofVerifier>(
         bundle, request,
     ))?;
     let applet_id = match &request.basis {
-        AppletManagedActorAuthoringBasis::InstallBot(basis) => &basis.applet_id,
+        AppletManagedActorAuthoringBasis::ProvisionBot(basis) => &basis.applet_id,
         AppletManagedActorAuthoringBasis::ProvisionGhost(basis) => &basis.applet_id,
     };
     let station_id = &request.governance_station_id;
@@ -799,6 +799,7 @@ mod tests {
                 0x83,
             )),
             committed_at: at,
+            producer_signer_fact_digest: None,
             signature: placeholder,
         };
         commit.signature = sign_detached_object(

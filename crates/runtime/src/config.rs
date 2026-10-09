@@ -143,14 +143,15 @@ pub struct ArkretConfig {
     /// The arkret edge/home server base URL (used for events_submit / blob /
     /// directory).
     pub server_url: String,
+    /// Public HTTPS management URL bound by the accepted Applet epoch.
+    #[serde(default)]
+    pub applet_base_url: String,
     /// The service DID of this bridge acting as an Applet.
     pub service_did: Did,
     /// Trust domain advertised by the applet service description.
     pub trust_domain: arkret::TrustDomainId,
     /// This bridge's applet id (`ak:applet:<uuidv7>`).
     pub applet_id: String,
-    /// The Bearer access token used to submit events.
-    pub access_token: String,
     /// The event signing private key seed (32 bytes, hexadecimal).
     pub signing_key_seed_hex: String,
     /// The signing verification method id (the kid on the DID).
@@ -282,7 +283,6 @@ impl fmt::Debug for ArkretConfig {
             .field("service_did", &self.service_did)
             .field("trust_domain", &self.trust_domain)
             .field("applet_id", &self.applet_id)
-            .field("access_token", &"<redacted>")
             .field("signing_key_seed_hex", &"<redacted>")
             .field(
                 "verification_method_fragment",
@@ -520,7 +520,6 @@ arkret:
   service_did: "did:webvh:bridge.example"
   trust_domain: "ak:trust_domain:example.net"
   applet_id: "ak:applet:01904100-0000-7000-8000-000000000001"
-  access_token: "token"
   signing_key_seed_hex: "1111111111111111111111111111111111111111111111111111111111111111"
   verification_method_fragment: "#key-1"
   trusted_server_did: "did:webvh:server.example"

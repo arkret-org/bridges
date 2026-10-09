@@ -781,8 +781,7 @@ mod tests {
             Ok(TransactionClaim::Conflict)
         ));
 
-        let response = AppletTransactionOutcome {
-            status: arkret_models_integration::AppletTransactionStatus::Accepted,
+        let response = AppletTransactionOutcome::Accepted {
             committed_event_refs: Vec::new(),
             rejections: Vec::new(),
             retry_after_ms: None,
@@ -792,7 +791,7 @@ mod tests {
             .unwrap();
         match store.claim(&replay_key("idem-1"), "hash-a", "anchor-a") {
             Ok(TransactionClaim::Duplicate(cached)) => assert_eq!(
-                cached.status,
+                cached.status(),
                 arkret_models_integration::AppletTransactionStatus::Accepted
             ),
             _ => panic!("expected duplicate replay"),
@@ -802,8 +801,7 @@ mod tests {
     #[test]
     fn db_idempotency_record_requires_the_exact_pending_claim() {
         let store = DbTransactionIdempotencyStore::new(memory_db()).unwrap();
-        let response = AppletTransactionOutcome {
-            status: arkret_models_integration::AppletTransactionStatus::Accepted,
+        let response = AppletTransactionOutcome::Accepted {
             committed_event_refs: Vec::new(),
             rejections: Vec::new(),
             retry_after_ms: None,

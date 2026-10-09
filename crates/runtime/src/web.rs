@@ -17,7 +17,6 @@ use arkret::{
 };
 use arkret_models_integration::{
     AppletAuthoringTransactionRequestBody, AppletTransactionOutcome, AppletTransactionRequestBody,
-    AppletTransactionStatus,
 };
 use arkret_wire::{DidUrl, ServiceOperationId};
 use chrono::Utc;
@@ -30,12 +29,11 @@ use serde_json::{Value, json};
 use crate::app::BridgeContext;
 use crate::arkret_edge::BridgeAppletHandler;
 use crate::config::Config;
-use crate::db::{DbEventDedupStore, DbTransactionIdempotencyStore};
+use crate::db::DbTransactionIdempotencyStore;
 use crate::did_binding::{
     AcceptedDidBindings, BindingLookupError, DidAuthority, verification_method_did,
 };
 use crate::error::{BridgeError, Result};
-use crate::idempotency::EventDedupStore;
 use crate::run_blocking;
 
 static PROMETHEUS_HANDLE: OnceLock<std::result::Result<PrometheusHandle, String>> = OnceLock::new();
@@ -67,7 +65,6 @@ pub async fn serve(
     // Durable idempotency / dedup records (applet-integration §7.3 / §13):
     // both stores persist in the bridge database so restarts do not turn
     // server retries into duplicate deliveries.
-    let dedup: Arc<dyn EventDedupStore> = Arc::new(DbEventDedupStore::new(ctx.db.clone())?);
     let idempotency: Arc<
         dyn TransactionIdempotencyStore<AppletTransactionOutcome, Error = BridgeError>,
     > = Arc::new(DbTransactionIdempotencyStore::new(ctx.db.clone())?);
@@ -82,8 +79,6 @@ pub async fn serve(
     let handler = Arc::new(BridgeAppletHandler::new(
         &ctx.edge,
         ctx.resolver(),
-        dedup,
-        ctx.handled_event_kinds(),
         did_authority.clone(),
     )?);
     let applet = applet_router(AppletWebState {
@@ -614,12 +609,12 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         }
         Ok(Ok(TransactionClaim::Pending)) => {
             record_applet_transaction("pending");
-            res.render(Json(arkret_models_integration::AppletTransactionOutcome {
-                status: AppletTransactionStatus::Rejected,
-                committed_event_refs: Vec::new(),
-                rejections: Vec::new(),
-                retry_after_ms: Some(1000),
-            }));
+            res.render(Json(
+                arkret_models_integration::AppletTransactionOutcome::Rejected {
+                    rejections: Vec::new(),
+                    retry_after_ms: Some(1000),
+                },
+            ));
             return;
         }
         Ok(Ok(TransactionClaim::Conflict)) => {
