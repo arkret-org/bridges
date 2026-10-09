@@ -803,7 +803,7 @@ mod tests {
             "ak:did_core:web:producer.example",
             [9; 32],
         );
-        let key = arkret_signatures::development_signing_key("did:web:station.example");
+        let key = arkret_test_kit::keys::development_signing_key("did:web:station.example");
         let public = PublicKeyMaterial::Ed25519Raw {
             bytes: key.verifying_key().to_bytes().to_vec(),
         };

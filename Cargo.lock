@@ -414,6 +414,7 @@ dependencies = [
  "arkret-models-integration",
  "arkret-retry",
  "arkret-signatures",
+ "arkret-test-kit",
  "arkret-wire",
  "async-trait",
  "chrono",
@@ -873,6 +874,22 @@ dependencies = [
  "arkret-identifiers",
  "arkret-wire",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "arkret-test-kit"
+version = "0.3.0"
+dependencies = [
+ "arkret-canonical",
+ "arkret-event-draft",
+ "arkret-identifiers",
+ "arkret-signatures",
+ "arkret-wire",
+ "chrono",
+ "ed25519-dalek 3.0.0",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
 ]
 
 [[package]]
