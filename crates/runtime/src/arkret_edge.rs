@@ -1,11 +1,11 @@
 //! The arkret protocol-side edge (replaces the Matrix bridge's
 //! `MatrixAppservice`).
 //!
-//! - **Outbound (app -> arkret)**: [`ArkretEdge::service_intent`] and
-//!   [`ArkretEdge::delegated_intent`] build complete producer `EventIntent`s;
-//!   [`ArkretEdge::author_and_sign`] derives the one content-bound identity and signs it, then
-//!   [`ArkretEdge::submit_event`] hands it to the current governance Station as an
-//!   `EventAdmissionSubmission` and retains the authority-signed commit reference.
+//! - **Outbound (app -> arkret)**: [`ArkretEdge::service_intent`] builds complete Service producer
+//!   `EventIntent`s; managed Account publication fails closed. [`ArkretEdge::author_and_sign`]
+//!   derives the one content-bound identity and signs it, then [`ArkretEdge::submit_event`] hands
+//!   it to the current governance Station as an `EventAdmissionSubmission` and retains the
+//!   authority-signed commit reference.
 //! - **Inbound (arkret → app)**: group content requires an accepted native managed Device. The
 //!   Applet management transaction endpoint accepts authoring completion only.
 //! - **Media**: [`ArkretEdge::upload_blob`] / [`ArkretEdge::download_blob`].
@@ -45,10 +45,9 @@ use arkret_models_integration::{
 use arkret_models_integration::{
     AppletAuthoringTransactionRequestBody, AppletManagedActorCommittedRequest,
 };
-#[cfg(any(feature = "web", test))]
 use arkret_wire::{
-    AuthorityRejectionStatus, AuthoritySubmitOutcome, AuthorizationRef, DidUrl,
-    EventAdmissionSubmission, SignalEnvelope, event_spec,
+    AuthorityRejectionStatus, AuthoritySubmitOutcome, DidUrl, EventAdmissionSubmission,
+    SignalEnvelope, event_spec,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -478,9 +477,8 @@ impl ArkretEdge {
         .into_intent(chrono::Utc::now())?)
     }
 
-    /// [`Self::service_intent`] with an explicit delegated actor and the
-    /// durable authorization it acts under. The complete Account comes from
-    /// provisioning; the Applet service identity cannot supply its Station.
+    /// Retained managed Account intent API. Provisioning supplies identity and
+    /// provenance, but this Service signer cannot consume its terminal child.
     pub fn delegated_intent<K>(
         &self,
         actor: &arkret::AccountId,
@@ -501,52 +499,19 @@ impl ArkretEdge {
         )
     }
 
-    /// A Circle completion authorizes that exact Circle; a Realm completion
-    /// cannot substitute for its scope-specific installed authoring context.
+    /// Managed Accounts require their own accepted native authoring and Device
+    /// executor. The Service signer cannot consume a terminal Account child.
     pub fn delegated_intent_in_scope<K>(
         &self,
-        actor: &arkret::AccountId,
-        scope: &ScopeRef,
-        content: K::Payload,
-        authorization_ref: &str,
+        _actor: &arkret::AccountId,
+        _scope: &ScopeRef,
+        _content: K::Payload,
+        _authorization_ref: &str,
     ) -> Result<EventIntent>
     where
         K: EventSpec,
     {
-        let authorization_ref = validate_authorization_ref(authorization_ref)?;
-        actor.validate()?;
-        let actor_id = arkret::ActorId::account(actor.clone());
-        if self.journal.is_locally_managed_actor(&actor_id)? {
-            let installed = self.journal.accepted_managed_creation(&actor_id)?.ok_or_else(||
-                BridgeError::Runtime("managed Actor completion remains pending; retain the original publication for retry".into()))?;
-            // Creation is provenance, not business authority. The exact supplied
-            // child grant is evaluated against its Service parent by the Station.
-            let root = &installed
-                .authoring_context
-                .applet_service_signer_evidence
-                .authenticated_signer_evidence;
-            let actual = PublicKeyMaterial::Jwk {
-                value: serde_json::to_value(&root.public_key_jwk)?,
-            };
-            if root.subject_id != self.service_actor_id
-                || root.verification_method != self.service_verification_method()?
-                || actual.ed25519_bytes()? != *self.signer.verifying_key().as_bytes()
-            {
-                return Err(BridgeError::App(
-                    "managed Actor ordinary authoring requires its installed exact Service root"
-                        .into(),
-                ));
-            }
-        }
-        Ok(TypedEventDraft::<K>::new(
-            scope.clone(),
-            arkret::ActorId::account(actor.clone()),
-            content,
-        )?
-        .with_executed_by(arkret::ActorId::service(self.service_actor_id.clone()))
-        .with_authorization_ref(authorization_ref)
-        .with_applet_id(self.applet_id.clone())
-        .into_intent(chrono::Utc::now())?)
+        Err(managed_account_executor_unavailable())
     }
 
     /// Derive the one content-bound identity of `intent` and attach the service
@@ -560,6 +525,9 @@ impl ArkretEdge {
         operation_id: &str,
         intent: EventIntent,
     ) -> Result<AuthoredEvent> {
+        if intent.actor_id().as_account_id().is_some() {
+            return Err(managed_account_executor_unavailable());
+        }
         if operation_id.is_empty() || intent.realm_id_opt() != Some(realm_id) {
             return Err(BridgeError::App(
                 "publication needs a stable operation id and exact Realm".into(),
@@ -651,6 +619,14 @@ impl ArkretEdge {
         event: &AuthoredEvent,
         retry_rejected: bool,
     ) -> Result<String> {
+        if event.actor_id.as_account_id().is_some()
+            && matches!(
+                event.event().actual_signer(),
+                arkret::ActorId::Service { .. }
+            )
+        {
+            return Err(managed_account_executor_unavailable());
+        }
         let key = scope_key(&event.realm_id, &event.actor_id)?;
         let (stored_scope, operation) = self
             .journal
@@ -728,9 +704,8 @@ impl ArkretEdge {
         }
     }
 
-    /// Outbound convenience with bridge provenance and an explicit delegated
-    /// actor. Used by messaging bridges to submit per-user Ghost Actor events
-    /// after provisioning returned a durable authorization ref.
+    /// Retained API for per-user Ghost publication. It fails closed until the
+    /// managed Account's native authoring and Device executor are connected.
     ///
     /// applet-integration §8 requires the signed Event Envelope top-level
     /// `external_ref` for bridge-originated events.
@@ -766,10 +741,8 @@ impl ArkretEdge {
         self.submit_event(&event).await
     }
 
-    /// Submit a message redaction attributed to a delegated app actor. The
-    /// redaction target travels in `content.message_id`, the single registered
-    /// target carrier. External app expiry or retention drops must be filtered
-    /// by callers before reaching this helper.
+    /// Retained Ghost redaction API. It fails closed until the managed
+    /// Account's native authoring and Device executor are connected.
     pub async fn submit_redaction_with_external_ref_as<E>(
         &self,
         actor: &arkret::AccountId,
@@ -875,16 +848,10 @@ fn rejection_reason(outcome: &AuthoritySubmitOutcome) -> &str {
     }
 }
 
-fn validate_authorization_ref(authorization_ref: &str) -> Result<AuthorizationRef> {
-    let authorization_ref = authorization_ref.trim();
-    if authorization_ref.is_empty() {
-        return Err(BridgeError::Arkret(
-            "delegated actor events require authorization_ref".to_owned(),
-        ));
-    }
-    AuthorizationRef::new(authorization_ref.to_owned()).map_err(|error| {
-        BridgeError::Arkret(format!("invalid delegated authorization_ref: {error}"))
-    })
+fn managed_account_executor_unavailable() -> BridgeError {
+    BridgeError::App(
+        "managed Account native authoring and Device execution are not connected; the Service signer cannot consume an Account child grant".into(),
+    )
 }
 
 fn default_client(config: &Config) -> Result<Client> {
@@ -1499,7 +1466,7 @@ mod tests {
         )
         .unwrap()
         .with_authorization_ref(
-            AuthorizationRef::new(
+            arkret::AuthorizationRef::new(
                 arkret::GrantId::from_event_id(
                     &arkret::EventId::new("ak:event:AdkQ-RmB1a8zyc52yl9GWAsodQ_EUle1WAVZqbO7pc19")
                         .unwrap(),
@@ -1825,62 +1792,79 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delegated_intent_preserves_the_provisioned_account_station() {
-        struct NoAuthoring {
-            expected_index: String,
-            reads: std::sync::atomic::AtomicUsize,
-        }
-        impl AuthoringStore for NoAuthoring {
-            fn load(&self, key: &str) -> Result<Option<String>> {
-                assert_eq!(
-                    key, self.expected_index,
-                    "intent may only classify the exact local Actor"
-                );
-                assert_eq!(
-                    self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
-                    0
-                );
-                Ok(None)
-            }
-            fn compare_exchange_batch(
-                &self,
-                _: &[(String, Option<String>)],
-                _: &[(String, Option<String>)],
-            ) -> Result<bool> {
-                panic!("intent must not mutate authoring state")
-            }
-            fn entries_with_prefix(&self, _: &str) -> Result<Vec<(String, String)>> {
-                panic!("intent must not scan authoring state")
-            }
-        }
+    async fn service_signer_never_consumes_a_managed_account_child_or_replays_it() {
+        let store = Arc::new(MemoryAuthoringStore::default());
+        let edge = test_edge(store.clone());
         let account = arkret::AccountId::new(
             DidCoreId::new("ak:did_core:webvh:z6mkghost").unwrap(),
-            DidCoreId::new("ak:did_core:webvh:z6mkstation").unwrap(),
+            edge.station_id.clone(),
         );
-        let store = Arc::new(NoAuthoring {
-            expected_index: format!(
-                "managed-authoring/local-actor/{}",
-                serde_json::to_string(&arkret::ActorId::account(account.clone())).unwrap()
-            ),
-            reads: std::sync::atomic::AtomicUsize::new(0),
-        });
-        let edge = test_edge(store.clone());
         let realm = RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").unwrap();
         let payload = arkret::MessageCreatePayload::with_content(
             arkret::StrandId::new("ak:strand:AT3ARBdH1FM6GjXK9ulTx-YMvQOXys39dlUzZV6KyID9")
                 .unwrap(),
             "main",
-            arkret::ContentBlock::text("hello"),
+            arkret::ContentBlock::text("legacy proxy"),
         );
         let grant = "ak:grant:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-        let intent = edge
-            .delegated_intent::<event_spec::MessageCreate>(&account, &realm, payload, grant)
-            .unwrap();
-        assert_eq!(intent.actor_id(), &arkret::ActorId::account(account));
-        assert_eq!(store.reads.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert_eq!(
-            intent.executed_by(),
-            Some(&arkret::ActorId::service(edge.service_actor_id.clone()))
+        assert!(
+            edge.delegated_intent::<event_spec::MessageCreate>(
+                &account,
+                &realm,
+                payload.clone(),
+                grant,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("Service signer cannot consume")
         );
+        assert!(store.0.lock().unwrap().is_empty());
+
+        // A retained pre-migration Service proxy must not bypass the gate.
+        let intent = TypedEventDraft::<event_spec::MessageCreate>::new(
+            ScopeRef::Realm {
+                realm_id: realm.clone(),
+            },
+            arkret::ActorId::account(account),
+            payload,
+        )
+        .unwrap()
+        .with_executed_by(arkret::ActorId::service(edge.service_actor_id.clone()))
+        .with_authorization_ref(arkret::AuthorizationRef::new(grant).unwrap())
+        .with_applet_id(edge.applet_id.clone())
+        .into_intent(arkret::canonical::normalize_timestamp_canonical(
+            chrono::Utc::now(),
+        ))
+        .unwrap();
+        let mut authored = intent
+            .clone()
+            .author_with_digest_suite(PRODUCER_DIGEST_SUITE)
+            .unwrap();
+        sign_event(&mut authored, &edge.signer, SignEventOptions::new()).unwrap();
+        let key = scope_key(&realm, intent.actor_id()).unwrap();
+        edge.journal
+            .freeze(
+                &key,
+                "legacy-proxy",
+                &PublicationRecord::new(intent.clone(), authored.clone()),
+            )
+            .await
+            .unwrap();
+        let snapshot = store.0.lock().unwrap().clone();
+        assert!(
+            edge.author_and_sign(&realm, "legacy-proxy", intent)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("Service signer cannot consume")
+        );
+        assert!(
+            edge.submit_event(&authored)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("Service signer cannot consume")
+        );
+        assert_eq!(*store.0.lock().unwrap(), snapshot);
     }
 }

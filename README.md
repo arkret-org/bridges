@@ -176,3 +176,9 @@ requirement from the publication journal.
 `ArkretEdge::prepare_bot_provision` 在已安装 Service 身份下运行 Station preview → HTTPS base_url author，并返回必须原样持久保存的 creation body；`provision_bot` 使用原 signed request digest 重试提交，不隐式追加业务 grant。
 
 Service 管理请求使用 SDK RFC9421 来源／目标签名，不申请 Applet session。`ArkretEdge::managed_device_client` 组合 SDK 的受限 Device HTTP transport，要求完整 Account、accepted authorization Event、scope 与独立 Device key；真实接纳和 21 项原生 operation allowlist 仍由 SDK／Station 校验。当前已实现 Bot／Ghost producer authoring 和持久 completion，尚未实现首 Device 私有状态／possession、自动 Welcome／ACK／MLS／Blob reader、native resolution rotation installer 与跨 scope current refresh；不声明完整群内容运行时。
+
+Managed Account message/profile/join execution also remains closed: the Service
+signer cannot consume a Bot or Ghost terminal child grant. Legacy retained
+Service-proxy publications are rejected before replay. Creation/completion and
+Service-subject maintenance operations remain available; Ghost message and
+redaction helpers require a future native managed-Account/Device executor.

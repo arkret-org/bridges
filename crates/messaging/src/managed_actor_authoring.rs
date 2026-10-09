@@ -1635,43 +1635,17 @@ mod ghost_bundle_tests {
             _ => unreachable!(),
         };
         let account = actor.as_account_id().unwrap();
-        assert!(
-            restarted
+        for scope in [realm_id(), RealmId::from_event_id(&event_id(0x94))] {
+            let error = restarted
                 .delegated_intent::<arkret_wire::event_spec::MessageCreate>(
                     account,
-                    &realm_id(),
+                    &scope,
                     payload.clone(),
-                    ""
+                    &authorization,
                 )
-                .is_err()
-        );
-        assert!(
-            restarted
-                .delegated_intent::<arkret_wire::event_spec::MessageCreate>(
-                    account,
-                    &RealmId::from_event_id(&event_id(0x94)),
-                    payload.clone(),
-                    &authorization
-                )
-                .is_ok()
-        );
-        let intent = restarted
-            .delegated_intent::<arkret_wire::event_spec::MessageCreate>(
-                account,
-                &realm_id(),
-                payload,
-                &authorization,
-            )
-            .unwrap();
-        let frozen = restarted
-            .author_and_sign(&realm_id(), "offline-operation", intent.clone())
-            .await
-            .unwrap();
-        let exact_retry = restarted
-            .author_and_sign(&realm_id(), "offline-operation", intent)
-            .await
-            .unwrap();
-        assert_eq!(frozen.event(), exact_retry.event());
+                .unwrap_err();
+            assert!(error.to_string().contains("Service signer cannot consume"));
+        }
         let installed_rows = store.0.lock().unwrap().clone();
         let mut conflict = body.clone();
         conflict.authoring_context.realm_stream_head.stream_position += 1;

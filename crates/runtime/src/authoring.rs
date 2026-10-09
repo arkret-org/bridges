@@ -692,20 +692,6 @@ impl AuthoringJournal {
         Ok(provision.initial_resolution.did)
     }
 
-    pub(crate) fn accepted_managed_creation(
-        &self,
-        actor: &ActorId,
-    ) -> Result<Option<AppletAuthoringTransactionRequestBody>> {
-        self.store
-            .load(&managed_actor_original_key(actor)?)?
-            .map(|raw| serde_json::from_str(&raw).map_err(Into::into))
-            .transpose()
-    }
-
-    pub(crate) fn is_locally_managed_actor(&self, actor: &ActorId) -> Result<bool> {
-        Ok(self.store.load(&managed_actor_local_key(actor)?)?.is_some())
-    }
-
     pub(crate) fn load_managed_authoring(
         &self,
         identity: &ManagedAuthoringIdentity,
