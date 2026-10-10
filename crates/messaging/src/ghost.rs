@@ -137,6 +137,10 @@ pub struct GhostProvisionAuthoringRequest {
 /// closed; it never synthesizes a Ghost DID from the service identity or fabricates
 /// provision/PCR Events locally.
 #[async_trait::async_trait]
+#[expect(
+    clippy::double_must_use,
+    reason = "async-trait adds an unconditional must_use attribute to its boxed Future methods."
+)]
 pub trait GhostProvisionRequestProvider: Send + Sync {
     async fn author_request(
         &self,

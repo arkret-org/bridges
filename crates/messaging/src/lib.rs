@@ -1027,6 +1027,10 @@ pub async fn send_json_expect_status(
 }
 
 #[async_trait]
+#[expect(
+    clippy::double_must_use,
+    reason = "async-trait adds an unconditional must_use attribute to its boxed Future methods."
+)]
 pub trait MessageBridge: Send + Sync + 'static {
     fn name(&self) -> &str;
 

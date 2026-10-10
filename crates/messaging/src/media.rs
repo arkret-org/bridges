@@ -74,6 +74,10 @@ impl Default for InboundMediaFetchPolicy {
 /// Platform-independent media transport boundary. It deliberately consumes a
 /// resolved vendor reference rather than accepting a URL as downloaded bytes.
 #[async_trait]
+#[expect(
+    clippy::double_must_use,
+    reason = "async-trait adds an unconditional must_use attribute to its boxed Future methods."
+)]
 pub trait InboundMediaFetcher: Send + Sync {
     async fn fetch(
         &self,
