@@ -472,7 +472,7 @@ impl JwtVerifier {
         // backends, in which case the crate deliberately refuses to guess and
         // would panic on first use. This provider is scoped to vendor JWTs; it
         // is independent from Arkret Event signature verification.
-        let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
+        let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
         Self {
             config,
             http,

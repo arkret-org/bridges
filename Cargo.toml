@@ -30,8 +30,8 @@ arkret = { version = "0.3.0", path = "../arkret-rust-sdk/crates/sdk", default-fe
     "signer",
 ] }
 arkret-canonical = { version = "0.3.0", path = "../arkret-rust-sdk/crates/canonical", default-features = false }
-arkret-bridge-messaging = { path = "crates/messaging", default-features = false }
-arkret-bridge-runtime = { path = "crates/runtime", default-features = false }
+arkret-bridge-messaging = { version = "0.3.0", path = "crates/messaging", default-features = false }
+arkret-bridge-runtime = { version = "0.3.0", path = "crates/runtime", default-features = false }
 arkret-egress-reqwest = { version = "0.3.0", path = "../arkret-rust-sdk/crates/egress-reqwest" }
 arkret-event-draft = { version = "0.3.0", path = "../arkret-rust-sdk/crates/event-draft", default-features = false }
 arkret-identifiers = { version = "0.3.0", path = "../arkret-rust-sdk/crates/identifiers", default-features = false }
@@ -54,7 +54,7 @@ futures = "0.3"
 getrandom = "0.4"
 hex = "0.4"
 hmac = "0.13"
-jsonwebtoken = { version = "11.0", features = ["rust_crypto"] }
+jsonwebtoken = { version = "11.0", features = ["aws_lc_rs"] }
 libsqlite3-sys = "0.38"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }

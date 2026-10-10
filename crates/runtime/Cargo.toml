@@ -68,7 +68,7 @@ tracing-subscriber = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
-arkret-test-kit = { path = "../../../arkret-rust-sdk/crates/test-kit" }
+arkret-test-kit = { version = "0.3.0", path = "../../../arkret-rust-sdk/crates/test-kit" }
 arkret-wire = { workspace = true, features = ["test-support"] }
 rand_chacha = { workspace = true }
 # `test` adds salvo's in-process `TestClient`, used by the web.rs admin-plane

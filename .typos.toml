@@ -1,3 +1,16 @@
+[default]
+extend-ignore-re = [
+    # Encoded key material and signatures are not prose.
+    "[A-Za-z0-9_-]{40,}",
+    "[A-Za-z0-9+/=]{40,}",
+    "z[1-9A-HJ-NP-Za-km-z]{20,}",
+]
+
+[default.extend-identifiers]
+# Intentionally malformed JSON keys prove strict unknown-field rejection.
+allias = "allias"
+mapings = "mapings"
+
 [default.extend-words]
 # hyphenated prefix: mis-configured, ...
 mis = "mis"

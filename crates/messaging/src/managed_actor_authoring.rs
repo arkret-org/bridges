@@ -1443,7 +1443,7 @@ mod ghost_bundle_tests {
             .unwrap(),
         };
         pcr_commit.commit_id = arkret::RealmCommitId::from_digest(arkret::canonical::sha256_bytes(
-            &arkret::canonical::canonical_json_bytes(
+            arkret::canonical::canonical_json_bytes(
                 &arkret::canonical::unsigned_value(&pcr_commit, &["commit_id", "signature"])
                     .unwrap(),
             )
@@ -1763,7 +1763,7 @@ mod ghost_bundle_tests {
         assert!(
             runtime::validate_managed_actor_bundle(
                 &wrong_event_proof.authoring_request,
-                &wrong_event_proof.managed_actor_bundle.as_ref().unwrap(),
+                wrong_event_proof.managed_actor_bundle.as_ref().unwrap(),
                 &verifier,
             )
             .is_err()
@@ -1779,7 +1779,7 @@ mod ghost_bundle_tests {
         assert!(
             runtime::validate_managed_actor_bundle(
                 &wrong_ref.authoring_request,
-                &wrong_ref.managed_actor_bundle.as_ref().unwrap(),
+                wrong_ref.managed_actor_bundle.as_ref().unwrap(),
                 &verifier,
             )
             .is_err()
@@ -1794,7 +1794,7 @@ mod ghost_bundle_tests {
         assert!(
             runtime::validate_managed_actor_bundle(
                 &wrong_executor.authoring_request,
-                &wrong_executor.managed_actor_bundle.as_ref().unwrap(),
+                wrong_executor.managed_actor_bundle.as_ref().unwrap(),
                 &verifier,
             )
             .is_err()
@@ -1809,7 +1809,7 @@ mod ghost_bundle_tests {
         assert!(
             runtime::validate_managed_actor_bundle(
                 &wrong_bundle_proof.authoring_request,
-                &wrong_bundle_proof.managed_actor_bundle.as_ref().unwrap(),
+                wrong_bundle_proof.managed_actor_bundle.as_ref().unwrap(),
                 &verifier,
             )
             .is_err()

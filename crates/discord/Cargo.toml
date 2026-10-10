@@ -24,7 +24,7 @@ serde = { workspace = true }
 serenity = { workspace = true, default-features = false, features = [
     "client",
     "gateway",
-    "rustls_backend",
+    "native_tls_backend",
     "model",
     "cache",
 ] }

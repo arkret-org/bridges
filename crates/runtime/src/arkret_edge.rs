@@ -293,7 +293,7 @@ impl ArkretEdge {
         let digest = body.authoring_request.canonical_digest()?;
         Ok(self
             .client
-            .applet_bot_provision(&self.config.arkret.applet_id, &digest.to_string(), body)
+            .applet_bot_provision(&self.config.arkret.applet_id, digest.as_ref(), body)
             .await?)
     }
 

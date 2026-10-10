@@ -356,17 +356,13 @@ pub(crate) fn validate_managed_authoring_completion(
     {
         return Err("authoring completion PCR Commit is not a Realm stream".into());
     }
-    if body.authoring_context.resolution_update.is_none() {
-        if let Some(bundle) = bundle {
-            if pcr.realm_id != bundle.pcr_genesis_event.realm_id
-                || pcr.event_ref != bundle.pcr_genesis_event.event_id
-                || pcr.stream_position != 0
-            {
-                return Err(
-                    "initial authoring completion does not cover its immutable PCR genesis".into(),
-                );
-            }
-        }
+    if body.authoring_context.resolution_update.is_none()
+        && let Some(bundle) = bundle
+        && (pcr.realm_id != bundle.pcr_genesis_event.realm_id
+            || pcr.event_ref != bundle.pcr_genesis_event.event_id
+            || pcr.stream_position != 0)
+    {
+        return Err("initial authoring completion does not cover its immutable PCR genesis".into());
     }
 
     let applet_evidence = &body

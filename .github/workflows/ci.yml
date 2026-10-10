@@ -45,7 +45,12 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: clippy
+
+      - name: Install nightly rustfmt
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -62,11 +67,11 @@ jobs:
         working-directory: bridges
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo +stable clippy --workspace --all-targets --locked -- -D warnings
         working-directory: bridges
 
       - name: Test
-        run: cargo test --workspace --locked
+        run: cargo +stable test --workspace --locked
         working-directory: bridges
 
   supply-chain:
