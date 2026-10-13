@@ -522,7 +522,10 @@ pub(crate) async fn create_portal_strand(
         .iter()
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
-    let operation_id = runtime::external_operation_key("ak.strand.create", &external_ref)?;
+    let operation_id = runtime::external_operation_key(
+        arkret_wire::CapabilityActionId::STRAND_CREATE,
+        &external_ref,
+    )?;
     if let Some(event) = edge
         .retained_publication(
             &realm,

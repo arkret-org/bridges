@@ -215,7 +215,7 @@ fn realm_from_scope(scope: &ScopeRef) -> Option<&RealmId> {
 fn provision_payload(
     event: &arkret::Event,
 ) -> std::result::Result<AppletManagedActorProvisionPayload, String> {
-    if event.kind != "ak.applet.managed_actor.provision" {
+    if event.kind != arkret_wire::event_kind_str::APPLET_MANAGED_ACTOR_PROVISION {
         return Err("authoring completion carries the wrong managed Actor provision Event".into());
     }
     let payload: AppletManagedActorProvisionPayload = serde_json::from_value(
@@ -296,7 +296,7 @@ pub(crate) fn validate_managed_authoring_completion(
                     "Ghost reuse cannot carry a new authoring completion".to_owned()
                 })?;
                 if ghost_bundle.managed_actor_provision_event.kind
-                    != "ak.applet.managed_actor.provision"
+                    != arkret_wire::event_kind_str::APPLET_MANAGED_ACTOR_PROVISION
                     || payload.applet_id != basis.applet_id
                     || payload.service_id != basis.service_id
                     || payload.actor_role != AppletManagedActorRole::Ghost

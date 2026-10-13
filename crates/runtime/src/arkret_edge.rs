@@ -756,7 +756,10 @@ impl ArkretEdge {
     {
         let realm = RealmId::new(realm_id.to_owned())?;
         let external_ref = spec_external_ref_map(external_ref)?;
-        let operation_id = external_operation_key("ak.message.redact", &external_ref)?;
+        let operation_id = external_operation_key(
+            arkret_wire::CapabilityActionId::MESSAGE_REDACT,
+            &external_ref,
+        )?;
         if let Some(event) = self
             .retained_publication(
                 &realm,
