@@ -372,10 +372,10 @@ impl Config {
     }
 
     fn from_yaml_with_base_dir(text: &str, base_dir: Option<&Path>) -> Result<Self> {
-        let mut value: serde_yaml_ng::Value =
-            serde_yaml_ng::from_str(text).map_err(|e| BridgeError::Config(e.to_string()))?;
+        let mut value: serde_json::Value =
+            serde_saphyr::from_str(text).map_err(|e| BridgeError::Config(e.to_string()))?;
         resolve_config_references(&mut value, base_dir)?;
-        serde_yaml_ng::from_value(value).map_err(|e| BridgeError::Config(e.to_string()))
+        serde_json::from_value(value).map_err(|e| BridgeError::Config(e.to_string()))
     }
 
     /// Decode the signing seed into 32 bytes.
@@ -399,30 +399,22 @@ impl Config {
     }
 }
 
-fn resolve_config_references(
-    value: &mut serde_yaml_ng::Value,
-    base_dir: Option<&Path>,
-) -> Result<()> {
+fn resolve_config_references(value: &mut serde_json::Value, base_dir: Option<&Path>) -> Result<()> {
     match value {
-        serde_yaml_ng::Value::String(s) => {
+        serde_json::Value::String(s) => {
             *s = resolve_config_string(s, base_dir)?;
         }
-        serde_yaml_ng::Value::Sequence(items) => {
+        serde_json::Value::Array(items) => {
             for item in items {
                 resolve_config_references(item, base_dir)?;
             }
         }
-        serde_yaml_ng::Value::Mapping(map) => {
+        serde_json::Value::Object(map) => {
             for value in map.values_mut() {
                 resolve_config_references(value, base_dir)?;
             }
         }
-        serde_yaml_ng::Value::Null
-        | serde_yaml_ng::Value::Bool(_)
-        | serde_yaml_ng::Value::Number(_) => {}
-        serde_yaml_ng::Value::Tagged(tagged) => {
-            resolve_config_references(&mut tagged.value, base_dir)?;
-        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
     }
     Ok(())
 }
@@ -573,7 +565,7 @@ arkret:
 
     #[test]
     fn webhook_rate_limit_config_rejects_misspelled_security_keys() {
-        let error = serde_yaml_ng::from_str::<WebhookRateLimitConfig>(
+        let error = serde_saphyr::from_str::<WebhookRateLimitConfig>(
             "enabled: true\nmax_request: 10\nwindow_secs: 60\n",
         )
         .expect_err("a misspelled rate-limit key must not silently use the default");
