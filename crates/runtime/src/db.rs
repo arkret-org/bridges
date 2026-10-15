@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use arkret::{IdempotencyIdentity, TransactionClaim, TransactionIdempotencyStore};
 use arkret_models_integration::AppletTransactionOutcome;
+use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
 use diesel::r2d2::{ConnectionManager, Pool, PooledConnection};
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
@@ -49,9 +50,13 @@ impl DatabaseManager {
     /// own tables.
     pub fn connect(cfg: &DatabaseConfig) -> Result<Self> {
         let url = normalize_url(&cfg.url);
+        #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
+        let url = bounded_postgres_url(&url)?;
         let manager = ConnectionManager::<DbConnection>::new(url);
         let pool = Pool::builder()
             .max_size(cfg.pool_size)
+            .connection_timeout(std::time::Duration::from_secs(5))
+            .connection_customizer(Box::new(SessionLimits))
             .build(manager)
             .map_err(|e| BridgeError::Database(e.to_string()))?;
         Ok(Self { pool })
@@ -101,6 +106,87 @@ impl DatabaseManager {
             Ok(deleted)
         })
         .map_err(Into::into)
+    }
+}
+
+#[derive(Debug)]
+struct SessionLimits;
+
+impl diesel::r2d2::CustomizeConnection<DbConnection, diesel::r2d2::Error> for SessionLimits {
+    fn on_acquire(&self, conn: &mut DbConnection) -> std::result::Result<(), diesel::r2d2::Error> {
+        #[cfg(feature = "sqlite")]
+        let sql = "PRAGMA busy_timeout = 5000;";
+        #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
+        let sql = "SET statement_timeout = '30s'; SET lock_timeout = '5s'; SET idle_in_transaction_session_timeout = '60s';";
+        conn.batch_execute(sql)
+            .map_err(diesel::r2d2::Error::QueryError)
+    }
+}
+
+#[cfg(all(feature = "postgres", not(feature = "sqlite")))]
+fn bounded_postgres_url(raw: &str) -> Result<String> {
+    let mut url = url::Url::parse(raw)
+        .map_err(|_| BridgeError::Config("PostgreSQL database URL is invalid".into()))?;
+    let pairs: Vec<_> = url
+        .query_pairs()
+        .filter(|(key, _)| {
+            !matches!(
+                key.as_ref(),
+                "connect_timeout"
+                    | "keepalives"
+                    | "keepalives_idle"
+                    | "keepalives_interval"
+                    | "keepalives_count"
+                    | "tcp_user_timeout"
+            )
+        })
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    url.set_query(None);
+    url.query_pairs_mut().extend_pairs(pairs).extend_pairs([
+        ("connect_timeout", "5"),
+        ("keepalives", "1"),
+        ("keepalives_idle", "5"),
+        ("keepalives_interval", "1"),
+        ("keepalives_count", "3"),
+        ("tcp_user_timeout", "5000"),
+    ]);
+    Ok(url.into())
+}
+
+#[cfg(all(test, feature = "postgres", not(feature = "sqlite")))]
+mod wait_bound_tests {
+    use super::*;
+
+    #[derive(diesel::QueryableByName)]
+    struct Bounds {
+        #[diesel(sql_type = diesel::sql_types::Bool)]
+        bounded: bool,
+    }
+
+    #[test]
+    fn postgres_sessions_bound_lock_wait_and_preserve_pool_capacity() {
+        let database_url =
+            std::env::var("BRIDGES_TEST_DATABASE_URL").expect("isolated test database required");
+        let db = DatabaseManager::connect(&DatabaseConfig {
+            url: database_url,
+            pool_size: 2,
+        })
+        .unwrap();
+        let mut first = db.conn().unwrap();
+        let mut second = db.conn().unwrap();
+        let bounds: Bounds = diesel::sql_query("SELECT current_setting('statement_timeout')::interval = interval '30 seconds' AND current_setting('lock_timeout')::interval = interval '5 seconds' AS bounded").get_result(&mut second).unwrap();
+        assert!(bounds.bounded);
+        first
+            .batch_execute("BEGIN; SELECT pg_advisory_xact_lock(876543210);")
+            .unwrap();
+        let start = std::time::Instant::now();
+        let result = second.batch_execute("SELECT pg_advisory_xact_lock(876543210)");
+        first.batch_execute("ROLLBACK").unwrap();
+        assert!(result.is_err());
+        assert!(start.elapsed() < std::time::Duration::from_secs(7));
+        drop(second);
+        assert!(db.conn().is_ok());
     }
 }
 
