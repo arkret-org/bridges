@@ -30,6 +30,8 @@
 //!   consumer `savfox` (`../../../savfox-ai/savfox`) depends on this surface with `default-features
 //!   = false, features = ["edge"]` and calls e.g. `ArkretEdge::new_outbound`; check it before
 //!   deleting any shared-layer pub symbol.
+//! - `managed-authoring`: shared Bot/Ghost custody and typed authoring over the host
+//!   `AuthoringStore`; its native DID resources and HTTP adapter are enabled with `web`.
 //! - `db`: the diesel-backed database pool ([`db`]) and [`DbAuthoringStore`].
 //! - `web`: the salvo HTTP service ([`web`]).
 //! - `runtime` (= `db` + `web`): [`BridgeContext`] / [`BridgeApp`] / [`run_bridge`].

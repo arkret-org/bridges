@@ -94,11 +94,77 @@ impl ManagedActorAuthoringService {
 
     #[cfg(feature = "web")]
     pub fn router(self: &Arc<Self>) -> Router {
-        Router::with_path("_arkret/edge/applet/managed-actors/author")
-            .hoop(affix_state::inject(AuthoringWebState {
-                service: self.clone(),
-            }))
-            .post(author_managed_actor)
+        Router::new()
+            .push(
+                Router::with_path("_arkret/edge/applet/managed-actors/author")
+                    .hoop(affix_state::inject(AuthoringWebState {
+                        service: self.clone(),
+                    }))
+                    .post(author_managed_actor),
+            )
+            .push(
+                Router::with_path("webvh/{local_id}/did.json")
+                    .hoop(affix_state::inject(AuthoringWebState {
+                        service: self.clone(),
+                    }))
+                    .get(published_document),
+            )
+            .push(
+                Router::with_path("webvh/{local_id}/did.jsonl")
+                    .hoop(affix_state::inject(AuthoringWebState {
+                        service: self.clone(),
+                    }))
+                    .get(published_history),
+            )
+    }
+
+    /// Read the exact public native resources retained with this host's own identity.
+    /// The URL index and verified encrypted custody prevent publishing another
+    /// host's document or substituting unverified storage bytes.
+    pub async fn published_principal(
+        &self,
+        local_id: &str,
+    ) -> Result<Option<(arkret::DidDocument, Vec<Value>)>> {
+        if local_id.is_empty()
+            || local_id.len() > 64
+            || !local_id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
+        {
+            return Ok(None);
+        }
+        let url = self
+            .principal_endpoint
+            .join(&format!("/webvh/{local_id}/did.json"))
+            .map_err(|error| BridgeError::Config(format!("managed publication URL: {error}")))?;
+        // Native WebVH resources always use HTTPS, including loopback DID hosts.
+        let mut url = url;
+        url.set_scheme("https").map_err(|_| {
+            BridgeError::Config("managed publication requires an HTTPS authority".into())
+        })?;
+        let Some((subject, record)) = self
+            .store
+            .clone()
+            .published_identity_async(url.to_string())
+            .await?
+        else {
+            return Ok(None);
+        };
+        let identity = self.decode_identity(&subject, record)?;
+        let ResolutionMethodHistoryEvidence::WebvhLog { log_entries, .. } =
+            identity.method_history_evidence
+        else {
+            return Err(BridgeError::Database(
+                "managed publication lacks native WebVH history".into(),
+            ));
+        };
+        let entry = log_entries
+            .last()
+            .ok_or_else(|| BridgeError::Database("managed publication history is empty".into()))?;
+        let document = serde_json::from_value(entry["state"].clone()).map_err(|error| {
+            BridgeError::Database(format!("managed publication document: {error}"))
+        })?;
+        Ok(Some((document, log_entries)))
     }
 
     /// Author or recover the exact Station-signed request using durable private custody.
@@ -964,6 +1030,65 @@ struct AuthoringWebState {
 }
 
 #[cfg(feature = "web")]
+async fn publish_native_resource(req: &Request, depot: &Depot, res: &mut Response, history: bool) {
+    let Ok(state) = depot.get_typed::<AuthoringWebState>() else {
+        res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+        return;
+    };
+    let local_id = req.param::<String>("local_id").unwrap_or_default();
+    match state.service.published_principal(&local_id).await {
+        Ok(Some((document, entries))) => {
+            res.headers_mut().insert(
+                "cache-control",
+                "no-store".parse().expect("static cache policy"),
+            );
+            if history {
+                let mut body = Vec::new();
+                for entry in entries {
+                    match canonical_json_bytes(&entry) {
+                        Ok(bytes) => {
+                            body.extend(bytes);
+                            body.push(b'\n');
+                        }
+                        Err(_) => {
+                            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+                            return;
+                        }
+                    }
+                }
+                res.headers_mut().insert(
+                    "content-type",
+                    "application/jsonl".parse().expect("static content type"),
+                );
+                if let Err(error) = res.write_body(body) {
+                    tracing::error!(%error,"managed history response write failed");
+                    res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+                }
+            } else {
+                res.render(Json(document));
+            }
+        }
+        Ok(None) => {
+            res.status_code(StatusCode::NOT_FOUND);
+        }
+        Err(error) => {
+            tracing::error!(%error,"managed native identity publication failed");
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
+}
+#[cfg(feature = "web")]
+#[handler]
+async fn published_document(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    publish_native_resource(req, depot, res, false).await;
+}
+#[cfg(feature = "web")]
+#[handler]
+async fn published_history(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    publish_native_resource(req, depot, res, true).await;
+}
+
+#[cfg(feature = "web")]
 #[handler]
 async fn author_managed_actor(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let Ok(state) = depot.get_typed::<AuthoringWebState>() else {
@@ -1455,6 +1580,33 @@ mod ghost_bundle_tests {
                 .managed_actor_bundle
                 .validate_bindings(&request)
                 .unwrap();
+            let did = &outcome.managed_actor_bundle.pcr_genesis_event.payload["object"]["initial_resolution"]
+                ["did"];
+            let did = Did::new(did.as_str().expect("managed principal DID").to_owned()).unwrap();
+            let document_url = arkret::identity::DidWebvhResolver::document_url(&did).unwrap();
+            let log_url = arkret::identity::DidWebvhResolver::log_url(&did).unwrap();
+            let mut doc_response = TestClient::get(&document_url).send(&service).await;
+            assert_eq!(doc_response.status_code, Some(StatusCode::OK));
+            let published: arkret::DidDocument = doc_response.take_json().await.unwrap();
+            assert_eq!(published.id, did);
+            let mut log_response = TestClient::get(&log_url).send(&service).await;
+            assert_eq!(log_response.status_code, Some(StatusCode::OK));
+            let public_bytes = log_response.take_bytes(None).await.unwrap();
+            let public_text = std::str::from_utf8(&public_bytes).unwrap();
+            assert!(
+                !public_text.contains("root_seed")
+                    && !public_text.contains("controller_seed")
+                    && !public_text.contains("encrypted_key_material")
+            );
+            let entries = public_text
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .collect::<Vec<_>>();
+            arkret::webvh::validate_webvh_history_at(&did, &entries, now).unwrap();
+            let unknown = TestClient::get("https://applet.example/webvh/unknown/did.json")
+                .send(&service)
+                .await;
+            assert_eq!(unknown.status_code, Some(StatusCode::NOT_FOUND));
             let key = managed_actor_subject_key(&request).unwrap();
             let record = author.store.managed_actor_identity(&key).unwrap().unwrap();
             assert!(!record.encrypted_key_material.contains("controller_seed"));
@@ -1472,6 +1624,29 @@ mod ghost_bundle_tests {
                 .unwrap(),
                 original
             );
+            let did = Did::new(original["managed_actor_bundle"]["pcr_genesis_event"]["payload"]["object"]["initial_resolution"]["did"].as_str().unwrap().to_owned()).unwrap();
+            let document_url =
+                url::Url::parse(&arkret::identity::DidWebvhResolver::document_url(&did).unwrap())
+                    .unwrap();
+            let local_id = document_url.path_segments().unwrap().nth(1).unwrap();
+            let (published, entries) = reopened
+                .published_principal(local_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(published.id, did);
+            arkret::webvh::validate_webvh_history_at(&did, &entries, now).unwrap();
+            let mut other_host = host("33");
+            Arc::get_mut(&mut other_host).unwrap().principal_endpoint =
+                "https://other.example".parse().unwrap();
+            assert!(
+                other_host
+                    .published_principal(local_id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            drop(other_host);
             let key = managed_actor_subject_key(&request).unwrap();
             assert_eq!(
                 reopened

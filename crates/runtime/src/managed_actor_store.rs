@@ -75,6 +75,36 @@ impl ManagedActorStore {
             .transpose()
     }
 
+    pub(super) async fn published_identity_async(
+        self: Arc<Self>,
+        document_url: String,
+    ) -> Result<Option<(String, ManagedActorIdentityRecord)>> {
+        run_blocking(move || {
+            let Some(subject) = self
+                .store
+                .load(&format!("managed-publication/v1/{document_url}"))?
+            else {
+                return Ok(None);
+            };
+            let identity = self.managed_actor_identity(&subject)?.ok_or_else(|| {
+                BridgeError::Database("managed publication has no retained identity".into())
+            })?;
+            let actual = arkret::identity::DidWebvhResolver::document_url(&arkret::Did::new(
+                identity.actor_did.clone(),
+            )?)
+            .map_err(|error| {
+                BridgeError::Database(format!("managed publication URL is invalid: {error}"))
+            })?;
+            if actual != document_url {
+                return Err(BridgeError::Database(
+                    "managed publication index differs from the native identity".into(),
+                ));
+            }
+            Ok(Some((subject, identity)))
+        })
+        .await
+    }
+
     fn completed_managed_actor_authoring(
         &self,
         subject_key: &str,
@@ -120,11 +150,23 @@ impl ManagedActorStore {
             return decode(&raw);
         }
         let reverse = format!("managed-identity-did/v1/{}", candidate.actor_did);
+        let document_url = arkret::identity::DidWebvhResolver::document_url(&arkret::Did::new(
+            candidate.actor_did.clone(),
+        )?)
+        .map_err(|error| {
+            BridgeError::Database(format!("managed publication URL is invalid: {error}"))
+        })?;
+        let publication = format!("managed-publication/v1/{document_url}");
         let inserted = self.store.compare_exchange_batch(
-            &[(key.clone(), None), (reverse.clone(), None)],
+            &[
+                (key.clone(), None),
+                (reverse.clone(), None),
+                (publication.clone(), None),
+            ],
             &[
                 (key.clone(), Some(encode(candidate)?)),
                 (reverse, Some(subject_key.into())),
+                (publication, Some(subject_key.into())),
             ],
         )?;
         if inserted {

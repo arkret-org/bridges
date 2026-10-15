@@ -190,3 +190,10 @@ adapts first-seen external users to that same authority. The private identity an
 exact authoring ledger use its existing atomic `AuthoringStore` host port. The root,
 next-root and operational controller seeds remain separate and encrypted with the
 explicit deployment key. This does not provide the managed Device/MLS runner.
+
+The authoring router also publishes the retained Principal's native
+`/webvh/<local_id>/did.json` and `did.jsonl` resources. The publication URL index is
+written atomically with private custody and only returns its verified public
+inception history. Configure the Principal endpoint's HTTPS origin to reach this
+host. Unknown identities return no material; rotation remains a separate native
+history installation obligation.
