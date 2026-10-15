@@ -13,7 +13,6 @@
 
 mod content;
 mod ghost;
-mod managed_actor_authoring;
 mod media;
 mod models;
 mod schema;
@@ -47,11 +46,11 @@ use ghost::{
     normalized_external_id, portal_location_ref, provision_ghost_actor,
     require_ghost_provision_provider, require_nonempty_ref,
 };
-use managed_actor_authoring::ManagedActorAuthoringService;
 pub use media::InboundMediaAuthorization;
 use media::{
     HttpInboundMediaFetcher, InboundMediaFetchPolicy, InboundMediaFetcher, InboundMediaReference,
 };
+use runtime::managed_actor_authoring::ManagedActorAuthoringService;
 pub use runtime::salvo;
 use serde_json::{Value, json};
 use store::{MessageResolver, MessageStore};
@@ -219,11 +218,8 @@ impl MessageContext {
         let replay_guard: Arc<dyn ReplayGuardStore> =
             Arc::new(DbReplayGuardStore::new(inner.db.clone()));
         let token_store: Arc<dyn TokenStore> = Arc::new(DbTokenStore::new(inner.db.clone()));
-        let managed_actor_authoring = Arc::new(ManagedActorAuthoringService::new(
-            inner.edge.clone(),
-            store.clone(),
-            inner.config.clone(),
-        )?);
+        let managed_actor_authoring =
+            Arc::new(ManagedActorAuthoringService::new(inner.edge.clone())?);
         let ghost_provision_provider: Arc<dyn GhostProvisionRequestProvider> =
             managed_actor_authoring.clone();
         Ok(Self {

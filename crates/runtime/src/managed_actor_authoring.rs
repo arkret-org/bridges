@@ -1,4 +1,4 @@
-//! Production Applet-managed Ghost identity authoring.
+//! Shared production Bot/Ghost Principal custody and authoring.
 //!
 //! One implementation backs both the canonical Applet author operation and
 //! the messaging bridge's first-seen-user provisioning path. Identity keys are
@@ -9,8 +9,7 @@ use std::sync::Arc;
 use arkret::canonical::{canonical_json_bytes, canonical_sha256};
 use arkret::signatures::{Ed25519DetachedJwsVerifier, PublicKeyMaterial};
 use arkret::{
-    AppletId, AppletManagedActorAuthorOutcome, AppletManagedActorAuthorRequestBody,
-    AppletManagedActorAuthoringBundle, AppletManagedActorAuthoringRequest,
+    AppletId, AppletManagedActorAuthoringBundle, AppletManagedActorAuthoringRequest,
     AppletManagedActorBundleAuthoringInput, AppletManagedActorCommittedRequest,
     AppletManagedActorPurpose, Did, DidCoreId, GenesisSalt, GhostActorProvisionRequestBody,
     GhostPreviewRequestBody, Hash, ResolutionCommitment, ResolutionDidBindingEvidenceKind,
@@ -18,19 +17,25 @@ use arkret::{
     ResolutionMethodEvidenceBoundary, ResolutionMethodHistoryEvidence,
     author_applet_managed_actor_bundle, namespace_pattern_matches, project_did_to_core_id,
 };
+#[cfg(feature = "web")]
+use arkret::{AppletManagedActorAuthorOutcome, AppletManagedActorAuthorRequestBody};
 use arkret_wire::{DidUrl, Discoverability, HistoryAccess, JoinRule, SecurityClass};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use chrono::Utc;
 use ed25519_dalek::SigningKey;
+#[cfg(feature = "web")]
 use salvo::http::StatusCode;
+#[cfg(feature = "web")]
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::ghost::{GhostProvisionAuthoringRequest, GhostProvisionRequestProvider};
-use crate::store::{ManagedActorAuthoringClaim, ManagedActorIdentityRecord, MessageStore};
-use crate::{BridgeError, Result, runtime};
+use crate as runtime;
+use crate::managed_actor_store::{
+    ManagedActorAuthoringClaim, ManagedActorIdentityRecord, ManagedActorStore,
+};
+use crate::{BridgeError, Result};
 
 const AUTHORING_LEASE_SECS: i64 = 30;
 const AUTHORING_WAIT_ATTEMPTS: usize = 300;
@@ -60,10 +65,10 @@ struct VerifiedManagedActorRoot {
     public_key: PublicKeyMaterial,
 }
 
-/// Durable production authoring authority installed by every messaging bridge.
-pub(crate) struct ManagedActorAuthoringService {
+/// Durable authoring authority shared by bridge and agent hosts.
+pub struct ManagedActorAuthoringService {
     edge: Arc<runtime::ArkretEdge>,
-    store: Arc<MessageStore>,
+    store: Arc<ManagedActorStore>,
     config: Arc<runtime::Config>,
     principal_endpoint: url::Url,
     key_encryption_key: [u8; 32],
@@ -71,11 +76,9 @@ pub(crate) struct ManagedActorAuthoringService {
 }
 
 impl ManagedActorAuthoringService {
-    pub(crate) fn new(
-        edge: Arc<runtime::ArkretEdge>,
-        store: Arc<MessageStore>,
-        config: Arc<runtime::Config>,
-    ) -> Result<Self> {
+    pub fn new(edge: Arc<runtime::ArkretEdge>) -> Result<Self> {
+        let config = edge.config().clone();
+        let store = Arc::new(ManagedActorStore::new(edge.authoring_store()));
         let principal_endpoint = config.arkret.managed_actor_authoring.principal_endpoint()?;
         let key_encryption_key = config.arkret.managed_actor_authoring.key_encryption_key()?;
         let expected_station_id = project_did_to_core_id(&config.arkret.trusted_server_did)?;
@@ -89,7 +92,8 @@ impl ManagedActorAuthoringService {
         })
     }
 
-    pub(crate) fn router(self: &Arc<Self>) -> Router {
+    #[cfg(feature = "web")]
+    pub fn router(self: &Arc<Self>) -> Router {
         Router::with_path("_arkret/edge/applet/managed-actors/author")
             .hoop(affix_state::inject(AuthoringWebState {
                 service: self.clone(),
@@ -97,7 +101,8 @@ impl ManagedActorAuthoringService {
             .post(author_managed_actor)
     }
 
-    async fn author(
+    /// Author or recover the exact Station-signed request using durable private custody.
+    pub async fn author(
         &self,
         request: &AppletManagedActorAuthoringRequest,
     ) -> Result<AppletManagedActorAuthoringBundle> {
@@ -853,23 +858,27 @@ fn ghost_bundle_authoring_input(
     })
 }
 
-#[async_trait::async_trait]
-impl GhostProvisionRequestProvider for ManagedActorAuthoringService {
-    async fn author_request(
+impl ManagedActorAuthoringService {
+    /// Prepare a fresh or reused Ghost with the same custody and frozen completion as HTTP
+    /// authoring.
+    pub async fn prepare_ghost(
         &self,
-        request: &GhostProvisionAuthoringRequest,
+        applet_id: &AppletId,
+        realm_id: &arkret::RealmId,
+        external_ref: &arkret::GhostExternalTuple,
+        display_name: Option<String>,
     ) -> Result<GhostActorProvisionRequestBody> {
         let preview = self
             .edge
             .client()
             .ghost_actor_preview(
-                request.applet_id.as_str(),
+                applet_id.as_str(),
                 &GhostPreviewRequestBody {
                     effective_scope: arkret::ScopeRef::Realm {
-                        realm_id: request.realm_id.clone(),
+                        realm_id: realm_id.clone(),
                     },
-                    external_ref: request.external_ref.clone(),
-                    display_name: request.display_name.clone(),
+                    external_ref: external_ref.clone(),
+                    display_name,
                 },
             )
             .await?;
@@ -948,11 +957,13 @@ fn random_token(bytes: usize) -> Result<String> {
     Ok(arkret::base64url_encode(value))
 }
 
+#[cfg(feature = "web")]
 #[derive(Clone)]
 struct AuthoringWebState {
     service: Arc<ManagedActorAuthoringService>,
 }
 
+#[cfg(feature = "web")]
 #[handler]
 async fn author_managed_actor(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let Ok(state) = depot.get_typed::<AuthoringWebState>() else {
@@ -964,41 +975,50 @@ async fn author_managed_actor(req: &mut Request, depot: &mut Depot, res: &mut Re
         );
         return;
     };
-    let body: AppletManagedActorAuthorRequestBody = match req.parse_json().await {
-        Ok(body) => body,
-        Err(error) => {
-            render_author_error(
-                res,
-                StatusCode::BAD_REQUEST,
-                "invalid_author_request",
-                &format!("invalid managed actor author request: {error}"),
-            );
-            return;
-        }
-    };
-    match state.service.author(&body.authoring_request).await {
-        Ok(managed_actor_bundle) => res.render(Json(AppletManagedActorAuthorOutcome {
-            managed_actor_bundle,
-        })),
-        Err(error) => {
-            let status = match &error {
-                BridgeError::App(message) if message.contains("expired") => StatusCode::GONE,
-                BridgeError::App(_) | BridgeError::Arkret(_) => StatusCode::BAD_REQUEST,
-                BridgeError::Config(_) | BridgeError::Database(_) | BridgeError::Runtime(_) => {
-                    StatusCode::INTERNAL_SERVER_ERROR
-                }
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            render_author_error(
-                res,
-                status,
-                "managed_actor_authoring_failed",
-                &error.to_string(),
-            );
+    state.service.serve(req, res).await;
+}
+
+impl ManagedActorAuthoringService {
+    /// Serve the canonical author operation after the host selects this exact Applet.
+    #[cfg(feature = "web")]
+    pub async fn serve(&self, req: &mut Request, res: &mut Response) {
+        let body: AppletManagedActorAuthorRequestBody = match req.parse_json().await {
+            Ok(body) => body,
+            Err(error) => {
+                render_author_error(
+                    res,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_author_request",
+                    &format!("invalid managed actor author request: {error}"),
+                );
+                return;
+            }
+        };
+        match self.author(&body.authoring_request).await {
+            Ok(managed_actor_bundle) => res.render(Json(AppletManagedActorAuthorOutcome {
+                managed_actor_bundle,
+            })),
+            Err(error) => {
+                let status = match &error {
+                    BridgeError::App(message) if message.contains("expired") => StatusCode::GONE,
+                    BridgeError::App(_) | BridgeError::Arkret(_) => StatusCode::BAD_REQUEST,
+                    BridgeError::Config(_) | BridgeError::Database(_) | BridgeError::Runtime(_) => {
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    }
+                    _ => StatusCode::INTERNAL_SERVER_ERROR,
+                };
+                render_author_error(
+                    res,
+                    status,
+                    "managed_actor_authoring_failed",
+                    &error.to_string(),
+                );
+            }
         }
     }
 }
 
+#[cfg(feature = "web")]
 fn render_author_error(res: &mut Response, status: StatusCode, code: &str, detail: &str) {
     res.status_code(status);
     res.render(Json(json!({
@@ -1363,6 +1383,127 @@ mod ghost_bundle_tests {
             &signer(0x11, STATION_DID),
         )
         .unwrap()
+    }
+
+    #[cfg(feature = "web")]
+    #[tokio::test]
+    async fn shared_http_author_uses_durable_custody_across_restart_and_refuses_wrong_kek() {
+        use salvo::test::{ResponseExt, TestClient};
+        let dir = std::env::temp_dir().join(format!(
+            "arkret-managed-http-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let host = |kek: &str| {
+            let base = edge(Arc::new(RecordingAuthoringStore::default()));
+            let mut config = base.config().as_ref().clone();
+            config.arkret.managed_actor_authoring.key_encryption_key_hex = kek.repeat(32);
+            config.arkret.trusted_verification_methods =
+                vec![crate::config::TrustedVerificationMethodConfig {
+                    verification_method: DidUrl::new(format!("{STATION_DID}#key-1")).unwrap(),
+                    public_key: PublicKeyMaterial::Ed25519Raw {
+                        bytes: SigningKey::from_bytes(&[0x11; 32])
+                            .verifying_key()
+                            .to_bytes()
+                            .to_vec(),
+                    },
+                }];
+            config.arkret.applet_namespaces = serde_json::from_value(json!({"actors":[{"pattern":"did:webvh:*:applet.example:webvh:*","exclusive":true}],"realms":[],"handles":[]})).unwrap();
+            let journal = crate::FileAuthoringStore::shared(dir.join("publications.redb")).unwrap();
+            let (sender, _) = tokio::sync::mpsc::channel(1);
+            let edge =
+                Arc::new(runtime::ArkretEdge::new(Arc::new(config), journal, sender).unwrap());
+            Arc::new(ManagedActorAuthoringService::new(edge).unwrap())
+        };
+        let now = DateTime::from_timestamp_millis(Utc::now().timestamp_millis()).unwrap();
+        let bot = bot_request("durable-http-bot");
+        let bot = AppletManagedActorAuthoringRequest::sign_bot(
+            bot.basis.bot().unwrap().clone(),
+            core_id(STATION_DID),
+            now,
+            now + chrono::Duration::minutes(2),
+            &signer(0x11, STATION_DID),
+        )
+        .unwrap();
+        let ghost = ghost_request();
+        let ghost = AppletManagedActorAuthoringRequest::sign_ghost(
+            ghost.basis.ghost().unwrap().clone(),
+            core_id(STATION_DID),
+            now,
+            now + chrono::Duration::minutes(2),
+            &signer(0x11, STATION_DID),
+        )
+        .unwrap();
+        let mut originals = Vec::new();
+        for request in [bot, ghost] {
+            let author = host("33");
+            let service = salvo::Service::new(author.router());
+            let mut response =
+                TestClient::post("http://localhost/_arkret/edge/applet/managed-actors/author")
+                    .json(&AppletManagedActorAuthorRequestBody {
+                        authoring_request: request.clone(),
+                    })
+                    .send(&service)
+                    .await;
+            let status = response.status_code;
+            let body: Value = response.take_json().await.unwrap();
+            assert_eq!(status, Some(StatusCode::OK), "{body}");
+            let outcome: AppletManagedActorAuthorOutcome =
+                serde_json::from_value(body.clone()).unwrap();
+            outcome
+                .managed_actor_bundle
+                .validate_bindings(&request)
+                .unwrap();
+            let key = managed_actor_subject_key(&request).unwrap();
+            let record = author.store.managed_actor_identity(&key).unwrap().unwrap();
+            assert!(!record.encrypted_key_material.contains("controller_seed"));
+            originals.push((request, body, record.encrypted_key_material));
+            drop(service);
+            drop(author);
+        }
+        for (request, original, ciphertext) in originals {
+            let reopened = host("33");
+            let replay = reopened.author(&request).await.unwrap();
+            assert_eq!(
+                serde_json::to_value(AppletManagedActorAuthorOutcome {
+                    managed_actor_bundle: replay
+                })
+                .unwrap(),
+                original
+            );
+            let key = managed_actor_subject_key(&request).unwrap();
+            assert_eq!(
+                reopened
+                    .store
+                    .managed_actor_identity(&key)
+                    .unwrap()
+                    .unwrap()
+                    .encrypted_key_material,
+                ciphertext
+            );
+            drop(reopened);
+            let wrong = host("44");
+            assert!(
+                wrong
+                    .author(&request)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("cannot be decrypted")
+            );
+            assert_eq!(
+                wrong
+                    .store
+                    .managed_actor_identity(&key)
+                    .unwrap()
+                    .unwrap()
+                    .encrypted_key_material,
+                ciphertext
+            );
+            drop(wrong);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

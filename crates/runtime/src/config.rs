@@ -182,7 +182,7 @@ pub struct ManagedActorAuthoringConfig {
     /// DID is checked against the installed Applet actor namespace before any
     /// key or authoring result becomes visible.
     pub principal_endpoint: String,
-    /// 32-byte hexadecimal key encrypting managed-actor root/next seeds at
+    /// 32-byte hexadecimal key encrypting managed-actor root/next/controller seeds at
     /// rest. It is deliberately separate from the Applet service signing key.
     pub key_encryption_key_hex: String,
 }

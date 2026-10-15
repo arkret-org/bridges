@@ -182,3 +182,11 @@ signer cannot consume a Bot or Ghost terminal child grant. Legacy retained
 Service-proxy publications are rejected before replay. Creation/completion and
 Service-subject maintenance operations remain available; Ghost message and
 redaction helpers require a future native managed-Account/Device executor.
+
+Managed Principal custody and the canonical Bot/Ghost author operation live in
+`arkret-bridge-runtime` behind `managed-authoring`.
+`ManagedActorAuthoringService` is shared with Savfox; the messaging layer only
+adapts first-seen external users to that same authority. The private identity and
+exact authoring ledger use its existing atomic `AuthoringStore` host port. The root,
+next-root and operational controller seeds remain separate and encrypted with the
+explicit deployment key. This does not provide the managed Device/MLS runner.

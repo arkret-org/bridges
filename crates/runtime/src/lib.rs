@@ -51,6 +51,10 @@ mod error;
 mod file_authoring_store;
 pub mod idempotency;
 pub mod logging;
+#[cfg(feature = "managed-authoring")]
+pub mod managed_actor_authoring;
+#[cfg(feature = "managed-authoring")]
+mod managed_actor_store;
 pub mod queue;
 pub mod telemetry;
 

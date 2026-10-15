@@ -242,6 +242,16 @@ impl ArkretEdge {
         self.signal_tx = Some(tx);
     }
 
+    #[cfg(feature = "managed-authoring")]
+    pub(crate) fn authoring_store(&self) -> Arc<dyn AuthoringStore> {
+        self.journal.store.clone()
+    }
+
+    #[cfg(feature = "managed-authoring")]
+    pub(crate) fn config(&self) -> &Arc<Config> {
+        &self.config
+    }
+
     pub fn client(&self) -> &Client {
         &self.client
     }

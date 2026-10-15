@@ -15,35 +15,6 @@ diesel::table! {
 }
 
 diesel::table! {
-    /// One Applet-owned managed identity per canonical branch subject. Root
-    /// and next seeds are retained only as authenticated ciphertext.
-    managed_actor_identities (subject_key) {
-        subject_key -> Text,
-        actor_did -> Text,
-        initial_resolution_json -> Text,
-        method_history_evidence_json -> Text,
-        encrypted_key_material -> Text,
-        created_at -> BigInt,
-    }
-}
-
-diesel::table! {
-    /// Exact authoring replay ledger. Keeping request digest in the primary key
-    /// preserves successful old-generation replay after a newer preview.
-    managed_actor_authorings (subject_key, request_digest) {
-        subject_key -> Text,
-        request_digest -> Text,
-        request_json -> Text,
-        status -> Text,
-        owner_token -> Text,
-        lease_expires_at -> BigInt,
-        bundle_json -> Nullable<Text>,
-        created_at -> BigInt,
-        updated_at -> BigInt,
-    }
-}
-
-diesel::table! {
     /// App message id <-> Arkret event id mapping. `normalized_sender` is part
     /// of the dedup key (applet-integration §16 minimum key set).
     message_mappings (id) {
@@ -89,7 +60,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     channel_realm_mappings,
     message_mappings,
     user_mappings,
-    prepared_ghost_provisions,
-    managed_actor_identities,
-    managed_actor_authorings
+    prepared_ghost_provisions
 );

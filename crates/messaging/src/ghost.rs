@@ -660,3 +660,21 @@ mod provider_tests {
         assert!(error.to_string().contains("fixture provider invoked"));
     }
 }
+
+#[async_trait::async_trait]
+impl GhostProvisionRequestProvider
+    for runtime::managed_actor_authoring::ManagedActorAuthoringService
+{
+    async fn author_request(
+        &self,
+        request: &GhostProvisionAuthoringRequest,
+    ) -> Result<GhostActorProvisionRequestBody> {
+        self.prepare_ghost(
+            &request.applet_id,
+            &request.realm_id,
+            &request.external_ref,
+            request.display_name.clone(),
+        )
+        .await
+    }
+}
