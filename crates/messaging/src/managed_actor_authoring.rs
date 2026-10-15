@@ -40,6 +40,7 @@ const AUTHORING_WAIT_ATTEMPTS: usize = 300;
 struct ManagedActorKeyMaterial {
     root_seed: String,
     next_root_seed: String,
+    controller_seed: String,
 }
 
 #[derive(Clone)]
@@ -375,11 +376,15 @@ impl ManagedActorAuthoringService {
     ) -> Result<ManagedActorIdentityRecord> {
         let mut root_seed = [0_u8; 32];
         let mut next_root_seed = [0_u8; 32];
+        let mut controller_seed = [0_u8; 32];
         getrandom::fill(&mut root_seed).map_err(|error| {
             BridgeError::Runtime(format!("managed actor root RNG failed: {error}"))
         })?;
         getrandom::fill(&mut next_root_seed).map_err(|error| {
             BridgeError::Runtime(format!("managed actor next-root RNG failed: {error}"))
+        })?;
+        getrandom::fill(&mut controller_seed).map_err(|error| {
+            BridgeError::Runtime(format!("managed actor controller RNG failed: {error}"))
         })?;
         let local_id = subject_key
             .strip_prefix("sha256:")
@@ -392,18 +397,21 @@ impl ManagedActorAuthoringService {
                 .verifying_key()
                 .as_bytes(),
         );
-        let inception =
-            arkret::webvh::prepare_agent_inception(&arkret::webvh::AgentInceptionInput {
+        let inception = arkret::webvh::prepare_applet_managed_inception(
+            &arkret::webvh::AppletManagedInceptionInput {
                 principal_endpoint: &self.principal_endpoint,
                 local_id: &local_id,
-                controller_principal_id: request.basis.service_id(),
+                controller_public_key: &SigningKey::from_bytes(&controller_seed)
+                    .verifying_key()
+                    .to_bytes(),
                 version_time: request.issued_at,
                 root_seed: &root_seed,
                 next_root_public_key_multibase: &next_key,
-            })
-            .map_err(|error| {
-                BridgeError::App(format!("managed actor WebVH inception failed: {error}"))
-            })?;
+            },
+        )
+        .map_err(|error| {
+            BridgeError::App(format!("managed actor WebVH inception failed: {error}"))
+        })?;
         let did = Did::new(inception.did.clone())?;
         if request.purpose == AppletManagedActorPurpose::ProvisionGhost
             && !self
@@ -460,6 +468,7 @@ impl ManagedActorAuthoringService {
             &ManagedActorKeyMaterial {
                 root_seed: arkret::base64url_encode(root_seed),
                 next_root_seed: arkret::base64url_encode(next_root_seed),
+                controller_seed: arkret::base64url_encode(controller_seed),
             },
         )?;
         Ok(ManagedActorIdentityRecord {
@@ -677,16 +686,6 @@ fn verify_managed_actor_root(
                 "stored managed actor WebVH inception proof is invalid: {error}"
             ))
         })?;
-    arkret::webvh::validate_agent_did_document_profile(
-        did.as_str(),
-        &validated.document,
-        &[validated.active_update_key_multibase.as_str()],
-    )
-    .map_err(|error| {
-        BridgeError::Database(format!(
-            "stored managed actor Agent DID profile is invalid: {error}"
-        ))
-    })?;
     let verification_method = entry
         .pointer("/proof/0/verificationMethod")
         .and_then(Value::as_str)
@@ -718,6 +717,36 @@ fn verify_managed_actor_root(
             )
         })?;
     let root_seed = decode_managed_actor_seed("root_seed", &key_material.root_seed)?;
+    let controller_seed =
+        decode_managed_actor_seed("controller_seed", &key_material.controller_seed)?;
+    let controller_key = SigningKey::from_bytes(&controller_seed).verifying_key();
+    let method = format!("{did}#managed-controller");
+    let document: arkret::DidDocument = serde_json::from_value(log_entries[0]["state"].clone())
+        .map_err(|error| {
+            BridgeError::Database(format!("managed controller document is invalid: {error}"))
+        })?;
+    let stored_key =
+        arkret::identity::jws::resolve_ed25519_pubkey_from_document(&document, &method).map_err(
+            |error| BridgeError::Database(format!("managed controller method is invalid: {error}")),
+        )?;
+    arkret::identity::validate_verification_method_relationship(
+        &document,
+        &DidUrl::new(method).map_err(|error| {
+            BridgeError::Database(format!("managed controller method is invalid: {error}"))
+        })?,
+        did,
+        arkret::identity::DidVerificationRelationship::AssertionMethod,
+    )
+    .map_err(|error| {
+        BridgeError::Database(format!(
+            "managed controller assertion relationship is invalid: {error}"
+        ))
+    })?;
+    if controller_key != stored_key || controller_seed == root_seed {
+        return Err(BridgeError::Database(
+            "stored managed controller key differs from its native document".into(),
+        ));
+    }
     let public_key = PublicKeyMaterial::Ed25519Raw {
         bytes: SigningKey::from_bytes(&root_seed)
             .verifying_key()
@@ -733,6 +762,11 @@ fn verify_managed_actor_root(
         ));
     }
     let next_root_seed = decode_managed_actor_seed("next_root_seed", &key_material.next_root_seed)?;
+    if controller_seed == next_root_seed {
+        return Err(BridgeError::Database(
+            "managed controller key must differ from the next history root".into(),
+        ));
+    }
     let next_root_multibase = arkret::ed25519_pubkey_to_did_key_multibase(
         SigningKey::from_bytes(&next_root_seed)
             .verifying_key()
@@ -982,7 +1016,7 @@ mod ghost_bundle_tests {
     use std::sync::{Arc, Mutex};
 
     use arkret::canonical::DigestSuite;
-    use arkret::webvh::{AgentInceptionInput, prepare_agent_inception};
+    use arkret::webvh::{AppletManagedInceptionInput, prepare_applet_managed_inception};
     use arkret::{
         AppletDidMethodVersionEvidence, AppletGhostAuthoringRequestBasis,
         AppletRegistrationEpochEvidence, DidDocument, GhostExternalTuple,
@@ -1108,10 +1142,12 @@ mod ghost_bundle_tests {
                 .verifying_key()
                 .as_bytes(),
         );
-        let inception = prepare_agent_inception(&AgentInceptionInput {
+        let inception = prepare_applet_managed_inception(&AppletManagedInceptionInput {
             principal_endpoint: &url::Url::parse("https://applet.example/actors/slack").unwrap(),
             local_id: "u123",
-            controller_principal_id: &core_id(SERVICE_DID),
+            controller_public_key: &SigningKey::from_bytes(&[0x55; 32])
+                .verifying_key()
+                .to_bytes(),
             version_time: issued_at(),
             root_seed: &[0x51; 32],
             next_root_public_key_multibase: &next_key,
@@ -1170,6 +1206,7 @@ mod ghost_bundle_tests {
         let material = ManagedActorKeyMaterial {
             root_seed: arkret::base64url_encode([0x51; 32]),
             next_root_seed: arkret::base64url_encode([0x52; 32]),
+            controller_seed: arkret::base64url_encode([0x55; 32]),
         };
         let verified = verify_managed_actor_root(
             &identity.initial_resolution.did,
@@ -1189,6 +1226,7 @@ mod ghost_bundle_tests {
         let wrong_root = ManagedActorKeyMaterial {
             root_seed: arkret::base64url_encode([0x53; 32]),
             next_root_seed: material.next_root_seed.clone(),
+            controller_seed: material.controller_seed.clone(),
         };
         assert!(
             verify_managed_actor_root(
@@ -1199,14 +1237,28 @@ mod ghost_bundle_tests {
             .is_err()
         );
         let wrong_next_root = ManagedActorKeyMaterial {
-            root_seed: material.root_seed,
+            root_seed: material.root_seed.clone(),
             next_root_seed: arkret::base64url_encode([0x54; 32]),
+            controller_seed: material.controller_seed.clone(),
         };
         assert!(
             verify_managed_actor_root(
                 &identity.initial_resolution.did,
                 &identity.method_history_evidence,
                 &wrong_next_root,
+            )
+            .is_err()
+        );
+        let wrong_controller = ManagedActorKeyMaterial {
+            root_seed: material.root_seed,
+            next_root_seed: material.next_root_seed,
+            controller_seed: arkret::base64url_encode([0x56; 32]),
+        };
+        assert!(
+            verify_managed_actor_root(
+                &identity.initial_resolution.did,
+                &identity.method_history_evidence,
+                &wrong_controller
             )
             .is_err()
         );
