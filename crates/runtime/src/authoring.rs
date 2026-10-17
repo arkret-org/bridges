@@ -64,6 +64,18 @@ struct ManagedAuthoringPreparation {
     committed_request: AppletManagedActorCommittedRequest,
     managed_actor_verification_method: DidUrl,
     managed_actor_public_key: PublicKeyMaterial,
+    service_verification_method: DidUrl,
+    service_public_key: PublicKeyMaterial,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ManagedAuthoringRoots {
+    pub(crate) completion_digest: Hash,
+    pub(crate) service_verification_method: DidUrl,
+    pub(crate) service_public_key: PublicKeyMaterial,
+    pub(crate) station_verification_method: DidUrl,
+    pub(crate) station_public_key: PublicKeyMaterial,
 }
 
 /// One frozen publication. `intent` retains the producer-selected content so a
@@ -162,6 +174,13 @@ fn managed_actor_local_key(actor: &ActorId) -> Result<String> {
 fn managed_actor_original_key(actor: &ActorId) -> Result<String> {
     Ok(format!(
         "managed-authoring/original/{}",
+        serde_json::to_string(actor)?
+    ))
+}
+
+fn managed_actor_original_roots_key(actor: &ActorId) -> Result<String> {
+    Ok(format!(
+        "managed-authoring/original-roots/{}",
         serde_json::to_string(actor)?
     ))
 }
@@ -404,21 +423,29 @@ impl AuthoringJournal {
         committed_request: &AppletManagedActorCommittedRequest,
         managed_actor_verification_method: &DidUrl,
         managed_actor_public_key: &PublicKeyMaterial,
+        service_verification_method: &DidUrl,
+        service_public_key: &PublicKeyMaterial,
     ) -> Result<bool> {
         managed_actor_public_key.ed25519_bytes().map_err(|error| {
             BridgeError::App(format!("managed Actor preparation key is invalid: {error}"))
         })?;
         let request_digest = managed_authoring_request(committed_request).canonical_digest()?;
         let key = managed_authoring_preparation_key(&request_digest);
-        let preparation = ManagedAuthoringPreparation {
+        let mut preparation = ManagedAuthoringPreparation {
             committed_request: committed_request.clone(),
             managed_actor_verification_method: managed_actor_verification_method.clone(),
             managed_actor_public_key: managed_actor_public_key.clone(),
+            service_verification_method: service_verification_method.clone(),
+            service_public_key: service_public_key.clone(),
         };
-        let raw = String::from_utf8(arkret::canonical::canonical_json_bytes(&preparation)?)
-            .map_err(|error| BridgeError::Arkret(error.to_string()))?;
         if let Some(existing) = self.store.load(&key)? {
-            return if existing == raw {
+            let prior: ManagedAuthoringPreparation = serde_json::from_str(&existing)?;
+            // Recover the original preparation after Service key rotation;
+            // today's signer cannot replace the already frozen Service root.
+            preparation.service_verification_method = prior.service_verification_method;
+            preparation.service_public_key = prior.service_public_key;
+            return if existing.as_bytes() == arkret::canonical::canonical_json_bytes(&preparation)?
+            {
                 Ok(false)
             } else {
                 Err(BridgeError::App(
@@ -426,6 +453,20 @@ impl AuthoringJournal {
                 ))
             };
         }
+        let request = managed_authoring_request(committed_request);
+        let epoch = match &request.basis {
+            AppletManagedActorAuthoringBasis::ProvisionBot(basis) => {
+                &basis.registration_epoch_evidence
+            }
+            AppletManagedActorAuthoringBasis::ProvisionGhost(basis) => {
+                &basis.registration_epoch_evidence
+            }
+        };
+        if !epoch.contains_signing_key(service_verification_method.as_str()) {
+            return Err(BridgeError::App("cannot create missing preparation with a Service key outside the original registration epoch".into()));
+        }
+        let raw = String::from_utf8(arkret::canonical::canonical_json_bytes(&preparation)?)
+            .map_err(|error| BridgeError::Arkret(error.to_string()))?;
         let mut expected = vec![(key.clone(), None)];
         let mut writes = vec![(key, Some(raw))];
         let bundle = match committed_request {
@@ -448,6 +489,77 @@ impl AuthoringJournal {
                 "managed Actor authoring preparation contended; retry the same request".into(),
             ))
         }
+    }
+
+    pub(crate) fn prepared_service_root(
+        &self,
+        body: &AppletAuthoringTransactionRequestBody,
+    ) -> Result<(DidUrl, PublicKeyMaterial)> {
+        let request = &body.authoring_context.committed_request;
+        let digest = managed_authoring_request(request).canonical_digest()?;
+        let raw = self
+            .store
+            .load(&managed_authoring_preparation_key(&digest))?
+            .ok_or_else(|| BridgeError::App("managed Actor has no local preparation".into()))?;
+        let prepared: ManagedAuthoringPreparation = serde_json::from_str(&raw)?;
+        if producer_creation_bytes(&prepared.committed_request)?
+            != producer_creation_bytes(request)?
+        {
+            return Err(BridgeError::Database(
+                "managed Actor completion differs from its original preparation".into(),
+            ));
+        }
+        Ok((
+            prepared.service_verification_method,
+            prepared.service_public_key,
+        ))
+    }
+
+    pub(crate) fn retained_managed_actor(
+        &self,
+        actor: &ActorId,
+    ) -> Result<(AppletAuthoringTransactionRequestBody, ManagedAuthoringRoots)> {
+        let body = self
+            .store
+            .load(&managed_actor_original_key(actor)?)?
+            .ok_or_else(|| {
+                BridgeError::App("managed Account has no accepted local creation".into())
+            })?;
+        let roots = self
+            .store
+            .load(&managed_actor_original_roots_key(actor)?)?
+            .ok_or_else(|| {
+                BridgeError::Database("managed Account lost its original roots".into())
+            })?;
+        let roots: ManagedAuthoringRoots = serde_json::from_str(&roots)?;
+        let body: AppletAuthoringTransactionRequestBody = serde_json::from_str(&body)?;
+        if arkret::canonical::canonical_sha256(&body)?.as_str() != roots.completion_digest.as_str()
+        {
+            return Err(BridgeError::Database(
+                "managed Account original root binding changed".into(),
+            ));
+        }
+        Ok((body, roots))
+    }
+
+    pub(crate) fn managed_actor_ids(&self) -> Result<Vec<ActorId>> {
+        let prefix = "managed-authoring/original/";
+        self.store
+            .entries_with_prefix(prefix)?
+            .into_iter()
+            .map(|(key, _)| {
+                let value = key.strip_prefix(prefix).ok_or_else(|| {
+                    BridgeError::Database("managed Account index escaped its prefix".into())
+                })?;
+                let actor: ActorId = serde_json::from_str(value)?;
+                if actor.as_account_id().is_none() {
+                    return Err(BridgeError::Database(
+                        "managed Account index contains a Service".into(),
+                    ));
+                }
+                Ok(actor)
+            })
+            .collect()
     }
 
     /// Match the Station-carried managed signer leaf to the exact locally
@@ -525,6 +637,7 @@ impl AuthoringJournal {
         &self,
         identity: &ManagedAuthoringIdentity,
         body: &AppletAuthoringTransactionRequestBody,
+        roots: &ManagedAuthoringRoots,
     ) -> Result<ManagedAuthoringInstall> {
         let request = managed_authoring_request(&body.authoring_context.committed_request);
         let request_digest = request.canonical_digest()?;
@@ -570,15 +683,32 @@ impl AuthoringJournal {
         let mut writes = vec![(completion_key, Some(body_raw.clone()))];
         {
             let original_key = managed_actor_original_key(&identity.actor_id)?;
+            let roots_key = managed_actor_original_roots_key(&identity.actor_id)?;
+            let roots_raw = String::from_utf8(arkret::canonical::canonical_json_bytes(roots)?)
+                .map_err(|error| BridgeError::Arkret(error.to_string()))?;
+            if roots.completion_digest.as_str()
+                != arkret::canonical::canonical_sha256(body)?.as_str()
+            {
+                return Err(BridgeError::App(
+                    "managed Account roots cover another completion".into(),
+                ));
+            }
             if let Some(original) = self.store.load(&original_key)? {
                 if original != body_raw {
                     return Err(BridgeError::App(
                         "managed Bot creation cannot replace its original identity anchors".into(),
                     ));
                 }
+                if self.store.load(&roots_key)?.as_deref() != Some(roots_raw.as_str()) {
+                    return Err(BridgeError::Database(
+                        "managed Account original roots are missing or changed".into(),
+                    ));
+                }
             } else {
                 expected.push((original_key.clone(), None));
                 writes.push((original_key, Some(body_raw.clone())));
+                expected.push((roots_key.clone(), None));
+                writes.push((roots_key, Some(roots_raw)));
             }
         }
         if let Some(current_raw) = current_raw {

@@ -75,6 +75,13 @@ pub struct ManagedActorAuthoringService {
     expected_station_id: DidCoreId,
 }
 
+pub(crate) struct OriginalManagedController {
+    pub(crate) account_id: arkret::AccountId,
+    pub(crate) principal_control_realm: arkret::RealmId,
+    pub(crate) signer: arkret::Ed25519PayloadSigner,
+    pub(crate) original: Box<arkret::AppletAuthoringTransactionRequestBody>,
+}
+
 impl ManagedActorAuthoringService {
     pub fn new(edge: Arc<runtime::ArkretEdge>) -> Result<Self> {
         let config = edge.config().clone();
@@ -89,6 +96,69 @@ impl ManagedActorAuthoringService {
             principal_endpoint,
             key_encryption_key,
             expected_station_id,
+        })
+    }
+
+    /// Load only this host's accepted identity and encrypted controller. The
+    /// historical closure proves ownership; Station admission must still
+    /// check the current controller, generation and every installation scope.
+    pub(crate) async fn original_managed_controller(
+        &self,
+        account_id: &arkret::AccountId,
+    ) -> Result<OriginalManagedController> {
+        let actor = arkret::ActorId::account(account_id.clone());
+        let edge = self.edge.clone();
+        let original = crate::run_blocking(move || edge.retained_managed_actor(&actor)).await?;
+        let (request, bundle) = match &original.authoring_context.committed_request {
+            AppletManagedActorCommittedRequest::Bot(bot) => {
+                (&bot.authoring_request, &bot.managed_actor_bundle)
+            }
+            AppletManagedActorCommittedRequest::Ghost(ghost) => (
+                &ghost.authoring_request,
+                ghost.managed_actor_bundle.as_ref().ok_or_else(|| {
+                    BridgeError::Database("original Ghost creation has no native bundle".into())
+                })?,
+            ),
+        };
+        let subject_key = managed_actor_subject_key(request)?;
+        let record = self
+            .store
+            .clone()
+            .managed_actor_identity_async(subject_key.clone())
+            .await?
+            .ok_or_else(|| {
+                BridgeError::Database("accepted managed Account lost its native custody".into())
+            })?;
+        let identity = self.decode_identity(&subject_key, record.clone())?;
+        let provision: arkret::AppletManagedActorProvisionPayload = serde_json::from_value(
+            serde_json::to_value(&bundle.managed_actor_provision_event.payload)?,
+        )?;
+        if identity.actor_id != account_id.principal_id
+            || account_id.station_id != self.expected_station_id
+            || provision.actor_id != arkret::ActorId::account(account_id.clone())
+            || canonical_json_bytes(&identity.initial_resolution)?
+                != canonical_json_bytes(&provision.initial_resolution)?
+        {
+            return Err(BridgeError::Database(
+                "accepted managed Account differs from native custody".into(),
+            ));
+        }
+        let material: ManagedActorKeyMaterial =
+            self.decrypt_key_material(&subject_key, &record.encrypted_key_material)?;
+        let controller = SigningKey::from_bytes(&decode_managed_actor_seed(
+            "controller_seed",
+            &material.controller_seed,
+        )?);
+        let did = Did::new(record.actor_did)?;
+        let method = DidUrl::new(format!("{did}#managed-controller"))
+            .map_err(|e| BridgeError::Database(e.into()))?;
+        let principal_control_realm =
+            arkret::RealmId::from_event_id(&bundle.pcr_genesis_event.event_id);
+        Ok(OriginalManagedController {
+            account_id: account_id.clone(),
+            principal_control_realm,
+            signer: arkret::Ed25519PayloadSigner::new(controller, did, method),
+            original: Box::new(original),
         })
     }
 
@@ -410,7 +480,7 @@ impl ManagedActorAuthoringService {
                 ))
             })?;
         let service_method = self.edge.service_verification_method()?;
-        if !epoch.contains_signing_key(service_method.as_str()) {
+        if require_fresh && !epoch.contains_signing_key(service_method.as_str()) {
             return Err(BridgeError::App(
                 "Applet service signing key is outside the request registration epoch".to_owned(),
             ));
@@ -611,10 +681,10 @@ impl ManagedActorAuthoringService {
         Ok(identity)
     }
 
-    fn encrypt_key_material(
+    pub(crate) fn encrypt_key_material<T: Serialize>(
         &self,
         subject_key: &str,
-        material: &ManagedActorKeyMaterial,
+        material: &T,
     ) -> Result<String> {
         let mut nonce = [0_u8; 24];
         getrandom::fill(&mut nonce).map_err(|error| {
@@ -640,7 +710,7 @@ impl ManagedActorAuthoringService {
         ))
     }
 
-    fn decrypt_key_material<T: for<'de> Deserialize<'de>>(
+    pub(crate) fn decrypt_key_material<T: for<'de> Deserialize<'de>>(
         &self,
         subject_key: &str,
         encoded: &str,

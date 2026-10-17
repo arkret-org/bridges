@@ -185,6 +185,17 @@ pub struct ManagedActorAuthoringConfig {
     /// 32-byte hexadecimal key encrypting managed-actor root/next/controller seeds at
     /// rest. It is deliberately separate from the Applet service signing key.
     pub key_encryption_key_hex: String,
+    /// Explicit native Device permissions for this host's created Accounts.
+    /// Omission leaves Device bootstrap under the host's direct API control.
+    #[serde(default)]
+    pub device: Option<ManagedDeviceBootstrapConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedDeviceBootstrapConfig {
+    pub actions: Vec<arkret_wire::CapabilityActionId>,
+    pub lifetime_seconds: u64,
 }
 
 impl ManagedActorAuthoringConfig {
@@ -226,6 +237,7 @@ impl fmt::Debug for ManagedActorAuthoringConfig {
             .debug_struct("ManagedActorAuthoringConfig")
             .field("principal_endpoint", &self.principal_endpoint)
             .field("key_encryption_key_hex", &"<redacted>")
+            .field("device", &self.device)
             .finish()
     }
 }

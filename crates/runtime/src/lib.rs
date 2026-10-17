@@ -57,6 +57,8 @@ pub mod logging;
 pub mod managed_actor_authoring;
 #[cfg(feature = "managed-authoring")]
 mod managed_actor_store;
+#[cfg(feature = "managed-authoring")]
+pub mod managed_device;
 pub mod queue;
 pub mod telemetry;
 
@@ -84,7 +86,7 @@ pub use authority::{
 pub use backoff::{BRIDGE_RETRY, bridge_retry_delay};
 pub use blocking::run_blocking;
 pub use cache::{PersistedToken, TokenCache, TokenStore};
-pub use config::{Config, DatabaseConfig, WebhookRateLimitConfig};
+pub use config::{Config, DatabaseConfig, ManagedDeviceBootstrapConfig, WebhookRateLimitConfig};
 #[cfg(feature = "db")]
 pub use db::{
     DbEventDedupStore, DbOutboundDeadLetterStore, DbReplayGuardStore, DbTokenStore,
@@ -179,6 +181,13 @@ where
                 interval.tick().await;
                 if let Err(error) = edge.retry_pending_publications().await {
                     tracing::warn!(%error, "publication recovery failed");
+                }
+                #[cfg(feature = "managed-authoring")]
+                if let Err(error) =
+                    managed_device::ManagedDeviceRuntime::bootstrap_if_configured(edge.clone())
+                        .await
+                {
+                    tracing::warn!(%error, "native managed Device recovery failed");
                 }
             }
         })

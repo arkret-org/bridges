@@ -197,3 +197,9 @@ written atomically with private custody and only returns its verified public
 inception history. Configure the Principal endpoint's HTTPS origin to reach this
 host. Unknown identities return no material; rotation remains a separate native
 history installation obligation.
+
+受管 Bot／Ghost 的首 Device 可通过 `managed_actor_authoring.device` 显式启用：
+`actions` 为非空 capability 列表，`lifetime_seconds` 为正数有限时长。默认关闭。
+共享 runtime 在验证原创建 completion 后，先于请求保存加密 Device／HPKE 私钥与
+Principal 原签授权；后台重试与重启沿用同一原件、exact 创建 scope 和期限。
+Device 接纳不授予业务权，也不自动加入 Realm／Circle；MLS／queue 内容执行仍需独立接线。
