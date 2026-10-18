@@ -29,6 +29,8 @@ use serde::{Deserialize, Serialize};
 use crate::managed_actor_authoring::ManagedActorAuthoringService;
 use crate::{ArkretEdge, AuthoringStore, BridgeError, Result, run_blocking};
 
+mod mls;
+
 /// A local durable operation plan, not another protocol authorization carrier.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -52,6 +54,8 @@ struct DeviceRecord {
     original_pcr_commit: RealmCommit,
     outcome: Option<AuthoritySubmitOutcome>,
     accepted_station_key: Option<PublicKeyMaterial>,
+    #[serde(default)]
+    mls: mls::ManagedMlsState,
 }
 
 /// A real accepted Device. Current business permission remains Station-owned.
@@ -62,6 +66,8 @@ pub struct ManagedDevice {
     pub authorization_commit: RealmCommit,
     client: Client,
     signer: Ed25519PayloadSigner,
+    operation_id: String,
+    effective_scope: ScopeRef,
 }
 
 impl ManagedDevice {
@@ -135,6 +141,11 @@ impl ManagedDeviceRuntime {
                 "managed Device bootstrap needs explicit actions and a finite lifetime".into(),
             ));
         }
+        if config.mls && !(1..=1000).contains(&config.key_package_inventory_target) {
+            return Err(BridgeError::Config(
+                "MLS inventory target must be 1..=1000".into(),
+            ));
+        }
         let seconds: i64 = config.lifetime_seconds.try_into().map_err(|_| {
             BridgeError::Config("managed Device lifetime exceeds the clock range".into())
         })?;
@@ -149,7 +160,17 @@ impl ManagedDeviceRuntime {
         let mut devices = Vec::new();
         for actor in actors {
             match self.bootstrap_actor(&actor, &actions, lifetime).await {
-                Ok(device) => devices.push(device),
+                Ok(device) => {
+                    if config.mls {
+                        if let Err(error) = self
+                            .maintain_mls_key_packages(&device, config.key_package_inventory_target)
+                            .await
+                        {
+                            tracing::warn!(account = %actor, %error, "native MLS publication remains pending")
+                        }
+                    }
+                    devices.push(device);
+                }
                 Err(error) => {
                     tracing::warn!(account = %actor, %error, "managed Device bootstrap remains unavailable for this Account")
                 }
@@ -499,6 +520,7 @@ impl ManagedDeviceRuntime {
                 .clone(),
             outcome: None,
             accepted_station_key: None,
+            mls: mls::ManagedMlsState::default(),
         };
         self.validate(&record)?;
         let next = self
@@ -659,6 +681,8 @@ impl ManagedDeviceRuntime {
         let method = arkret::DidUrl::new(format!("{}#{}", record.principal_did, p.device_id))
             .map_err(invalid)?;
         Ok(ManagedDevice {
+            operation_id: plan.operation_id.clone(),
+            effective_scope: effective_scope.clone(),
             account_id: plan.account_id,
             device_id: p.device_id,
             authorization_event_id: record.authorization.event_id().clone(),

@@ -175,7 +175,7 @@ requirement from the publication journal.
 
 `ArkretEdge::prepare_bot_provision` 在已安装 Service 身份下运行 Station preview → HTTPS base_url author，并返回必须原样持久保存的 creation body；`provision_bot` 使用原 signed request digest 重试提交，不隐式追加业务 grant。
 
-Service 管理请求使用 SDK RFC9421 来源／目标签名，不申请 Applet session。`ArkretEdge::managed_device_client` 组合 SDK 的受限 Device HTTP transport，要求完整 Account、accepted authorization Event、scope 与独立 Device key；真实接纳和 21 项原生 operation allowlist 仍由 SDK／Station 校验。当前已实现 Bot／Ghost producer authoring 和持久 completion，尚未实现首 Device 私有状态／possession、自动 Welcome／ACK／MLS／Blob reader、native resolution rotation installer 与跨 scope current refresh；不声明完整群内容运行时。
+Service 管理请求使用 SDK RFC9421 来源／目标签名，不申请 Applet session。`ArkretEdge::managed_device_client` 组合 SDK 的受限 Device HTTP transport，要求完整 Account、accepted authorization Event、scope 与独立 Device key；真实接纳和 21 项原生 operation allowlist 仍由 SDK／Station 校验。当前已实现 Bot／Ghost producer authoring、持久 completion 与独立首 Device 私有状态／possession；自动 Welcome／ACK／完整 MLS／Blob reader、native resolution rotation installer 与跨 scope current refresh 仍需接线，不声明完整群内容运行时。
 
 Managed Account message/profile/join execution also remains closed: the Service
 signer cannot consume a Bot or Ghost terminal child grant. Legacy retained
@@ -189,7 +189,7 @@ Managed Principal custody and the canonical Bot/Ghost author operation live in
 adapts first-seen external users to that same authority. The private identity and
 exact authoring ledger use its existing atomic `AuthoringStore` host port. The root,
 next-root and operational controller seeds remain separate and encrypted with the
-explicit deployment key. This does not provide the managed Device/MLS runner.
+explicit deployment key. Principal custody alone does not provide the MLS runner.
 
 The authoring router also publishes the retained Principal's native
 `/webvh/<local_id>/did.json` and `did.jsonl` resources. The publication URL index is
@@ -203,3 +203,11 @@ history installation obligation.
 共享 runtime 在验证原创建 completion 后，先于请求保存加密 Device／HPKE 私钥与
 Principal 原签授权；后台重试与重启沿用同一原件、exact 创建 scope 和期限。
 Device 接纳不授予业务权，也不自动加入 Realm／Circle；MLS／queue 内容执行仍需独立接线。
+
+`device.mls = true` 同时启用耐久原生 MLS KeyPackage 库存发布，
+`key_package_inventory_target` 默认为 8（1..=1000），每周期最多补 20 个。
+私有 identity、完整私有 KeyPackage bundles 和原签 batch 在同一次原有加密 custody CAS 中提交，
+先于 HTTP；重启／丢响应／outcome 落盘失败均重投原 batch，不重新生成已在途材料。
+只有已持久确认的 upload outcome 才计入 SDK 本地 inventory；该 inventory 不是服务端可 claim 状态的证明。
+发布仍依赖实际 membership／独立 E2EE consent、原授权 scope、current 安装与 Station 业务门；
+它不自动加入群，也不把 KeyPackage 发布当作 Welcome／解密／回复执行器完成。

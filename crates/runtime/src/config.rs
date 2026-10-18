@@ -196,6 +196,16 @@ pub struct ManagedActorAuthoringConfig {
 pub struct ManagedDeviceBootstrapConfig {
     pub actions: Vec<arkret_wire::CapabilityActionId>,
     pub lifetime_seconds: u64,
+    /// Maintain native MLS KeyPackages at the original Device's exact scopes.
+    #[serde(default)]
+    pub mls: bool,
+    #[serde(default = "default_key_package_inventory_target")]
+    /// Desired single-use inventory; each worker cycle prepares at most twenty.
+    pub key_package_inventory_target: usize,
+}
+
+fn default_key_package_inventory_target() -> usize {
+    8
 }
 
 impl ManagedActorAuthoringConfig {
