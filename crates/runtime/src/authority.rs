@@ -525,7 +525,7 @@ pub fn validate_applet_committed_delivery(
         proof.verification_method.as_str(),
     ))?;
     let producer_id = protocol(arkret_wire::project_did_to_core_id(&producer_did))?;
-    if let Some(producer) = protocol(pair.event.human_device_producer())? {
+    if let Some(producer) = protocol(pair.event.account_device_producer())? {
         let evidence = pair.producer_device_evidence.as_ref().ok_or_else(|| {
             BridgeProtocolError::Protocol("Account Device delivery lacks original evidence".into())
         })?;
