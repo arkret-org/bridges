@@ -574,7 +574,12 @@ impl ManagedActorAuthoringService {
             )));
         }
         let method_history_head = canonical_sha256(&inception.log_entry)?;
-        let document_digest = Hash::new(canonical_sha256(&inception.log_entry["state"])?)?;
+        let document: arkret::DidDocument =
+            serde_json::from_value(inception.log_entry["state"].clone())?;
+        let document_digest =
+            arkret::identity::document_canonical_digest(&document).map_err(|error| {
+                BridgeError::App(format!("managed actor document digest failed: {error}"))
+            })?;
         let witness_records = Vec::<Value>::new();
         let witness_proofs_digest = Hash::new(canonical_sha256(&witness_records)?)?;
         let boundary = ResolutionMethodEvidenceBoundary {
@@ -1378,8 +1383,9 @@ mod ghost_bundle_tests {
                 .to_vec(),
         };
         let method_history_head = canonical_sha256(&inception.log_entry).unwrap();
-        let document_digest =
-            Hash::new(canonical_sha256(&inception.log_entry["state"]).unwrap()).unwrap();
+        let document: arkret::DidDocument =
+            serde_json::from_value(inception.log_entry["state"].clone()).unwrap();
+        let document_digest = arkret::identity::document_canonical_digest(&document).unwrap();
         let witness_records = Vec::<Value>::new();
         let witness_proofs_digest = Hash::new(canonical_sha256(&witness_records).unwrap()).unwrap();
         ManagedActorIdentity {
@@ -1659,6 +1665,20 @@ mod ghost_bundle_tests {
             assert_eq!(doc_response.status_code, Some(StatusCode::OK));
             let published: arkret::DidDocument = doc_response.take_json().await.unwrap();
             assert_eq!(published.id, did);
+            let provision: arkret::AppletManagedActorProvisionPayload = serde_json::from_value(
+                serde_json::to_value(
+                    &outcome
+                        .managed_actor_bundle
+                        .managed_actor_provision_event
+                        .payload,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let verified =
+                arkret::identity::verify_applet_managed_initial_resolution(&provision, Utc::now())
+                    .unwrap();
+            assert_eq!(verified, published);
             let mut log_response = TestClient::get(&log_url).send(&service).await;
             assert_eq!(log_response.status_code, Some(StatusCode::OK));
             let public_bytes = log_response.take_bytes(None).await.unwrap();
