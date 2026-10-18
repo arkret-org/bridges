@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use arkret::{Client, ClientRequestOptions};
+use arkret::{Client, ClientRequestOptions, VerifiedSubmission};
 use arkret_identifiers::{DidCoreId, EventId, RealmId};
 use arkret_models_collaboration::authority_commit::{
     AuthorityHandoffRequest, SelfAuthoritySubmitOutcome, SelfAuthoritySubmitRequest,
@@ -63,7 +63,7 @@ fn protocol<T, E: std::fmt::Display>(result: std::result::Result<T, E>) -> Resul
 pub trait GovernanceStationTransport: Send + Sync {
     async fn submit(
         &self,
-        request: &AuthoritySubmitRequest,
+        request: &VerifiedSubmission<AuthoritySubmitRequest>,
         options: &ClientRequestOptions,
     ) -> Result<AuthoritySubmitOutcome>;
 
@@ -79,10 +79,10 @@ pub trait GovernanceStationTransport: Send + Sync {
 impl GovernanceStationTransport for Client {
     async fn submit(
         &self,
-        request: &AuthoritySubmitRequest,
+        request: &VerifiedSubmission<AuthoritySubmitRequest>,
         options: &ClientRequestOptions,
     ) -> Result<AuthoritySubmitOutcome> {
-        let request = match request {
+        let wire = match request.wire() {
             AuthoritySubmitRequest::Event(value) => {
                 SelfAuthoritySubmitRequest::Event(value.clone())
             }
@@ -90,6 +90,7 @@ impl GovernanceStationTransport for Client {
                 SelfAuthoritySubmitRequest::MlsCommit(value.clone())
             }
         };
+        let request = protocol(request.rebind(wire))?;
         match protocol(self.submit_to_realm_authority(&request, options).await)? {
             SelfAuthoritySubmitOutcome::Ordinary(outcome) => Ok(outcome),
             _ => Err(BridgeProtocolError::Protocol(
@@ -200,6 +201,7 @@ impl SubmissionQueue {
         &mut self,
         event_id: &EventId,
         station: &T,
+        verified: &VerifiedSubmission<AuthoritySubmitRequest>,
         options: &ClientRequestOptions,
     ) -> Result<AuthoritySubmitOutcome> {
         let index = self
@@ -210,8 +212,12 @@ impl SubmissionQueue {
         if self.submissions[index].state.is_terminal() {
             return Err(BridgeProtocolError::TerminalSubmission);
         }
-        let request = self.submissions[index].request.clone();
-        let outcome = station.submit(&request, options).await?;
+        if verified.wire() != &self.submissions[index].request {
+            return Err(BridgeProtocolError::Protocol(
+                "verified submission differs from the frozen queue entry".into(),
+            ));
+        }
+        let outcome = station.submit(verified, options).await?;
         self.apply_outcome(event_id, &outcome)?;
         Ok(outcome)
     }

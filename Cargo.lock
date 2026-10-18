@@ -697,9 +697,12 @@ version = "0.3.0"
 dependencies = [
  "arkret-canonical",
  "arkret-egress-policy",
+ "arkret-event-draft",
  "arkret-keystore",
  "arkret-models-collaboration",
+ "arkret-models-crypto",
  "arkret-models-identity",
+ "arkret-models-integration",
  "arkret-signatures",
  "arkret-wire",
  "chrono",

@@ -294,11 +294,11 @@ impl ArkretEdge {
         })
     }
 
-    /// Admit a retained creation body. Review-required outcomes must be resolved
+    /// Admit a verified retained creation body. Review-required outcomes must be resolved
     /// through the separate management review contract before retrying admission.
     pub async fn provision_bot(
         &self,
-        body: &arkret_models_integration::AppletBotProvisionRequestBody,
+        body: &arkret::VerifiedSubmission<arkret_models_integration::AppletBotProvisionRequestBody>,
     ) -> Result<arkret_models_integration::AppletBotProvisionOutcome> {
         let digest = body.authoring_request.canonical_digest()?;
         Ok(self
@@ -714,6 +714,16 @@ impl ArkretEdge {
         }
         let request =
             SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(event.event().clone()));
+        let producer = arkret::ProducerVerificationContext {
+            actor: arkret::ActorId::service(self.service_actor_id.clone()),
+            verification_method: self.service_verification_method()?,
+            public_key: PublicKeyMaterial::Ed25519Raw {
+                bytes: self.signer.verifying_key().to_bytes().to_vec(),
+            },
+            digest_suite: arkret::DigestSuite::Sha256,
+        };
+        let request = arkret::VerifiedSubmission::verify(request, |_| Ok(producer.clone()))
+            .map_err(|error| BridgeError::Arkret(error.to_string()))?;
         let options = ClientRequestOptions::new().idempotency_key(event.event_id().as_str());
         let outcome = self
             .client
