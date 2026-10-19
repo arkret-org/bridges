@@ -29,7 +29,13 @@ use serde::{Deserialize, Serialize};
 use crate::managed_actor_authoring::ManagedActorAuthoringService;
 use crate::{ArkretEdge, AuthoringStore, BridgeError, Result, run_blocking};
 
+mod inbox;
 mod mls;
+mod read_source;
+mod worker;
+pub use inbox::ManagedQueueProgress;
+pub use read_source::ManagedDeviceReader;
+pub use worker::ManagedDeviceWorkers;
 
 /// A local durable operation plan, not another protocol authorization carrier.
 #[derive(Clone, Serialize, Deserialize)]
@@ -136,16 +142,7 @@ impl ManagedDeviceRuntime {
         let Some(config) = &self.edge.config().arkret.managed_actor_authoring.device else {
             return Ok(Vec::new());
         };
-        if config.actions.is_empty() || config.lifetime_seconds == 0 {
-            return Err(BridgeError::Config(
-                "managed Device bootstrap needs explicit actions and a finite lifetime".into(),
-            ));
-        }
-        if config.mls && !(1..=1000).contains(&config.key_package_inventory_target) {
-            return Err(BridgeError::Config(
-                "MLS inventory target must be 1..=1000".into(),
-            ));
-        }
+        config.validate()?;
         let seconds: i64 = config.lifetime_seconds.try_into().map_err(|_| {
             BridgeError::Config("managed Device lifetime exceeds the clock range".into())
         })?;
@@ -157,24 +154,31 @@ impl ManagedDeviceRuntime {
         actions.dedup();
         let edge = self.edge.clone();
         let actors = run_blocking(move || edge.managed_actor_ids()).await?;
-        let mut devices = Vec::new();
-        for actor in actors {
-            match self.bootstrap_actor(&actor, &actions, lifetime).await {
-                Ok(device) => {
-                    if config.mls
-                        && let Err(error) = self
-                            .maintain_mls_key_packages(&device, config.key_package_inventory_target)
-                            .await
-                    {
-                        tracing::warn!(account = %actor, %error, "native MLS publication remains pending")
+        use futures::StreamExt as _;
+        let mut devices = futures::stream::iter(actors)
+            .map(|actor| {
+                let actions = &actions;
+                async move {
+                    let device = match self.bootstrap_actor(&actor, actions, lifetime).await {
+                        Ok(device) => device,
+                        Err(error) => {
+                            tracing::warn!(account = %actor, %error, "managed Device bootstrap remains unavailable for this Account");
+                            return None;
+                        }
+                    };
+                    if config.mls && let Err(error) = self.maintain_mls_key_packages(&device, config.key_package_inventory_target).await {
+                        tracing::warn!(account = %actor, %error, "native MLS publication remains pending");
                     }
-                    devices.push(device);
+                    Some(device)
                 }
-                Err(error) => {
-                    tracing::warn!(account = %actor, %error, "managed Device bootstrap remains unavailable for this Account")
-                }
-            }
-        }
+            })
+            .buffer_unordered(8)
+            .filter_map(|device| async move { device })
+            .collect::<Vec<_>>()
+            .await;
+        devices.sort_by(|left, right| {
+            (&left.account_id, &left.device_id).cmp(&(&right.account_id, &right.device_id))
+        });
         Ok(devices)
     }
 

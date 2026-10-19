@@ -15,14 +15,16 @@ const CAS_ATTEMPTS: usize = 8;
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ManagedMlsState {
-    identity: Option<Vec<u8>>,
     scopes: BTreeMap<String, ScopeInventory>,
+    #[serde(default)]
+    pub(super) inboxes: BTreeMap<String, super::inbox::ScopeInbox>,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ScopeInventory {
     scope: ScopeRef,
+    identity: Vec<u8>,
     publications: Vec<Publication>,
 }
 
@@ -41,15 +43,20 @@ fn endpoint(record: &DeviceRecord) -> Result<MlsEndpointIdentity> {
     ))
 }
 
-fn identity(record: &DeviceRecord) -> Result<ArkretMlsIdentity> {
+pub(super) fn identity(record: &DeviceRecord, scope: &ScopeRef) -> Result<ArkretMlsIdentity> {
     let actor = ActorId::account(record.plan.account_id.clone());
-    match &record.mls.identity {
-        Some(bytes) => {
+    match record
+        .mls
+        .scopes
+        .get(&scope.canonical_mls_group_id()?.to_string())
+    {
+        Some(state) if &state.scope == scope => {
+            let bytes = &state.identity;
             ArkretMlsIdentity::restore_from_private_state(actor, endpoint(record)?, bytes).map_err(
                 |_| invalid("MLS private identity cannot be restored for its original endpoint"),
             )
         }
-        None if record.mls.scopes.is_empty() => ArkretMlsIdentity::new_human_device(
+        None => ArkretMlsIdentity::new_human_device(
             actor,
             payload(record)?.device_id,
             ArkretMlsSigner::from_ed25519_signing_key(SigningKey::from_bytes(&seed(
@@ -57,7 +64,7 @@ fn identity(record: &DeviceRecord) -> Result<ArkretMlsIdentity> {
             )?)),
         )
         .map_err(|_| invalid("MLS identity cannot be initialized for its original endpoint")),
-        None => Err(invalid("MLS inventory has no original private identity")),
+        _ => Err(invalid("MLS inventory has another original scope identity")),
     }
 }
 
@@ -124,7 +131,7 @@ fn validate_publication(
         &request.endpoint_signature,
     )
     .map_err(|error| invalid(error.to_string()))?;
-    let identity = identity(record)?;
+    let identity = identity(record, scope)?;
     for (original, entry) in batch.records.iter().zip(&request.keypackages) {
         if original.actor_id != ActorId::account(record.plan.account_id.clone())
             || original.endpoint != endpoint(record)?
@@ -159,7 +166,7 @@ fn validate_publication(
                 "MLS inventory differs from its frozen public record",
             ));
         }
-        if original.is_usable()
+        if original.state == MlsKeyPackageState::Published
             && live
             && !identity
                 .holds_private_key_package(original)
@@ -187,6 +194,7 @@ fn inventory(record: &DeviceRecord, scope: &ScopeRef) -> Result<LocalMlsKeyPacka
     if &state.scope != scope {
         return Err(invalid("MLS inventory has another actual scope"));
     }
+    let private_identity = identity(record, scope)?;
     for batch in &state.publications {
         validate_publication(record, scope, batch)?;
         let accepted = accepted_refs(batch)?;
@@ -205,7 +213,11 @@ fn inventory(record: &DeviceRecord, scope: &ScopeRef) -> Result<LocalMlsKeyPacka
                 } else {
                     MlsKeyPackageState::Retired
                 },
-                has_private_state: true,
+                has_private_state: package.state == MlsKeyPackageState::Published
+                    && package.expires_at.is_none_or(|expiry| expiry > Utc::now())
+                    && private_identity
+                        .holds_private_key_package(package)
+                        .map_err(|error| invalid(error.to_string()))?,
                 created_at: package.created_at,
                 expires_at: package
                     .expires_at
@@ -225,7 +237,10 @@ fn inventory(record: &DeviceRecord, scope: &ScopeRef) -> Result<LocalMlsKeyPacka
 }
 
 impl ManagedDeviceRuntime {
-    async fn mls_record(&self, device: &ManagedDevice) -> Result<(String, String, DeviceRecord)> {
+    pub(super) async fn accepted_device_record(
+        &self,
+        device: &ManagedDevice,
+    ) -> Result<(String, String, DeviceRecord)> {
         let operation_key = format!(
             "managed-device/v1/{}",
             canonical_sha256(&(&device.account_id, &device.operation_id))?
@@ -255,7 +270,7 @@ impl ManagedDeviceRuntime {
         &self,
         device: &ManagedDevice,
     ) -> Result<LocalMlsKeyPackageInventory> {
-        let (_, _, record) = self.mls_record(device).await?;
+        let (_, _, record) = self.accepted_device_record(device).await?;
         inventory(&record, &device.effective_scope)
     }
 
@@ -272,7 +287,7 @@ impl ManagedDeviceRuntime {
             ));
         }
         for _ in 0..CAS_ATTEMPTS {
-            let (operation_key, previous, mut record) = self.mls_record(device).await?;
+            let (operation_key, previous, mut record) = self.accepted_device_record(device).await?;
             let now = Utc::now();
             if now < record.plan.not_before || now >= record.plan.expires_at {
                 return Err(invalid(
@@ -307,7 +322,20 @@ impl ManagedDeviceRuntime {
             if deficit == 0 {
                 return Ok(None);
             }
-            let identity = identity(&record)?;
+            // A scope owns one provider. Generate additional private bundles
+            // through its live group so checkpoint restore cannot resurrect
+            // an older provider and discard newly published KeyPackages.
+            let live_group = super::inbox::restore_group(&record, device)?;
+            let standalone = if live_group.is_none() {
+                Some(identity(&record, scope)?)
+            } else {
+                None
+            };
+            let identity = live_group
+                .as_ref()
+                .map(|group| group.identity())
+                .or(standalone.as_ref())
+                .ok_or_else(|| invalid("MLS scope identity is unavailable"))?;
             let records = (0..deficit)
                 .map(|_| {
                     identity
@@ -330,11 +358,29 @@ impl ManagedDeviceRuntime {
             )
             .map_err(|error| invalid(error.to_string()))?;
             let request = unsigned.into_signed(signature);
-            record.mls.identity = Some(
-                identity
-                    .export_private_state()
-                    .map_err(|error| invalid(error.to_string()))?,
-            );
+            let private_identity = identity
+                .export_private_state()
+                .map_err(|error| invalid(error.to_string()))?;
+            if let Some(group) = &live_group {
+                super::inbox::refresh_group_private_state(
+                    &mut record,
+                    device,
+                    group
+                        .export_state_record()
+                        .map_err(|error| invalid(error.to_string()))?,
+                )?;
+            }
+            let scope_state =
+                record
+                    .mls
+                    .scopes
+                    .entry(group.clone())
+                    .or_insert_with(|| ScopeInventory {
+                        scope: scope.clone(),
+                        identity: Vec::new(),
+                        publications: Vec::new(),
+                    });
+            scope_state.identity = private_identity;
             let publication = Publication {
                 request: request.clone(),
                 records,
@@ -344,11 +390,8 @@ impl ManagedDeviceRuntime {
             record
                 .mls
                 .scopes
-                .entry(group)
-                .or_insert_with(|| ScopeInventory {
-                    scope: scope.clone(),
-                    publications: Vec::new(),
-                })
+                .get_mut(&group)
+                .ok_or_else(|| invalid("MLS scope disappeared"))?
                 .publications
                 .push(publication);
             let next = self
@@ -375,7 +418,7 @@ impl ManagedDeviceRuntime {
         let response = device.client().keypackages_upload(&request).await?;
         let digest = canonical_sha256(&request)?;
         for _ in 0..CAS_ATTEMPTS {
-            let (operation_key, previous, mut record) = self.mls_record(device).await?;
+            let (operation_key, previous, mut record) = self.accepted_device_record(device).await?;
             let group = device.effective_scope.canonical_mls_group_id()?.to_string();
             let state = record
                 .mls
@@ -422,4 +465,94 @@ fn publication_result(outcome: &KeyPackagesUploadOutcome) -> Result<()> {
             "MLS publication rejections are retained in original custody".into(),
         ))
     }
+}
+
+/// Retain publication bytes while recording that its original private bundle
+/// was used by a durable Welcome. Last-resort bundles remain reusable.
+pub(super) fn mark_welcome_package(
+    record: &mut DeviceRecord,
+    scope: &ScopeRef,
+    claim: &arkret::KeyPackageClaimRecord,
+    consumed: bool,
+) -> Result<()> {
+    let group = scope.canonical_mls_group_id()?.to_string();
+    let state = record
+        .mls
+        .scopes
+        .get_mut(&group)
+        .ok_or_else(|| invalid("Welcome has no original local publication"))?;
+    if &state.scope != scope {
+        return Err(invalid("Welcome publication scope changed"));
+    }
+    let mut found = false;
+    for batch in &mut state.publications {
+        let accepted = accepted_refs(batch)?;
+        for package in &mut batch.records {
+            if package.keypackage_ref.as_str() != claim.keypackage_ref {
+                continue;
+            }
+            if found
+                || !accepted.contains(package.keypackage_ref.as_str())
+                || package.keypackage != claim.keypackage
+                || package.actor_id != claim.actor_id
+                || !matches!(&package.endpoint, MlsEndpointIdentity::HumanDevice { device_id, .. } if claim.device_id.as_ref() == Some(device_id) && claim.agent_verification_method.is_none())
+            {
+                return Err(invalid(
+                    "Welcome claim differs from original published KeyPackage",
+                ));
+            }
+            found = true;
+            if !package.last_resort {
+                if !consumed && package.state == MlsKeyPackageState::Consumed {
+                    return Err(invalid(
+                        "Welcome reuses an already consumed single-use KeyPackage",
+                    ));
+                }
+                if package
+                    .claim_id
+                    .as_deref()
+                    .is_some_and(|id| id != claim.claim_id)
+                {
+                    return Err(invalid(
+                        "single-use KeyPackage was already used by another claim",
+                    ));
+                }
+                if !matches!(
+                    package.state,
+                    MlsKeyPackageState::Published
+                        | MlsKeyPackageState::Claimed
+                        | MlsKeyPackageState::Consumed
+                ) {
+                    return Err(invalid("Welcome uses a retired KeyPackage"));
+                }
+                package.claim_id = Some(claim.claim_id.clone());
+                package.state = if consumed || package.state == MlsKeyPackageState::Consumed {
+                    MlsKeyPackageState::Consumed
+                } else {
+                    MlsKeyPackageState::Claimed
+                };
+            }
+        }
+    }
+    if !found {
+        return Err(invalid("Welcome has no original local private KeyPackage"));
+    }
+    Ok(())
+}
+
+pub(super) fn retain_scope_identity(
+    record: &mut DeviceRecord,
+    scope: &ScopeRef,
+    bytes: Vec<u8>,
+) -> Result<()> {
+    let state = record
+        .mls
+        .scopes
+        .get_mut(&scope.canonical_mls_group_id()?.to_string())
+        .ok_or_else(|| invalid("joined MLS scope has no private publication identity"))?;
+    if &state.scope != scope {
+        return Err(invalid("joined MLS identity has another scope"));
+    }
+    state.identity = bytes;
+    Ok(())
 }

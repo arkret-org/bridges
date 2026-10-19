@@ -42,7 +42,7 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `arkret-bridge-
 每个桥都是一个 arkret **Applet**:
 
 - **管理接入**：HTTPS `arkret.applet_base_url` 用于发现、主体 authoring 与签名 completion。安装只接纳 Service，独立 Bot／Ghost 通过四 Event provision 接入。
-- **入站(arkret → app)**：群 Event／Signal 只能由具体受管 Account 的 accepted Device 从原生数据面获取。`BridgeAppletHandler` 已禁止旧群 transaction 推送；新的 Device reader／MLS Welcome／Blob 执行器尚未接线，当前不会降级到 Service 群订阅。
+- **入站(arkret → app)**：群 Event／Signal 只能由具体受管 Account 的 accepted Device 从原生数据面获取。`BridgeAppletHandler` 已禁止旧群 transaction 推送；显式启用device.mls后，独立Device reader消费本人的Welcome并耐久安装群状态；消息stream／Blob与原签回复仍需接线，不会降级到Service群订阅。
 - **出站(app → arkret)**:适配器收到 app 消息(gateway/长轮询/webhook)→
   `MessageContext::submit_app_message` → 查找已持久化的 per-user Ghost Actor 映射；首次用户通过
   Station preview → Applet `managed-actors/author` → Station commit 创建正式
@@ -191,7 +191,7 @@ requirement from the publication journal.
 
 `ArkretEdge::prepare_bot_provision` 在已安装 Service 身份下运行 Station preview → HTTPS base_url author，并返回必须原样持久保存的 creation body；`provision_bot` 使用原 signed request digest 重试提交，不隐式追加业务 grant。
 
-Service 管理请求使用 SDK RFC9421 来源／目标签名，不申请 Applet session。`ArkretEdge::managed_device_client` 组合 SDK 的受限 Device HTTP transport，要求完整 Account、accepted authorization Event、scope 与独立 Device key；真实接纳和 21 项原生 operation allowlist 仍由 SDK／Station 校验。当前已实现 Bot／Ghost producer authoring、持久 completion 与独立首 Device 私有状态／possession；自动 Welcome／ACK／完整 MLS／Blob reader、native resolution rotation installer 与跨 scope current refresh 仍需接线，不声明完整群内容运行时。
+Service 管理请求使用 SDK RFC9421 来源／目标签名，不申请 Applet session。`ArkretEdge::managed_device_client` 组合 SDK 的受限 Device HTTP transport，要求完整 Account、accepted authorization Event、scope 与独立 Device key；真实接纳和 21 项原生 operation allowlist 仍由 SDK／Station 校验。当前已实现 Bot／Ghost producer authoring、持久 completion 与独立首 Device 私有状态／possession；已接通原生Welcome／群状态／consume／ACK与cursor耐久恢复；消息stream／Blob／原签回复、native resolution rotation installer与跨scope current refresh仍需接线，不声明完整群内容运行时。
 
 Managed Account message/profile/join execution also remains closed: the Service
 signer cannot consume a Bot or Ghost terminal child grant. Legacy retained
@@ -218,12 +218,16 @@ history installation obligation.
 `actions` 为非空 capability 列表，`lifetime_seconds` 为正数有限时长。默认关闭。
 共享 runtime 在验证原创建 completion 后，先于请求保存加密 Device／HPKE 私钥与
 Principal 原签授权；后台重试与重启沿用同一原件、exact 创建 scope 和期限。
-Device 接纳不授予业务权，也不自动加入 Realm／Circle；MLS／queue 内容执行仍需独立接线。
+Device接纳不授予业务权，也不自动加入Realm／Circle。显式device.mls启用独立Welcome worker；消息stream、附件与回复尚需接线。
 
-`device.mls = true` 同时启用耐久原生 MLS KeyPackage 库存发布，
+`device.mls = true` 启用耐久原生MLS KeyPackage库存与每个Device独立的Welcome worker，
 `key_package_inventory_target` 默认为 8（1..=1000），每周期最多补 20 个。
 私有 identity、完整私有 KeyPackage bundles 和原签 batch 在同一次原有加密 custody CAS 中提交，
 先于 HTTP；重启／丢响应／outcome 落盘失败均重投原 batch，不重新生成已在途材料。
 只有已持久确认的 upload outcome 才计入 SDK 本地 inventory；该 inventory 不是服务端可 claim 状态的证明。
 发布仍依赖实际 membership／独立 E2EE consent、原授权 scope、current 安装与 Station 业务门；
-它不自动加入群，也不把 KeyPackage 发布当作 Welcome／解密／回复执行器完成。
+它不自动加入群。读取还要求原签scope项含ak.event.read、当前Service读取上界及实际membership／E2EE同意。
+
+worker绑定原Account／Device／authorization／scope、有限授权窗口与当前host实例。队列页先耐久保存；Welcome须验证实际accepted Commit、原历史producer、本人claim receipt、完整signed roster和Genesis材料，才由SDK用本地私有包加入。群状态、scope私有identity与原签consume同一加密CAS落盘后才发送consume／累计ACK；丢响应重投相同签名请求，重启恢复原游标。补包同步刷新同一群provider，防止冷恢复丢失新私有包。host退出立即退休reader，各Device网络周期最多八路并发。扩scope或续期仍须合法replacement authorize，不自动改写原授权。
+
+本路径仅消费已有正式scope的Welcome；内容stream、附件解密、业务child与原签回复、已有group的恢复／再加入及Principal rotation仍是独立后续边界。群内容不发往管理base_url。

@@ -51,6 +51,7 @@ diesel = { version = "2.3", default-features = false, features = ["r2d2", "chron
 diesel_migrations = "2.3"
 ed25519-dalek = "3.0"
 futures = "0.3"
+garth = { version = "0.3.0", path = "../garth", default-features = false }
 getrandom = "0.4"
 hex = "0.4"
 hmac = "0.13"

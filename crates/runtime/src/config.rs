@@ -9,7 +9,7 @@ use arkret::Did;
 use arkret::signatures::PublicKeyMaterial;
 use arkret_models_integration::AppletWireNamespaces;
 use arkret_wire::DidUrl;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{BridgeError, Result};
 
@@ -175,7 +175,7 @@ pub struct ArkretConfig {
 }
 
 /// Durable Applet-managed actor identity configuration.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedActorAuthoringConfig {
     /// Public HTTPS base used in managed `did:webvh` identities. The generated
@@ -187,21 +187,38 @@ pub struct ManagedActorAuthoringConfig {
     pub key_encryption_key_hex: String,
     /// Explicit native Device permissions for this host's created Accounts.
     /// Omission leaves Device bootstrap under the host's direct API control.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<ManagedDeviceBootstrapConfig>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedDeviceBootstrapConfig {
     pub actions: Vec<arkret_wire::CapabilityActionId>,
     pub lifetime_seconds: u64,
-    /// Maintain native MLS KeyPackages at the original Device's exact scopes.
+    /// Maintain native MLS KeyPackages and consume the Device's scoped Welcome queue.
     #[serde(default)]
     pub mls: bool,
     #[serde(default = "default_key_package_inventory_target")]
     /// Desired single-use inventory; each worker cycle prepares at most twenty.
     pub key_package_inventory_target: usize,
+}
+
+impl ManagedDeviceBootstrapConfig {
+    /// Validate shared local host settings before any Device operation starts.
+    pub fn validate(&self) -> Result<()> {
+        if self.actions.is_empty() || self.lifetime_seconds == 0 {
+            return Err(BridgeError::Config(
+                "managed Device bootstrap needs explicit actions and a finite lifetime".into(),
+            ));
+        }
+        if self.mls && !(1..=1000).contains(&self.key_package_inventory_target) {
+            return Err(BridgeError::Config(
+                "MLS inventory target must be 1..=1000".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn default_key_package_inventory_target() -> usize {

@@ -86,7 +86,10 @@ pub use authority::{
 pub use backoff::{BRIDGE_RETRY, bridge_retry_delay};
 pub use blocking::run_blocking;
 pub use cache::{PersistedToken, TokenCache, TokenStore};
-pub use config::{Config, DatabaseConfig, ManagedDeviceBootstrapConfig, WebhookRateLimitConfig};
+pub use config::{
+    Config, DatabaseConfig, ManagedActorAuthoringConfig, ManagedDeviceBootstrapConfig,
+    WebhookRateLimitConfig,
+};
 #[cfg(feature = "db")]
 pub use db::{
     DbEventDedupStore, DbOutboundDeadLetterStore, DbReplayGuardStore, DbTokenStore,
@@ -175,6 +178,18 @@ where
 
     let publication_replayer = {
         let edge = edge.clone();
+        #[cfg(feature = "managed-authoring")]
+        let mut device_workers = if edge
+            .config()
+            .arkret
+            .managed_actor_authoring
+            .device
+            .is_some()
+        {
+            Some(managed_device::ManagedDeviceWorkers::new(edge.clone())?)
+        } else {
+            None
+        };
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
             loop {
@@ -183,11 +198,10 @@ where
                     tracing::warn!(%error, "publication recovery failed");
                 }
                 #[cfg(feature = "managed-authoring")]
-                if let Err(error) =
-                    managed_device::ManagedDeviceRuntime::bootstrap_if_configured(edge.clone())
-                        .await
-                {
-                    tracing::warn!(%error, "native managed Device recovery failed");
+                if let Some(workers) = device_workers.as_mut() {
+                    if let Err(error) = workers.tick().await {
+                        tracing::warn!(%error, "native managed Device recovery failed");
+                    }
                 }
             }
         })
