@@ -158,12 +158,6 @@ fn bounded_postgres_url(raw: &str) -> Result<String> {
 mod wait_bound_tests {
     use super::*;
 
-    #[derive(diesel::QueryableByName)]
-    struct Bounds {
-        #[diesel(sql_type = diesel::sql_types::Bool)]
-        bounded: bool,
-    }
-
     #[test]
     fn postgres_sessions_bound_lock_wait_and_preserve_pool_capacity() {
         let database_url =
@@ -175,8 +169,12 @@ mod wait_bound_tests {
         .unwrap();
         let mut first = db.conn().unwrap();
         let mut second = db.conn().unwrap();
-        let bounds: Bounds = diesel::sql_query("SELECT current_setting('statement_timeout')::interval = interval '30 seconds' AND current_setting('lock_timeout')::interval = interval '5 seconds' AS bounded").get_result(&mut second).unwrap();
-        assert!(bounds.bounded);
+        let bounded: bool = diesel::select(diesel::dsl::sql::<diesel::sql_types::Bool>(
+            "current_setting('statement_timeout')::interval = interval '30 seconds' AND current_setting('lock_timeout')::interval = interval '5 seconds'",
+        ))
+        .get_result(&mut second)
+        .unwrap();
+        assert!(bounded);
         first
             .batch_execute("BEGIN; SELECT pg_advisory_xact_lock(876543210);")
             .unwrap();

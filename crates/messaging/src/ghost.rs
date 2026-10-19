@@ -588,6 +588,24 @@ pub(crate) async fn create_portal_strand(
     Ok(StrandId::from_event_id(event.event_id()).to_string())
 }
 
+#[async_trait::async_trait]
+impl GhostProvisionRequestProvider
+    for runtime::managed_actor_authoring::ManagedActorAuthoringService
+{
+    async fn author_request(
+        &self,
+        request: &GhostProvisionAuthoringRequest,
+    ) -> Result<GhostActorProvisionRequestBody> {
+        self.prepare_ghost(
+            &request.applet_id,
+            &request.realm_id,
+            &request.external_ref,
+            request.display_name.clone(),
+        )
+        .await
+    }
+}
+
 #[cfg(test)]
 mod provider_tests {
     use super::*;
@@ -668,23 +686,5 @@ mod provider_tests {
 
         let error = selected.author_request(&request).await.unwrap_err();
         assert!(error.to_string().contains("fixture provider invoked"));
-    }
-}
-
-#[async_trait::async_trait]
-impl GhostProvisionRequestProvider
-    for runtime::managed_actor_authoring::ManagedActorAuthoringService
-{
-    async fn author_request(
-        &self,
-        request: &GhostProvisionAuthoringRequest,
-    ) -> Result<GhostActorProvisionRequestBody> {
-        self.prepare_ghost(
-            &request.applet_id,
-            &request.realm_id,
-            &request.external_ref,
-            request.display_name.clone(),
-        )
-        .await
     }
 }
