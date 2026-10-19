@@ -1,0 +1,290 @@
+//! Continuous originals and private MLS progress share the encrypted Device CAS.
+
+use std::collections::BTreeMap;
+
+use arkret_wire::{
+    CommitStreamHead, CommitStreamRef, CommittedEventView, EventKind, RealmStateSnapshot,
+    StreamScanDirection, StreamScanRequest,
+};
+
+use super::*;
+
+const MAX_PENDING_EVENTS: usize = 128;
+const SCAN_PAGE_SIZE: usize = 64;
+const MAX_PENDING_CANONICAL_BYTES: usize = 8_388_608;
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ScopeStream {
+    scope: ScopeRef,
+    head: CommitStreamHead,
+    processed_through: CommitStreamHead,
+    current: RealmStateSnapshot,
+    pending: BTreeMap<u64, CommittedEventView>,
+}
+
+/// Local custody observations never assert current remote business permission.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ManagedStreamProgress {
+    pub durable_events: usize,
+    pub pending_events: usize,
+    pub last_position: Option<u64>,
+    pub epoch: Option<u64>,
+}
+
+fn stream_key(device: &ManagedDevice) -> Result<String> {
+    Ok(device.effective_scope.canonical_mls_group_id()?.to_string())
+}
+
+fn state<'a>(record: &'a DeviceRecord, device: &ManagedDevice) -> Result<Option<&'a ScopeStream>> {
+    let saved = record.mls.streams.get(&stream_key(device)?);
+    if let Some(saved) = saved {
+        validate_state(saved, &device.effective_scope)?;
+    }
+    Ok(saved)
+}
+
+fn validate_state(saved: &ScopeStream, scope: &ScopeRef) -> Result<()> {
+    let stream = CommitStreamRef::from_scope(scope, None)?;
+    if saved.scope != *scope
+        || saved.head.stream_ref != stream
+        || saved.processed_through.stream_ref != stream
+        || saved.current.realm_id != *scope.realm_id()
+        || saved.processed_through.stream_position > saved.head.stream_position
+        || saved.pending.len() > MAX_PENDING_EVENTS
+    {
+        return Err(invalid(
+            "native stream custody has another scope or incomplete progress",
+        ));
+    }
+    let mut previous = saved.processed_through.clone();
+    for (position, row) in &saved.pending {
+        let commit = row.commit();
+        if previous.stream_position.checked_add(1) != Some(*position)
+            || commit.stream_position != *position
+            || commit.stream_ref != stream
+            || commit.previous_commit_ref.as_ref() != Some(&previous.commit_id)
+        {
+            return Err(invalid(
+                "native durable originals are not one continuous pending tail",
+            ));
+        }
+        previous.stream_position = *position;
+        previous.commit_id = commit.commit_id.clone();
+    }
+    if previous != saved.head
+        || canonical_json_bytes(&saved.pending)?.len() > MAX_PENDING_CANONICAL_BYTES
+    {
+        return Err(invalid("native durable tail does not cover its exact head"));
+    }
+    Ok(())
+}
+
+fn current_covers(current: &RealmStateSnapshot, expected: &CommitStreamHead) -> Result<()> {
+    let Some(cap) = current
+        .visible_stream_heads
+        .iter()
+        .find(|head| head.stream_ref == expected.stream_ref)
+    else {
+        return Err(invalid("native current omits the durable stream"));
+    };
+    if cap.stream_position < expected.stream_position
+        || (cap.stream_position == expected.stream_position && cap.commit_id != expected.commit_id)
+    {
+        return Err(invalid(
+            "native current is behind or forks the durable stream",
+        ));
+    }
+    Ok(())
+}
+
+fn head(row: &CommittedEventView) -> CommitStreamHead {
+    let commit = row.commit();
+    CommitStreamHead {
+        stream_ref: commit.stream_ref.clone(),
+        stream_position: commit.stream_position,
+        commit_id: commit.commit_id.clone(),
+    }
+}
+
+impl ManagedDeviceRuntime {
+    pub async fn durable_stream_progress(
+        &self,
+        device: &ManagedDevice,
+    ) -> Result<ManagedStreamProgress> {
+        let (_, _, record) = self.accepted_device_record(device).await?;
+        let Some(saved) = state(&record, device)? else {
+            return Ok(ManagedStreamProgress::default());
+        };
+        Ok(ManagedStreamProgress {
+            durable_events: 0,
+            pending_events: saved.pending.len(),
+            last_position: Some(saved.head.stream_position),
+            epoch: super::inbox::restore_group(&record, device)?.map(|group| group.epoch()),
+        })
+    }
+
+    /// A fresh current read and re-admitted exact head precede every tail read.
+    /// The first head is the accepted Welcome Add, never a later snapshot cut.
+    /// Unhandled or withheld rows remain ordered and prevent later MLS merges.
+    pub async fn poll_content_stream(
+        &self,
+        device: &ManagedDevice,
+        reader: &ManagedDeviceReader,
+    ) -> Result<ManagedStreamProgress> {
+        reader.check_device(device)?;
+        let (_, _, record) = self.accepted_device_record(device).await?;
+        if super::inbox::accepted_group_original(&record, device)?.is_none() {
+            return Ok(ManagedStreamProgress::default());
+        }
+        let response = reader
+            .client()
+            .snapshot_head(device.effective_scope.realm_id())
+            .await?;
+        let current = garth::own_station_results::consume_own_station_device_snapshot(&response)
+            .map_err(|error| invalid(error.to_string()))?
+            .clone();
+        let (key, previous, mut record) = self.accepted_device_record(device).await?;
+        let actual_base = super::inbox::accepted_group_original(&record, device)?
+            .ok_or_else(|| invalid("accepted MLS base disappeared during the current read"))?;
+        let saved = state(&record, device)?;
+        let expected = if let Some(saved) = saved {
+            if current.governance_generation < saved.current.governance_generation {
+                return Err(invalid("native current governance generation rolled back"));
+            }
+            saved.head.clone()
+        } else {
+            head(&CommittedEventView::Full(actual_base.clone()))
+        };
+        current_covers(&current, &expected)?;
+        let pending_len = saved.map_or(0, |state| state.pending.len());
+        let limit = SCAN_PAGE_SIZE.min(MAX_PENDING_EVENTS - pending_len);
+        if limit == 0 {
+            return Ok(ManagedStreamProgress {
+                pending_events: pending_len,
+                last_position: Some(expected.stream_position),
+                epoch: super::inbox::restore_group(&record, device)?.map(|group| group.epoch()),
+                ..Default::default()
+            });
+        }
+        let mut replica = garth::own_station_results::OwnStationDeviceReplica::new(
+            device.effective_scope.clone(),
+        )
+        .map_err(|error| invalid(error.to_string()))?;
+        replica
+            .install_current(response)
+            .map_err(|error| invalid(error.to_string()))?;
+        replica
+            .restore_checkpoint_head(reader.client(), &expected)
+            .await
+            .map_err(|error| invalid(error.to_string()))?;
+        let request = StreamScanRequest {
+            realm_id: device.effective_scope.realm_id().clone(),
+            stream_ref: expected.stream_ref.clone(),
+            direction: StreamScanDirection::After(Some(expected.stream_position)),
+            limit: limit as u16,
+        };
+        let page = replica
+            .apply_bound_scan(
+                reader.client(),
+                reader.client().scan_commit_stream(&request).await?,
+            )
+            .await
+            .map_err(|error| invalid(error.to_string()))?;
+        let rows = page.rows().map_err(|error| invalid(error.to_string()))?;
+        if rows.len() > limit {
+            return Err(invalid("native stream exceeded its bounded page"));
+        }
+        let next_head = replica
+            .head()
+            .map_err(|error| invalid(error.to_string()))?
+            .ok_or_else(|| invalid("native stream lost its independently verified head"))?
+            .clone();
+        let mut pending = saved.map(|saved| saved.pending.clone()).unwrap_or_default();
+        let mut processed_through = saved
+            .map(|saved| saved.processed_through.clone())
+            .unwrap_or_else(|| expected.clone());
+        for row in rows {
+            if let CommittedEventView::Full(full) = row {
+                arkret_event_draft::validate_event_for_submit(&full.event)
+                    .map_err(|error| invalid(error.to_string()))?;
+            }
+            if pending
+                .insert(row.commit().stream_position, row.clone())
+                .is_some()
+            {
+                return Err(invalid("native stream tried to replace a durable original"));
+            }
+        }
+        let mut group = super::inbox::restore_group(&record, device)?
+            .ok_or_else(|| invalid("native stream has no private MLS checkpoint"))?;
+        let mut accepted = actual_base;
+        let mut advanced = false;
+        while let Some((position, CommittedEventView::Full(full))) = pending.first_key_value() {
+            if full.event.kind != EventKind::MlsCommit {
+                break;
+            }
+            let position = *position;
+            let full = full.clone();
+            group
+                .install_recovered_remote_commit(&full, &accepted.event.event_id)
+                .map_err(|error| invalid(error.to_string()))?;
+            self.install_received_roster(device, reader, &full, &mut group)
+                .await?;
+            super::inbox::install_remote_group_checkpoint(
+                &mut record,
+                device,
+                &accepted.event.event_id,
+                full.clone(),
+                group
+                    .export_state_record()
+                    .map_err(|error| invalid(error.to_string()))?,
+            )?;
+            super::mls::retain_scope_identity(
+                &mut record,
+                &device.effective_scope,
+                group
+                    .identity()
+                    .export_private_state()
+                    .map_err(|error| invalid(error.to_string()))?,
+            )?;
+            processed_through = head(&CommittedEventView::Full(full.clone()));
+            accepted = full;
+            pending.remove(&position);
+            advanced = true;
+        }
+        let progress = ManagedStreamProgress {
+            durable_events: rows.len(),
+            pending_events: pending.len(),
+            last_position: Some(next_head.stream_position),
+            epoch: Some(group.epoch()),
+        };
+        if !advanced
+            && rows.is_empty()
+            && state(&record, device)?.is_some_and(|saved| saved.current == current)
+        {
+            page.rows().map_err(|error| invalid(error.to_string()))?;
+            reader.check_device(device)?;
+            return Ok(progress);
+        }
+        let next = ScopeStream {
+            scope: device.effective_scope.clone(),
+            head: next_head,
+            processed_through,
+            current,
+            pending,
+        };
+        validate_state(&next, &device.effective_scope)?;
+        record.mls.streams.insert(stream_key(device)?, next);
+        page.rows().map_err(|error| invalid(error.to_string()))?;
+        reader.check_device(device)?;
+        let encrypted = self.authoring.encrypt_key_material(&key, &record)?;
+        if !self.cas(&key, Some(previous), encrypted).await? {
+            return Err(invalid(
+                "native stream checkpoint contended; reload original custody",
+            ));
+        }
+        reader.check_device(device)?;
+        Ok(progress)
+    }
+}

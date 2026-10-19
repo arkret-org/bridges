@@ -32,9 +32,11 @@ use crate::{ArkretEdge, AuthoringStore, BridgeError, Result, run_blocking};
 mod inbox;
 mod mls;
 mod read_source;
+mod stream;
 mod worker;
 pub use inbox::ManagedQueueProgress;
 pub use read_source::ManagedDeviceReader;
+pub use stream::ManagedStreamProgress;
 pub use worker::ManagedDeviceWorkers;
 
 /// A local durable operation plan, not another protocol authorization carrier.

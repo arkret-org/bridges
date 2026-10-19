@@ -133,7 +133,7 @@ impl ManagedDeviceRuntime {
         device: &ManagedDevice,
         reader: &ManagedDeviceReader,
     ) -> Result<DeviceMessagesGetOutcome> {
-        reader.client().check_context()?;
+        reader.check_device(device)?;
         let (_, _, record) = self.accepted_device_record(device).await?;
         if let Some(page) = inbox(&record, device)?.and_then(|inbox| inbox.page.as_ref()) {
             check_page(page, device)?;
@@ -180,7 +180,7 @@ impl ManagedDeviceRuntime {
             return Ok(page);
         }
         for _ in 0..CAS_ATTEMPTS {
-            reader.client().check_context()?;
+            reader.check_device(device)?;
             let (key, previous, mut record) = self.accepted_device_record(device).await?;
             let state = inbox_mut(&mut record, device)?;
             if let Some(winner) = &state.page {
@@ -208,7 +208,7 @@ impl ManagedDeviceRuntime {
         expired: &str,
     ) -> Result<()> {
         for _ in 0..CAS_ATTEMPTS {
-            reader.client().check_context()?;
+            reader.check_device(device)?;
             let (key, previous, mut record) = self.accepted_device_record(device).await?;
             let state = inbox_mut(&mut record, device)?;
             if state.page.is_some() || state.cursor.as_deref() != Some(expired) {
@@ -218,7 +218,7 @@ impl ManagedDeviceRuntime {
             }
             state.cursor = None;
             let next = self.authoring.encrypt_key_material(&key, &record)?;
-            reader.client().check_context()?;
+            reader.check_device(device)?;
             if self.cas(&key, Some(previous), next).await? {
                 return Ok(());
             }
@@ -371,18 +371,18 @@ impl ManagedDeviceRuntime {
         original
             .full()
             .map_err(|error| invalid(error.to_string()))?;
-        reader.client().check_context()?;
+        reader.check_device(device)?;
         let next = self.authoring.encrypt_key_material(&key, &record)?;
         if !self.cas(&key, Some(previous), next).await? {
             return Err(invalid(
                 "Welcome checkpoint contended; reload original private state",
             ));
         }
-        reader.client().check_context()?;
+        reader.check_device(device)?;
         Ok(())
     }
 
-    async fn install_received_roster(
+    pub(super) async fn install_received_roster(
         &self,
         device: &ManagedDevice,
         reader: &ManagedDeviceReader,
@@ -434,7 +434,7 @@ impl ManagedDeviceRuntime {
             material.value()?,
         )
         .map_err(invalid)?;
-        reader.client().check_context()?;
+        reader.check_device(device)?;
         Ok(())
     }
 
@@ -515,6 +515,7 @@ impl ManagedDeviceRuntime {
         device: &ManagedDevice,
         reader: &ManagedDeviceReader,
     ) -> Result<ManagedQueueProgress> {
+        reader.check_device(device)?;
         self.drain_durable_welcome_consumes(device).await?;
         let page = self.durable_recipient_page(device, reader).await?;
         let mut progress = ManagedQueueProgress {
@@ -568,6 +569,47 @@ pub(super) fn restore_group(
         .verify_installed_historical_base(&installed.accepted, &installed.accepted.event.event_id)
         .map_err(|error| invalid(error.to_string()))?;
     Ok(Some(group))
+}
+
+pub(super) fn accepted_group_original(
+    record: &DeviceRecord,
+    device: &ManagedDevice,
+) -> Result<Option<arkret_wire::CommittedEventFullView>> {
+    restore_group(record, device)?;
+    Ok(inbox(record, device)?
+        .and_then(|state| state.group.as_ref())
+        .map(|group| group.accepted.clone()))
+}
+
+pub(super) fn install_remote_group_checkpoint(
+    record: &mut DeviceRecord,
+    device: &ManagedDevice,
+    previous: &arkret::EventId,
+    accepted: arkret_wire::CommittedEventFullView,
+    state: MlsGroupStateRecord,
+) -> Result<()> {
+    let installed = inbox_mut(record, device)?
+        .group
+        .as_mut()
+        .ok_or_else(|| invalid("MLS checkpoint disappeared"))?;
+    if &installed.accepted.event.event_id != previous
+        || installed.state.group_id != state.group_id
+        || installed.state.actor_id != state.actor_id
+        || installed.state.endpoint != state.endpoint
+        || installed.state.epoch.checked_add(1) != Some(state.epoch)
+    {
+        return Err(invalid(
+            "remote MLS checkpoint differs from its exact previous state",
+        ));
+    }
+    let group = ArkretMlsGroup::restore_from_state_record(&state)
+        .map_err(|error| invalid(error.to_string()))?;
+    group
+        .verify_installed_historical_base(&accepted, &accepted.event.event_id)
+        .map_err(|error| invalid(error.to_string()))?;
+    installed.accepted = accepted;
+    installed.state = state;
+    Ok(())
 }
 
 pub(super) fn refresh_group_private_state(

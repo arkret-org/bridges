@@ -18,6 +18,8 @@ pub(super) struct ManagedMlsState {
     scopes: BTreeMap<String, ScopeInventory>,
     #[serde(default)]
     pub(super) inboxes: BTreeMap<String, super::inbox::ScopeInbox>,
+    #[serde(default)]
+    pub(super) streams: BTreeMap<String, super::stream::ScopeStream>,
 }
 
 #[derive(Serialize, Deserialize)]

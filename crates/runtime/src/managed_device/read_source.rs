@@ -37,6 +37,20 @@ impl ManagedDeviceReader {
     pub fn client(&self) -> &OwnStationDeviceClient {
         &self.client
     }
+    pub(super) fn check_device(&self, device: &ManagedDevice) -> Result<()> {
+        self.client.check_context()?;
+        let context = self.client.context()?;
+        if context.account_id() != &device.account_id
+            || context.device_id() != &device.device_id
+            || context.authorization_event_id() != &device.authorization_event_id
+            || context.effective_scope() != &device.effective_scope
+        {
+            return Err(invalid(
+                "native reader belongs to another original Device or scope",
+            ));
+        }
+        Ok(())
+    }
     pub fn retire(&self) {
         self.source.active.store(false, Ordering::Release);
     }

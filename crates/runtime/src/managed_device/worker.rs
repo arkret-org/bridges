@@ -185,6 +185,10 @@ fn spawn_worker(
                 Err(error) => tracing::warn!(account = %device.account_id, %error,
                     "native recipient recovery remains pending"),
             }
+            if let Err(error) = runtime.poll_content_stream(&device, &reader).await {
+                tracing::warn!(account = %device.account_id, %error,
+                    "native stream recovery remains pending");
+            }
         }
     })
 }
