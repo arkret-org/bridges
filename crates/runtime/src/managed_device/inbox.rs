@@ -139,13 +139,46 @@ impl ManagedDeviceRuntime {
             check_page(page, device)?;
             return Ok(page.clone());
         }
-        let cursor = inbox(&record, device)?.and_then(|inbox| inbox.cursor.clone());
-        let response = reader
+        let mut cursor = inbox(&record, device)?.and_then(|inbox| inbox.cursor.clone());
+        let response = match reader
             .client()
             .receive_device_messages(cursor.as_deref(), Some(100))
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error)
+                if cursor.is_some()
+                    && error.error_code() == Some(arkret_wire::ErrorCode::CursorExpired) =>
+            {
+                self.retire_expired_recipient_cursor(
+                    device,
+                    reader,
+                    cursor
+                        .as_deref()
+                        .ok_or_else(|| invalid("expired cursor is absent"))?,
+                )
+                .await?;
+                cursor = None;
+                // This is a new authorized queue read, never a repaired cursor
+                // or permission to skip outstanding items. The group and all
+                // original delivery/consume checkpoints remain unchanged.
+                reader
+                    .client()
+                    .receive_device_messages(None, Some(100))
+                    .await?
+            }
+            Err(error) => return Err(error.into()),
+        };
         let page = response.value()?.clone();
         check_page(&page, device)?;
+        if page.deliveries.is_empty()
+            && page.ack_token.is_none()
+            && page.next_cursor.is_none()
+            && !page.has_more
+        {
+            // An idle read has no material or continuation to checkpoint.
+            return Ok(page);
+        }
         for _ in 0..CAS_ATTEMPTS {
             reader.client().check_context()?;
             let (key, previous, mut record) = self.accepted_device_record(device).await?;
@@ -165,6 +198,33 @@ impl ManagedDeviceRuntime {
         }
         Err(invalid(
             "recipient page persistence contended; reload the durable page",
+        ))
+    }
+
+    async fn retire_expired_recipient_cursor(
+        &self,
+        device: &ManagedDevice,
+        reader: &ManagedDeviceReader,
+        expired: &str,
+    ) -> Result<()> {
+        for _ in 0..CAS_ATTEMPTS {
+            reader.client().check_context()?;
+            let (key, previous, mut record) = self.accepted_device_record(device).await?;
+            let state = inbox_mut(&mut record, device)?;
+            if state.page.is_some() || state.cursor.as_deref() != Some(expired) {
+                return Err(invalid(
+                    "recipient state changed while retiring its expired cursor",
+                ));
+            }
+            state.cursor = None;
+            let next = self.authoring.encrypt_key_material(&key, &record)?;
+            reader.client().check_context()?;
+            if self.cas(&key, Some(previous), next).await? {
+                return Ok(());
+            }
+        }
+        Err(invalid(
+            "expired recipient cursor persistence contended; reload custody",
         ))
     }
 

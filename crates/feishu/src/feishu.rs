@@ -491,9 +491,14 @@ mod tests {
 
         // The handler keys the replay guard on `timestamp:nonce:signature`. A
         // captured (validly signed) delivery must be accepted at most once.
+        #[cfg(feature = "sqlite")]
+        let database_url = "sqlite://:memory:".to_owned();
+        #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
+        let database_url =
+            std::env::var("BRIDGES_TEST_DATABASE_URL").expect("isolated test database required");
         let db = Arc::new(
             DatabaseManager::connect(&arkret_bridge_messaging::runtime::DatabaseConfig {
-                url: "sqlite://:memory:".to_owned(),
+                url: database_url,
                 pool_size: 1,
             })
             .unwrap(),
@@ -503,13 +508,20 @@ mod tests {
             Arc::new(DbReplayGuardStore::new(db)),
             Duration::from_secs(300),
         );
-        let key = "1700000000:nonce-xyz:deadbeef";
+        let key = format!(
+            "1700000000:nonce-xyz-{}-{}:deadbeef",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
         assert_eq!(
-            window.check_and_record(key).await.unwrap(),
+            window.check_and_record(key.as_str()).await.unwrap(),
             webhook::ReplayGuardVerdict::Fresh
         );
         assert_eq!(
-            window.check_and_record(key).await.unwrap(),
+            window.check_and_record(key.as_str()).await.unwrap(),
             webhook::ReplayGuardVerdict::Replay
         );
     }

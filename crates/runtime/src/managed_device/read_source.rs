@@ -2,10 +2,9 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use arkret::StationConnectionBinding;
 use arkret::http_client::own_station_device_results::{
-    OwnStationDeviceClient, OwnStationDeviceInstance, OwnStationDeviceSnapshot,
-    OwnStationDeviceSource,
+    OwnStationDeviceBinding, OwnStationDeviceClient, OwnStationDeviceInstance,
+    OwnStationDeviceSnapshot, OwnStationDeviceSource,
 };
 
 use super::*;
@@ -55,16 +54,8 @@ impl ManagedDeviceRuntime {
         // Description confirms the operator-selected origin. No redirect or
         // returned URL may silently replace the accepted Account Station.
         let description = device.client().describe().await?;
-        let binding = StationConnectionBinding::from_description(
-            device.client().base_url(),
-            &description,
-            false,
-        )?;
-        if binding.trust_domain != self.edge.config().arkret.trust_domain {
-            return Err(invalid(
-                "native Station description changed the configured trust domain",
-            ));
-        }
+        let binding =
+            OwnStationDeviceBinding::from_description(device.client().base_url(), &description)?;
         let (_, _, record) = self.accepted_device_record(device).await?;
         let authorization = payload(&record)?;
         let expires_at = authorization
