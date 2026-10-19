@@ -231,6 +231,16 @@ pub(crate) async fn provision_ghost_actor(
             BridgeError::Database(format!("stored Ghost provision invalid: {error}"))
         })?;
     let ghost_actor_id = validate_authored_ghost_request(&authoring_request, &request, edge)?;
+    let producer = arkret::ProducerVerificationContext {
+        actor: arkret::ActorId::service(edge.service_actor_id().clone()),
+        verification_method: edge.service_verification_method()?,
+        public_key: arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+            bytes: edge.signer().verifying_key().to_bytes().to_vec(),
+        },
+        digest_suite: runtime::PRODUCER_DIGEST_SUITE,
+    };
+    let request = arkret::VerifiedSubmission::verify(request, |_| Ok(producer.clone()))
+        .map_err(|error| BridgeError::Arkret(error.to_string()))?;
     let response: GhostActorProvisionOutcome = edge
         .client()
         .ghost_actor_provision(&config.arkret.applet_id, &idempotency_key, &request)

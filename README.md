@@ -79,7 +79,23 @@ cargo check --workspace
 cargo run -p arkret-bridge-discord -- --config config.yaml
 ```
 
-每个 crate 默认 `sqlite` feature;`--features postgres` 切换后端。
+每个 crate 默认启用 `sqlite` feature。PostgreSQL 构建必须关闭默认 features，
+例如 `cargo check --workspace --all-targets --locked --no-default-features --features postgres`。
+仅追加 `--features postgres` 会同时保留 SQLite，不能验证 PostgreSQL 后端。
+
+CI 的两组有效集合覆盖所有 provider binary、messaging 和 runtime：
+
+| 集合 | Clippy | 测试 |
+|---|---|---|
+| 默认 SQLite | `cargo clippy --workspace --all-targets --locked -- -D warnings` | `cargo test --workspace --locked` |
+| PostgreSQL-only | `cargo clippy --workspace --all-targets --locked --no-default-features --features postgres -- -D warnings` | `cargo test --workspace --locked --no-default-features --features postgres` |
+
+Ubuntu 需要 `pkg-config`、`libssl-dev`（provider 原生 TLS）与 `libpq-dev`（PostgreSQL）；
+SQLite 由 runtime 的 `libsqlite3-sys/bundled` 编译。PostgreSQL 测试还需独立 UTF-8 数据库，
+通过 `BRIDGES_TEST_DATABASE_URL` 提供；CI 使用独立 PostgreSQL 18 service。
+MSRV 检查保留默认 SQLite 集合：`cargo check --workspace --all-targets --locked`。
+跨仓依赖证据继续使用 SDK 现有 compatibility manifest/runner；其 all-features 检查
+会保留 SQLite，不能替代这里的 PostgreSQL-only 集合。
 配置文件使用 YAML。
 所有桥都必须显式建立 app channel 到 Realm 的映射；没有 channel-realm mapping 的入站消息会直接失败,
 不再回退到默认 Realm。

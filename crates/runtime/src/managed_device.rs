@@ -161,13 +161,12 @@ impl ManagedDeviceRuntime {
         for actor in actors {
             match self.bootstrap_actor(&actor, &actions, lifetime).await {
                 Ok(device) => {
-                    if config.mls {
-                        if let Err(error) = self
+                    if config.mls
+                        && let Err(error) = self
                             .maintain_mls_key_packages(&device, config.key_package_inventory_target)
                             .await
-                        {
-                            tracing::warn!(account = %actor, %error, "native MLS publication remains pending")
-                        }
+                    {
+                        tracing::warn!(account = %actor, %error, "native MLS publication remains pending")
                     }
                     devices.push(device);
                 }

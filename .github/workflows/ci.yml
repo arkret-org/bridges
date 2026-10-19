@@ -25,8 +25,31 @@ jobs:
         uses: crate-ci/typos@v1.45.2
 
   rust:
-    name: Rust
+    name: Rust (${{ matrix.backend }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: sqlite
+            cargo-features: ''
+          - backend: postgres
+            cargo-features: --no-default-features --features postgres
+    services:
+      postgres:
+        image: ${{ matrix.backend == 'postgres' && 'postgres:18' || '' }}
+        env:
+          POSTGRES_USER: bridges
+          POSTGRES_PASSWORD: bridges
+          POSTGRES_DB: bridges_test
+          POSTGRES_INITDB_ARGS: --encoding=UTF8
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bridges -d bridges_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - name: Checkout bridges
         uses: actions/checkout@v6
@@ -48,30 +71,43 @@ jobs:
           components: clippy
 
       - name: Install nightly rustfmt
+        if: matrix.backend == 'sqlite'
         uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
+
+      # Discord/Telegram use native TLS; PostgreSQL-only also links libpq.
+      # SQLite is bundled by the runtime's default feature.
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends pkg-config libssl-dev libpq-dev
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: bridges -> target
+          key: ${{ matrix.backend }}
 
       # ARC-0002 (重构计划 2026-07-10): legacy patterns must stay at zero.
       - name: Deletion gate
+        if: matrix.backend == 'sqlite'
         run: bash scripts/deletion_gate.sh
         working-directory: bridges
 
       - name: Rustfmt
+        if: matrix.backend == 'sqlite'
         run: cargo +nightly fmt --all -- --check
         working-directory: bridges
 
       - name: Clippy
-        run: cargo +stable clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo +stable clippy --workspace --all-targets --locked ${{ matrix.cargo-features }} -- -D warnings
         working-directory: bridges
 
       - name: Test
-        run: cargo +stable test --workspace --locked
+        run: cargo +stable test --workspace --locked ${{ matrix.cargo-features }}
+        env:
+          BRIDGES_TEST_DATABASE_URL: ${{ matrix.backend == 'postgres' && 'postgres://bridges:bridges@127.0.0.1:5432/bridges_test' || '' }}
         working-directory: bridges
 
   supply-chain:
@@ -101,7 +137,7 @@ jobs:
         working-directory: bridges
 
   msrv:
-    name: MSRV
+    name: MSRV (default SQLite)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout bridges
@@ -118,6 +154,11 @@ jobs:
 
       - name: Install Rust 1.98
         uses: dtolnay/rust-toolchain@1.98
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends pkg-config libssl-dev
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
