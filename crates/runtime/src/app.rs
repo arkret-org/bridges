@@ -163,6 +163,10 @@ impl BridgeContext {
     reason = "async-trait adds an unconditional must_use attribute to its boxed Future methods."
 )]
 pub trait BridgeApp: Send + Sync + 'static {
+    /// Whether this host consumes decrypted attachment bytes.
+    fn native_attachments(&self) -> bool {
+        false
+    }
     /// The bridge name (e.g. `discord`, `iot-telemetry`).
     fn name(&self) -> &str;
 
@@ -476,6 +480,9 @@ pub(crate) struct AppContentSink<A: BridgeApp> {
 #[cfg(all(feature = "runtime", feature = "managed-authoring"))]
 #[async_trait]
 impl<A: BridgeApp> crate::managed_device::NativeContentSink for AppContentSink<A> {
+    fn requires_attachments(&self) -> bool {
+        self.app.native_attachments()
+    }
     async fn deliver(&self, content: &crate::managed_device::NativeContent) -> Result<()> {
         let key = content.original().event.realm_id.to_string();
         self.ctx

@@ -41,14 +41,14 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `arkret-bridge-
 
 每个桥都是一个 arkret **Applet**:
 
-- **管理接入**：HTTPS `arkret.applet_base_url` 用于发现、主体 authoring 与签名 completion。安装只接纳 Service，独立 Bot／Ghost 通过四 Event provision 接入。
-- **入站(arkret → app)**：群 Event／Signal 只能由具体受管 Account 的 accepted Device 从原生数据面获取。`BridgeAppletHandler` 已禁止旧群 transaction 推送；显式启用device.mls后，独立Device reader消费本人的Welcome并耐久安装群状态；消息stream／Blob与原签回复仍需接线，不会降级到Service群订阅。
+- **管理接入**：HTTPS `arkret.applet_base_url` 用于发现、主体 authoring 与签名 completion。安装只接纳 Service，Bot／Ghost 通过单个 `ak.realm.actor.create` 建立 Realm Actor 身份及独立 DID。
+- **入站(arkret → app)**：群内容由具体 Realm Actor 的 accepted Device 从原生数据面获取。`BridgeAppletHandler` 拒绝群 transaction 推送；启用 `device.mls` 后，Device reader 验证 Welcome、原签 stream 与 MLS 群状态，并耐久交付解密消息。支持媒体的消费者单独取得经过当前权限核验和解密的附件。
 - **出站(app → arkret)**:适配器收到 app 消息(gateway/长轮询/webhook)→
   `MessageContext::submit_app_message` → 查找已持久化的 per-user Ghost Actor 映射；首次用户通过
   Station preview → Applet `managed-actors/author` → Station commit 创建正式
   Ghost，再构造带 `external_ref` 溯源的 `ak.message.create` 事件并提交。Ghost WebVH root/next key
   使用独立随机材料和配置的 32-byte key 加密落库；author ledger 按完整请求 digest 保存 exact
-  bundle，按完整 scope 与外部 tuple 隔离身份，支持并发、重启和成功请求过期后的逐字重放；已接受 Ghost 只复用原四项身份锚点，不创建新的 authoring completion。纯 HTTP 桥的入站经各自
+  bundle，按完整 scope 与外部 tuple 隔离身份，支持并发、重启和成功请求过期后的逐字重放；已接受 Ghost 复用原创建记录与完整 Realm ActorId，不创建另一份身份。纯 HTTP 桥的入站经各自
   `MessageBridge::webhook_router` 挂到 web 服务,平台来源验签在 handler 解析 JSON 前完成。
   部分桥(WeChat / Feishu / DingTalk / iMessage / QQ / LINE 等)的入站还需要 body-bound
   验签材料(EncodingAESKey / Encrypt Key / 注入式 HMAC secret / signing secret);缺失时入站面
@@ -62,9 +62,8 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `arkret-bridge-
   Station 返回 authority-signed `RealmCommit`,它才是该 Event 的唯一位置事实。
   Realm、每个 Circle、每个 Sidecar 各有独立 commit stream,桥不合并、也不比较跨 stream 的位置。
   桥侧持久层只保存冻结的签名字节与 accepted 后的 exact `CommittedEventRef`。
-- **消息内容**:对齐 SDK 规范类型 `TextMessageContent`(`{body}`)/`MediaContent`
-  (`{body,blob,mimetype,filename,size}`)。
-- **媒体**:`MessageContext::{upload_blob,download_blob,forward_external_media}` + `Attachment`;
+- **消息内容**:使用 SDK `MessageCreatePayload` 与 `ContentBlock`；附件使用 SDK `EncryptedAttachment`，存储站只接收密文和最小加密分类。
+- **媒体**:`MessageContext::forward_external_media` 经 Realm Actor Device 加密上传；`Attachment` 中的本地明文由 native runtime 验证后提供；
   discord/telegram 收发双向,whatsapp/line/slack/messenger/zulip 入站已接,余者文本
   (通用能力就绪)。
 - **防回声**:`on_arkret_event` 跳过本桥 `external_ref.source` 自发事件、由本桥
@@ -191,13 +190,11 @@ requirement from the publication journal.
 
 `ArkretEdge::prepare_bot_provision` 在已安装 Service 身份下运行 Station preview → HTTPS base_url author，并返回必须原样持久保存的 creation body；`provision_bot` 使用原 signed request digest 重试提交，不隐式追加业务 grant。
 
-Service 管理请求使用 SDK RFC9421 来源／目标签名，不申请 Applet session。`ArkretEdge::managed_device_client` 组合 SDK 的受限 Device HTTP transport，要求完整 Account、accepted authorization Event、scope 与独立 Device key；真实接纳和 21 项原生 operation allowlist 仍由 SDK／Station 校验。当前已实现 Bot／Ghost producer authoring、持久 completion 与独立首 Device 私有状态／possession；已接通原生Welcome／群状态／consume／ACK与cursor耐久恢复；消息stream／Blob／原签回复、native resolution rotation installer与跨scope current refresh仍需接线，不声明完整群内容运行时。
+Service 管理请求使用 SDK RFC9421 来源／目标签名，不申请 Applet session。`ArkretEdge::managed_device_client` 使用完整 Realm ActorId、accepted authorization Event、精确 scope 与独立 Device key。普通 AccountId 与 PCR 不用于 Applet Bot／Ghost 身份。
 
-Managed Account message/profile/join execution also remains closed: the Service
-signer cannot consume a Bot or Ghost terminal child grant. Legacy retained
-Service-proxy publications are rejected before replay. Creation/completion and
-Service-subject maintenance operations remain available; Ghost message and
-redaction helpers require a future native managed-Account/Device executor.
+已经接通独立身份创建、首 Device、成员加入、Service parent 与 terminal child、原生 Welcome／群状态／consume／ACK、stream 解密、加密消息与附件收发、精确重试及本地存储冷恢复。附件上传不授予消息发布或读取权；读取仍核验 accepted 消息来源及当前设备／安装／内容权限。纯文本消费者不会取得附件明文。Circle 首次上传的用途绑定仍待正式裁决，当前拒绝该分支。
+
+Service 签名仅用于自身管理操作；业务内容由主体 Device 原签。完整 MLS 发起端 worker、主体控制轮换／恢复、持续授权与全部消费者仍需独立验收，不声明完整 21-operation runtime 已交付。
 
 Managed Principal custody and the canonical Bot/Ghost author operation live in
 `arkret-bridge-runtime` behind `managed-authoring`.
@@ -228,6 +225,6 @@ Device接纳不授予业务权，也不自动加入Realm／Circle。显式device
 发布仍依赖实际 membership／独立 E2EE consent、原授权 scope、current 安装与 Station 业务门；
 它不自动加入群。读取还要求原签scope项含ak.event.read、当前Service读取上界及实际membership／E2EE同意。
 
-worker绑定原Account／Device／authorization／scope、有限授权窗口与当前host实例。队列页先耐久保存；Welcome须验证实际accepted Commit、原历史producer、本人claim receipt、完整signed roster和Genesis材料，才由SDK用本地私有包加入。群状态、scope私有identity与原签consume同一加密CAS落盘后才发送consume／累计ACK；丢响应重投相同签名请求，重启恢复原游标。补包同步刷新同一群provider，防止冷恢复丢失新私有包。host退出立即退休reader，各Device网络周期最多八路并发。扩scope或续期仍须合法replacement authorize，不自动改写原授权。
+worker绑定完整Realm Actor／Device／authorization／scope、有限授权窗口与当前host实例。队列页先耐久保存；Welcome须验证实际accepted Commit、原历史producer、本人claim receipt、完整signed roster和Genesis材料，才由SDK用本地私有包加入。群状态、scope私有identity与原签consume同一加密CAS落盘后才发送consume／累计ACK；丢响应重投相同签名请求，重启恢复原游标。补包同步刷新同一群provider，防止冷恢复丢失新私有包。host退出立即退休reader，各Device网络周期最多八路并发。扩scope或续期仍须合法replacement authorize，不自动改写原授权。
 
-本路径仅消费已有正式scope的Welcome；内容stream、附件解密、业务child与原签回复、已有group的恢复／再加入及Principal rotation仍是独立后续边界。群内容不发往管理base_url。
+worker 消费已有正式 scope 的 Welcome 和内容 stream，附件按消费者需要解密；已有群的重新加入、完整 MLS 发起端与 Principal rotation 继续独立验收。群内容不发往管理 base_url。

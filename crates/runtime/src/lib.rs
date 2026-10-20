@@ -12,8 +12,8 @@
 //!   current governance Station, which returns the authority-signed `RealmCommit` that fixes the
 //!   Event's position in exactly one independent commit stream. The durable [`AuthoringJournal`]
 //!   retains the exact signed bytes and the exact committed reference across retries; see
-//!   [`arkret_edge::ArkretEdge`] (`service_intent`, `delegated_intent`, `author_and_sign`,
-//!   `submit_event`) and [`authority`].
+//!   [`arkret_edge::ArkretEdge`] (`service_intent`, `author_and_sign`, `submit_event`) and
+//!   [`authority`].
 //! - **App-runtime scaffolding**: config loading, a diesel pool + migration runner, a salvo server
 //!   (applet routes + health/metrics + app webhooks), and the [`run_bridge`] orchestration loop.
 //!

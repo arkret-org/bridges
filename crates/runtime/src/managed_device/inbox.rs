@@ -395,7 +395,7 @@ impl ManagedDeviceRuntime {
         reader: &ManagedDeviceReader,
         accepted: &arkret_wire::CommittedEventFullView,
         group: &mut ArkretMlsGroup,
-    ) -> Result<()> {
+    ) -> Result<arkret::EventId> {
         let transition =
             garth::mls::accepted_artifact::accepted_mls_transition(accepted).map_err(invalid)?;
         let request = MlsMemberRosterAuthorityReadRequestBody {
@@ -442,7 +442,7 @@ impl ManagedDeviceRuntime {
         )
         .map_err(invalid)?;
         reader.check_device(device)?;
-        Ok(())
+        Ok(pages[0].roster.manifest.genesis_event_ref.clone())
     }
 
     /// Cleanup sends only previously durable commands. It may complete after

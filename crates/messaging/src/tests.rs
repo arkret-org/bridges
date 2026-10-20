@@ -63,6 +63,7 @@ fn media_attachment() -> Attachment {
         filename: Some("shot.png".to_owned()),
         size: Some(2048),
         caption: "look at this".to_owned(),
+        plaintext: None,
     }
 }
 

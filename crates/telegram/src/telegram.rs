@@ -79,16 +79,18 @@ impl MessageBridge for TelegramApp {
 
     async fn send_to_app(
         &self,
-        ctx: Arc<MessageContext>,
+        _ctx: Arc<MessageContext>,
         msg: OutboundAppMessage,
     ) -> Result<AppMessageRef> {
         let chat = parse_telegram_chat_id(&msg.app_channel)?;
         let bot = &self.bot;
         let body = msg.rendered_body(SenderRenderStyle::Plain);
 
-        // With an attachment: download the arkret blob and send it as a document.
+        // The native runtime supplies already verified and decrypted bytes.
         if let Some(att) = &msg.attachment {
-            let bytes = ctx.download_blob(&att.blob_ref).await?;
+            let bytes = att.plaintext.clone().ok_or_else(|| {
+                BridgeError::App("native attachment plaintext is unavailable".into())
+            })?;
             let filename = att.filename.clone().unwrap_or_else(|| "file".to_owned());
             let file = InputFile::memory(bytes).file_name(filename);
             let sent = bot

@@ -578,6 +578,7 @@ name = "arkret-crypto"
 version = "0.3.0"
 dependencies = [
  "arkret-canonical",
+ "arkret-models-collaboration",
  "arkret-models-crypto",
  "arkret-signatures",
  "arkret-wire",

@@ -104,5 +104,6 @@ fn attachment_from_sdk_media(media: ContentBlockMediaAttachment) -> Attachment {
         filename: media.filename,
         size: media.size_bytes,
         caption: media.caption,
+        plaintext: None,
     }
 }

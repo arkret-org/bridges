@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use crate::managed_actor_authoring::ManagedActorAuthoringService;
 use crate::{ArkretEdge, AuthoringStore, BridgeError, Result, run_blocking};
 
+mod attachment;
 mod business;
 mod content;
 mod inbox;

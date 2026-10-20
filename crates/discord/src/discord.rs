@@ -60,15 +60,17 @@ impl MessageBridge for DiscordApp {
 
     async fn send_to_app(
         &self,
-        ctx: Arc<MessageContext>,
+        _ctx: Arc<MessageContext>,
         msg: OutboundAppMessage,
     ) -> Result<AppMessageRef> {
         let channel = parse_discord_channel_id(&msg.app_channel)?;
         let body = msg.rendered_body(SenderRenderStyle::MarkdownBold);
 
-        // With an attachment: download the arkret blob and upload it to Discord.
+        // The native runtime supplies already verified and decrypted bytes.
         if let Some(att) = &msg.attachment {
-            let bytes = ctx.download_blob(&att.blob_ref).await?;
+            let bytes = att.plaintext.clone().ok_or_else(|| {
+                BridgeError::App("native attachment plaintext is unavailable".into())
+            })?;
             let filename = att.filename.clone().unwrap_or_else(|| "file".to_owned());
             let file = CreateAttachment::bytes(bytes, filename);
             let message = CreateMessage::new().content(body).add_file(file);

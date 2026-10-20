@@ -13,6 +13,16 @@ use super::*;
 pub struct NativeContent {
     original: arkret::CommittedEventFullView,
     message: Option<MessageCreatePayload>,
+    attachments: Vec<NativeAttachment>,
+    pub(super) attachments_opened: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct NativeAttachment {
+    pub(super) descriptor: arkret::EncryptedAttachment,
+    #[serde(with = "super::attachment::private_bytes")]
+    plaintext: Vec<u8>,
 }
 
 impl NativeContent {
@@ -22,6 +32,79 @@ impl NativeContent {
 
     pub fn message(&self) -> Option<&MessageCreatePayload> {
         self.message.as_ref()
+    }
+
+    pub fn attachment_bytes(&self, reference: &str) -> Option<&[u8]> {
+        self.attachments
+            .iter()
+            .find(|item| item.descriptor.blob_ref().as_str() == reference)
+            .map(|item| item.plaintext.as_slice())
+    }
+
+    pub(super) fn attachments(&self) -> &[NativeAttachment] {
+        &self.attachments
+    }
+    pub(super) fn without_attachment_bytes(&self) -> Self {
+        let mut view = self.clone();
+        view.attachments.clear();
+        view
+    }
+
+    pub(super) async fn open_attachments(
+        &mut self,
+        runtime: &ManagedDeviceRuntime,
+        device: &ManagedDevice,
+        reader: &ManagedDeviceReader,
+        accepted: &arkret::CommittedEventFullView,
+        group: &ArkretMlsGroup,
+    ) -> Result<()> {
+        if self.attachments_opened {
+            return Ok(());
+        }
+        let Some(content) = self
+            .message
+            .as_ref()
+            .and_then(|message| message.content.as_ref())
+        else {
+            self.attachments_opened = true;
+            return Ok(());
+        };
+        let mut blocks = vec![content];
+        let mut descriptors = std::collections::BTreeMap::new();
+        let mut total = 0u64;
+        while let Some(block) = blocks.pop() {
+            blocks.extend(block.parts.iter());
+            if block.blob_ref().is_some() && block.rendered_encrypted_attachment()?.is_none() {
+                return Err(invalid("MLS media has no encrypted attachment descriptor"));
+            }
+            if let Some(descriptor) = block.rendered_encrypted_attachment()? {
+                if let Some(prior) =
+                    descriptors.insert(descriptor.blob_ref().clone(), descriptor.clone())
+                {
+                    if prior != descriptor {
+                        return Err(invalid("attachment reference has conflicting descriptors"));
+                    }
+                } else {
+                    total = total
+                        .checked_add(descriptor.size_bytes())
+                        .ok_or_else(|| invalid("attachment size overflow"))?;
+                    if total > super::attachment::MAX_ATTACHMENT_BYTES as u64 {
+                        return Err(invalid("message attachments exceed local delivery budget"));
+                    }
+                }
+            }
+        }
+        for descriptor in descriptors.into_values() {
+            let plaintext = runtime
+                .decrypt_attachment(device, reader, &descriptor, accepted, group)
+                .await?;
+            self.attachments.push(NativeAttachment {
+                descriptor,
+                plaintext,
+            });
+        }
+        self.attachments_opened = true;
+        Ok(())
     }
 
     pub(super) fn decrypt(
@@ -85,6 +168,8 @@ impl NativeContent {
         Ok(Self {
             original: original.clone(),
             message,
+            attachments: Vec::new(),
+            attachments_opened: false,
         })
     }
 }
@@ -93,5 +178,9 @@ impl NativeContent {
 /// Failure retains the exact decrypted item for restart and retry.
 #[async_trait::async_trait]
 pub trait NativeContentSink: Send + Sync + 'static {
+    /// Local adapter demand, never a protocol permission or an implicit grant.
+    fn requires_attachments(&self) -> bool {
+        false
+    }
     async fn deliver(&self, content: &NativeContent) -> Result<()>;
 }

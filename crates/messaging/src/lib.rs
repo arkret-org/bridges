@@ -418,16 +418,6 @@ impl MessageContext {
         Ok(())
     }
 
-    /// Upload bytes to arkret blob storage, returning the blob_ref string.
-    pub async fn upload_blob(&self, bytes: &[u8], mime: &str) -> Result<String> {
-        self.inner.edge.upload_blob(bytes, mime).await
-    }
-
-    /// Download a arkret blob by its blob_ref string.
-    pub async fn download_blob(&self, blob_ref: &str) -> Result<Vec<u8>> {
-        self.inner.edge.download_blob(blob_ref).await
-    }
-
     /// Download app-hosted media with HTTPS, host allow-list and a hard byte
     /// cap. Use this for all inbound media fetches before uploading to Arkret blob
     /// storage.
@@ -453,7 +443,7 @@ impl MessageContext {
     /// Forward one piece of inbound external media into arkret with the shared
     /// skeleton: download (https + host allowlist + byte cap) → MIME fallback
     /// (`mime_hint` → download `Content-Type` → [`DEFAULT_MEDIA_MIME`]) → blob
-    /// upload → [`Attachment`] assembly → [`Self::submit_media_message`].
+    /// native Device encryption/upload → original message publication.
     ///
     /// On any step failing, the shared inbound-failure audit
     /// ([`Self::report_inbound_failure`]: warn log + best-effort durable
@@ -486,17 +476,15 @@ impl MessageContext {
             .mime_hint
             .or(media.content_type)
             .unwrap_or_else(|| DEFAULT_MEDIA_MIME.to_owned());
-        let blob_ref = self.upload_blob(&media.bytes, &mime).await?;
-        let attachment = Attachment {
-            blob_ref,
-            media_type: Some(mime),
-            filename: request.filename,
-            size: Some(media.bytes.len() as u64),
-            // Left empty: `submit_media_message` fills the caption from the
-            // inbound body when the platform delivered one.
-            caption: String::new(),
-        };
-        self.submit_media_message(inbound.clone(), attachment).await
+        let result = self
+            .submit_content(
+                inbound,
+                text_content_block(&inbound.body)?,
+                Some((media.bytes, mime, request.filename)),
+            )
+            .await;
+        self.record_message_metric(MessageDirection::InboundMedia, &result);
+        result
     }
 
     /// Resolve the portal strand for an app channel following the §10.1
@@ -571,27 +559,8 @@ impl MessageContext {
     /// Submit an inbound text message as a `ak.message.create` event.
     pub async fn submit_app_message(&self, msg: InboundAppMessage) -> Result<String> {
         let content = text_content_block(&msg.body)?;
-        let result = self.submit_content(&msg, content, Vec::new()).await;
+        let result = self.submit_content(&msg, content, None).await;
         self.record_message_metric(MessageDirection::Inbound, &result);
-        result
-    }
-
-    /// Submit an inbound media message. The `attachment` must already reference a
-    /// blob uploaded via [`MessageContext::upload_blob`]; `msg.body` becomes the
-    /// caption when non-empty.
-    pub(crate) async fn submit_media_message(
-        &self,
-        msg: InboundAppMessage,
-        mut attachment: Attachment,
-    ) -> Result<String> {
-        if attachment.caption.is_empty() {
-            attachment.caption = msg.body.clone();
-        }
-        let content = media_content_block(&attachment)?;
-        let result = self
-            .submit_content(&msg, content, vec![attachment.blob_ref.clone()])
-            .await;
-        self.record_message_metric(MessageDirection::InboundMedia, &result);
         result
     }
 
@@ -751,7 +720,7 @@ impl MessageContext {
         &self,
         msg: &InboundAppMessage,
         content: ContentBlock,
-        blob_refs: Vec<String>,
+        media: Option<(Vec<u8>, String, Option<String>)>,
     ) -> Result<String> {
         let external_event_id = normalized_external_id(&msg.app_message_id);
         if external_event_id.is_empty() {
@@ -775,7 +744,6 @@ impl MessageContext {
         // §10.1: the mapping unit for an external location is (realm_id,
         // strand_id) — resolve the portal strand before submitting.
         let strand_id = self.ensure_portal_strand(&msg.app_channel, &realm).await?;
-        let payload = content::build_message_create_payload(&strand_id, content, blob_refs)?;
 
         let protocol = bridge_protocol(&self.inner.config);
         let tenant = bridge_tenant(&self.inner.config);
@@ -876,6 +844,39 @@ impl MessageContext {
                         }
                     };
                     let actor = &mapping.arkret_actor_id;
+                    let scope = arkret::ScopeRef::Realm {
+                        realm_id: arkret::RealmId::new(realm_for_submit.clone())?,
+                    };
+                    let (content, blob_refs) = if let Some((bytes, mime, filename)) = media {
+                        let descriptor = managed_devices
+                            .upload_attachment(
+                                actor,
+                                &scope,
+                                &serde_json::to_string(&external_ref)?,
+                                &bytes,
+                                &mime,
+                            )
+                            .await?;
+                        let reference = descriptor.blob_ref().to_string();
+                        let attachment = Attachment {
+                            blob_ref: reference.clone(),
+                            media_type: Some(mime),
+                            filename,
+                            size: Some(bytes.len() as u64),
+                            caption: content.body.clone(),
+                            plaintext: None,
+                        };
+                        let mut block = media_content_block(&attachment)?;
+                        block.extra.insert(
+                            "attachments".into(),
+                            serde_json::to_value(vec![descriptor])?,
+                        );
+                        (block, vec![reference])
+                    } else {
+                        (content, Vec::new())
+                    };
+                    let payload =
+                        content::build_message_create_payload(&strand_id, content, blob_refs)?;
                     let event_id = managed_devices
                         .submit_message(
                             actor,
@@ -1113,6 +1114,7 @@ impl<M: MessageBridge> MessageAdapter<M> {
         &self,
         event: &Event,
         plaintext: Option<&arkret::MessageCreatePayload>,
+        native: Option<&runtime::managed_device::NativeContent>,
     ) -> Result<()> {
         // Deletion forwarding (arkret -> app): a `ak.message.redact` that targets
         // an event we previously bridged is mapped to an app-side deletion via the
@@ -1214,7 +1216,19 @@ impl<M: MessageBridge> MessageAdapter<M> {
             return Ok(());
         }
         let body = extract_plain_body(&payload)?;
-        let attachment = extract_attachment(&payload)?;
+        let mut attachment = extract_attachment(&payload)?;
+        if self.user.capabilities().outbound_native_attachments
+            && let Some(attachment) = &mut attachment
+        {
+            attachment.plaintext = Some(
+                native
+                    .and_then(|content| content.attachment_bytes(&attachment.blob_ref))
+                    .ok_or_else(|| {
+                        BridgeError::App("attachment has no verified local plaintext".into())
+                    })?
+                    .to_vec(),
+            );
+        }
         let sender_display = sender_display_for_event(
             self.ctx.store.clone(),
             event.actor_id.clone(),
@@ -1308,6 +1322,9 @@ async fn sender_display_for_event(
 
 #[async_trait]
 impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
+    fn native_attachments(&self) -> bool {
+        self.user.capabilities().outbound_native_attachments
+    }
     fn name(&self) -> &str {
         self.user.name()
     }
@@ -1317,7 +1334,7 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
     }
 
     async fn on_arkret_event(&self, _ctx: Arc<BridgeContext>, event: Event) -> Result<()> {
-        self.handle_content(&event, None).await
+        self.handle_content(&event, None, None).await
     }
 
     async fn on_native_content(
@@ -1325,7 +1342,7 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
         _ctx: Arc<BridgeContext>,
         content: &runtime::managed_device::NativeContent,
     ) -> Result<()> {
-        self.handle_content(&content.original().event, content.message())
+        self.handle_content(&content.original().event, content.message(), Some(content))
             .await
     }
 

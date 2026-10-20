@@ -283,7 +283,10 @@ impl ManagedDeviceRuntime {
                     EventKind::MessageCreate | EventKind::MessageRedact
                 ) && !self.is_local_publication(&full.event).await?
                 {
-                    delivery = Some(NativeContent::decrypt(&full, &accepted, &mut group)?);
+                    let content = NativeContent::decrypt(&full, &accepted, &mut group)?;
+                    self.retain_attachment_checkpoint(device, &accepted, &group)
+                        .await?;
+                    delivery = Some(content);
                     super::inbox::refresh_group_private_state(
                         &mut record,
                         device,
@@ -300,6 +303,8 @@ impl ManagedDeviceRuntime {
                 }
                 continue;
             }
+            self.retain_attachment_checkpoint(device, &accepted, &group)
+                .await?;
             group
                 .install_recovered_remote_commit(&full, &accepted.event.event_id)
                 .map_err(|error| invalid(error.to_string()))?;
@@ -385,8 +390,9 @@ impl ManagedDeviceRuntime {
         sink: &dyn NativeContentSink,
     ) -> Result<bool> {
         reader.check_device(device)?;
-        let (_, _, record) = self.accepted_device_record(device).await?;
-        let Some(content) = state(&record, device)?.and_then(|saved| saved.delivery.clone()) else {
+        let (key, previous, mut record) = self.accepted_device_record(device).await?;
+        let Some(mut content) = state(&record, device)?.and_then(|saved| saved.delivery.clone())
+        else {
             return Ok(false);
         };
         let current = reader
@@ -394,8 +400,58 @@ impl ManagedDeviceRuntime {
             .snapshot_head(device.effective_scope.realm_id())
             .await?;
         current.value()?;
+        let original = garth::own_station_results::consume_own_station_device_event(
+            reader.client(),
+            &content.original().event.event_id,
+            reader
+                .client()
+                .committed_event_get(&content.original().event.event_id)
+                .await?,
+        )
+        .await
+        .map_err(|e| invalid(e.to_string()))?;
+        if original.full().map_err(|e| invalid(e.to_string()))? != content.original() {
+            return Err(invalid(
+                "pending delivery differs from its currently authorized original",
+            ));
+        }
+        if sink.requires_attachments() {
+            if !content.attachments_opened {
+                let group = super::inbox::restore_group(&record, device)?
+                    .ok_or_else(|| invalid("pending attachment has no private epoch"))?;
+                let accepted = super::inbox::accepted_group_original(&record, device)?
+                    .ok_or_else(|| invalid("pending attachment has no accepted base"))?;
+                content
+                    .open_attachments(self, device, reader, &accepted, &group)
+                    .await?;
+                record
+                    .mls
+                    .streams
+                    .get_mut(&stream_key(device)?)
+                    .ok_or_else(|| invalid("pending content disappeared"))?
+                    .delivery = Some(content.clone());
+                original.full().map_err(|e| invalid(e.to_string()))?;
+                reader.check_device(device)?;
+                let encrypted = self.authoring.encrypt_key_material(&key, &record)?;
+                if !self.cas(&key, Some(previous), encrypted).await? {
+                    return Err(invalid("attachment delivery checkpoint contended"));
+                }
+            } else {
+                for attachment in content.attachments() {
+                    self.read_attachment_ciphertext(device, reader, &attachment.descriptor)
+                        .await?;
+                }
+            }
+        }
+        original.full().map_err(|e| invalid(e.to_string()))?;
+        current.value()?;
         reader.check_device(device)?;
-        sink.deliver(&content).await?;
+        let view = if sink.requires_attachments() {
+            content.clone()
+        } else {
+            content.without_attachment_bytes()
+        };
+        sink.deliver(&view).await?;
         for _ in 0..8 {
             let (key, previous, mut record) = self.accepted_device_record(device).await?;
             let saved = record

@@ -31,7 +31,7 @@ pub struct OutboundAppMessage { pub app_channel: String, pub sender_display: Str
                                 pub body: String, pub attachment: Option<Attachment> }
 pub struct Attachment { pub blob_ref: String, pub media_type: Option<String>,
                         pub filename: Option<String>, pub size: Option<u64>,
-                        pub caption: String }
+                        pub caption: String, pub plaintext: Option<Vec<u8>> }
 pub struct AppMessageRef { pub app_message_id: String }
 
 #[async_trait]
@@ -56,10 +56,13 @@ pub trait MessageBridge: Send + Sync + 'static {
 }
 ```
 
-下行(arkret→app)由 messaging 的 `MessageAdapter::on_arkret_event` 自动驱动 `send_to_app`,
-适配器无需自己实现 `on_arkret_event`;只转发 portal strand 上的 `ak.message.create`(§10.1 映射
-单位是 `(realm_id, strand_id)`),正文从 `payload.content`(content_block)解析,媒体从
-`blob_ref`/`blob_refs[]` 解析。`config.app` 放该 app 专属配置(token 等),由
+下行(arkret→app)由 native Device runtime 验证原签消息、当前权限并解密，再经
+`MessageAdapter::on_native_content` 驱动 `send_to_app`。适配器只转发 portal strand 上的
+`ak.message.create`（§10.1 映射单位是 `(realm_id, strand_id)`）。消息正文与附件 descriptor
+来自 SDK 解密结果，原签 Event 保持不变。声明 `native_outbound_attachments` 的适配器只消费
+`Attachment.plaintext` 中已验证的本地字节，不自行用 Service 凭据下载 Blob；缺少字节必须拒绝，
+不能把存储密文发给外部平台。纯文本适配器不取得附件明文，继续使用共享文本降级。
+`config.app` 放该 app 专属配置(token 等),由
 `bridge_main` 经 serde 反序列化成每桥自定义的强类型 `AppConfig`(缺字段由 serde 按字段名报错)。
 错误统一用 `BridgeError::App(String)`。
 

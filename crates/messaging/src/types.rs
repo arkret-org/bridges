@@ -126,8 +126,7 @@ pub struct OutboundAppMessage {
     pub app_channel: String,
     pub sender_display: String,
     pub body: String,
-    /// Present when the arkret event carried media; the adapter may download it
-    /// via [`crate::MessageContext::download_blob`] and re-send to the app.
+    /// Verified local media, ready for the adapter to re-send to the app.
     pub attachment: Option<Attachment>,
 }
 
@@ -219,12 +218,7 @@ pub struct AppMessageRef {
     pub app_message_id: String,
 }
 
-/// A media attachment that already resides in arkret blob storage (referenced by
-/// `blob_ref`). Inbound: the adapter downloads app media, uploads it via
-/// [`crate::MessageContext::upload_blob`], then submits with
-/// [`crate::MessageContext::submit_media_message`]. Outbound: extracted from a `ak.message.create`
-/// media payload and handed to the adapter, which downloads via
-/// [`crate::MessageContext::download_blob`] and re-sends.
+/// Local media view retaining the immutable ciphertext resource identity.
 #[derive(Clone, Debug)]
 pub struct Attachment {
     pub blob_ref: String,
@@ -233,6 +227,8 @@ pub struct Attachment {
     pub size: Option<u64>,
     /// Caption / display text for the media event (may be empty).
     pub caption: String,
+    /// Filled only after native MLS and attachment verification.
+    pub plaintext: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -336,6 +332,7 @@ mod tests {
                 filename: Some("shot.png".to_owned()),
                 size: Some(2048),
                 caption: "caption from media".to_owned(),
+                plaintext: None,
             }),
         };
 
@@ -366,6 +363,7 @@ mod tests {
                 filename: None,
                 size: None,
                 caption: "media caption".to_owned(),
+                plaintext: None,
             }),
         };
 
