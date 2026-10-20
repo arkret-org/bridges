@@ -71,14 +71,16 @@ impl ManagedDeviceWorkers {
         let mut active_scopes = BTreeSet::new();
         for device in devices {
             let id = canonical_sha256(&(
-                &device.account_id,
+                &device.actor_id,
                 &device.device_id,
                 &device.authorization_event_id,
+                &device.governance_station,
+                device.governance_generation,
                 &device.effective_scope,
             ))?;
             active.insert(id.clone());
             active_scopes.insert(canonical_sha256(&(
-                &device.account_id,
+                &device.actor_id,
                 &device.effective_scope,
             ))?);
             if self
@@ -91,7 +93,7 @@ impl ManagedDeviceWorkers {
             let reader = match self.runtime.open_reader(&device).await {
                 Ok(reader) => Arc::new(reader),
                 Err(error) => {
-                    tracing::warn!(account = %device.account_id, %error, "native reader remains unavailable");
+                    tracing::warn!(account = %device.actor_id, %error, "native reader remains unavailable");
                     continue;
                 }
             };
@@ -120,7 +122,7 @@ impl ManagedDeviceWorkers {
             // A transient bootstrap failure can omit an Account. Absence
             // alone never declares that its accepted Device was replaced.
             if active_scopes.contains(&canonical_sha256(&(
-                &worker.device.account_id,
+                &worker.device.actor_id,
                 &worker.device.effective_scope,
             ))?) {
                 worker.retired = true;
@@ -131,7 +133,7 @@ impl ManagedDeviceWorkers {
                 continue;
             }
             if let Err(error) = cleanup(&self.runtime, &worker.device).await {
-                tracing::warn!(account = %worker.device.account_id, %error, "retired native Device cleanup remains pending");
+                tracing::warn!(account = %worker.device.actor_id, %error, "retired native Device cleanup remains pending");
                 continue;
             }
             if !self
@@ -170,7 +172,7 @@ fn spawn_worker(
                 break;
             };
             if let Err(error) = cleanup(&runtime, &device).await {
-                tracing::warn!(account = %device.account_id, %error, "native durable cleanup remains pending");
+                tracing::warn!(account = %device.actor_id, %error, "native durable cleanup remains pending");
                 continue;
             }
             if reader.client().check_context().is_err() {
@@ -178,15 +180,15 @@ fn spawn_worker(
             }
             match runtime.poll_welcome_queue(&device, &reader).await {
                 Ok(progress) if progress.pending_content > 0 => {
-                    tracing::warn!(account = %device.account_id, pending = progress.pending_content,
+                    tracing::warn!(account = %device.actor_id, pending = progress.pending_content,
                         "native content remains durable and unacknowledged");
                 }
                 Ok(_) => {}
-                Err(error) => tracing::warn!(account = %device.account_id, %error,
+                Err(error) => tracing::warn!(account = %device.actor_id, %error,
                     "native recipient recovery remains pending"),
             }
             if let Err(error) = runtime.poll_content_stream(&device, &reader).await {
-                tracing::warn!(account = %device.account_id, %error,
+                tracing::warn!(account = %device.actor_id, %error,
                     "native stream recovery remains pending");
             }
         }

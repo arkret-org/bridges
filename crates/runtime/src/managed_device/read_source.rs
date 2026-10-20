@@ -40,7 +40,7 @@ impl ManagedDeviceReader {
     pub(super) fn check_device(&self, device: &ManagedDevice) -> Result<()> {
         self.client.check_context()?;
         let context = self.client.context()?;
-        if context.account_id() != &device.account_id
+        if context.actor_id() != &device.actor_id
             || context.device_id() != &device.device_id
             || context.authorization_event_id() != &device.authorization_event_id
             || context.effective_scope() != &device.effective_scope
@@ -65,8 +65,20 @@ impl Drop for ManagedDeviceReader {
 impl ManagedDeviceRuntime {
     pub async fn open_reader(&self, device: &ManagedDevice) -> Result<ManagedDeviceReader> {
         self.accepted_device_record(device).await?;
-        // Description confirms the operator-selected origin. No redirect or
-        // returned URL may silently replace the accepted Account Station.
+        let realm = device
+            .actor_id
+            .as_realm_actor_id()
+            .ok_or_else(|| invalid("Realm actor required"))?
+            .realm_id
+            .clone();
+        let route = self.edge.realm_route(&realm).await?;
+        if route.authority.current_service_id() != &device.governance_station
+            || route.authority.current_generation() != device.governance_generation
+        {
+            return Err(invalid(
+                "Device reader must be rebuilt for the current governance tenure",
+            ));
+        }
         let description = device.client().describe().await?;
         let binding =
             OwnStationDeviceBinding::from_description(device.client().base_url(), &description)?;
@@ -79,7 +91,7 @@ impl ManagedDeviceRuntime {
         let mut nonce = [0u8; 16];
         getrandom::fill(&mut nonce).map_err(|error| invalid(error.to_string()))?;
         let metadata = AppletManagedDeviceMetadata {
-            account_id: device.account_id.clone(),
+            actor_id: device.actor_id.clone(),
             device_id: device.device_id.clone(),
             authorization_event_id: device.authorization_event_id.clone(),
             applet_id: authorization
@@ -91,6 +103,7 @@ impl ManagedDeviceRuntime {
         let key = SigningKey::from_bytes(&seed(&record.device_seed)?);
         let context = OwnStationDeviceSnapshot::new(
             binding,
+            &route.authority,
             &metadata,
             key.verifying_key().to_bytes(),
             authorization.not_before,

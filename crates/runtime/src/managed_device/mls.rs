@@ -40,13 +40,13 @@ struct Publication {
 
 fn endpoint(record: &DeviceRecord) -> Result<MlsEndpointIdentity> {
     Ok(MlsEndpointIdentity::human_device(
-        record.plan.account_id.principal_id.clone(),
+        record.plan.actor_id.signing_principal_id().clone(),
         payload(record)?.device_id,
     ))
 }
 
 pub(super) fn identity(record: &DeviceRecord, scope: &ScopeRef) -> Result<ArkretMlsIdentity> {
-    let actor = ActorId::account(record.plan.account_id.clone());
+    let actor = record.plan.actor_id.clone();
     match record
         .mls
         .scopes
@@ -58,7 +58,7 @@ pub(super) fn identity(record: &DeviceRecord, scope: &ScopeRef) -> Result<Arkret
                 |_| invalid("MLS private identity cannot be restored for its original endpoint"),
             )
         }
-        None => ArkretMlsIdentity::new_human_device(
+        None => ArkretMlsIdentity::new_realm_device(
             actor,
             payload(record)?.device_id,
             ArkretMlsSigner::from_ed25519_signing_key(SigningKey::from_bytes(&seed(
@@ -111,8 +111,8 @@ fn validate_publication(
     request.validate_shape().map_err(invalid)?;
     let p = payload(record)?;
     let method = format!("{}#{}", record.principal_did, p.device_id);
-    if request.actor_id != ActorId::account(record.plan.account_id.clone())
-        || request.principal_id != record.plan.account_id.principal_id
+    if request.actor_id != record.plan.actor_id.clone()
+        || request.principal_id != *record.plan.actor_id.signing_principal_id()
         || request.device_id.as_ref() != Some(&p.device_id)
         || request.agent_verification_method.is_some()
         || request.agent_key_authorize_event_id.is_some()
@@ -135,7 +135,7 @@ fn validate_publication(
     .map_err(|error| invalid(error.to_string()))?;
     let identity = identity(record, scope)?;
     for (original, entry) in batch.records.iter().zip(&request.keypackages) {
-        if original.actor_id != ActorId::account(record.plan.account_id.clone())
+        if original.actor_id != record.plan.actor_id.clone()
             || original.endpoint != endpoint(record)?
         {
             return Err(invalid(
@@ -245,7 +245,7 @@ impl ManagedDeviceRuntime {
     ) -> Result<(String, String, DeviceRecord)> {
         let operation_key = format!(
             "managed-device/v1/{}",
-            canonical_sha256(&(&device.account_id, &device.operation_id))?
+            canonical_sha256(&(&device.actor_id, &device.operation_id))?
         );
         let raw = self
             .read(&operation_key)
@@ -253,7 +253,7 @@ impl ManagedDeviceRuntime {
             .ok_or_else(|| invalid("MLS Device custody is unavailable"))?;
         let record: DeviceRecord = self.authoring.decrypt_key_material(&operation_key, &raw)?;
         self.validate(&record)?;
-        if record.plan.account_id != device.account_id
+        if record.plan.actor_id != device.actor_id
             || record.plan.operation_id != device.operation_id
             || payload(&record)?.device_id != device.device_id
             || record.authorization.event_id() != &device.authorization_event_id

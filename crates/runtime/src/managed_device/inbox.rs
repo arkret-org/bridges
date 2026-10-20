@@ -109,7 +109,7 @@ fn check_page(page: &DeviceMessagesGetOutcome, device: &ManagedDevice) -> Result
                 mls_welcome,
                 &garth::LocalMlsEndpoint::device(
                     mls_welcome.realm_id.clone(),
-                    ActorId::account(device.account_id.clone()),
+                    device.actor_id.clone(),
                     device.device_id.clone(),
                 ),
                 &mls_welcome.commit_event_ref,
@@ -270,9 +270,13 @@ impl ManagedDeviceRuntime {
             })
             .await?;
         let outcome = outcome.value()?.clone();
+        let route = self.edge.realm_route(&delivery.realm_id).await?;
+        let claim_did =
+            arkret::verification_method_did(outcome.claim_receipt.signature.kid.as_str())
+                .map_err(|e| invalid(e.to_string()))?;
         let resolution = device
             .client()
-            .open_service_resolution(&device.account_id.station_id)
+            .resolve_service_from_did(&claim_did, arkret::ServiceKind::Station)
             .await?;
         arkret::verify_peer_keypackage_claim_receipt_signature(
             &outcome.claim_receipt,
@@ -282,12 +286,15 @@ impl ManagedDeviceRuntime {
             delivery,
             &garth::LocalMlsEndpoint::device(
                 delivery.realm_id.clone(),
-                ActorId::account(device.account_id.clone()),
+                device.actor_id.clone(),
                 device.device_id.clone(),
             ),
             &accepted.event,
             &outcome,
-            &device.account_id.station_id,
+            garth::mls::WelcomeClaimAuthority::Realm {
+                current_station: route.authority.current_service_id(),
+                authority: &route.authority,
+            },
             &device.authorization_event_id,
         )
         .map_err(|error| invalid(error.to_string()))?;
@@ -319,12 +326,12 @@ impl ManagedDeviceRuntime {
         let consume = garth::mls::signed_welcome_consume(
             delivery,
             &outcome,
-            RecipientMlsDurableSigner::Device {
-                recipient_account_id: device.account_id.clone(),
+            RecipientMlsDurableSigner::RealmDevice {
+                recipient_actor_id: device.actor_id.clone(),
                 recipient_device_id: device.device_id.clone(),
                 device_verification_method: method.clone(),
             },
-            &device.account_id.station_id,
+            &outcome.claim_receipt.destination_id,
             group.epoch(),
             arkret::canonical::normalize_timestamp_canonical(Utc::now()),
             |kid, input| {
@@ -397,7 +404,7 @@ impl ManagedDeviceRuntime {
             mls_group_id: transition.mls_group_id,
             target_commit_event_ref: accepted.event.event_id.clone(),
             target_epoch: transition.next_epoch,
-            caller_actor_id: ActorId::account(device.account_id.clone()),
+            caller_actor_id: device.actor_id.clone(),
             cursor: None,
         };
         let mut page_request = request.clone();
@@ -469,11 +476,33 @@ impl ManagedDeviceRuntime {
                     "consume receipt differs from the exact durable request",
                 ));
             }
+            let realm = device
+                .actor_id
+                .as_realm_actor_id()
+                .ok_or_else(|| invalid("Realm actor required"))?
+                .realm_id
+                .clone();
+            let route = self.edge.realm_route(&realm).await?;
+            let issuer_did = arkret::verification_method_did(receipt.signature.kid.as_str())
+                .map_err(|e| invalid(e.to_string()))?;
+            let issuer = arkret::project_did_to_core_id(&issuer_did)?;
+            if !route
+                .authority
+                .authorizes_issuer_at(&issuer, None, receipt.consumed_at)
+            {
+                return Err(invalid(
+                    "consume receipt signer did not govern the Realm at consumption",
+                ));
+            }
             let resolution = device
                 .client()
-                .open_service_resolution(&device.account_id.station_id)
+                .resolve_service_from_did(&issuer_did, arkret::ServiceKind::Station)
                 .await?;
-            arkret::verify_peer_keypackage_consume_receipt_signature(receipt, &resolution)?;
+            arkret::verify_peer_keypackage_consume_receipt_signature(
+                receipt,
+                &issuer,
+                &resolution,
+            )?;
             for attempt in 0..CAS_ATTEMPTS {
                 let (key, previous, mut record) = self.accepted_device_record(device).await?;
                 let state = inbox_mut(&mut record, device)?;
@@ -554,10 +583,10 @@ pub(super) fn restore_group(
     let group = ArkretMlsGroup::restore_from_state_record(&installed.state)
         .map_err(|error| invalid(error.to_string()))?;
     if group.scope() != &device.effective_scope
-        || group.identity().actor_id != ActorId::account(device.account_id.clone())
+        || group.identity().actor_id != device.actor_id.clone()
         || group.identity().endpoint
             != MlsEndpointIdentity::human_device(
-                device.account_id.principal_id.clone(),
+                device.actor_id.signing_principal_id().clone(),
                 device.device_id.clone(),
             )
     {

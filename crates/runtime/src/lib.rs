@@ -57,9 +57,11 @@ pub mod logging;
 pub mod managed_actor_authoring;
 #[cfg(feature = "managed-authoring")]
 mod managed_actor_store;
+mod managed_authoring;
 #[cfg(feature = "managed-authoring")]
 pub mod managed_device;
 pub mod queue;
+mod realm_governance;
 pub mod telemetry;
 
 #[cfg(feature = "db")]
@@ -79,9 +81,9 @@ pub use authoring::DbAuthoringStore;
 pub use authoring::{AuthoringJournal, AuthoringStore, external_operation_key};
 pub use authority::{
     AuthorityMaterialVerifier, BridgeProtocolError, CurrentAuthority, GovernanceStationTransport,
-    JoinBootstrap, LocalServiceManagedActorProofVerifier, ManagedActorProofVerifier,
-    ProducerProofVerifier, QueuedSubmission, StreamCursorBook, StreamTail, SubmissionQueue,
-    SubmissionState, validate_handoff, validate_managed_actor_bundle, validate_producer_event,
+    JoinBootstrap, LocalServiceManagedActorProofVerifier, ProducerProofVerifier, QueuedSubmission,
+    StreamCursorBook, StreamTail, SubmissionQueue, SubmissionState, validate_handoff,
+    validate_producer_event,
 };
 pub use backoff::{BRIDGE_RETRY, bridge_retry_delay};
 pub use blocking::run_blocking;
@@ -106,6 +108,7 @@ pub use error::{BridgeError, Result, redact_sensitive_url_values};
 // rather than kept as a stub against types that no longer exist.
 pub use file_authoring_store::FileAuthoringStore;
 pub use idempotency::{DedupVerdict, EventDedupStore, ReplayGuardStore, ReplayGuardVerdict};
+pub use managed_authoring::{PreparedGhost, PreparedManagedActor};
 #[cfg(feature = "web")]
 pub use salvo;
 pub use telemetry::increment_counter;

@@ -82,6 +82,7 @@ pub async fn serve(
         did_authority.clone(),
     )?);
     let applet = applet_router(AppletWebState {
+        edge: ctx.edge.clone(),
         handler,
         config: ctx.config.clone(),
         idempotency,
@@ -311,6 +312,7 @@ async fn admin_invalidate_did_bindings(req: &mut Request, depot: &mut Depot, res
 
 #[derive(Clone)]
 struct AppletWebState {
+    edge: Arc<crate::ArkretEdge>,
     handler: Arc<BridgeAppletHandler>,
     config: Arc<Config>,
     idempotency:
@@ -345,13 +347,14 @@ fn validate_authoring_completion(
         project_did_to_core_id(&config.arkret.service_did).map_err(|error| error.to_string())?;
     let applet_id = arkret::AppletId::new(config.arkret.applet_id.clone())
         .map_err(|error| error.to_string())?;
-    crate::authoring::validate_managed_authoring_completion(
+    crate::managed_authoring::validate_managed_authoring_completion(
         body,
         source_id,
         &applet_id,
         &service_id,
     )
     .map(|_| ())
+    .map_err(|error| error.to_string())
 }
 
 /// Authenticate every Event before creating the durable idempotency claim.
@@ -509,21 +512,6 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         }
     };
 
-    let verified = match verify_http_transaction_request(
-        req,
-        &headers,
-        &body_bytes,
-        &state.config,
-        state.did_authority.bindings(),
-    ) {
-        Ok(verified) => verified,
-        Err(err) => {
-            record_applet_transaction("unauthorized");
-            unauthorized_code(res, err.code, err.message);
-            return;
-        }
-    };
-
     let value: Value = match serde_json::from_slice(&body_bytes) {
         Ok(value) => value,
         Err(err) => {
@@ -545,6 +533,49 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         Err(err) => {
             record_applet_transaction("bad_request");
             bad_request(res, format!("invalid transaction body: {err}"));
+            return;
+        }
+    };
+
+    let AppletTransactionRequestBody::Authoring(authoring) = &body else {
+        bad_request(res, "group content must use an accepted managed Device");
+        return;
+    };
+    // Only a locally frozen creation can trigger the authenticated governance lookup.
+    if let Err(error) = state.edge.prepared_managed_actor(authoring) {
+        unauthorized(res, error.to_string());
+        return;
+    }
+    let route = match state
+        .edge
+        .realm_route(&authoring.authoring_context.material.realm_id)
+        .await
+    {
+        Ok(route) => route,
+        Err(error) => {
+            unauthorized(res, error.to_string());
+            return;
+        }
+    };
+    let verified = match verify_http_applet_request(
+        req,
+        &headers,
+        &body_bytes,
+        &state.config,
+        state.did_authority.bindings(),
+        true,
+        Some(&route),
+    ) {
+        Ok(verified) => verified,
+        Err(error) => {
+            unauthorized_code(res, error.code, error.message);
+            return;
+        }
+    };
+    let verified_completion = match state.edge.verify_managed_completion(authoring).await {
+        Ok(completion) => completion,
+        Err(error) => {
+            unauthorized(res, error.to_string());
             return;
         }
     };
@@ -643,12 +674,14 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         }
     }
 
-    let handler = state.handler.clone();
-    let idempotency_key_for_handler = idempotency_key.clone();
+    let edge = state.edge.clone();
     match run_blocking(move || {
-        handler
-            .handle_transaction(&idempotency_key_for_handler, body)
-            .map_err(BridgeError::from)
+        edge.install_verified_managed_completion(verified_completion)?;
+        Ok(AppletTransactionOutcome::Accepted {
+            committed_event_refs: Vec::new(),
+            rejections: Vec::new(),
+            retry_after_ms: None,
+        })
     })
     .await
     {
@@ -773,23 +806,13 @@ fn applet_state<'a>(depot: &'a Depot, res: &mut Response) -> Option<&'a AppletWe
     }
 }
 
-fn verify_http_transaction_request(
-    req: &Request,
-    headers: &[(String, String)],
-    body: &[u8],
-    config: &Config,
-    bindings: &AcceptedDidBindings,
-) -> std::result::Result<VerifiedAppletHttpRequest, HttpSignatureReject> {
-    verify_http_applet_request(req, headers, body, config, bindings, true)
-}
-
 fn verify_http_applet_get_request(
     req: &Request,
     config: &Config,
     bindings: &AcceptedDidBindings,
 ) -> std::result::Result<(), HttpSignatureReject> {
     let headers = collect_headers(req);
-    verify_http_applet_request(req, &headers, &[], config, bindings, false).map(|_| ())
+    verify_http_applet_request(req, &headers, &[], config, bindings, false, None).map(|_| ())
 }
 
 fn verify_http_applet_request(
@@ -799,6 +822,7 @@ fn verify_http_applet_request(
     config: &Config,
     bindings: &AcceptedDidBindings,
     require_content_digest: bool,
+    realm_route: Option<&crate::realm_governance::RealmRoute>,
 ) -> std::result::Result<VerifiedAppletHttpRequest, HttpSignatureReject> {
     let signature_input_header = header_value_from(headers, "signature-input")
         .ok_or_else(|| http_signature_required("Signature-Input header is required"))?;
@@ -813,7 +837,15 @@ fn verify_http_applet_request(
         ))
     })?;
     let signer_did = verification_method_did(&key_id_url).map_err(http_signature_invalid)?;
-    if signer_did.as_str() != config.arkret.trusted_server_did.as_str() {
+    let signer_id =
+        project_did_to_core_id(&signer_did).map_err(|e| http_signature_invalid(e.to_string()))?;
+    let expected_source = realm_route
+        .map(|route| route.authority.current_service_id().clone())
+        .unwrap_or(
+            project_did_to_core_id(&config.arkret.trusted_server_did)
+                .map_err(|e| http_signature_invalid(e.to_string()))?,
+        );
+    if signer_id != expected_source {
         return Err(http_signature_invalid(
             "HTTP signature keyid is not owned by the trusted server DID",
         ));
@@ -826,15 +858,9 @@ fn verify_http_applet_request(
             "Source-Service-ID is not a valid service id: {error}"
         ))
     })?;
-    let trusted_server_id =
-        project_did_to_core_id(&config.arkret.trusted_server_did).map_err(|error| {
-            http_signature_invalid(format!(
-                "configured trusted server DID cannot be projected: {error}"
-            ))
-        })?;
-    if origin != trusted_server_id {
+    if origin != expected_source {
         return Err(http_signature_invalid(
-            "HTTP signature source service id is not trusted",
+            "HTTP source differs from verified governance",
         ));
     }
 
@@ -862,20 +888,29 @@ fn verify_http_applet_request(
     // binding came from configuration at startup, so this is a pure in-memory
     // lookup, and a method with no acceptance fails closed instead of
     // triggering one.
-    let accepted = bindings
-        .source_service(&signer_did, &key_id_url, now)
-        .map_err(|err| match err {
-            BindingLookupError::Missing => {
-                http_signature_invalid(format!("verification method {key_id_url} is not trusted"))
-            }
-            BindingLookupError::NotUsable { .. } => http_signature_invalid(format!(
-                "source service verification method {key_id_url} is no longer accepted: {err}"
-            )),
-        })?;
-    let public_key_bytes = public_key_material_from_binding(&accepted, &key_id_url)
-        .map_err(|err| http_signature_invalid(err.to_string()))?
-        .ed25519_bytes()
-        .map_err(|err| http_signature_invalid(err.to_string()))?;
+    let public_key_bytes = if let Some(route) = realm_route {
+        route
+            .station_key(&key_id_url, now)
+            .map_err(|e| http_signature_invalid(e.to_string()))?
+            .ed25519_bytes()
+            .map_err(|e| http_signature_invalid(e.to_string()))?
+    } else {
+        let accepted = bindings
+            .source_service(&signer_did, &key_id_url, now)
+            .map_err(|err| match err {
+                BindingLookupError::Missing => http_signature_invalid(format!(
+                    "verification method {key_id_url} is not trusted"
+                )),
+                BindingLookupError::NotUsable { .. } => http_signature_invalid(format!(
+                    "source service verification method {key_id_url} is no longer accepted: {err}"
+                )),
+            })?;
+        let bytes = public_key_material_from_binding(&accepted, &key_id_url)
+            .map_err(|err| http_signature_invalid(err.to_string()))?
+            .ed25519_bytes()
+            .map_err(|err| http_signature_invalid(err.to_string()))?;
+        bytes
+    };
     let source_key_state_digest = arkret::canonical::canonical_digest(&public_key_bytes);
     let public_key = public_key_from_bytes(&public_key_bytes)
         .map_err(|err| http_signature_invalid(err.to_string()))?;

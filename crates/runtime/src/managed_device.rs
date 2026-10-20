@@ -8,8 +8,8 @@ use arkret::signatures::{
     Ed25519PayloadSigner, EventSigner as _, PublicKeyMaterial, SignEventOptions, sign_event,
 };
 use arkret::{
-    AccountId, ActorId, AppletManagedDeviceMetadata, AuthoredEvent, DeviceId, Did,
-    EventAdmissionSubmission, RealmCommit, ScopeRef,
+    ActorId, AppletManagedDeviceMetadata, AuthoredEvent, DeviceId, Did, EventAdmissionSubmission,
+    RealmCommit, ScopeRef,
 };
 use arkret_event_draft::TypedEventDraft;
 use arkret_models_collaboration::authority_commit::{
@@ -44,7 +44,7 @@ pub use worker::ManagedDeviceWorkers;
 #[serde(deny_unknown_fields)]
 pub struct InitialManagedDevicePlan {
     pub operation_id: String,
-    pub account_id: AccountId,
+    pub actor_id: ActorId,
     pub scopes: AppletManagedDeviceScopes,
     pub not_before: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
@@ -59,7 +59,7 @@ struct DeviceRecord {
     hpke_private_key: String,
     authorization: AuthoredEvent,
     controller_public_key: PublicKeyMaterial,
-    original_pcr_commit: RealmCommit,
+    creation_commit: RealmCommit,
     outcome: Option<AuthoritySubmitOutcome>,
     accepted_station_key: Option<PublicKeyMaterial>,
     #[serde(default)]
@@ -68,10 +68,12 @@ struct DeviceRecord {
 
 /// A real accepted Device. Current business permission remains Station-owned.
 pub struct ManagedDevice {
-    pub account_id: AccountId,
+    pub actor_id: ActorId,
     pub device_id: DeviceId,
     pub authorization_event_id: arkret::EventId,
     pub authorization_commit: RealmCommit,
+    pub governance_generation: u64,
+    pub governance_station: arkret::DidCoreId,
     client: Client,
     signer: Ed25519PayloadSigner,
     operation_id: String,
@@ -93,13 +95,20 @@ pub struct ManagedDeviceRuntime {
     store: Arc<dyn AuthoringStore>,
 }
 
+struct ManagedControlState {
+    control: arkret::RealmActorControlValue,
+    revision: arkret::CurrentRevision,
+    reference: arkret::CommittedEventRef,
+    generation: u64,
+}
+
 fn invalid(detail: impl Into<String>) -> BridgeError {
     BridgeError::Database(detail.into())
 }
 fn key(plan: &InitialManagedDevicePlan) -> Result<String> {
     Ok(format!(
         "managed-device/v1/{}",
-        canonical_sha256(&(&plan.account_id, &plan.operation_id))?
+        canonical_sha256(&(&plan.actor_id, &plan.operation_id))?
     ))
 }
 fn nonempty(raw: impl Into<String>) -> Result<arkret_wire::NonEmptyString> {
@@ -117,6 +126,72 @@ fn payload(record: &DeviceRecord) -> Result<DeviceAuthorizePayload> {
 }
 
 impl ManagedDeviceRuntime {
+    async fn control_state(&self, actor: &ActorId) -> Result<ManagedControlState> {
+        let id = actor
+            .as_realm_actor_id()
+            .ok_or_else(|| invalid("Realm actor required"))?;
+        let route = self.edge.realm_route(&id.realm_id).await?;
+        let control_selector = arkret::CurrentSelector::RealmActorControl {
+            actor_id: actor.clone(),
+        };
+        let manager_selector = arkret::CurrentSelector::RealmActorManager {
+            actor_id: actor.clone(),
+        };
+        let generation_selector = arkret::CurrentSelector::RealmActorDeviceGeneration {
+            actor_id: actor.clone(),
+        };
+        let request = arkret::RealmActorMaterialRequest::Current {
+            actor_id: actor.clone(),
+            request_nonce: crate::realm_governance::nonce()?,
+            selectors: vec![
+                control_selector.clone(),
+                manager_selector.clone(),
+                generation_selector.clone(),
+            ],
+        };
+        let verified = route
+            .material(
+                &request,
+                &ActorId::service(self.edge.service_actor_id().clone()),
+            )
+            .await?;
+        let arkret::RealmActorMaterialResult::Current { entries } = &verified.material().result
+        else {
+            return Err(invalid("current control query returned another purpose"));
+        };
+        let row = |target: &arkret::CurrentSelector| -> Result<(&arkret::CurrentRevision, &serde_json::Value)> {
+            entries.iter().find_map(|entry| match entry {
+                arkret::RealmActorMaterialCurrentEntry::Present { row: arkret::TypedCurrentRow::Value { selector, revision, value, .. } }
+                    if selector == target => Some((revision, value)),
+                _ => None,
+            }).ok_or_else(|| invalid("required current Realm control row missing"))
+        };
+        let (revision, control) = row(&control_selector)?;
+        let control: arkret::RealmActorControlValue = serde_json::from_value(control.clone())?;
+        let manager: arkret::RealmActorManagerValue =
+            serde_json::from_value(row(&manager_selector)?.1.clone())?;
+        let generation: arkret::RealmActorDeviceGenerationValue =
+            serde_json::from_value(row(&generation_selector)?.1.clone())?;
+        if manager.service_id != *self.edge.service_actor_id()
+            || generation.current_device_generation_ref == 0
+        {
+            return Err(invalid("Applet is no longer this Realm actor's manager"));
+        }
+        Ok(ManagedControlState {
+            reference: arkret::CommittedEventRef {
+                event_id: arkret::EventId::new(control.resolution.resolution_event_ref.clone())?,
+                commit_id: revision.commit_id.clone(),
+                stream_position: revision.stream_position,
+                stream_ref: arkret::CommitStreamRef::RealmControl {
+                    realm_id: id.realm_id.clone(),
+                },
+            },
+            control,
+            revision: revision.clone(),
+            generation: generation.current_device_generation_ref,
+        })
+    }
+
     pub fn new(edge: Arc<ArkretEdge>) -> Result<Self> {
         Ok(Self {
             authoring: Arc::new(ManagedActorAuthoringService::new(edge.clone())?),
@@ -179,7 +254,7 @@ impl ManagedDeviceRuntime {
             .collect::<Vec<_>>()
             .await;
         devices.sort_by(|left, right| {
-            (&left.account_id, &left.device_id).cmp(&(&right.account_id, &right.device_id))
+            (&left.actor_id, &left.device_id).cmp(&(&right.actor_id, &right.device_id))
         });
         Ok(devices)
     }
@@ -190,34 +265,18 @@ impl ManagedDeviceRuntime {
         actions: &[arkret_wire::CapabilityActionId],
         lifetime: chrono::TimeDelta,
     ) -> Result<ManagedDevice> {
-        let account_id = actor
-            .as_account_id()
-            .ok_or_else(|| invalid("managed creation has no full Account"))?
-            .clone();
+        if actor.as_realm_actor_id().is_none() {
+            return Err(invalid("managed creation requires a Realm actor"));
+        }
+        let actor_id = actor.clone();
         let edge = self.edge.clone();
-        let actor = actor.clone();
-        let original = run_blocking(move || edge.retained_managed_actor(&actor)).await?;
-        let request = match &original.authoring_context.committed_request {
-            arkret::AppletManagedActorCommittedRequest::Bot(bot) => &bot.authoring_request,
-            arkret::AppletManagedActorCommittedRequest::Ghost(ghost) => &ghost.authoring_request,
-        };
-        let scope = match &request.basis {
-            arkret::AppletManagedActorAuthoringBasis::ProvisionBot(basis) => {
-                basis.effective_scope.clone()
-            }
-            arkret::AppletManagedActorAuthoringBasis::ProvisionGhost(basis) => {
-                basis.effective_scope.clone()
-            }
-        };
-        let operation_id = format!(
-            "initial-device/{}",
-            original
-                .authoring_context
-                .principal_control_commit
-                .event_ref
-        );
+        let local_actor = actor.clone();
+        let original = run_blocking(move || edge.retained_managed_actor(&local_actor)).await?;
+        let creation = crate::managed_authoring::creation_event(&original)?;
+        let scope = crate::managed_authoring::creation_payload(creation)?.creation_scope;
+        let operation_id = format!("initial-device/{}", creation.event_id);
         if let Some(device) = self
-            .recover_initial_device(&account_id, &operation_id, &scope)
+            .recover_initial_device(&actor_id, &operation_id, &scope)
             .await?
         {
             return Ok(device);
@@ -235,7 +294,7 @@ impl ManagedDeviceRuntime {
         self.authorize_initial_device(
             InitialManagedDevicePlan {
                 operation_id,
-                account_id,
+                actor_id,
                 scopes,
                 not_before: now,
                 expires_at,
@@ -249,19 +308,19 @@ impl ManagedDeviceRuntime {
     /// not recompute a new expiry or scope while recovering the same operation.
     pub async fn recover_initial_device(
         &self,
-        account_id: &AccountId,
+        actor_id: &ActorId,
         operation_id: &str,
         effective_scope: &ScopeRef,
     ) -> Result<Option<ManagedDevice>> {
         let operation_key = format!(
             "managed-device/v1/{}",
-            canonical_sha256(&(account_id, operation_id))?
+            canonical_sha256(&(actor_id, operation_id))?
         );
         let Some(raw) = self.read(&operation_key).await? else {
             return Ok(None);
         };
         let record: DeviceRecord = self.authoring.decrypt_key_material(&operation_key, &raw)?;
-        if record.plan.account_id != *account_id || record.plan.operation_id != operation_id {
+        if record.plan.actor_id != *actor_id || record.plan.operation_id != operation_id {
             return Err(invalid(
                 "recovered Device operation belongs to another Account or operation",
             ));
@@ -324,25 +383,29 @@ impl ManagedDeviceRuntime {
         let Some(DeviceAuthorizationScopes::AppletManaged(scopes)) = &p.scopes else {
             return Err(invalid("managed Device lost its exact scope/action pairs"));
         };
-        if record.authorization.actor_id != ActorId::account(record.plan.account_id.clone())
+        if record.authorization.actor_id != record.plan.actor_id.clone()
             || arkret::project_did_to_core_id(&record.principal_did)?
-                != record.plan.account_id.principal_id
-            || record.plan.account_id.station_id
-                != arkret::project_did_to_core_id(&self.edge.config().arkret.trusted_server_did)?
+                != *record.plan.actor_id.signing_principal_id()
             || p.device_public_key_did.as_str() != device_did
             || p.hpke_key.as_str() != arkret::identity_root::x25519_public_multikey(&hpke_public)
             || p.authorization_binding_kind
-                != DeviceAuthorizationBindingKind::AppletManagedDelegation
-            || !matches!(&p.authorized_by, DeviceOrPrincipalRef::Principal(id) if id == &record.plan.account_id.principal_id)
+                != DeviceAuthorizationBindingKind::RealmManagedDelegation
+            || !matches!(&p.authorized_by, DeviceOrPrincipalRef::Principal(id) if id == &*record.plan.actor_id.signing_principal_id())
             || p.device_key_algorithm.as_str() != "Ed25519"
             || p.recovery_session_id.is_some()
             || p.pairing_challenge_transcript_digest.is_some()
-            || p.authorized_generation_ref != 1
+            || p.authorized_generation_ref == 0
+            || p.expected_control_revision.is_none()
+            || p.expected_device_revision != Some(None)
             || p.applet_id.as_ref().map(|id| id.as_str()) != Some(self.edge.applet_id())
             || canonical_json_bytes(scopes)? != canonical_json_bytes(&record.plan.scopes)?
             || p.not_before != record.plan.not_before
             || p.expires_at != Some(Some(record.plan.expires_at))
-            || record.authorization.realm_id != record.original_pcr_commit.realm_id
+            || record.authorization.realm_id != record.creation_commit.realm_id
+            || record.authorization.scope_ref
+                != (ScopeRef::RealmControl {
+                    realm_id: record.creation_commit.realm_id.clone(),
+                })
             || record.authorization.kind != arkret::EventKind::DeviceAuthorize
             || record.authorization.executed_by.is_some()
             || record
@@ -356,7 +419,7 @@ impl ManagedDeviceRuntime {
                 "managed Device private custody differs from its original authorization",
             ));
         }
-        let pbytes = p.device_possession_signature_input(&record.plan.account_id)?;
+        let pbytes = p.realm_device_possession_signature_input(&record.plan.actor_id)?;
         let SignatureMaterial::NonEmptyString(signature) = &p.device_signature else {
             return Err(invalid(
                 "Device possession signature is not a raw Ed25519 signature",
@@ -399,18 +462,12 @@ impl ManagedDeviceRuntime {
         station_key: &PublicKeyMaterial,
     ) -> Result<()> {
         commit.validate_content_address()?;
-        let station_did =
-            arkret::verification_method_did(commit.signature.verification_method.as_str())
-                .map_err(|e| invalid(e.to_string()))?;
-        if arkret::project_did_to_core_id(&station_did)? != record.plan.account_id.station_id
-            || commit.event_ref != *record.authorization.event_id()
-            || commit.stream_ref != record.original_pcr_commit.stream_ref
-            || commit.stream_position <= record.original_pcr_commit.stream_position
-            || commit.governance_generation != record.original_pcr_commit.governance_generation
-            || commit.authority_ref != record.original_pcr_commit.authority_ref
+        if commit.event_ref != *record.authorization.event_id()
+            || commit.stream_ref != record.creation_commit.stream_ref
+            || commit.stream_position <= record.creation_commit.stream_position
         {
             return Err(invalid(
-                "managed Device acceptance differs from its original PCR authority",
+                "managed Device acceptance differs from its original Realm control stream",
             ));
         }
         arkret::signatures::detached_object::verify_detached_object_signature(
@@ -438,10 +495,20 @@ impl ManagedDeviceRuntime {
         }
         let controller = self
             .authoring
-            .original_managed_controller(&plan.account_id)
+            .original_managed_controller(&plan.actor_id)
             .await?;
-        if controller.account_id != plan.account_id {
+        if controller.actor_id != plan.actor_id {
             return Err(invalid("controller returned another managed Account"));
+        }
+        let control = self.control_state(&plan.actor_id).await?;
+        if control.control.control_method_kid.as_str() != controller.signer.verification_method()
+            || control.control.resolution.did
+                != arkret::verification_method_did(controller.signer.verification_method())
+                    .map_err(|e| invalid(e.to_string()))?
+        {
+            return Err(invalid(
+                "local controller differs from current Realm control",
+            ));
         }
         let mut signing_seed = [0u8; 32];
         getrandom::fill(&mut signing_seed).map_err(|e| BridgeError::Runtime(e.to_string()))?;
@@ -472,14 +539,18 @@ impl ManagedDeviceRuntime {
                 arkret_wire::HPKE_SUITE_X25519_CHACHA20POLY1305_V1,
             )?],
             device_key_algorithm: nonempty("Ed25519")?,
-            authorized_by: DeviceOrPrincipalRef::Principal(plan.account_id.principal_id.clone()),
+            authorized_by: DeviceOrPrincipalRef::Principal(
+                plan.actor_id.signing_principal_id().clone(),
+            ),
             scopes: Some(DeviceAuthorizationScopes::AppletManaged(
                 plan.scopes.clone(),
             )),
             not_before: plan.not_before,
             expires_at: Some(Some(plan.expires_at)),
-            authorization_binding_kind: DeviceAuthorizationBindingKind::AppletManagedDelegation,
-            authorized_generation_ref: 1,
+            authorization_binding_kind: DeviceAuthorizationBindingKind::RealmManagedDelegation,
+            authorized_generation_ref: control.generation,
+            expected_control_revision: Some(control.revision.clone()),
+            expected_device_revision: Some(None),
             device_signature: SignatureMaterial::NonEmptyString(nonempty("AA")?),
             recovery_session_id: None,
             pairing_challenge_transcript_digest: None,
@@ -488,14 +559,19 @@ impl ManagedDeviceRuntime {
         p.device_signature =
             SignatureMaterial::NonEmptyString(nonempty(arkret::base64url_encode(
                 device_key
-                    .sign(&p.device_possession_signature_input(&plan.account_id)?)
+                    .sign(&p.realm_device_possession_signature_input(&plan.actor_id)?)
                     .to_bytes(),
             ))?);
         let mut authorization = TypedEventDraft::<event_spec::DeviceAuthorize>::new(
-            ScopeRef::Realm {
-                realm_id: controller.principal_control_realm,
+            ScopeRef::RealmControl {
+                realm_id: plan
+                    .actor_id
+                    .as_realm_actor_id()
+                    .ok_or_else(|| invalid("Realm actor required"))?
+                    .realm_id
+                    .clone(),
             },
-            ActorId::account(plan.account_id.clone()),
+            plan.actor_id.clone(),
             p,
         )
         .map_err(|e| invalid(e.to_string()))?
@@ -518,11 +594,10 @@ impl ManagedDeviceRuntime {
             controller_public_key: PublicKeyMaterial::Ed25519Raw {
                 bytes: controller.signer.verifying_key().to_bytes().to_vec(),
             },
-            original_pcr_commit: controller
-                .original
-                .authoring_context
-                .principal_control_commit
-                .clone(),
+            creation_commit: match &controller.original.authoring_context.material.result {
+                arkret::RealmActorMaterialResult::Event { commit, .. } => commit.clone(),
+                _ => return Err(invalid("creation Commit missing")),
+            },
             outcome: None,
             accepted_station_key: None,
             mls: mls::ManagedMlsState::default(),
@@ -563,38 +638,22 @@ impl ManagedDeviceRuntime {
         }
         let controller = self
             .authoring
-            .original_managed_controller(&plan.account_id)
+            .original_managed_controller(&plan.actor_id)
             .await?;
         let operation_key = key(&plan)?;
         let previous = self.prepare(&plan, &operation_key).await?;
         let mut record = self.decode(&operation_key, &previous, &plan)?;
-        if record.original_pcr_commit
-            != controller
-                .original
-                .authoring_context
-                .principal_control_commit
-            || record
-                .controller_public_key
-                .ed25519_bytes()
-                .map_err(|e| invalid(e.to_string()))?
-                != controller.signer.verifying_key().to_bytes()
-            || record
-                .authorization
-                .producer_proof
-                .as_ref()
-                .map(|p| p.verification_method.as_str())
-                != Some(controller.signer.verification_method())
-        {
-            return Err(invalid(
-                "Device custody differs from the retained managed creation",
-            ));
+        let control = self.control_state(&plan.actor_id).await?;
+        let auth_payload = payload(&record)?;
+        if control.generation != auth_payload.authorized_generation_ref {
+            return Err(invalid("managed Device generation has been retired"));
         }
         if record.outcome.is_none() {
             let request = SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(
                 record.authorization.event().clone(),
             ));
             let producer = arkret::ProducerVerificationContext {
-                actor: ActorId::account(plan.account_id.clone()),
+                actor: plan.actor_id.clone(),
                 verification_method: arkret::DidUrl::new(
                     controller.signer.verification_method().to_owned(),
                 )
@@ -608,30 +667,64 @@ impl ManagedDeviceRuntime {
                 .map_err(|e| invalid(e.to_string()))?;
             let options = arkret::ClientRequestOptions::new()
                 .idempotency_key(record.authorization.event_id().as_str());
-            let answer = self
-                .edge
-                .client()
-                .submit_to_realm_authority(&request, &options)
-                .await?;
+            if auth_payload.expected_control_revision.as_ref() != Some(&control.revision)
+                || control.control.control_method_kid.as_str()
+                    != controller.signer.verification_method()
+            {
+                return Err(invalid(
+                    "pending authorization cannot replace its original control cut",
+                ));
+            }
+            let realm = plan
+                .actor_id
+                .as_realm_actor_id()
+                .ok_or_else(|| invalid("Realm actor required"))?
+                .realm_id
+                .clone();
+            let route = self.edge.realm_route(&realm).await?;
+            let client = route.client.clone().with_realm_actor_control_http_signer(
+                arkret::RealmActorControlHttpMetadata {
+                    actor_id: plan.actor_id.clone(),
+                    control_ref: control.reference.clone(),
+                    nonce: crate::realm_governance::nonce()?,
+                },
+                route.authority.current_service_id().clone(),
+                arkret::http_client::HttpMessageSigner::new(
+                    controller.signer.verification_method().to_owned(),
+                    controller.signing_key.clone(),
+                ),
+            )?;
+            let answer = client.submit_to_realm_authority(&request, &options).await?;
             let SelfAuthoritySubmitOutcome::Ordinary(outcome) = answer else {
                 return Err(invalid("Device authorize returned an aggregate outcome"));
             };
             match &outcome {
                 AuthoritySubmitOutcome::Accepted { commit, .. } => {
-                    let trusted = self
-                        .edge
-                        .config()
-                        .arkret
-                        .trusted_verification_methods
-                        .iter()
-                        .find(|key| {
-                            key.verification_method == commit.signature.verification_method.as_str()
-                        })
-                        .ok_or_else(|| {
-                            invalid("Device acceptance has no trusted own-Station signer")
-                        })?;
-                    self.verify_commit(&record, commit, &trusted.public_key)?;
-                    record.accepted_station_key = Some(trusted.public_key.clone());
+                    let keys =
+                        garth::historical_station_keys::fetch_historical_station_keys_for_commits(
+                            &route.client,
+                            &route.bundle,
+                            &[commit],
+                        )
+                        .await
+                        .map_err(|e| invalid(e.to_string()))?;
+                    route
+                        .authority
+                        .verify_commit(commit, &keys)
+                        .map_err(|e| invalid(e.to_string()))?;
+                    let issuer = route
+                        .authority
+                        .authority_service_at(commit.governance_generation)
+                        .ok_or_else(|| invalid("Device Commit has no legal governance tenure"))?;
+                    let key = route
+                        .historical_station_key(
+                            issuer,
+                            &commit.signature.verification_method,
+                            commit.committed_at,
+                        )
+                        .await?;
+                    self.verify_commit(&record, commit, &key)?;
+                    record.accepted_station_key = Some(key);
                 }
                 AuthoritySubmitOutcome::Rejected {
                     status: AuthorityRejectionStatus::RetryableUnavailable,
@@ -684,7 +777,7 @@ impl ManagedDeviceRuntime {
         let mut nonce = [0u8; 16];
         getrandom::fill(&mut nonce).map_err(|e| BridgeError::Runtime(e.to_string()))?;
         let metadata = AppletManagedDeviceMetadata {
-            account_id: plan.account_id.clone(),
+            actor_id: plan.actor_id.clone(),
             device_id: p.device_id.clone(),
             authorization_event_id: record.authorization.event_id().clone(),
             applet_id: p
@@ -693,18 +786,39 @@ impl ManagedDeviceRuntime {
             effective_scope: effective_scope.clone(),
             nonce: arkret::base64url_encode(nonce),
         };
-        let client = self
-            .edge
-            .managed_device_client(metadata, device_key.clone())?;
+        let realm = plan
+            .actor_id
+            .as_realm_actor_id()
+            .ok_or_else(|| invalid("Realm actor required"))?
+            .realm_id
+            .clone();
+        let route = self.edge.realm_route(&realm).await?;
+        let key_method = format!(
+            "did:key:{}",
+            arkret::ed25519_pubkey_to_did_key_multibase(device_key.verifying_key().as_bytes())
+        );
+        let fragment = key_method
+            .strip_prefix("did:key:")
+            .ok_or_else(|| invalid("Device key fingerprint missing"))?;
+        let client = route.client.clone().with_managed_device_http_signer(
+            metadata,
+            route.authority.current_service_id().clone(),
+            arkret::http_client::HttpMessageSigner::new(
+                format!("{key_method}#{fragment}"),
+                device_key.clone(),
+            ),
+        )?;
         let method = arkret::DidUrl::new(format!("{}#{}", record.principal_did, p.device_id))
             .map_err(invalid)?;
         Ok(ManagedDevice {
             operation_id: plan.operation_id.clone(),
             effective_scope: effective_scope.clone(),
-            account_id: plan.account_id,
+            actor_id: plan.actor_id,
             device_id: p.device_id,
             authorization_event_id: record.authorization.event_id().clone(),
             authorization_commit: commit,
+            governance_generation: route.authority.current_generation(),
+            governance_station: route.authority.current_service_id().clone(),
             signer: Ed25519PayloadSigner::new(device_key, record.principal_did, method),
             client,
         })

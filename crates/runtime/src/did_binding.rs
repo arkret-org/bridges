@@ -1,65 +1,11 @@
-//! Accepted DID bindings for the inbound applet transaction path
-//! (`identity/did-usage-and-verification.md` §3 / §4 / §5 / §6).
+//! Operator-pinned Service bindings for startup and management discovery.
 //!
-//! # Why this module holds no resolver
-//!
-//! A bridge has exactly one DID authority need: authenticating the RFC 9421
-//! HTTP Message Signature of the Arkret node that pushes to it. That key is an
-//! operator-configured trust anchor, so the acceptance is made from
-//! configuration at startup and costs zero network calls — forever.
-//!
-//! Inbound Event `proofs[]` are deliberately **not** authenticated here. §4's
-//! exclusion list already says an ordinary or high-risk Event write does not
-//! create a DID authority call, and that a device key MUST come from an
-//! accepted PCR authorization chain. A bridge structurally cannot reach that
-//! chain: `applet-integration.md` §12 fixes the node → applet anchoring
-//! material as the source service DID key-state evidence, and
-//! `AppletTransactionRequestBody` carries no PCR material at all. Resolving an
-//! Event proof's `verification_method` here would therefore only establish
-//! "this key appears in some DID document" — far weaker than admission — while
-//! reading to a maintainer as if the signer had been independently verified.
-//! The signer authority of an inbound Event is carried by the source Arkret
-//! node that already completed admission and vouches for the push with its
-//! HTTP signature.
-//!
-//! So there is no `Principal`-purpose acceptance and no resolver anywhere on
-//! this path: [`DidAuthority`] owns a binding store and nothing else, and a
-//! missing or unusable `Service` binding fails closed rather than triggering a
-//! lookup.
-//!
-//! | material | purpose | DID | source of the acceptance |
-//! | --- | --- | --- | --- |
-//! | RFC 9421 HTTP signature | [`DidBindingPurpose::Service`] | `arkret.trusted_server_did` | [`DidAuthority::accept_configured_source_service_key`] (config trust anchor, zero network) |
-//!
-//! # Version / epoch dimension
-//!
-//! No binding built here pins a `history_head` or a `version_id`, so every one
-//! of them carries the per-pin `limited_trust` record §5.5 demands. No Applet
-//! registration epoch is reachable from a bridge: `registration_epoch`
-//! (`applet-schema.md` §1.0.1) is computed over an `AppletPackage` transcript
-//! held by the Arkret node that installed the applet, a bridge never builds,
-//! receives or stores an `AppletPackage`, `AppletTransactionRequestBody`
-//! carries no epoch, and there is no config field for one. For the node →
-//! applet direction `applet-integration.md` §12 names the anchor material as
-//! source-service DID key-state evidence for the Arkret-node direction, which is
-//! exactly `VerifiedAppletHttpRequest::source_key_state_digest`, already
-//! recorded in the idempotency anchor. That digest is a digest of the source
-//! service's published key material, and the binding pins that same material
-//! through `document_digest`, so the acceptance still changes exactly when the
-//! source key state does. See
-//! [`DidAuthority::accept_configured_source_service_key`] for why the digest is
-//! no longer folded into the evidence itself.
-//!
-//! A config-pinned anchor publishes no method proofs, so the §5.2 evidence
-//! receipt's `method_proofs` is empty for every acceptance made here. That is
-//! the normative degenerate form, and the pins are recorded as
-//! `method_unsupported` rather than silently omitted. Rotation is handled by an
-//! operator config change and by explicit [`DidAuthority::invalidate_did`]
-//! (§5.6: rotation, deactivation, witness fork, or explicit revocation must
-//! invalidate affected bindings; the `for_did` coarse sweep is the safety floor that
-//! section accepts until evidence dependency records land). The runtime trigger
-//! is the operator: `POST /admin/did-bindings/invalidate` on the loopback admin
-//! plane (`web.rs`) reaches [`DidAuthority::invalidate_did`] directly.
+//! Realm creation completions use the async verified governance adapter in
+//! `realm_governance`: a locally frozen creation selects the Realm, then its
+//! authenticated handoff chain selects the current Station. The bindings in
+//! this module alone never authorize a Realm creation completion or a Device.
+//! Ordinary signature lookup remains resolver-free. No Event signer obtains
+//! authority merely because its key appears in a DID document.
 
 use std::sync::Arc;
 
