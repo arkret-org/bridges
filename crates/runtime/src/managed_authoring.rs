@@ -17,7 +17,8 @@ pub struct PreparedManagedActor {
     pub create_event: Event,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum PreparedGhost {
     Create(PreparedManagedActor),
     Reuse {
@@ -278,6 +279,22 @@ impl AuthoringJournal {
                 "creation preparation contended; retry exact command",
             ))
         }
+    }
+
+    pub(crate) fn validate_prepared_creation(&self, command: &PreparedManagedActor) -> Result<()> {
+        let raw = self
+            .store
+            .load(&preparation_key(&command.create_event.event_id))?
+            .ok_or_else(|| invalid("creation has no locally frozen custody"))?;
+        let prepared: Preparation = serde_json::from_str(&raw)?;
+        if canonical_json_bytes(&prepared.command)? != canonical_json_bytes(command)? {
+            return Err(invalid("creation differs from frozen custody"));
+        }
+        verify_creation_service(
+            &command.create_event,
+            &prepared.service_verification_method,
+            &prepared.service_public_key,
+        )
     }
 
     fn preparation(&self, body: &AppletAuthoringTransactionRequestBody) -> Result<Preparation> {

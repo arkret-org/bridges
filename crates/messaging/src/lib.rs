@@ -44,7 +44,7 @@ use ghost::{
     bridge_tenant, create_portal_strand, external_id_object_ref_digest, external_ref_for_delete,
     external_ref_for_message, find_existing_portal_strand, message_mapping_channel_key,
     normalized_external_id, portal_location_ref, provision_ghost_actor,
-    require_ghost_provision_provider, require_nonempty_ref,
+    require_ghost_provision_provider,
 };
 pub use media::InboundMediaAuthorization;
 use media::{
@@ -209,6 +209,7 @@ pub struct MessageContext {
     token_store: Arc<dyn TokenStore>,
     managed_actor_authoring: Arc<ManagedActorAuthoringService>,
     ghost_provision_provider: Arc<dyn GhostProvisionRequestProvider>,
+    managed_devices: Arc<runtime::managed_device::ManagedDeviceRuntime>,
     pub http: reqwest::Client,
 }
 
@@ -222,6 +223,9 @@ impl MessageContext {
             Arc::new(ManagedActorAuthoringService::new(inner.edge.clone())?);
         let ghost_provision_provider: Arc<dyn GhostProvisionRequestProvider> =
             managed_actor_authoring.clone();
+        let managed_devices = Arc::new(runtime::managed_device::ManagedDeviceRuntime::new(
+            inner.edge.clone(),
+        )?);
         Ok(Self {
             inner,
             store,
@@ -229,6 +233,7 @@ impl MessageContext {
             token_store,
             managed_actor_authoring,
             ghost_provision_provider,
+            managed_devices,
             http,
         })
     }
@@ -634,6 +639,7 @@ impl MessageContext {
             .queue
             .run(&mapping_channel_key, || {
                 let edge = self.inner.edge.clone();
+                let managed_devices = self.managed_devices.clone();
                 let store = self.store.clone();
                 let config = self.inner.config.clone();
                 let mapping_channel_key = mapping_channel_key.clone();
@@ -660,6 +666,8 @@ impl MessageContext {
                     let mapping = match store
                         .clone()
                         .ghost_actor_for_app_user_async(
+                            arkret::AppletId::new(config.arkret.applet_id.clone())?,
+                            arkret::RealmId::new(realm_for_submit.clone())?,
                             protocol.clone(),
                             tenant.clone(),
                             external_actor_id.clone(),
@@ -682,32 +690,25 @@ impl MessageContext {
                                 &realm_for_submit,
                             )
                             .await?;
-                            // The DB mapping stores the resolvable Ghost DID:
-                            // outbound submission signs with it. The server's
-                            // stable core id was checked against this exact
-                            // DID during provisioning.
-                            let display_name = provisioned
-                                .outcome
-                                .display_name
-                                .as_deref()
-                                .or(Some(external_actor_id.as_str()));
                             store
                                 .clone()
                                 .upsert_user_async(
+                                    arkret::AppletId::new(config.arkret.applet_id.clone())?,
+                                    arkret::RealmId::new(realm_for_submit.clone())?,
                                     protocol.clone(),
                                     tenant.clone(),
                                     external_actor_id.clone(),
-                                    provisioned.outcome.ghost_actor_id.clone(),
+                                    provisioned.actor_id.clone(),
                                     provisioned.did.clone(),
-                                    provisioned.outcome.profile_event_ref.to_string(),
-                                    provisioned.outcome.accountability_grant_ref.to_string(),
-                                    provisioned.outcome.authorization_ref.to_string(),
-                                    display_name.map(str::to_owned),
+                                    provisioned.creation_ref.clone(),
+                                    Some(external_actor_id.clone()),
                                 )
                                 .await?;
                             store
                                 .clone()
                                 .ghost_actor_for_app_user_async(
+                                    arkret::AppletId::new(config.arkret.applet_id.clone())?,
+                                    arkret::RealmId::new(realm_for_submit.clone())?,
                                     protocol.clone(),
                                     tenant.clone(),
                                     external_actor_id.clone(),
@@ -720,27 +721,18 @@ impl MessageContext {
                                 })?
                         }
                     };
-                    require_nonempty_ref("profile_event_ref", &mapping.profile_event_ref)?;
-                    require_nonempty_ref(
-                        "accountability_grant_ref",
-                        &mapping.accountability_grant_ref,
-                    )?;
-                    require_nonempty_ref("authorization_ref", &mapping.authorization_ref)?;
-                    let actor = mapping.arkret_actor_id.as_account_id().ok_or_else(|| {
-                        BridgeError::Database(
-                            "stored Ghost identity is not a complete Account".into(),
-                        )
-                    })?;
+                    let actor = &mapping.arkret_actor_id;
                     let payload =
                         redaction_payload_for_app_delete(&target_event_id, delete.reason)?
                             .expect("delete reason was checked before queue submission");
-                    let event_id = edge
-                        .submit_redaction_with_external_ref_as(
+                    let event_id = managed_devices
+                        .submit_redaction(
                             actor,
-                            &realm_for_submit,
+                            &arkret::ScopeRef::Realm {
+                                realm_id: arkret::RealmId::new(realm_for_submit.clone())?,
+                            },
                             payload,
                             external_ref_for_delete(&config, &delete),
-                            &mapping.authorization_ref,
                         )
                         .await?;
                     Ok(AppDeleteOutcome::Submitted {
@@ -801,6 +793,7 @@ impl MessageContext {
             .queue
             .run(&mapping_channel_key, || {
                 let edge = self.inner.edge.clone();
+                let managed_devices = self.managed_devices.clone();
                 let store = self.store.clone();
                 let config = self.inner.config.clone();
                 let external_ref = external_ref_for_message(&config, msg);
@@ -827,6 +820,8 @@ impl MessageContext {
                     let mapping = match store
                         .clone()
                         .ghost_actor_for_app_user_async(
+                            arkret::AppletId::new(config.arkret.applet_id.clone())?,
+                            arkret::RealmId::new(realm_for_submit.clone())?,
                             protocol.clone(),
                             tenant.clone(),
                             external_user_id.clone(),
@@ -849,32 +844,25 @@ impl MessageContext {
                                 &realm_for_submit,
                             )
                             .await?;
-                            // The DB mapping stores the resolvable Ghost DID:
-                            // outbound submission signs with it. The server's
-                            // stable core id was checked against this exact
-                            // DID during provisioning.
-                            let display_name = provisioned
-                                .outcome
-                                .display_name
-                                .as_deref()
-                                .or(Some(external_user_id.as_str()));
                             store
                                 .clone()
                                 .upsert_user_async(
+                                    arkret::AppletId::new(config.arkret.applet_id.clone())?,
+                                    arkret::RealmId::new(realm_for_submit.clone())?,
                                     protocol.clone(),
                                     tenant.clone(),
                                     external_user_id.clone(),
-                                    provisioned.outcome.ghost_actor_id.clone(),
+                                    provisioned.actor_id.clone(),
                                     provisioned.did.clone(),
-                                    provisioned.outcome.profile_event_ref.to_string(),
-                                    provisioned.outcome.accountability_grant_ref.to_string(),
-                                    provisioned.outcome.authorization_ref.to_string(),
-                                    display_name.map(str::to_owned),
+                                    provisioned.creation_ref.clone(),
+                                    Some(external_user_id.clone()),
                                 )
                                 .await?;
                             store
                                 .clone()
                                 .ghost_actor_for_app_user_async(
+                                    arkret::AppletId::new(config.arkret.applet_id.clone())?,
+                                    arkret::RealmId::new(realm_for_submit.clone())?,
                                     protocol.clone(),
                                     tenant.clone(),
                                     external_user_id.clone(),
@@ -887,24 +875,15 @@ impl MessageContext {
                                 })?
                         }
                     };
-                    require_nonempty_ref("profile_event_ref", &mapping.profile_event_ref)?;
-                    require_nonempty_ref(
-                        "accountability_grant_ref",
-                        &mapping.accountability_grant_ref,
-                    )?;
-                    require_nonempty_ref("authorization_ref", &mapping.authorization_ref)?;
-                    let actor = mapping.arkret_actor_id.as_account_id().ok_or_else(|| {
-                        BridgeError::Database(
-                            "stored Ghost identity is not a complete Account".into(),
-                        )
-                    })?;
-                    let event_id = edge
-                        .submit_with_external_ref_as::<arkret_wire::event_spec::MessageCreate, _>(
+                    let actor = &mapping.arkret_actor_id;
+                    let event_id = managed_devices
+                        .submit_message(
                             actor,
-                            &realm_for_submit,
+                            &arkret::ScopeRef::Realm {
+                                realm_id: arkret::RealmId::new(realm_for_submit.clone())?,
+                            },
                             payload,
                             external_ref,
-                            &mapping.authorization_ref,
                         )
                         .await?;
                     store
@@ -1129,38 +1108,12 @@ impl<M: MessageBridge> MessageAdapter<M> {
     }
 }
 
-async fn sender_display_for_event(
-    store: Arc<MessageStore>,
-    actor_id: arkret::ActorId,
-    executed_by: Option<arkret::ActorId>,
-) -> Result<String> {
-    let actor_id_text = actor_id.to_string();
-    let mut display = match store.user_by_actor_async(actor_id.clone()).await? {
-        Some(row) => row
-            .display_name
-            .filter(|name| !name.trim().is_empty())
-            .unwrap_or(row.external_user_id),
-        None => actor_id_text,
-    };
-    if let Some(executed_by) = executed_by
-        && executed_by != actor_id
-    {
-        display = format!("{display} via {executed_by}");
-    }
-    Ok(display)
-}
-
-#[async_trait]
-impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
-    fn name(&self) -> &str {
-        self.user.name()
-    }
-
-    async fn run(self: Arc<Self>, _ctx: Arc<BridgeContext>) -> Result<()> {
-        self.user.clone().run(self.ctx.clone()).await
-    }
-
-    async fn on_arkret_event(&self, _ctx: Arc<BridgeContext>, event: Event) -> Result<()> {
+impl<M: MessageBridge> MessageAdapter<M> {
+    async fn handle_content(
+        &self,
+        event: &Event,
+        plaintext: Option<&arkret::MessageCreatePayload>,
+    ) -> Result<()> {
         // Deletion forwarding (arkret -> app): a `ak.message.redact` that targets
         // an event we previously bridged is mapped to an app-side deletion via the
         // adapter's `redact_in_app`. Honors the `disable_deletion_forwarding`
@@ -1203,11 +1156,9 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
         }
         // Loop prevention: skip events this bridge itself submitted (app ->
         // arkret), which the server echoes back. Only signature-covered fields
-        // are consulted: every delegated ghost event this bridge submits carries
-        // `executed_by = service_id` plus signed Applet provenance, and service
-        // actor events are authored by the service DID itself.
-        // Both checks are independent of local DB state, so a server push
-        // racing ahead of our own mapping write cannot bypass them.
+        // are consulted for Service events. Native Device publications are
+        // recognized from their exact frozen local originals before decryption
+        // by the native stream consumer, including mapping-write races.
         let service_actor =
             arkret::ActorId::service(self.ctx.core().edge.service_actor_id().clone());
         if event.executed_by.as_ref() == Some(&service_actor) {
@@ -1248,9 +1199,12 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
             Some(strand_id) => strand_id,
             None => self.ctx.ensure_portal_strand(&channel, &realm_id).await?,
         };
-        let payload = event
-            .as_message_create()
-            .map_err(|error| BridgeError::Arkret(error.to_string()))?;
+        let payload = match plaintext {
+            Some(payload) => payload.clone(),
+            None => event
+                .as_message_create()
+                .map_err(|error| BridgeError::Arkret(error.to_string()))?,
+        };
         if extract_strand_id(&payload) != portal_strand.as_str() {
             tracing::debug!(
                 realm = %realm_id,
@@ -1331,6 +1285,51 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
         }
         Ok(())
     }
+}
+
+async fn sender_display_for_event(
+    store: Arc<MessageStore>,
+    actor_id: arkret::ActorId,
+    executed_by: Option<arkret::ActorId>,
+) -> Result<String> {
+    let actor_id_text = actor_id.to_string();
+    let mut display = match store.user_by_actor_async(actor_id.clone()).await? {
+        Some(row) => row
+            .display_name
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or(row.external_user_id),
+        None => actor_id_text,
+    };
+    if let Some(executed_by) = executed_by
+        && executed_by != actor_id
+    {
+        display = format!("{display} via {executed_by}");
+    }
+    Ok(display)
+}
+
+#[async_trait]
+impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
+    fn name(&self) -> &str {
+        self.user.name()
+    }
+
+    async fn run(self: Arc<Self>, _ctx: Arc<BridgeContext>) -> Result<()> {
+        self.user.clone().run(self.ctx.clone()).await
+    }
+
+    async fn on_arkret_event(&self, _ctx: Arc<BridgeContext>, event: Event) -> Result<()> {
+        self.handle_content(&event, None).await
+    }
+
+    async fn on_native_content(
+        &self,
+        _ctx: Arc<BridgeContext>,
+        content: &runtime::managed_device::NativeContent,
+    ) -> Result<()> {
+        self.handle_content(&content.original().event, content.message())
+            .await
+    }
 
     async fn on_signal(&self, _ctx: Arc<BridgeContext>, signal: SignalEnvelope) -> Result<()> {
         self.user.on_signal(self.ctx.clone(), signal).await
@@ -1369,7 +1368,6 @@ where
         // Install DB-backed actor/realm resolution before the web service starts.
         core_ctx.set_resolver(Arc::new(MessageResolver {
             store: store.clone(),
-            station_id: arkret::project_did_to_core_id(&core_ctx.config.arkret.trusted_server_did)?,
         }));
         // Declare the inbound event kinds this messaging bridge consumes so the
         // applet handler rejects anything else as `capability_denied`

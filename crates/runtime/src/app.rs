@@ -175,6 +175,19 @@ pub trait BridgeApp: Send + Sync + 'static {
     /// what (if anything) to do with each event kind.
     async fn on_arkret_event(&self, ctx: Arc<BridgeContext>, event: Event) -> Result<()>;
 
+    /// Device-authenticated native content, with the immutable signed original
+    /// and its decrypted local view kept distinct.
+    #[cfg(feature = "managed-authoring")]
+    async fn on_native_content(
+        &self,
+        _ctx: Arc<BridgeContext>,
+        _content: &crate::managed_device::NativeContent,
+    ) -> Result<()> {
+        Err(BridgeError::App(
+            "adapter has no native content consumer".into(),
+        ))
+    }
+
     /// Handle an encrypted Signal pushed alongside events as the SDK
     /// [`SignalEnvelope`] wire type. Product kind and payload stay encrypted;
     /// adapters must not infer them from the server-visible outer header.
@@ -452,4 +465,24 @@ pub async fn consume_signals<A: BridgeApp>(
         }
     }
     Ok(())
+}
+
+#[cfg(all(feature = "runtime", feature = "managed-authoring"))]
+pub(crate) struct AppContentSink<A: BridgeApp> {
+    pub ctx: Arc<BridgeContext>,
+    pub app: Arc<A>,
+}
+
+#[cfg(all(feature = "runtime", feature = "managed-authoring"))]
+#[async_trait]
+impl<A: BridgeApp> crate::managed_device::NativeContentSink for AppContentSink<A> {
+    async fn deliver(&self, content: &crate::managed_device::NativeContent) -> Result<()> {
+        let key = content.original().event.realm_id.to_string();
+        self.ctx
+            .queue
+            .run(&key, || {
+                self.app.on_native_content(self.ctx.clone(), content)
+            })
+            .await
+    }
 }

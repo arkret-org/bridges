@@ -29,6 +29,7 @@ pub struct ManagedDeviceWorkers {
     runtime: Arc<ManagedDeviceRuntime>,
     permits: Arc<Semaphore>,
     workers: BTreeMap<String, Worker>,
+    content_sink: Option<Arc<dyn NativeContentSink>>,
 }
 
 impl ManagedDeviceWorkers {
@@ -37,7 +38,13 @@ impl ManagedDeviceWorkers {
             runtime: Arc::new(ManagedDeviceRuntime::new(edge)?),
             permits: Arc::new(Semaphore::new(8)),
             workers: BTreeMap::new(),
+            content_sink: None,
         })
+    }
+
+    pub fn with_content_sink(mut self, sink: Arc<dyn NativeContentSink>) -> Self {
+        self.content_sink = Some(sink);
+        self
     }
 
     /// Explicit host shutdown waits for cancelled network futures to release
@@ -103,6 +110,7 @@ impl ManagedDeviceWorkers {
                 device.clone(),
                 reader.clone(),
                 self.permits.clone(),
+                self.content_sink.clone(),
             );
             self.workers.insert(
                 id,
@@ -162,6 +170,7 @@ fn spawn_worker(
     device: Arc<ManagedDevice>,
     reader: Arc<ManagedDeviceReader>,
     permits: Arc<Semaphore>,
+    sink: Option<Arc<dyn NativeContentSink>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
@@ -190,6 +199,11 @@ fn spawn_worker(
             if let Err(error) = runtime.poll_content_stream(&device, &reader).await {
                 tracing::warn!(account = %device.actor_id, %error,
                     "native stream recovery remains pending");
+            }
+            if let Some(sink) = sink.as_ref() {
+                if let Err(error) = runtime.drain_content(&device, &reader, sink.as_ref()).await {
+                    tracing::warn!(actor = %device.actor_id, %error, "native content delivery remains pending");
+                }
             }
         }
     })

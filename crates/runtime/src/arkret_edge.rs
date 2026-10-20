@@ -18,6 +18,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+#[cfg(any(feature = "web", test))]
+use arkret::WireError;
 use arkret::http_client::Client;
 #[cfg(any(feature = "web", test))]
 use arkret::identity::public_key_material_from_binding;
@@ -26,7 +28,7 @@ use arkret::signatures::VerificationMethodDocument;
 use arkret::signatures::{PublicKeyMaterial, SignEventOptions, sign_event};
 use arkret::{
     ActorId, AppletId, AuthoredEvent, ClientRequestOptions, Did, DidCoreId, DigestSuite,
-    Ed25519PayloadSigner, Event, EventIntent, RealmId, ScopeRef, WireError, project_did_to_core_id,
+    Ed25519PayloadSigner, Event, EventIntent, RealmId, ScopeRef, project_did_to_core_id,
 };
 use arkret_event_draft::{EventSpec, TypedEventDraft};
 use arkret_models_collaboration::authority_commit::{
@@ -35,13 +37,13 @@ use arkret_models_collaboration::authority_commit::{
 use arkret_models_collaboration::events_payloads::MessageRedactPayload;
 #[cfg(any(feature = "web", test))]
 use arkret_models_discovery::{ServiceDescribe, TransportBinding};
-use arkret_models_integration::AppletAuthoringTransactionRequestBody;
-#[cfg(any(feature = "web", test))]
-use arkret_models_integration::AppletTransactionRequestBody;
 #[cfg(any(feature = "web", test))]
 use arkret_models_integration::{
     AppletActorView, AppletPingOutcome, AppletProtocolMetadata, AppletRealmView,
     AppletTransactionOutcome,
+};
+use arkret_models_integration::{
+    AppletAuthoringTransactionRequestBody, AppletTransactionRequestBody,
 };
 use arkret_wire::{
     AuthorityRejectionStatus, AuthoritySubmitOutcome, DidUrl, EventAdmissionSubmission,
@@ -484,6 +486,11 @@ impl ArkretEdge {
         )
     }
 
+    /// Check an outbound creation against independently retained local custody.
+    pub fn validate_prepared_creation(&self, command: &PreparedManagedActor) -> Result<()> {
+        self.journal.validate_prepared_creation(command)
+    }
+
     pub(crate) fn prepared_managed_actor(
         &self,
         body: &AppletAuthoringTransactionRequestBody,
@@ -807,6 +814,62 @@ impl ArkretEdge {
                 return Err(BridgeError::Runtime("publication retry contention".into()));
             }
         }
+        if matches!(event.actor_id, ActorId::Service { .. })
+            && !matches!(event.scope_ref, ScopeRef::RealmControl { .. })
+        {
+            let route = self.realm_route(&event.realm_id).await?;
+            let transaction =
+                AppletTransactionRequestBody::Events(arkret::AppletEventTransactionRequestBody {
+                    applet_id: AppletId::new(self.applet_id())?,
+                    source_id: self.service_actor_id.clone(),
+                    events: vec![event.event().clone()],
+                    committed_events: vec![],
+                    signals: vec![],
+                });
+            let producer = arkret::ProducerVerificationContext {
+                actor: ActorId::service(self.service_actor_id.clone()),
+                verification_method: self.service_verification_method()?,
+                public_key: PublicKeyMaterial::Ed25519Raw {
+                    bytes: self.signer.verifying_key().to_bytes().to_vec(),
+                },
+                digest_suite: crate::PRODUCER_DIGEST_SUITE,
+            };
+            let transaction =
+                arkret::VerifiedSubmission::verify(transaction, |_| Ok(producer.clone()))
+                    .map_err(|e| BridgeError::Arkret(e.to_string()))?;
+            let outcome = route
+                .client
+                .applet_transaction_from_service(
+                    event.event_id().as_str(),
+                    &transaction,
+                    &self.service_actor_id,
+                    route.authority.current_service_id(),
+                )
+                .await?;
+            let committed = crate::authoring::applet_publication_outcome(event, &outcome)?;
+            if !self
+                .journal
+                .record_applet_outcome(
+                    &key,
+                    &operation,
+                    route.authority.current_service_id(),
+                    &outcome,
+                    committed.as_ref(),
+                )
+                .await?
+            {
+                return Err(BridgeError::Runtime(
+                    "Applet outcome persistence contended; retry original".into(),
+                ));
+            }
+            return committed.map(|r| r.event_id.to_string()).ok_or_else(|| {
+                BridgeError::App(format!(
+                    "Applet Event {} rejected: {:?}",
+                    event.event_id(),
+                    outcome.rejections()
+                ))
+            });
+        }
         let request =
             SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(event.event().clone()));
         let producer = arkret::ProducerVerificationContext {
@@ -820,7 +883,8 @@ impl ArkretEdge {
         let request = arkret::VerifiedSubmission::verify(request, |_| Ok(producer.clone()))
             .map_err(|error| BridgeError::Arkret(error.to_string()))?;
         let options = ClientRequestOptions::new().idempotency_key(event.event_id().as_str());
-        let outcome = self
+        let route = self.realm_route(&event.realm_id).await?;
+        let outcome = route
             .client
             .submit_to_realm_authority(&request, &options)
             .await?;
@@ -831,13 +895,26 @@ impl ArkretEdge {
         };
         // A retryable answer settles nothing: the frozen bytes stay replayable
         // and the pending index is left in place for the recovery loop.
+        if let AuthoritySubmitOutcome::Accepted { commit, .. } = &outcome {
+            let keys = garth::historical_station_keys::fetch_historical_station_keys_for_commits(
+                &route.client,
+                &route.bundle,
+                &[commit],
+            )
+            .await
+            .map_err(|e| BridgeError::Arkret(e.to_string()))?;
+            route
+                .authority
+                .verify_commit(commit, &keys)
+                .map_err(|e| BridgeError::Arkret(e.to_string()))?;
+        }
         let committed = publication_outcome(event, &outcome)?;
         if !self
             .journal
             .record_outcome(
                 &key,
                 &operation,
-                &self.station_id,
+                route.authority.current_service_id(),
                 &outcome,
                 committed.as_ref(),
             )

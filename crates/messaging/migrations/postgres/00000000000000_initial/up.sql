@@ -18,17 +18,17 @@ CREATE TABLE IF NOT EXISTS message_mappings (
 
 CREATE TABLE IF NOT EXISTS user_mappings (
     id BIGSERIAL PRIMARY KEY,
+    applet_id TEXT NOT NULL,
+    realm_id TEXT NOT NULL,
     protocol TEXT NOT NULL,
     tenant TEXT NOT NULL,
     external_user_id TEXT NOT NULL,
     arkret_actor_id TEXT NOT NULL UNIQUE,
     arkret_actor_did TEXT NOT NULL,
-    profile_event_ref TEXT NOT NULL,
-    accountability_grant_ref TEXT NOT NULL,
-    authorization_ref TEXT NOT NULL,
+    creation_ref TEXT NOT NULL,
     display_name TEXT,
     created_at BIGINT NOT NULL,
-    UNIQUE(protocol, tenant, external_user_id));
+    UNIQUE(applet_id, realm_id, protocol, tenant, external_user_id));
 
 CREATE TABLE IF NOT EXISTS prepared_ghost_provisions (
     id BIGSERIAL PRIMARY KEY,

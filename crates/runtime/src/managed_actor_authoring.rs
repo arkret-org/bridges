@@ -946,19 +946,9 @@ fn decode_managed_actor_seed(name: &str, encoded: &str) -> Result<[u8; 32]> {
     })
 }
 
-/// The authoring inputs the SDK's API deliberately keeps outside the signed
-/// request, assembled for the Ghost branch.
-///
-/// `registration_ref` is echoed from the signed basis. The SDK rejects any
-/// other value, and taking it from configuration or from a live registration
-/// read would let an authoring request be answered against a registration it
-/// did not name.
-///
-/// The control Realm belongs to one principal, so it is closed, secret and
-/// `since_join`: `models/realm-and-space.md` fixes `history_access =
-/// since_join` for every PCR, and a control Realm anyone could join or
-/// discover would not be a control Realm. `security_class` matches the other
-/// PCR authoring paths in the SDK.
+/// Prepare one Realm-scoped Ghost using a signed current governance basis.
+/// The original creation and independent native DID custody remain unchanged
+/// across a later governance handoff.
 impl ManagedActorAuthoringService {
     pub async fn prepare_ghost(
         &self,

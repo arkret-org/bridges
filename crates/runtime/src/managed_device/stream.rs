@@ -21,6 +21,8 @@ pub(super) struct ScopeStream {
     processed_through: CommitStreamHead,
     current: RealmStateSnapshot,
     pending: BTreeMap<u64, CommittedEventView>,
+    #[serde(default)]
+    delivery: Option<NativeContent>,
 }
 
 /// Local custody observations never assert current remote business permission.
@@ -56,6 +58,16 @@ fn validate_state(saved: &ScopeStream, scope: &ScopeRef) -> Result<()> {
         return Err(invalid(
             "native stream custody has another scope or incomplete progress",
         ));
+    }
+    if let Some(delivery) = &saved.delivery {
+        if delivery.original().event.scope_ref != *scope
+            || head(&CommittedEventView::Full(delivery.original().clone()))
+                != saved.processed_through
+        {
+            return Err(invalid(
+                "native delivery differs from the durable processed cut",
+            ));
+        }
     }
     let mut previous = saved.processed_through.clone();
     for (position, row) in &saved.pending {
@@ -118,7 +130,7 @@ impl ManagedDeviceRuntime {
         };
         Ok(ManagedStreamProgress {
             durable_events: 0,
-            pending_events: saved.pending.len(),
+            pending_events: saved.pending.len() + usize::from(saved.delivery.is_some()),
             last_position: Some(saved.head.stream_position),
             epoch: super::inbox::restore_group(&record, device)?.map(|group| group.epoch()),
         })
@@ -134,13 +146,17 @@ impl ManagedDeviceRuntime {
     ) -> Result<ManagedStreamProgress> {
         reader.check_device(device)?;
         let (_, _, record) = self.accepted_device_record(device).await?;
+        if state(&record, device)?.is_some_and(|saved| saved.delivery.is_some()) {
+            return self.durable_stream_progress(device).await;
+        }
         if super::inbox::accepted_group_original(&record, device)?.is_none() {
             return Ok(ManagedStreamProgress::default());
         }
         let response = reader
             .client()
             .snapshot_head(device.effective_scope.realm_id())
-            .await?;
+            .await
+            .map_err(|error| invalid(format!("native stream current read: {error}")))?;
         let current = garth::own_station_results::consume_own_station_device_snapshot(&response)
             .map_err(|error| invalid(error.to_string()))?
             .clone();
@@ -159,14 +175,6 @@ impl ManagedDeviceRuntime {
         current_covers(&current, &expected)?;
         let pending_len = saved.map_or(0, |state| state.pending.len());
         let limit = SCAN_PAGE_SIZE.min(MAX_PENDING_EVENTS - pending_len);
-        if limit == 0 {
-            return Ok(ManagedStreamProgress {
-                pending_events: pending_len,
-                last_position: Some(expected.stream_position),
-                epoch: super::inbox::restore_group(&record, device)?.map(|group| group.epoch()),
-                ..Default::default()
-            });
-        }
         let mut replica = garth::own_station_results::OwnStationDeviceReplica::new(
             device.effective_scope.clone(),
         )
@@ -177,22 +185,26 @@ impl ManagedDeviceRuntime {
         replica
             .restore_checkpoint_head(reader.client(), &expected)
             .await
-            .map_err(|error| invalid(error.to_string()))?;
+            .map_err(|error| invalid(format!("native stream original checkpoint: {error}")))?;
         let request = StreamScanRequest {
             realm_id: device.effective_scope.realm_id().clone(),
             stream_ref: expected.stream_ref.clone(),
             direction: StreamScanDirection::After(Some(expected.stream_position)),
-            limit: limit as u16,
+            limit: limit.max(1) as u16,
         };
         let page = replica
             .apply_bound_scan(
                 reader.client(),
-                reader.client().scan_commit_stream(&request).await?,
+                reader
+                    .client()
+                    .scan_commit_stream(&request)
+                    .await
+                    .map_err(|error| invalid(format!("native stream tail read: {error}")))?,
             )
             .await
-            .map_err(|error| invalid(error.to_string()))?;
+            .map_err(|error| invalid(format!("native stream tail verification: {error}")))?;
         let rows = page.rows().map_err(|error| invalid(error.to_string()))?;
-        if rows.len() > limit {
+        if rows.len() > limit.max(1) {
             return Err(invalid("native stream exceeded its bounded page"));
         }
         let next_head = replica
@@ -220,12 +232,33 @@ impl ManagedDeviceRuntime {
             .ok_or_else(|| invalid("native stream has no private MLS checkpoint"))?;
         let mut accepted = actual_base;
         let mut advanced = false;
+        let mut delivery = None;
         while let Some((position, CommittedEventView::Full(full))) = pending.first_key_value() {
-            if full.event.kind != EventKind::MlsCommit {
-                break;
-            }
             let position = *position;
             let full = full.clone();
+            if full.event.kind != EventKind::MlsCommit {
+                if matches!(
+                    full.event.kind,
+                    EventKind::MessageCreate | EventKind::MessageRedact
+                ) && !self.is_local_publication(&full.event).await?
+                {
+                    delivery = Some(NativeContent::decrypt(&full, &accepted, &mut group)?);
+                    super::inbox::refresh_group_private_state(
+                        &mut record,
+                        device,
+                        group
+                            .export_state_record()
+                            .map_err(|e| invalid(e.to_string()))?,
+                    )?;
+                }
+                processed_through = head(&CommittedEventView::Full(full));
+                pending.remove(&position);
+                advanced = true;
+                if delivery.is_some() {
+                    break;
+                }
+                continue;
+            }
             group
                 .install_recovered_remote_commit(&full, &accepted.event.event_id)
                 .map_err(|error| invalid(error.to_string()))?;
@@ -255,7 +288,7 @@ impl ManagedDeviceRuntime {
         }
         let progress = ManagedStreamProgress {
             durable_events: rows.len(),
-            pending_events: pending.len(),
+            pending_events: pending.len() + usize::from(delivery.is_some()),
             last_position: Some(next_head.stream_position),
             epoch: Some(group.epoch()),
         };
@@ -273,6 +306,7 @@ impl ManagedDeviceRuntime {
             processed_through,
             current,
             pending,
+            delivery,
         };
         validate_state(&next, &device.effective_scope)?;
         record.mls.streams.insert(stream_key(device)?, next);
@@ -286,5 +320,46 @@ impl ManagedDeviceRuntime {
         }
         reader.check_device(device)?;
         Ok(progress)
+    }
+    /// The plaintext and receive ratchet were committed before this callback.
+    /// Recheck remote access before delivery and acknowledge only the exact item.
+    pub async fn drain_content(
+        &self,
+        device: &ManagedDevice,
+        reader: &ManagedDeviceReader,
+        sink: &dyn NativeContentSink,
+    ) -> Result<bool> {
+        reader.check_device(device)?;
+        let (_, _, record) = self.accepted_device_record(device).await?;
+        let Some(content) = state(&record, device)?.and_then(|saved| saved.delivery.clone()) else {
+            return Ok(false);
+        };
+        let current = reader
+            .client()
+            .snapshot_head(device.effective_scope.realm_id())
+            .await?;
+        current.value()?;
+        reader.check_device(device)?;
+        sink.deliver(&content).await?;
+        for _ in 0..8 {
+            let (key, previous, mut record) = self.accepted_device_record(device).await?;
+            let saved = record
+                .mls
+                .streams
+                .get_mut(&stream_key(device)?)
+                .ok_or_else(|| invalid("native content checkpoint disappeared"))?;
+            let Some(pending) = &saved.delivery else {
+                return Ok(true);
+            };
+            if canonical_json_bytes(pending)? != canonical_json_bytes(&content)? {
+                return Err(invalid("native delivery changed during acknowledgement"));
+            }
+            saved.delivery = None;
+            let encrypted = self.authoring.encrypt_key_material(&key, &record)?;
+            if self.cas(&key, Some(previous), encrypted).await? {
+                return Ok(true);
+            }
+        }
+        Err(invalid("native delivery acknowledgement contended"))
     }
 }

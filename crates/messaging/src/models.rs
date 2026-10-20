@@ -1,6 +1,6 @@
 //! Diesel row models for the messaging helper layer.
 
-use arkret::{ActorId, Did};
+use arkret::{ActorId, AppletId, CommittedEventRef, Did, RealmId};
 use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -56,14 +56,14 @@ pub struct NewMessageMapping<'a> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserMapping {
     pub id: i64,
+    pub applet_id: AppletId,
+    pub realm_id: RealmId,
     pub protocol: String,
     pub tenant: String,
     pub external_user_id: String,
     pub arkret_actor_id: ActorId,
     pub arkret_actor_did: Did,
-    pub profile_event_ref: String,
-    pub accountability_grant_ref: String,
-    pub authorization_ref: String,
+    pub creation_ref: CommittedEventRef,
     pub display_name: Option<String>,
     pub created_at: i64,
 }
@@ -74,14 +74,14 @@ pub struct UserMapping {
 #[diesel(table_name = user_mappings)]
 pub(crate) struct UserMappingRow {
     id: i64,
+    applet_id: String,
+    realm_id: String,
     protocol: String,
     tenant: String,
     external_user_id: String,
     arkret_actor_id: String,
     arkret_actor_did: String,
-    profile_event_ref: String,
-    accountability_grant_ref: String,
-    authorization_ref: String,
+    creation_ref: String,
     display_name: Option<String>,
     created_at: i64,
 }
@@ -92,23 +92,30 @@ impl TryFrom<UserMappingRow> for UserMapping {
     fn try_from(row: UserMappingRow) -> Result<Self, Self::Error> {
         let actor_id: ActorId = serde_json::from_str(&row.arkret_actor_id)?;
         let actor_did = Did::new(row.arkret_actor_did)?;
-        if !matches!(&actor_id, ActorId::Account { .. })
+        let applet_id = AppletId::new(row.applet_id)?;
+        let realm_id = RealmId::new(row.realm_id)?;
+        let creation_ref: CommittedEventRef = serde_json::from_str(&row.creation_ref)?;
+        if actor_id.as_realm_actor_id().map(|id| &id.realm_id) != Some(&realm_id)
+            || creation_ref.stream_ref
+                != (arkret::CommitStreamRef::RealmControl {
+                    realm_id: realm_id.clone(),
+                })
             || actor_id.signing_principal_id() != &arkret::project_did_to_core_id(&actor_did)?
         {
             return Err(arkret_bridge_runtime::BridgeError::Database(
-                "stored Ghost Actor is not the Account bound to its DID".to_owned(),
+                "stored Ghost identity or creation belongs to another Realm or DID".to_owned(),
             ));
         }
         Ok(Self {
             id: row.id,
+            applet_id,
+            realm_id,
             protocol: row.protocol,
             tenant: row.tenant,
             external_user_id: row.external_user_id,
             arkret_actor_id: actor_id,
             arkret_actor_did: actor_did,
-            profile_event_ref: row.profile_event_ref,
-            accountability_grant_ref: row.accountability_grant_ref,
-            authorization_ref: row.authorization_ref,
+            creation_ref,
             display_name: row.display_name,
             created_at: row.created_at,
         })
@@ -118,14 +125,14 @@ impl TryFrom<UserMappingRow> for UserMapping {
 #[derive(Debug, Clone, Insertable)]
 #[diesel(table_name = user_mappings)]
 pub struct NewUserMapping<'a> {
+    pub applet_id: &'a str,
+    pub realm_id: &'a str,
     pub protocol: &'a str,
     pub tenant: &'a str,
     pub external_user_id: &'a str,
     pub arkret_actor_id: &'a str,
     pub arkret_actor_did: &'a str,
-    pub profile_event_ref: &'a str,
-    pub accountability_grant_ref: &'a str,
-    pub authorization_ref: &'a str,
+    pub creation_ref: &'a str,
     pub display_name: Option<&'a str>,
     pub created_at: i64,
 }

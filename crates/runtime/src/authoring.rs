@@ -44,7 +44,7 @@ pub(crate) struct PublicationRecord {
     pub authored: AuthoredEvent,
     /// Terminal or retryable Station answer; stored in the atomic result row.
     #[serde(skip)]
-    pub outcome: Option<AuthoritySubmitOutcome>,
+    pub outcome: Option<StationAnswer>,
     /// Exact committed reference for an accepted publication.
     #[serde(skip)]
     pub committed: Option<CommittedEventRef>,
@@ -54,18 +54,25 @@ pub(crate) struct PublicationRecord {
     pub observation_count: u64,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "result", rename_all = "snake_case")]
+pub(crate) enum StationAnswer {
+    Authority(AuthoritySubmitOutcome),
+    Applet(arkret::AppletTransactionOutcome),
+}
+
 /// One answer observed from one governance Station for this publication.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StationObservation {
     pub station: DidCoreId,
-    pub outcome: AuthoritySubmitOutcome,
+    pub outcome: StationAnswer,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RecordedResult {
-    outcome: Option<AuthoritySubmitOutcome>,
+    outcome: Option<StationAnswer>,
     committed: Option<CommittedEventRef>,
     observation_count: u64,
 }
@@ -183,6 +190,42 @@ impl AuthoringJournal {
         operation: &str,
         station: &DidCoreId,
         outcome: &AuthoritySubmitOutcome,
+        committed: Option<&CommittedEventRef>,
+    ) -> Result<bool> {
+        self.record_answer(
+            scope,
+            operation,
+            station,
+            &StationAnswer::Authority(outcome.clone()),
+            committed,
+        )
+        .await
+    }
+
+    pub(crate) async fn record_applet_outcome(
+        &self,
+        scope: &str,
+        operation: &str,
+        station: &DidCoreId,
+        outcome: &arkret::AppletTransactionOutcome,
+        committed: Option<&CommittedEventRef>,
+    ) -> Result<bool> {
+        self.record_answer(
+            scope,
+            operation,
+            station,
+            &StationAnswer::Applet(outcome.clone()),
+            committed,
+        )
+        .await
+    }
+
+    async fn record_answer(
+        &self,
+        scope: &str,
+        operation: &str,
+        station: &DidCoreId,
+        outcome: &StationAnswer,
         committed: Option<&CommittedEventRef>,
     ) -> Result<bool> {
         let store = self.store.clone();
@@ -337,7 +380,14 @@ impl PublicationRecord {
         }
         match &self.outcome {
             Some(outcome) => {
-                let committed = publication_outcome(&self.authored, outcome)?;
+                let committed = match outcome {
+                    StationAnswer::Authority(outcome) => {
+                        publication_outcome(&self.authored, outcome)?
+                    }
+                    StationAnswer::Applet(outcome) => {
+                        applet_publication_outcome(&self.authored, outcome)?
+                    }
+                };
                 if committed.as_ref() != self.committed.as_ref() {
                     return Err(BridgeError::Database(
                         "retained committed reference disagrees with the recorded answer".into(),
@@ -402,6 +452,38 @@ pub(crate) fn publication_outcome(
             "governance Station is unavailable: {reason_code}"
         ))),
     }
+}
+
+/// A transaction response is an authenticated operation result, not a fabricated
+/// RealmCommit. Preserve its exact registered reference and its original carrier.
+pub(crate) fn applet_publication_outcome(
+    event: &AuthoredEvent,
+    outcome: &arkret::AppletTransactionOutcome,
+) -> Result<Option<CommittedEventRef>> {
+    let refs = outcome.committed_event_refs();
+    if outcome.status() == arkret::AppletTransactionStatus::Accepted
+        && refs.len() == 1
+        && outcome.rejections().is_empty()
+        && refs[0].event_id == *event.event_id()
+        && refs[0].stream_ref == arkret::CommitStreamRef::from_scope(&event.scope_ref, None)?
+    {
+        return Ok(Some(refs[0].clone()));
+    }
+    if outcome.retry_after_ms().is_some() {
+        return Err(BridgeError::Runtime(
+            "Applet transaction remains retryable".into(),
+        ));
+    }
+    if outcome.status() == arkret::AppletTransactionStatus::Rejected
+        && refs.is_empty()
+        && outcome.rejections().len() == 1
+        && outcome.rejections()[0].event_id.as_ref() == Some(event.event_id())
+    {
+        return Ok(None);
+    }
+    Err(BridgeError::Arkret(
+        "Applet response does not settle the exact single Event".into(),
+    ))
 }
 
 /// Stable bridge operation identity from the upstream delivery identity, not message content.

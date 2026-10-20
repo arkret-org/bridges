@@ -29,11 +29,14 @@ use serde::{Deserialize, Serialize};
 use crate::managed_actor_authoring::ManagedActorAuthoringService;
 use crate::{ArkretEdge, AuthoringStore, BridgeError, Result, run_blocking};
 
+mod business;
+mod content;
 mod inbox;
 mod mls;
 mod read_source;
 mod stream;
 mod worker;
+pub use content::{NativeContent, NativeContentSink};
 pub use inbox::ManagedQueueProgress;
 pub use read_source::ManagedDeviceReader;
 pub use stream::ManagedStreamProgress;
@@ -371,6 +374,7 @@ impl ManagedDeviceRuntime {
     }
 
     fn validate(&self, record: &DeviceRecord) -> Result<()> {
+        arkret::RealmActorDeviceAuthorizationValue::from_event(record.authorization.event())?;
         let p = payload(record)?;
         let key = SigningKey::from_bytes(&seed(&record.device_seed)?);
         let hpke = arkret::base64url_decode(&record.hpke_private_key)?;
@@ -575,6 +579,7 @@ impl ManagedDeviceRuntime {
             p,
         )
         .map_err(|e| invalid(e.to_string()))?
+        .with_applet_id(arkret::AppletId::new(self.edge.applet_id())?)
         .author_with_digest_suite(now, crate::PRODUCER_DIGEST_SUITE)
         .map_err(|e| invalid(e.to_string()))?;
         sign_event(

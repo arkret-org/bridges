@@ -189,7 +189,14 @@ where
             .device
             .is_some()
         {
-            Some(managed_device::ManagedDeviceWorkers::new(edge.clone())?)
+            Some(
+                managed_device::ManagedDeviceWorkers::new(edge.clone())?.with_content_sink(
+                    Arc::new(app::AppContentSink {
+                        ctx: ctx.clone(),
+                        app: app.clone(),
+                    }),
+                ),
+            )
         } else {
             None
         };

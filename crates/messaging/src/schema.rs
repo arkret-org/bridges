@@ -32,14 +32,14 @@ diesel::table! {
     /// External protocol/user <-> Arkret actor DID mapping.
     user_mappings (id) {
         id -> BigInt,
+        applet_id -> Text,
+        realm_id -> Text,
         protocol -> Text,
         tenant -> Text,
         external_user_id -> Text,
         arkret_actor_id -> Text,
         arkret_actor_did -> Text,
-        profile_event_ref -> Text,
-        accountability_grant_ref -> Text,
-        authorization_ref -> Text,
+        creation_ref -> Text,
         display_name -> Nullable<Text>,
         created_at -> BigInt,
     }

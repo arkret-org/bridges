@@ -65,6 +65,7 @@ impl Drop for ManagedDeviceReader {
 impl ManagedDeviceRuntime {
     pub async fn open_reader(&self, device: &ManagedDevice) -> Result<ManagedDeviceReader> {
         self.accepted_device_record(device).await?;
+        self.terminal_child(device, "ak.event.read").await?;
         let realm = device
             .actor_id
             .as_realm_actor_id()
