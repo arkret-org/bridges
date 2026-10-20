@@ -5,10 +5,9 @@ use crate::content::{
     build_message_create_payload, extract_attachment, extract_plain_body, extract_strand_id,
     media_content_block, media_content_kind, text_content_block,
 };
-use crate::ghost::location_matches;
 use crate::types::{AppDeleteOutcome, AppDeleteReason, Attachment};
 use crate::{
-    ChannelRealmMappingConfig, EXTERNAL_REF_SCHEMA, PORTAL_STRAND_TRACK, json_scalar_id_string,
+    ChannelRealmMappingConfig, PORTAL_STRAND_TRACK, json_scalar_id_string,
     redaction_payload_for_app_delete,
 };
 
@@ -174,21 +173,6 @@ fn extraction_handles_composite_payloads() {
     let extracted = extract_attachment(&composite).unwrap().expect("attachment");
     assert_eq!(extracted.filename.as_deref(), Some("spec.pdf"));
     assert_eq!(extracted.size, Some(7));
-}
-
-#[test]
-fn location_match_requires_protocol_network_and_location() {
-    let location = json!({
-        "schema": EXTERNAL_REF_SCHEMA,
-        "protocol": "discord",
-        "network_id": "tenant-1",
-        "location_id": "chan-1",
-    });
-    assert!(location_matches(Some(&location), &location));
-    let mut other = location.clone();
-    other["location_id"] = json!("chan-2");
-    assert!(!location_matches(Some(&other), &location));
-    assert!(!location_matches(None, &location));
 }
 
 #[test]

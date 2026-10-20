@@ -957,15 +957,39 @@ impl ManagedActorAuthoringService {
         external_ref: &arkret::GhostExternalTuple,
         display_name: Option<String>,
     ) -> Result<PreparedGhost> {
-        let route = self.edge.realm_route(realm_id).await?;
+        self.prepare_ghost_in_scope(
+            applet_id,
+            &arkret::ScopeRef::Realm {
+                realm_id: realm_id.clone(),
+            },
+            external_ref,
+            display_name,
+        )
+        .await
+    }
+
+    pub async fn prepare_ghost_in_scope(
+        &self,
+        applet_id: &AppletId,
+        scope: &arkret::ScopeRef,
+        external_ref: &arkret::GhostExternalTuple,
+        display_name: Option<String>,
+    ) -> Result<PreparedGhost> {
+        if !matches!(
+            scope,
+            arkret::ScopeRef::Realm { .. } | arkret::ScopeRef::Circle { .. }
+        ) {
+            return Err(BridgeError::App(
+                "Ghost creation requires a Realm or Circle scope".into(),
+            ));
+        }
+        let route = self.edge.realm_route(scope.realm_id()).await?;
         let preview = route
             .client
             .ghost_actor_preview(
                 applet_id.as_str(),
                 &GhostPreviewRequestBody {
-                    effective_scope: arkret::ScopeRef::Realm {
-                        realm_id: realm_id.clone(),
-                    },
+                    effective_scope: scope.clone(),
                     external_ref: external_ref.clone(),
                     display_name,
                 },

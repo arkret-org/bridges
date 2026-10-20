@@ -192,9 +192,13 @@ requirement from the publication journal.
 
 Service 管理请求使用 SDK RFC9421 来源／目标签名，不申请 Applet session。`ArkretEdge::managed_device_client` 使用完整 Realm ActorId、accepted authorization Event、精确 scope 与独立 Device key。普通 AccountId 与 PCR 不用于 Applet Bot／Ghost 身份。
 
-已经接通独立身份创建、首 Device、成员加入、Service parent 与 terminal child、原生 Welcome／群状态／consume／ACK、stream 解密、加密消息与附件收发、精确重试及本地存储冷恢复。附件上传不授予消息发布或读取权；读取仍核验 accepted 消息来源及当前设备／安装／内容权限。纯文本消费者不会取得附件明文。Circle 首次上传的用途绑定仍待正式裁决，当前拒绝该分支。
+已经接通独立身份创建、首 Device、成员加入、Service parent 与 terminal child、原生 Welcome／群状态／consume／ACK、stream 解密、加密消息与附件收发、精确重试及本地存储冷恢复。附件上传不授予消息发布或读取权；读取仍核验 accepted 消息来源及当前设备／安装／内容权限。纯文本消费者不会取得附件明文。Circle 首次上传已按正式裁决使用治理方验证的创建目标和不可变私有绑定，生产联合验证仍在进行。
 
-Service 签名仅用于自身管理操作；业务内容由主体 Device 原签。完整 MLS 发起端 worker、主体控制轮换／恢复、持续授权与全部消费者仍需独立验收，不声明完整 21-operation runtime 已交付。
+Circle 主体可用 `prepare_ghost_in_scope` 发起现有 authoring 流程；创建不自动加入父 Realm 或 Circle。`join_circle_after_realm_join` 使用主体本人已接受的父 Realm 加入 Commit，并由 Circle Device 原签 Circle 加入。两者分别需要现有安装、原签 Device 范围和原有加入授权；父 Realm 设备可只含 `ak.applet.join`，不必取得父 Realm 的上传或内容读取权限。没有获准的父加入来源时保持未就绪，不由管理员代写第三方 join。
+
+此 runtime 的 Realm 消息与加密 portal 由主体 Device 原签。协议允许的 Service 自身写入仍须引用覆盖实际 action/resource 的有效安装授权，Service 签名本身不授予权限。完整 MLS 发起端 worker、主体控制轮换／恢复、持续授权与全部消费者仍需独立验收，不声明全部已登记 operation 的 runtime 已交付。
+
+设备撤销使用 `ManagedDeviceRuntime::revoke_device`，以稳定本地操作标识保存 controller 原签申请；重复标识不能改变目标或原因代码。申请的 Commit 只表示登记，必须由私有材料中的 `device_revoke` 结果确认 pending／accepted／rejected。`reconcile_device_revocations` 与 host worker 会冷续跑原申请及结果查询，pending 不删除密钥。若治理站已接受但本地未保存回执，先由管理 Service 读取已签结果及精确原件，核验后恢复，无须重发控制签名申请。永久 accepted 后，已收取的队列工作完成才通过 `erase_revoked_device` 删除设备私钥、MLS 私态和附件私有检查点；保留公开授权原件、最终材料和退役标记，原设备创建操作不能自动换钥重建。拒绝与未知结果不视为永久撤销。Realm／Circle 真实 HTTPS 与 PostgreSQL 联合测试已覆盖丢回执冷恢复、pending 保留密钥、生产终态任务、清理和防重建；其它生命周期与完整 operation 验收仍在进行。
 
 Managed Principal custody and the canonical Bot/Ghost author operation live in
 `arkret-bridge-runtime` behind `managed-authoring`.
@@ -215,7 +219,7 @@ history installation obligation.
 `actions` 为非空 capability 列表，`lifetime_seconds` 为正数有限时长。默认关闭。
 共享 runtime 在验证原创建 completion 后，先于请求保存加密 Device／HPKE 私钥与
 Principal 原签授权；后台重试与重启沿用同一原件、exact 创建 scope 和期限。
-Device接纳不授予业务权，也不自动加入Realm／Circle。显式device.mls启用独立Welcome worker；消息stream、附件与回复尚需接线。
+Device接纳不授予业务权，也不自动加入Realm／Circle。显式device.mls启用独立Welcome worker；消息stream、附件与回复由同一原生设备 runtime 分别核验和处理。
 
 `device.mls = true` 启用耐久原生MLS KeyPackage库存与每个Device独立的Welcome worker，
 `key_package_inventory_target` 默认为 8（1..=1000），每周期最多补 20 个。

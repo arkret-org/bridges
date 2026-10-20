@@ -3,21 +3,15 @@
 
 use std::sync::{Arc, OnceLock};
 
-use arkret::{AppletId, Did, DidCoreId, EventKind, RealmId, StrandId, StrandTrack};
+use arkret::{AppletId, Did, DidCoreId, RealmId};
 use arkret_bridge_runtime::{BridgeError, PreparedGhost, Result};
-use arkret_models_collaboration::events_payloads::StrandCreatePayload;
-use arkret_models_collaboration::objects::strand::Strand;
 use arkret_models_integration::{AppletBridgeErrorClass, GhostExternalTuple};
-use arkret_wire::{CommitStreamRef, StreamScanDirection, StreamScanRequest};
 use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::store::MessageStore;
 use crate::types::{InboundAppDelete, InboundAppMessage};
-use crate::{
-    EXTERNAL_REF_SCHEMA, MESSAGE_MAPPING_KEY_SEPARATOR, PORTAL_STRAND_SCAN_MAX_PAGES,
-    PORTAL_STRAND_SCAN_PAGE_LIMIT, PORTAL_STRAND_TRACK, runtime,
-};
+use crate::{EXTERNAL_REF_SCHEMA, MESSAGE_MAPPING_KEY_SEPARATOR, runtime};
 
 static GHOST_PROVISION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
@@ -397,155 +391,6 @@ pub(crate) fn portal_location_ref(config: &runtime::Config, app_channel: &str) -
         "network_id": bridge_tenant(config),
         "location_id": normalized_external_id(app_channel),
     })
-}
-
-/// §10.1 location equivalence: protocol / network_id / location_id equality.
-pub(crate) fn location_matches(candidate: Option<&Value>, location: &Value) -> bool {
-    let Some(candidate) = candidate else {
-        return false;
-    };
-    ["protocol", "network_id", "location_id"]
-        .iter()
-        .all(|key| candidate.get(*key) == location.get(*key))
-}
-
-/// §10.1 step 2: scan the portal Realm's own commit stream for an existing
-/// portal strand whose recorded external location matches. Concurrent or
-/// retried creates resolve to the earliest committed create, per the §10.1
-/// create-idempotency rule.
-///
-/// "Earliest" is the lowest `stream_position` in this Realm's single commit
-/// stream: the governance Station fixed that order when it signed the commits,
-/// and the scan returns them in exactly that order. Only the Realm stream is
-/// scanned — Circle and Sidecar streams are independent and carry no portal
-/// strand creates.
-///
-/// The location is matched against the strand object's signed
-/// `metadata.fields.external_ref` (covered by the event digest). Strand creation
-/// also records the same location in the envelope's signed top-level
-/// `external_ref`.
-pub(crate) async fn find_existing_portal_strand(
-    edge: &runtime::ArkretEdge,
-    realm_id: &str,
-    location: &Value,
-) -> Result<Option<String>> {
-    let realm_id = RealmId::new(realm_id.to_owned())?;
-    let stream_ref = CommitStreamRef::Realm {
-        realm_id: realm_id.clone(),
-    };
-    let mut after_position: Option<u64> = None;
-    for _ in 0..PORTAL_STRAND_SCAN_MAX_PAGES {
-        let request = StreamScanRequest {
-            realm_id: realm_id.clone(),
-            stream_ref: stream_ref.clone(),
-            direction: StreamScanDirection::After(after_position),
-            limit: PORTAL_STRAND_SCAN_PAGE_LIMIT,
-        };
-        let page = edge.client().scan_commit_stream(&request).await?;
-        for item in &page.committed_events {
-            let Some(event) = item.reducer_input() else {
-                return Err(BridgeError::Arkret(
-                    "portal strand scan encountered a withheld Event; earliest-create check is unavailable"
-                        .to_owned(),
-                ));
-            };
-            if event.kind != EventKind::StrandCreate {
-                continue;
-            }
-            let Some(object) = event.payload.get("object") else {
-                continue;
-            };
-            if !location_matches(object.pointer("/metadata/fields/external_ref"), location) {
-                continue;
-            }
-            let Some(strand_id) = object.get("id").and_then(Value::as_str) else {
-                continue;
-            };
-            return Ok(Some(strand_id.to_owned()));
-        }
-        let Some(last) = page.committed_events.last() else {
-            break;
-        };
-        after_position = Some(last.commit().stream_position);
-        if page.committed_events.len() < usize::from(PORTAL_STRAND_SCAN_PAGE_LIMIT) {
-            break;
-        }
-    }
-    Ok(None)
-}
-
-/// §10.1 step 3: create the portal strand by submitting `ak.strand.create` under
-/// the bridge's own signable identity (the service actor), recording the
-/// external location in signed envelope/strand fields, and return the new strand
-/// id.
-pub(crate) async fn create_portal_strand(
-    edge: &runtime::ArkretEdge,
-    app_channel: &str,
-    alias: Option<&str>,
-    realm_id: &str,
-    location: &Value,
-) -> Result<String> {
-    let realm = RealmId::new(realm_id.to_owned())?;
-    let external_ref = location
-        .as_object()
-        .ok_or_else(|| BridgeError::App("portal location must be an object".into()))?
-        .iter()
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
-    let operation_id = runtime::external_operation_key(
-        arkret_wire::CapabilityActionId::STRAND_CREATE,
-        &external_ref,
-    )?;
-    if let Some(event) = edge
-        .retained_publication(
-            &realm,
-            &arkret::ActorId::service(edge.service_actor_id().clone()),
-            &operation_id,
-        )
-        .await?
-    {
-        edge.submit_event(&event).await?;
-        return Ok(StrandId::from_event_id(event.event_id()).to_string());
-    }
-    let title = alias
-        .filter(|alias| !alias.trim().is_empty())
-        .unwrap_or(app_channel);
-    let mut strand = Strand::new_create(
-        realm.clone(),
-        title,
-        arkret::ActorId::service(edge.service_actor_id().clone()),
-    );
-    strand
-        .metadata
-        .get_or_insert_default()
-        .fields
-        .insert("external_ref".to_owned(), location.clone());
-    strand.tracks.clear();
-    strand.tracks.insert(
-        PORTAL_STRAND_TRACK.to_owned(),
-        StrandTrack::discussion_primary(),
-    );
-    let strand_created_at = strand.created_at;
-    let payload = StrandCreatePayload { object: strand };
-    // Every producer-signed member rides the intent, and the one derived
-    // identity covers them all. strand_create_payload semantic validation
-    // requires object.created_by == actor_id (both are the stable service identity here)
-    // and object.created_at == the envelope created_at.
-    let intent = edge
-        .service_intent::<arkret_wire::event_spec::StrandCreate>(&realm, payload)?
-        .with_created_at(strand_created_at)
-        .with_external_ref(
-            location
-                .as_object()
-                .ok_or_else(|| BridgeError::App("portal location must be an object".to_owned()))?
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect(),
-        );
-    let event = edge.author_and_sign(&realm, &operation_id, intent).await?;
-    edge.submit_event(&event).await?;
-    // The Strand is named by `retype(event_id)` of its own accepted create.
-    Ok(StrandId::from_event_id(event.event_id()).to_string())
 }
 
 #[async_trait::async_trait]

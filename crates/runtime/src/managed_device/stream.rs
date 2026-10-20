@@ -249,6 +249,15 @@ impl ManagedDeviceRuntime {
             let full = match row {
                 CommittedEventView::Full(full) => full.clone(),
                 _ => {
+                    if self
+                        .already_applied_local_content(device, row.commit())
+                        .await?
+                    {
+                        processed_through = head(row);
+                        pending.remove(&position);
+                        advanced = true;
+                        continue;
+                    }
                     // A previously withheld prefix must be re-admitted at
                     // current authority; never skip it or replace its Commit.
                     let id = row.commit().event_ref.clone();

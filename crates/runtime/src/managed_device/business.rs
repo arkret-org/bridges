@@ -4,6 +4,7 @@ use arkret_event_draft::EventSpec;
 use arkret_models_collaboration::events_payloads::{
     CapabilityGrantCreateBody, CapabilityGrantPayload, MESSAGE_CONTENT_BLOCK_MLS_CONTENT_TYPE,
     MESSAGE_METADATA_MLS_CONTENT_TYPE, MessageCreatePayload, MessageRedactPayload,
+    StrandCreatePayload,
 };
 use arkret_models_collaboration::governance::grant_constraint::{
     CapabilityGrant, CapabilitySubject, GrantConstraintEffect, GrantConstraintKind,
@@ -170,8 +171,38 @@ impl ManagedDeviceRuntime {
     /// Subject-only Realm membership still uses the existing join rules and
     /// management gate. An approval-required outcome remains pending at the host.
     pub async fn ensure_realm_membership(&self, device: &ManagedDevice) -> Result<()> {
+        if let ScopeRef::Circle {
+            realm_id,
+            circle_id,
+        } = &device.effective_scope
+        {
+            // A Circle-only Device cannot author a Realm membership write.
+            // Existing admission is established through the exact scoped
+            // current projection; this read never admits a new member.
+            let reader = self.open_reader(device).await?;
+            let response = reader.client().snapshot_head(realm_id).await?;
+            let snapshot =
+                garth::own_station_results::consume_own_station_device_snapshot(&response)
+                    .map_err(|e| invalid(e.to_string()))?;
+            let joined = snapshot.current_state_entries.iter().any(|row| {
+                let arkret::TypedCurrentRow::Value {
+                    selector, value, ..
+                } = row;
+                matches!(selector, arkret::CurrentSelector::CircleMemberState {
+                    circle_id: actual, member_actor_id,
+                } if actual == circle_id && member_actor_id == &device.actor_id)
+                    && serde_json::to_value(value).is_ok_and(|value| value["membership"] == "join")
+            });
+            return if joined {
+                Ok(())
+            } else {
+                Err(BridgeError::App(
+                    "Circle membership admission is not yet accepted".into(),
+                ))
+            };
+        }
         if !matches!(device.effective_scope, ScopeRef::Realm { .. }) {
-            return Err(invalid("Realm membership bootstrap cannot join a Circle"));
+            return Err(invalid("managed membership requires a Realm or Circle"));
         }
         let body = serde_json::from_value(
             serde_json::json!({"member_id":device.actor_id,"membership":"join"}),
@@ -194,6 +225,11 @@ impl ManagedDeviceRuntime {
                     .actions
                     .iter()
                     .any(|action| action == "ak.applet.join")
+                    && grant
+                        .resources
+                        .contains(&arkret::WireResourceSelector::realm(
+                            device.effective_scope.realm_id().clone(),
+                        ))
             })
             .ok_or_else(|| {
                 BridgeError::App("current installation has no Applet join permission".into())
@@ -212,6 +248,82 @@ impl ManagedDeviceRuntime {
             .freeze_device_intent(device, "realm-self-join", &digest, intent)
             .await?;
         self.submit_device_original(device, "realm-self-join", event)
+            .await?;
+        Ok(())
+    }
+
+    /// Join the Circle with the subject's own Device, using the accepted
+    /// parent join as its exact dependency. Both installations and all
+    /// existing membership permissions remain independently required.
+    pub async fn join_circle_after_realm_join(
+        &self,
+        device: &ManagedDevice,
+        parent_device: &ManagedDevice,
+    ) -> Result<()> {
+        let ScopeRef::Circle {
+            realm_id,
+            circle_id,
+        } = &device.effective_scope
+        else {
+            return Err(invalid("Circle membership requires a Circle Device"));
+        };
+        if device.actor_id != parent_device.actor_id
+            || parent_device.effective_scope
+                != (ScopeRef::Realm {
+                    realm_id: realm_id.clone(),
+                })
+        {
+            return Err(invalid(
+                "Circle parent join belongs to another subject or Realm",
+            ));
+        }
+        self.ensure_realm_membership(parent_device).await?;
+        let (_, _, saved) = self
+            .publication(
+                &parent_device.actor_id,
+                &parent_device.effective_scope,
+                "realm-self-join",
+            )
+            .await?
+            .ok_or_else(|| invalid("accepted parent join is unavailable"))?;
+        if Self::accepted_publication(&saved)?.is_none() {
+            return Err(invalid("parent membership is not yet accepted"));
+        }
+        let Some(AuthoritySubmitOutcome::Accepted { commit, .. }) = saved.outcome else {
+            return Err(invalid("parent membership has no accepted Commit"));
+        };
+        let revision = arkret::CurrentRevision {
+            commit_id: commit.commit_id,
+            stream_position: commit.stream_position,
+        };
+        let digest = canonical_sha256(&(&device.actor_id, &device.effective_scope, &revision))?;
+        if let Some(event) = self
+            .retained_device_publication(device, "circle-self-join", &digest)
+            .await?
+        {
+            self.submit_device_original(device, "circle-self-join", event)
+                .await?;
+            return Ok(());
+        }
+        let child = self.terminal_child(device, "ak.circle.member.add").await?;
+        let body = serde_json::from_value(serde_json::json!({
+            "circle_id": circle_id, "member_id": device.actor_id,
+            "membership": "join", "parent_membership_revision": revision,
+        }))?;
+        let intent = TypedEventDraft::<event_spec::CircleMemberState>::new(
+            device.effective_scope.clone(),
+            device.actor_id.clone(),
+            body,
+        )?
+        .with_applet_id(arkret::AppletId::new(
+            self.edge.config().arkret.applet_id.clone(),
+        )?)
+        .with_authorization_ref(child.into())
+        .into_intent(Utc::now())?;
+        let event = self
+            .freeze_device_intent(device, "circle-self-join", &digest, intent)
+            .await?;
+        self.submit_device_original(device, "circle-self-join", event)
             .await?;
         Ok(())
     }
@@ -353,6 +465,56 @@ impl ManagedDeviceRuntime {
         let saved: ManagedPublication = self.authoring.decrypt_key_material(&key, &raw)?;
         if saved.event.event() != event {
             return Err(invalid("publication index has different original bytes"));
+        }
+        Ok(true)
+    }
+
+    /// A withdrawn local send has already advanced this Device's send ratchet.
+    /// Only its exact accepted Commit may advance the stream without opening
+    /// content again. This never returns plaintext or acknowledges remote work.
+    pub(super) async fn already_applied_local_content(
+        &self,
+        device: &ManagedDevice,
+        commit: &RealmCommit,
+    ) -> Result<bool> {
+        let Some(key) = self
+            .read(&Self::publication_event_key(&commit.event_ref)?)
+            .await?
+        else {
+            return Ok(false);
+        };
+        let raw = self
+            .read(&key)
+            .await?
+            .ok_or_else(|| invalid("local publication index has no original"))?;
+        let saved: ManagedPublication = self.authoring.decrypt_key_material(&key, &raw)?;
+        saved.event.verify_identity()?;
+        if saved.event.event_id() != &commit.event_ref {
+            return Err(invalid("local publication index names another Event"));
+        }
+        if saved.event.actor_id != device.actor_id
+            || saved.event.scope_ref != device.effective_scope
+            || saved.device_operation_id != device.operation_id
+            || !matches!(
+                saved.event.kind,
+                arkret::EventKind::MessageCreate
+                    | arkret::EventKind::MessageRedact
+                    | arkret::EventKind::StrandCreate
+            )
+        {
+            return Ok(false);
+        }
+        if Self::accepted_publication(&saved)?.is_none() {
+            return Ok(false);
+        }
+        let Some(AuthoritySubmitOutcome::Accepted {
+            commit: retained, ..
+        }) = &saved.outcome
+        else {
+            return Ok(false);
+        };
+        if retained != commit {
+            return Err(invalid("local content has a different accepted Commit"));
         }
         Ok(true)
     }
@@ -547,6 +709,40 @@ impl ManagedDeviceRuntime {
             .await
     }
 
+    /// A portal's title follows the same native MLS custody as message content.
+    /// Its location remains in the original signed envelope for discovery.
+    pub async fn submit_portal_strand<E: Serialize>(
+        &self,
+        actor: &ActorId,
+        scope: &ScopeRef,
+        title: &str,
+        external: E,
+    ) -> Result<arkret::StrandId> {
+        let mut object = arkret_models_collaboration::objects::strand::Strand::new_create(
+            scope.realm_id().clone(),
+            title,
+            actor.clone(),
+        );
+        if let ScopeRef::Circle { circle_id, .. } = scope {
+            object.scope_circle_id = Some(circle_id.clone());
+        }
+        object.tracks.clear();
+        object.tracks.insert(
+            "discussion".into(),
+            arkret::StrandTrack::discussion_primary(),
+        );
+        let id = self
+            .submit_content::<event_spec::StrandCreate, _>(
+                actor,
+                scope,
+                StrandCreatePayload { object },
+                external,
+                true,
+            )
+            .await?;
+        Ok(arkret::StrandId::from_event_id(&arkret::EventId::new(id)?))
+    }
+
     async fn submit_content<K: EventSpec, E: Serialize>(
         &self,
         actor: &ActorId,
@@ -563,8 +759,23 @@ impl ManagedDeviceRuntime {
             "content/{}",
             canonical_sha256(&(actor, scope, K::KIND, &external))?
         );
+        let saved = self.publication(actor, scope, &operation).await?;
+        // A create embeds its timestamp in the payload. Recover that one
+        // producer input before comparing a retry, just as for the envelope.
+        let at = saved.as_ref().map_or_else(
+            || arkret::canonical::normalize_timestamp_canonical(Utc::now()),
+            |(_, _, saved)| saved.event.created_at,
+        );
+        let content = if K::KIND == arkret::EventKind::StrandCreate {
+            let mut strand: StrandCreatePayload =
+                serde_json::from_value(serde_json::to_value(&content)?)?;
+            strand.object.created_at = at;
+            serde_json::from_value(serde_json::to_value(strand)?)?
+        } else {
+            content
+        };
         let digest = canonical_sha256(&(actor, scope, K::KIND, &content, &external))?;
-        if let Some((_, _, saved)) = self.publication(actor, scope, &operation).await? {
+        if let Some((_, _, saved)) = saved {
             if saved.input_digest != digest {
                 return Err(invalid("delivery identity already binds different content"));
             }
@@ -626,12 +837,6 @@ impl ManagedDeviceRuntime {
             let (key, previous, mut record) = self.accepted_device_record(&device).await?;
             let mut value = serde_json::to_value(&content)?;
             if encrypt {
-                let mut message: MessageCreatePayload = serde_json::from_value(value)?;
-                if message.encrypted_content.is_some() || message.encrypted_metadata.is_some() {
-                    return Err(invalid(
-                        "host must supply plaintext for the native MLS send transaction",
-                    ));
-                }
                 let mut group =
                     super::inbox::restore_group(&record, &device)?.ok_or_else(|| {
                         BridgeError::App(
@@ -660,20 +865,51 @@ impl ManagedDeviceRuntime {
                     arkret::mls::encrypted_envelope_from_payload(&encrypted)
                         .map_err(|e| invalid(e.to_string()))
                 };
-                let plaintext = message
-                    .content
-                    .take()
-                    .ok_or_else(|| invalid("message content missing"))?;
-                message.encrypted_content = Some(seal(
-                    MESSAGE_CONTENT_BLOCK_MLS_CONTENT_TYPE,
-                    &canonical_json_bytes(&plaintext)?,
-                )?);
-                if let Some(metadata) = message.metadata.take() {
-                    message.encrypted_metadata = Some(seal(
-                        MESSAGE_METADATA_MLS_CONTENT_TYPE,
-                        &canonical_json_bytes(&metadata)?,
-                    )?);
-                }
+                value = match K::KIND {
+                    arkret::EventKind::MessageCreate => {
+                        let mut message: MessageCreatePayload = serde_json::from_value(value)?;
+                        if message.encrypted_content.is_some()
+                            || message.encrypted_metadata.is_some()
+                        {
+                            return Err(invalid("host must supply plaintext for native MLS"));
+                        }
+                        let plaintext = message
+                            .content
+                            .take()
+                            .ok_or_else(|| invalid("message content missing"))?;
+                        message.encrypted_content = Some(seal(
+                            MESSAGE_CONTENT_BLOCK_MLS_CONTENT_TYPE,
+                            &canonical_json_bytes(&plaintext)?,
+                        )?);
+                        if let Some(metadata) = message.metadata.take() {
+                            message.encrypted_metadata = Some(seal(
+                                MESSAGE_METADATA_MLS_CONTENT_TYPE,
+                                &canonical_json_bytes(&metadata)?,
+                            )?);
+                        }
+                        serde_json::to_value(message)?
+                    }
+                    arkret::EventKind::StrandCreate => {
+                        let mut strand: StrandCreatePayload = serde_json::from_value(value)?;
+                        if strand.object.encrypted_metadata.is_some()
+                            || strand.object.content.is_some()
+                            || strand.object.encrypted_content.is_some()
+                        {
+                            return Err(invalid("portal create requires plaintext metadata only"));
+                        }
+                        let metadata = strand
+                            .object
+                            .metadata
+                            .take()
+                            .ok_or_else(|| invalid("portal metadata missing"))?;
+                        strand.object.encrypted_metadata = Some(seal(
+                            "application/vnd.arkret.strand-metadata+json",
+                            &canonical_json_bytes(&metadata)?,
+                        )?);
+                        serde_json::to_value(strand)?
+                    }
+                    _ => return Err(invalid("unsupported native content encryption")),
+                };
                 super::inbox::refresh_group_private_state(
                     &mut record,
                     &device,
@@ -681,7 +917,6 @@ impl ManagedDeviceRuntime {
                         .export_state_record()
                         .map_err(|e| invalid(e.to_string()))?,
                 )?;
-                value = serde_json::to_value(message)?;
             }
             let typed: K::Payload = serde_json::from_value(value)?;
             let intent = TypedEventDraft::<K>::new(scope.clone(), actor.clone(), typed)?
@@ -689,7 +924,7 @@ impl ManagedDeviceRuntime {
                     self.edge.config().arkret.applet_id.clone(),
                 )?)
                 .with_authorization_ref(child.clone().into())
-                .into_intent(Utc::now())?
+                .into_intent(at)?
                 .with_external_ref(
                     external_map
                         .iter()

@@ -34,7 +34,9 @@ mod business;
 mod content;
 mod inbox;
 mod mls;
+mod portal;
 mod read_source;
+mod revocation;
 mod stream;
 mod worker;
 pub use content::{NativeContent, NativeContentSink};
@@ -85,6 +87,10 @@ pub struct ManagedDevice {
 }
 
 impl ManagedDevice {
+    pub fn effective_scope(&self) -> &ScopeRef {
+        &self.effective_scope
+    }
+
     pub fn client(&self) -> &Client {
         &self.client
     }
@@ -316,6 +322,9 @@ impl ManagedDeviceRuntime {
         operation_id: &str,
         effective_scope: &ScopeRef,
     ) -> Result<Option<ManagedDevice>> {
+        if self.is_retired_device(actor_id, operation_id).await? {
+            return Err(invalid("this Device operation was permanently retired"));
+        }
         let operation_key = format!(
             "managed-device/v1/{}",
             canonical_sha256(&(actor_id, operation_id))?
@@ -489,6 +498,12 @@ impl ManagedDeviceRuntime {
         plan: &InitialManagedDevicePlan,
         operation_key: &str,
     ) -> Result<String> {
+        if self
+            .is_retired_device(&plan.actor_id, &plan.operation_id)
+            .await?
+        {
+            return Err(invalid("this Device operation was permanently retired"));
+        }
         if let Some(raw) = self.read(operation_key).await? {
             self.decode(operation_key, &raw, plan)?;
             return Ok(raw);
@@ -612,7 +627,18 @@ impl ManagedDeviceRuntime {
         let next = self
             .authoring
             .encrypt_key_material(operation_key, &record)?;
-        if self.cas(operation_key, None, next.clone()).await? {
+        let tombstone = revocation::retirement_key(&plan.actor_id, &plan.operation_id)?;
+        let store = self.store.clone();
+        let insertion_key = operation_key.to_owned();
+        let inserted_value = next.clone();
+        if run_blocking(move || {
+            store.compare_exchange_batch(
+                &[(insertion_key.clone(), None), (tombstone, None)],
+                &[(insertion_key, Some(inserted_value))],
+            )
+        })
+        .await?
+        {
             return Ok(next);
         }
         let winner = self

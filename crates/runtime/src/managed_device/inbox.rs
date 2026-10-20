@@ -25,6 +25,16 @@ pub(super) struct ScopeInbox {
     welcomes: BTreeMap<String, DurableWelcome>,
 }
 
+pub(super) fn has_pending_work(record: &DeviceRecord) -> bool {
+    record.mls.inboxes.values().any(|state| {
+        state.page.is_some()
+            || state
+                .welcomes
+                .values()
+                .any(|welcome| welcome.outcome.is_none())
+    })
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InstalledGroup {

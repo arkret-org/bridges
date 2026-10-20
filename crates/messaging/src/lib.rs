@@ -41,10 +41,9 @@ use content::{
 };
 use ghost::{
     GhostProvisionRequestProvider, bridge_error_class, bridge_error_code, bridge_protocol,
-    bridge_tenant, create_portal_strand, external_id_object_ref_digest, external_ref_for_delete,
-    external_ref_for_message, find_existing_portal_strand, message_mapping_channel_key,
-    normalized_external_id, portal_location_ref, provision_ghost_actor,
-    require_ghost_provision_provider,
+    bridge_tenant, external_id_object_ref_digest, external_ref_for_delete,
+    external_ref_for_message, message_mapping_channel_key, normalized_external_id,
+    portal_location_ref, provision_ghost_actor, require_ghost_provision_provider,
 };
 pub use media::InboundMediaAuthorization;
 use media::{
@@ -166,12 +165,6 @@ const BRIDGE_HANDLED_EVENT_KINDS: [EventKind; 2] =
 /// requires bridge messages to use the `discussion` track; the v1
 /// `message_create_payload.track_name` schema constrains it to that value.
 pub(crate) const PORTAL_STRAND_TRACK: &str = "discussion";
-
-/// Page size for the §10.1 step-2 projection scan over realm history.
-pub(crate) const PORTAL_STRAND_SCAN_PAGE_LIMIT: u16 = 200;
-/// Page cap for the §10.1 step-2 projection scan (bounds startup cost on large
-/// realms; a fresh portal realm resolves in one page).
-pub(crate) const PORTAL_STRAND_SCAN_MAX_PAGES: usize = 25;
 
 /// `message_id` is the single registered target carrier of
 /// `message_redact_payload`; the create Event token is retyped to
@@ -493,14 +486,25 @@ impl MessageContext {
     /// cached in the channel↔realm mapping. Serialized per channel so
     /// concurrent first messages cannot double-create.
     pub async fn ensure_portal_strand(&self, app_channel: &str, realm_id: &str) -> Result<String> {
+        self.ensure_portal_strand_for_actor(app_channel, realm_id, None)
+            .await
+    }
+
+    async fn ensure_portal_strand_for_actor(
+        &self,
+        app_channel: &str,
+        realm_id: &str,
+        actor: Option<&arkret::ActorId>,
+    ) -> Result<String> {
         let channel_key = message_mapping_channel_key(&self.inner.config, app_channel);
         let queue_key = format!("portal_strand{MESSAGE_MAPPING_KEY_SEPARATOR}{channel_key}");
         self.inner
             .queue
             .run(&queue_key, || {
-                let edge = self.inner.edge.clone();
                 let store = self.store.clone();
                 let config = self.inner.config.clone();
+                let devices = self.managed_devices.clone();
+                let actor = actor.cloned();
                 let app_channel = app_channel.to_owned();
                 let realm_id = realm_id.to_owned();
                 async move {
@@ -520,22 +524,50 @@ impl MessageContext {
                         return Ok::<String, BridgeError>(strand_id);
                     }
                     let location = portal_location_ref(&config, &app_channel);
-                    // §10.1 step 2: look for an existing portal strand.
-                    let strand_id =
-                        match find_existing_portal_strand(&edge, &realm_id, &location).await? {
-                            Some(strand_id) => strand_id,
-                            // §10.1 step 3: create it.
-                            None => {
-                                create_portal_strand(
-                                    &edge,
-                                    &app_channel,
-                                    alias.as_deref(),
-                                    &realm_id,
-                                    &location,
+                    let realm = RealmId::new(realm_id.clone())?;
+                    let actor = match actor {
+                        Some(actor) => actor,
+                        None => devices
+                            .local_actor_for_realm(&realm)
+                            .await?
+                            .ok_or_else(|| {
+                                BridgeError::App(
+                                    "portal discovery is waiting for an accepted Realm actor"
+                                        .into(),
                                 )
+                            })?,
+                    };
+                    // §10.1 step 2: look for an existing portal strand.
+                    let strand_id = match devices
+                        .find_portal_strand(&actor, &realm, &location)
+                        .await?
+                    {
+                        Some(strand_id) => strand_id,
+                        // §10.1 step 3: create it.
+                        None => {
+                            let scope = arkret::ScopeRef::Realm {
+                                realm_id: realm.clone(),
+                            };
+                            let title = alias
+                                .as_deref()
+                                .filter(|title| !title.trim().is_empty())
+                                .unwrap_or(&app_channel);
+                            devices
+                                .submit_portal_strand(&actor, &scope, title, &location)
+                                .await?;
+                            // A concurrent creator can precede our own accepted create.
+                            devices
+                                .find_portal_strand(&actor, &realm, &location)
                                 .await?
-                            }
-                        };
+                                .ok_or_else(|| {
+                                    BridgeError::Arkret(
+                                        "accepted portal create is absent from verified history"
+                                            .into(),
+                                    )
+                                })?
+                        }
+                    }
+                    .to_string();
                     store
                         .set_channel_portal_strand_async(app_channel, strand_id.clone())
                         .await?;
@@ -741,10 +773,6 @@ impl MessageContext {
                     msg.app_channel
                 ))
             })?;
-        // §10.1: the mapping unit for an external location is (realm_id,
-        // strand_id) — resolve the portal strand before submitting.
-        let strand_id = self.ensure_portal_strand(&msg.app_channel, &realm).await?;
-
         let protocol = bridge_protocol(&self.inner.config);
         let tenant = bridge_tenant(&self.inner.config);
         let external_user_id = normalized_external_id(&msg.app_user);
@@ -844,6 +872,15 @@ impl MessageContext {
                         }
                     };
                     let actor = &mapping.arkret_actor_id;
+                    // Resolve custody first: first contact must not depend on
+                    // a Service identity being able to read native history.
+                    let strand_id = self
+                        .ensure_portal_strand_for_actor(
+                            &msg.app_channel,
+                            &realm_for_submit,
+                            Some(actor),
+                        )
+                        .await?;
                     let scope = arkret::ScopeRef::Realm {
                         realm_id: arkret::RealmId::new(realm_for_submit.clone())?,
                     };

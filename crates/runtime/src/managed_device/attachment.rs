@@ -46,6 +46,32 @@ struct AttachmentCheckpoint {
 }
 
 impl ManagedDeviceRuntime {
+    pub(super) async fn attachment_checkpoints_for_device(
+        &self,
+        actor: &ActorId,
+        device_id: &DeviceId,
+    ) -> Result<Vec<(String, String)>> {
+        let store = self.store.clone();
+        let entries =
+            run_blocking(move || store.entries_with_prefix("managed-attachment-checkpoint/v1/"))
+                .await?;
+        let mut selected = Vec::new();
+        for (key, raw) in entries {
+            let checkpoint: AttachmentCheckpoint =
+                self.authoring.decrypt_key_material(&key, &raw)?;
+            if &checkpoint.state.actor_id == actor
+                && checkpoint.state.endpoint
+                    == arkret::MlsEndpointIdentity::human_device(
+                        actor.signing_principal_id().clone(),
+                        device_id.clone(),
+                    )
+            {
+                selected.push((key, raw));
+            }
+        }
+        Ok(selected)
+    }
+
     fn attachment_checkpoint_key(
         device: &ManagedDevice,
         reference: &arkret::EventId,
@@ -81,7 +107,25 @@ impl ManagedDeviceRuntime {
                     .map_err(|e| invalid(e.to_string()))?,
             };
             let encrypted = self.authoring.encrypt_key_material(&key, &checkpoint)?;
-            self.cas(&key, None, encrypted).await?;
+            let tombstone =
+                super::revocation::retirement_key(&device.actor_id, &device.operation_id)?;
+            let store = self.store.clone();
+            let inserted = run_blocking(move || {
+                store.compare_exchange_batch(
+                    &[(key.clone(), None), (tombstone, None)],
+                    &[(key, Some(encrypted))],
+                )
+            })
+            .await?;
+            if !inserted
+                && self
+                    .is_retired_device(&device.actor_id, &device.operation_id)
+                    .await?
+            {
+                return Err(invalid(
+                    "retired Device cannot retain new private checkpoints",
+                ));
+            }
         }
         Ok(())
     }

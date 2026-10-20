@@ -60,6 +60,23 @@ impl ManagedDeviceWorkers {
     }
 
     pub async fn tick(&mut self) -> Result<()> {
+        let fenced = self.runtime.reconcile_device_revocations().await?;
+        let mut settled_revocations = Vec::new();
+        for (id, worker) in &mut self.workers {
+            if fenced.iter().any(|(actor, device)| {
+                actor == &worker.device.actor_id && device == &worker.device.device_id
+            }) {
+                worker.retired = true;
+                worker.reader.retire();
+                worker.task.abort();
+                if self.runtime.erase_revoked_device(&worker.device).await? {
+                    settled_revocations.push(id.clone());
+                }
+            }
+        }
+        for id in settled_revocations {
+            self.workers.remove(&id);
+        }
         let devices = self.runtime.bootstrap_configured_devices().await?;
         if !self
             .runtime
@@ -77,6 +94,12 @@ impl ManagedDeviceWorkers {
         let mut active = BTreeSet::new();
         let mut active_scopes = BTreeSet::new();
         for device in devices {
+            if fenced
+                .iter()
+                .any(|(actor, id)| actor == &device.actor_id && id == &device.device_id)
+            {
+                continue;
+            }
             let id = canonical_sha256(&(
                 &device.actor_id,
                 &device.device_id,
