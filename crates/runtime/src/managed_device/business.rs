@@ -695,6 +695,16 @@ impl ManagedDeviceRuntime {
         payload: MessageCreatePayload,
         external: E,
     ) -> Result<String> {
+        if let Some(content) = &payload.content {
+            let value = content.to_value()?;
+            arkret_models_collaboration::events_payloads::validate_content_block(&value)
+                .map_err(|error| invalid(error.to_string()))?;
+            arkret_models_collaboration::events_payloads::validate_mentions_in_realm(
+                &value,
+                scope.realm_id(),
+            )
+            .map_err(|error| invalid(error.to_string()))?;
+        }
         self.submit_content::<event_spec::MessageCreate, _>(actor, scope, payload, external, true)
             .await
     }

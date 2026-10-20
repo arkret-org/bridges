@@ -111,7 +111,7 @@ impl NativeContent {
         original: &arkret::CommittedEventFullView,
         accepted: &arkret::CommittedEventFullView,
         group: &mut ArkretMlsGroup,
-    ) -> Result<Self> {
+    ) -> Result<Option<Self>> {
         let event = &original.event;
         let message = if event.kind == arkret::EventKind::MessageCreate {
             let mut message = event.as_message_create()?;
@@ -149,28 +149,46 @@ impl NativeContent {
                 .encrypted_content
                 .take()
                 .ok_or_else(|| invalid("activated MLS message has no encrypted content"))?;
-            message.content = Some(serde_json::from_slice(&open(
-                &encrypted,
-                MESSAGE_CONTENT_BLOCK_MLS_CONTENT_TYPE,
-            )?)?);
-            if let Some(encrypted) = message.encrypted_metadata.take() {
-                message.metadata = Some(serde_json::from_slice(&open(
-                    &encrypted,
-                    MESSAGE_METADATA_MLS_CONTENT_TYPE,
-                )?)?);
-            }
+            let content_bytes = open(&encrypted, MESSAGE_CONTENT_BLOCK_MLS_CONTENT_TYPE)?;
+            let metadata_bytes = message
+                .encrypted_metadata
+                .take()
+                .map(|encrypted| open(&encrypted, MESSAGE_METADATA_MLS_CONTENT_TYPE))
+                .transpose()?;
+            // Authenticate every envelope before classifying plaintext. The
+            // caller persists this receive ratchet even when application data
+            // is rejected; cryptographic failures still return an error.
+            let decoded = (|| -> Result<MessageCreatePayload> {
+                message.content = Some(serde_json::from_slice(&content_bytes)?);
+                let content = message.content.as_ref().expect("just decoded").to_value()?;
+                arkret_models_collaboration::events_payloads::validate_content_block(&content)
+                    .map_err(|error| invalid(error.to_string()))?;
+                arkret_models_collaboration::events_payloads::validate_mentions_in_realm(
+                    &content,
+                    &event.realm_id,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                message.metadata = metadata_bytes
+                    .as_deref()
+                    .map(serde_json::from_slice)
+                    .transpose()?;
+                Ok(message)
+            })();
+            let Ok(message) = decoded else {
+                return Ok(None);
+            };
             Some(message)
         } else if event.kind == arkret::EventKind::MessageRedact {
             None
         } else {
             return Err(invalid("native message delivery has another Event kind"));
         };
-        Ok(Self {
+        Ok(Some(Self {
             original: original.clone(),
             message,
             attachments: Vec::new(),
             attachments_opened: false,
-        })
+        }))
     }
 }
 

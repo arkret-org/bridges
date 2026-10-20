@@ -23,6 +23,9 @@ pub(super) struct ScopeStream {
     pending: BTreeMap<u64, CommittedEventView>,
     #[serde(default)]
     delivery: Option<NativeContent>,
+    // A bounded private diagnostic, containing ciphertext and signed originals
+    // only. It is committed with the receive ratchet, never sent to a sink.
+    last_rejected_content: Option<arkret::CommittedEventFullView>,
 }
 
 /// Local custody observations never assert current remote business permission.
@@ -67,6 +70,18 @@ fn validate_state(saved: &ScopeStream, scope: &ScopeRef) -> Result<()> {
             return Err(invalid(
                 "native delivery differs from the durable processed cut",
             ));
+        }
+    }
+    if let Some(rejected) = &saved.last_rejected_content {
+        let rejected_head = head(&CommittedEventView::Full(rejected.clone()));
+        if rejected.event.scope_ref != *scope
+            || rejected.event.kind != EventKind::MessageCreate
+            || rejected_head.stream_ref != saved.processed_through.stream_ref
+            || rejected_head.stream_position > saved.processed_through.stream_position
+            || (rejected_head.stream_position == saved.processed_through.stream_position
+                && rejected_head.commit_id != saved.processed_through.commit_id)
+        {
+            return Err(invalid("rejected content differs from the durable stream"));
         }
     }
     let mut previous = saved.processed_through.clone();
@@ -120,6 +135,16 @@ fn head(row: &CommittedEventView) -> CommitStreamHead {
 }
 
 impl ManagedDeviceRuntime {
+    /// Local private diagnostics, not another protocol notification or proof
+    /// of current read access. No rejected plaintext is retained or delivered.
+    pub async fn last_rejected_content(
+        &self,
+        device: &ManagedDevice,
+    ) -> Result<Option<arkret::CommittedEventFullView>> {
+        let (_, _, record) = self.accepted_device_record(device).await?;
+        Ok(state(&record, device)?.and_then(|saved| saved.last_rejected_content.clone()))
+    }
+
     pub async fn durable_stream_progress(
         &self,
         device: &ManagedDevice,
@@ -243,6 +268,7 @@ impl ManagedDeviceRuntime {
         let mut accepted = actual_base;
         let mut advanced = false;
         let mut delivery = None;
+        let mut last_rejected_content = saved.and_then(|saved| saved.last_rejected_content.clone());
         let mut recovered = Vec::new();
         while let Some((position, row)) = pending.first_key_value() {
             let position = *position;
@@ -292,10 +318,12 @@ impl ManagedDeviceRuntime {
                     EventKind::MessageCreate | EventKind::MessageRedact
                 ) && !self.is_local_publication(&full.event).await?
                 {
-                    let content = NativeContent::decrypt(&full, &accepted, &mut group)?;
+                    delivery = NativeContent::decrypt(&full, &accepted, &mut group)?;
                     self.retain_attachment_checkpoint(device, &accepted, &group)
                         .await?;
-                    delivery = Some(content);
+                    if delivery.is_none() {
+                        last_rejected_content = Some(full.clone());
+                    }
                     super::inbox::refresh_group_private_state(
                         &mut record,
                         device,
@@ -369,6 +397,7 @@ impl ManagedDeviceRuntime {
             current,
             pending,
             delivery,
+            last_rejected_content,
         };
         validate_state(&next, &device.effective_scope)?;
         record.mls.streams.insert(stream_key(device)?, next);
