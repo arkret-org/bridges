@@ -65,7 +65,8 @@ impl Drop for ManagedDeviceReader {
 impl ManagedDeviceRuntime {
     pub async fn open_reader(&self, device: &ManagedDevice) -> Result<ManagedDeviceReader> {
         self.accepted_device_record(device).await?;
-        self.terminal_child(device, "ak.event.read").await?;
+        // Membership-derived reads need the actual Service ceiling and current
+        // Device scope, not an additional delegated child grant.
         let realm = device
             .actor_id
             .as_realm_actor_id()

@@ -1265,24 +1265,22 @@ impl<M: MessageBridge> MessageAdapter<M> {
         let mapping_channel_key = message_mapping_channel_key(&self.ctx.core().config, &channel);
         let app_message_id = normalized_external_id(&app_ref.app_message_id);
         if app_message_id.is_empty() {
-            tracing::debug!(
-                realm = %realm_id,
-                app_channel = %channel,
-                "adapter returned no app message id; outbound mapping not recorded"
-            );
-        } else {
-            self.ctx
-                .store
-                .clone()
-                .record_message_async(
-                    mapping_channel_key,
-                    app_message_id,
-                    event.actor_id.to_string(),
-                    event.event_id.to_string(),
-                    realm_id,
-                )
-                .await?;
+            return Err(BridgeError::App(
+                "external delivery has no message identity; durable acknowledgement is unavailable"
+                    .into(),
+            ));
         }
+        self.ctx
+            .store
+            .clone()
+            .record_message_async(
+                mapping_channel_key,
+                app_message_id,
+                event.actor_id.to_string(),
+                event.event_id.to_string(),
+                realm_id,
+            )
+            .await?;
         Ok(())
     }
 }

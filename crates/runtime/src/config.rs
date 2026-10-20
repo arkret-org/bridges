@@ -185,7 +185,7 @@ pub struct ManagedActorAuthoringConfig {
     /// 32-byte hexadecimal key encrypting managed-actor root/next/controller seeds at
     /// rest. It is deliberately separate from the Applet service signing key.
     pub key_encryption_key_hex: String,
-    /// Explicit native Device permissions for this host's created Accounts.
+    /// Explicit native Device permissions for this host's Realm actors.
     /// Omission leaves Device bootstrap under the host's direct API control.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<ManagedDeviceBootstrapConfig>,

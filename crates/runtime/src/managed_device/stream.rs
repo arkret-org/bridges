@@ -186,25 +186,35 @@ impl ManagedDeviceRuntime {
             .restore_checkpoint_head(reader.client(), &expected)
             .await
             .map_err(|error| invalid(format!("native stream original checkpoint: {error}")))?;
-        let request = StreamScanRequest {
-            realm_id: device.effective_scope.realm_id().clone(),
-            stream_ref: expected.stream_ref.clone(),
-            direction: StreamScanDirection::After(Some(expected.stream_position)),
-            limit: limit.max(1) as u16,
+        let page =
+            if limit == 0 {
+                None
+            } else {
+                let request = StreamScanRequest {
+                    realm_id: device.effective_scope.realm_id().clone(),
+                    stream_ref: expected.stream_ref.clone(),
+                    direction: StreamScanDirection::After(Some(expected.stream_position)),
+                    limit: limit as u16,
+                };
+                Some(
+                    replica
+                        .apply_bound_scan(
+                            reader.client(),
+                            reader.client().scan_commit_stream(&request).await.map_err(
+                                |error| invalid(format!("native stream tail read: {error}")),
+                            )?,
+                        )
+                        .await
+                        .map_err(|error| {
+                            invalid(format!("native stream tail verification: {error}"))
+                        })?,
+                )
+            };
+        let rows = match &page {
+            Some(page) => page.rows().map_err(|error| invalid(error.to_string()))?,
+            None => &[],
         };
-        let page = replica
-            .apply_bound_scan(
-                reader.client(),
-                reader
-                    .client()
-                    .scan_commit_stream(&request)
-                    .await
-                    .map_err(|error| invalid(format!("native stream tail read: {error}")))?,
-            )
-            .await
-            .map_err(|error| invalid(format!("native stream tail verification: {error}")))?;
-        let rows = page.rows().map_err(|error| invalid(error.to_string()))?;
-        if rows.len() > limit.max(1) {
+        if rows.len() > limit {
             return Err(invalid("native stream exceeded its bounded page"));
         }
         let next_head = replica
@@ -233,9 +243,40 @@ impl ManagedDeviceRuntime {
         let mut accepted = actual_base;
         let mut advanced = false;
         let mut delivery = None;
-        while let Some((position, CommittedEventView::Full(full))) = pending.first_key_value() {
+        let mut recovered = Vec::new();
+        while let Some((position, row)) = pending.first_key_value() {
             let position = *position;
-            let full = full.clone();
+            let full = match row {
+                CommittedEventView::Full(full) => full.clone(),
+                _ => {
+                    // A previously withheld prefix must be re-admitted at
+                    // current authority; never skip it or replace its Commit.
+                    let id = row.commit().event_ref.clone();
+                    let original = garth::own_station_results::consume_own_station_device_event(
+                        reader.client(),
+                        &id,
+                        reader.client().committed_event_get(&id).await?,
+                    )
+                    .await
+                    .map_err(|error| invalid(format!("native withheld recovery: {error}")))?;
+                    if original
+                        .view()
+                        .map_err(|e| invalid(e.to_string()))?
+                        .commit()
+                        != row.commit()
+                    {
+                        return Err(invalid("recovered original changed its accepted Commit"));
+                    }
+                    let CommittedEventView::Full(full) =
+                        original.view().map_err(|e| invalid(e.to_string()))?
+                    else {
+                        break;
+                    };
+                    let full = full.clone();
+                    recovered.push(original);
+                    full
+                }
+            };
             if full.event.kind != EventKind::MlsCommit {
                 if matches!(
                     full.event.kind,
@@ -296,7 +337,14 @@ impl ManagedDeviceRuntime {
             && rows.is_empty()
             && state(&record, device)?.is_some_and(|saved| saved.current == current)
         {
-            page.rows().map_err(|error| invalid(error.to_string()))?;
+            if let Some(page) = &page {
+                page.rows().map_err(|error| invalid(error.to_string()))?;
+            }
+            for original in &recovered {
+                original
+                    .full()
+                    .map_err(|error| invalid(error.to_string()))?;
+            }
             reader.check_device(device)?;
             return Ok(progress);
         }
@@ -310,7 +358,14 @@ impl ManagedDeviceRuntime {
         };
         validate_state(&next, &device.effective_scope)?;
         record.mls.streams.insert(stream_key(device)?, next);
-        page.rows().map_err(|error| invalid(error.to_string()))?;
+        if let Some(page) = &page {
+            page.rows().map_err(|error| invalid(error.to_string()))?;
+        }
+        for original in &recovered {
+            original
+                .full()
+                .map_err(|error| invalid(error.to_string()))?;
+        }
         reader.check_device(device)?;
         let encrypted = self.authoring.encrypt_key_material(&key, &record)?;
         if !self.cas(&key, Some(previous), encrypted).await? {

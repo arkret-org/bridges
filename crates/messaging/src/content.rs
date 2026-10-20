@@ -79,8 +79,8 @@ pub(crate) fn build_message_create_payload(
 }
 
 /// Extract displayable plain text from a typed `ak.message.create` payload.
-/// E2EE `encrypted_content` yields an empty string; this bridge does not join
-/// MLS groups.
+/// Native MLS delivery supplies the decrypted local payload separately from
+/// the immutable signed Event. An unopened encrypted payload has no plain body.
 pub fn extract_plain_body(payload: &MessageCreatePayload) -> Result<String> {
     payload.plain_body().map_err(BridgeError::from)
 }
