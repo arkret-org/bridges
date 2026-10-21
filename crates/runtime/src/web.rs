@@ -1209,10 +1209,6 @@ fn collect_headers(req: &Request) -> Vec<(String, String)> {
         .collect()
 }
 
-fn header_value(req: &Request, name: &str) -> Option<String> {
-    header_value_from(&collect_headers(req), name)
-}
-
 fn header_value_from(headers: &[(String, String)], name: &str) -> Option<String> {
     let lower = name.to_ascii_lowercase();
     let values: Vec<&str> = headers
