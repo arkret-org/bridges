@@ -23,6 +23,15 @@ pub(super) struct ManagedPublication {
     commit_key: Option<PublicKeyMaterial>,
 }
 
+struct ContentIntent<P> {
+    operation: String,
+    digest: String,
+    at: chrono::DateTime<Utc>,
+    content: P,
+    external: serde_json::Map<String, serde_json::Value>,
+    encrypt: bool,
+}
+
 impl ManagedDeviceRuntime {
     /// Bootstrap only the explicitly configured Device scopes and finite window.
     pub async fn device_for_actor(&self, actor: &ActorId) -> Result<ManagedDevice> {
@@ -764,7 +773,8 @@ impl ManagedDeviceRuntime {
         let external = serde_json::to_value(external)?;
         let external_map = external
             .as_object()
-            .ok_or_else(|| invalid("external provenance must be an object"))?;
+            .ok_or_else(|| invalid("external provenance must be an object"))?
+            .clone();
         let operation = format!(
             "content/{}",
             canonical_sha256(&(actor, scope, K::KIND, &external))?
@@ -803,20 +813,51 @@ impl ManagedDeviceRuntime {
                 .await;
         }
         let device = self.device_for_actor(actor).await?;
+        self.submit_new_content::<K>(
+            actor,
+            scope,
+            &device,
+            ContentIntent {
+                operation,
+                digest,
+                at,
+                content,
+                external: external_map,
+                encrypt,
+            },
+        )
+        .await
+    }
+
+    // Keep device bootstrap outside the larger encryption/publication frame.
+    // Both phases retain the original current gates and durable send ordering.
+    async fn submit_new_content<K: EventSpec>(
+        &self,
+        actor: &ActorId,
+        scope: &ScopeRef,
+        device: &ManagedDevice,
+        intent: ContentIntent<K::Payload>,
+    ) -> Result<String> {
+        let ContentIntent {
+            operation,
+            digest,
+            at,
+            content,
+            external: external_map,
+            encrypt,
+        } = intent;
         if &device.effective_scope != scope {
             return Err(invalid("content scope differs from Device original"));
         }
         if let Some(event) = self
-            .retained_device_publication(&device, &operation, &digest)
+            .retained_device_publication(device, &operation, &digest)
             .await?
         {
-            return self
-                .submit_device_original(&device, &operation, event)
-                .await;
+            return self.submit_device_original(device, &operation, event).await;
         }
-        self.ensure_realm_membership(&device).await?;
-        let child = self.terminal_child(&device, K::KIND.as_str()).await?;
-        let reader = self.open_reader(&device).await?;
+        self.ensure_realm_membership(device).await?;
+        let child = self.terminal_child(device, K::KIND.as_str()).await?;
+        let reader = self.open_reader(device).await?;
         if encrypt {
             let target = self
                 .edge
@@ -826,20 +867,18 @@ impl ManagedDeviceRuntime {
                 .device
                 .as_ref()
                 .map_or(8, |c| c.key_package_inventory_target);
-            self.maintain_mls_key_packages(&device, target).await?;
-            self.poll_welcome_queue(&device, &reader).await?;
-            self.poll_content_stream(&device, &reader).await?;
+            self.maintain_mls_key_packages(device, target).await?;
+            self.poll_welcome_queue(device, &reader).await?;
+            self.poll_content_stream(device, &reader).await?;
         }
         for _ in 0..8 {
             if let Some(event) = self
-                .retained_device_publication(&device, &operation, &digest)
+                .retained_device_publication(device, &operation, &digest)
                 .await?
             {
-                return self
-                    .submit_device_original(&device, &operation, event)
-                    .await;
+                return self.submit_device_original(device, &operation, event).await;
             }
-            let (key, previous, mut record) = self.accepted_device_record(&device).await?;
+            let (key, previous, mut record) = self.accepted_device_record(device).await?;
             let mut value = serde_json::to_value(&content)?;
             if encrypt {
                 let mut group =
@@ -853,7 +892,7 @@ impl ManagedDeviceRuntime {
                 // A durable plaintext delivery awaiting its consumer's ACK is
                 // not an MLS transition. Sending still requires fresh public
                 // coordinates matching the installed private GroupContext.
-                self.verify_current_content_send(&device, &reader, &record, &group, &base)
+                self.verify_current_content_send(device, &reader, &record, &group, &base)
                     .await?;
                 let mut seal = |content_type: &str, bytes: &[u8]| -> Result<_> {
                     let header = arkret::EventContentPreEncryptionHeader::reconstruct(
@@ -922,7 +961,7 @@ impl ManagedDeviceRuntime {
                 };
                 super::inbox::refresh_group_private_state(
                     &mut record,
-                    &device,
+                    device,
                     group
                         .export_state_record()
                         .map_err(|e| invalid(e.to_string()))?,
@@ -941,15 +980,13 @@ impl ManagedDeviceRuntime {
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect(),
                 );
-            let event = self.sign_device_intent(&device, intent)?;
-            reader.check_device(&device)?;
+            let event = self.sign_device_intent(device, intent)?;
+            reader.check_device(device)?;
             if self
-                .freeze_publication(&device, &operation, &digest, &event, key, previous, &record)
+                .freeze_publication(device, &operation, &digest, &event, key, previous, &record)
                 .await?
             {
-                return self
-                    .submit_device_original(&device, &operation, event)
-                    .await;
+                return self.submit_device_original(device, &operation, event).await;
             }
         }
         Err(invalid("native content send custody contended"))
