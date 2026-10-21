@@ -23,6 +23,26 @@ pub(super) struct ManagedPublication {
     commit_key: Option<PublicKeyMaterial>,
 }
 
+/// Reject only resource scopes known to be disjoint. More specific objects
+/// still need the Station's resource/ancestry evaluator; they are not widened
+/// into a Realm or Circle selector here.
+fn parent_scope_candidate(grant: &CapabilityGrant, scope: &ScopeRef) -> bool {
+    grant.resources.iter().any(|resource| {
+        if resource.realm_id.as_ref() != Some(scope.realm_id()) {
+            return false;
+        }
+        match resource.kind {
+            arkret::ResourceSelectorKind::Circle => matches!(scope,
+                ScopeRef::Circle { circle_id, .. } if resource.circle_id.as_ref() == Some(circle_id)),
+            arkret::ResourceSelectorKind::Realm => {
+                matches!(scope, ScopeRef::Realm { .. })
+                    || resource.match_scope == Some(arkret::ResourceMatchScope::RealmWide)
+            }
+            _ => true,
+        }
+    })
+}
+
 impl ManagedDeviceRuntime {
     /// Bootstrap only the explicitly configured Device scopes and finite window.
     pub async fn device_for_actor(&self, actor: &ActorId) -> Result<ManagedDevice> {
@@ -91,7 +111,8 @@ impl ManagedDeviceRuntime {
             .await?
             .into_iter()
             .find(|grant| {
-                grant.actions.iter().any(|item| item == action)
+                parent_scope_candidate(grant, &device.effective_scope)
+                    && grant.actions.iter().any(|item| item == action)
                     && grant.constraints.iter().any(|c| {
                         c.constraint_kind == GrantConstraintKind::AuthorityControl
                             && c.constraint_subkind.is_none()
@@ -216,24 +237,7 @@ impl ManagedDeviceRuntime {
                 .await?;
             return Ok(());
         }
-        let grant = self
-            .service_grants(device)
-            .await?
-            .into_iter()
-            .find(|grant| {
-                grant
-                    .actions
-                    .iter()
-                    .any(|action| action == "ak.applet.join")
-                    && grant
-                        .resources
-                        .contains(&arkret::WireResourceSelector::realm(
-                            device.effective_scope.realm_id().clone(),
-                        ))
-            })
-            .ok_or_else(|| {
-                BridgeError::App("current installation has no Applet join permission".into())
-            })?;
+        let installation_source = self.subject_installation_source(device).await?;
         let intent = TypedEventDraft::<event_spec::MemberState>::new(
             device.effective_scope.clone(),
             device.actor_id.clone(),
@@ -242,7 +246,7 @@ impl ManagedDeviceRuntime {
         .with_applet_id(arkret::AppletId::new(
             self.edge.config().arkret.applet_id.clone(),
         )?)
-        .with_authorization_ref(grant.id.into())
+        .with_authorization_ref(installation_source.into())
         .into_intent(Utc::now())?;
         let event = self
             .freeze_device_intent(device, "realm-self-join", &digest, intent)
@@ -254,7 +258,11 @@ impl ManagedDeviceRuntime {
 
     /// Join the Circle with the subject's own Device, using the accepted
     /// parent join as its exact dependency. Both installations and all
-    /// existing membership permissions remain independently required.
+    /// existing membership permissions remain independently required. Before
+    /// joining a parent scope different from the identity's creation scope,
+    /// retain that scope's actual SDK install response with
+    /// [`Self::remember_installation_outcome`]; no grant-list discovery fallback
+    /// can establish membership in an installation aggregate.
     pub async fn join_circle_after_realm_join(
         &self,
         device: &ManagedDevice,
@@ -955,3 +963,6 @@ impl ManagedDeviceRuntime {
         Err(invalid("native content send custody contended"))
     }
 }
+
+#[cfg(test)]
+mod source_selection_tests;

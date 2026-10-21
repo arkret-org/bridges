@@ -206,6 +206,8 @@ Service 管理请求使用 SDK RFC9421 来源／目标签名，不申请 Applet 
 
 Circle 主体可用 `prepare_ghost_in_scope` 发起现有 authoring 流程；创建不自动加入父 Realm 或 Circle。`join_circle_after_realm_join` 使用主体本人已接受的父 Realm 加入 Commit，并由 Circle Device 原签 Circle 加入。两者分别需要现有安装、原签 Device 范围和原有加入授权；父 Realm 设备可只含 `ak.applet.join`，不必取得父 Realm 的上传或内容读取权限。没有获准的父加入来源时保持未就绪，不由管理员代写第三方 join。
 
+创建 scope 内的本人 Realm join 使用原 accepted create 的 `creation_authorization_ref` 作为安装来源，不按业务 grant 排序猜测。公开的跨 scope 加入 API 要求调用者先以 `remember_installation_outcome(&scope, &outcome)` 登记该 scope 真实安装 HTTP 响应的 SDK `AppletInstallOutcome`；没有此输入就保持未就绪。该记录只是本地候选来源，每次使用仍读取正式 authority/material、验证当前 scope／Service／Applet／epoch，最终由 Station 检查 exact installation；不能自行构造一个成功 outcome、复用另一 scope 的 grant 或把 `current_binding=active` 当作授权。现有 portal、消息与附件产品调用均使用 `device_for_actor` 的 creation scope，跨 scope API 不隐式启动额外产品工作流。
+
 此 runtime 的 Realm 消息与加密 portal 由主体 Device 原签。协议允许的 Service 自身写入仍须引用覆盖实际 action/resource 的有效安装授权，Service 签名本身不授予权限。完整 MLS 发起端 worker、主体控制轮换／恢复、持续授权与全部消费者仍需独立验收，不声明全部已登记 operation 的 runtime 已交付。
 
 设备撤销使用 `ManagedDeviceRuntime::revoke_device`，以稳定本地操作标识保存 controller 原签申请；重复标识不能改变目标或原因代码。申请的 Commit 只表示登记，必须由私有材料中的 `device_revoke` 结果确认 pending／accepted／rejected。`reconcile_device_revocations` 与 host worker 会冷续跑原申请及结果查询，pending 不删除密钥。若治理站已接受但本地未保存回执，先由管理 Service 读取已签结果及精确原件，核验后恢复，无须重发控制签名申请。永久 accepted 后，已收取的队列工作完成才通过 `erase_revoked_device` 删除设备私钥、MLS 私态和附件私有检查点；保留公开授权原件、最终材料和退役标记，原设备创建操作不能自动换钥重建。拒绝与未知结果不视为永久撤销。Realm／Circle 真实 HTTPS 与 PostgreSQL 联合测试已覆盖丢回执冷恢复、pending 保留密钥、生产终态任务、清理和防重建；其它生命周期与完整 operation 验收仍在进行。

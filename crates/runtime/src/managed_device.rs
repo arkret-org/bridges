@@ -33,6 +33,7 @@ mod attachment;
 mod business;
 mod content;
 mod inbox;
+mod installation_source;
 mod mls;
 mod portal;
 mod read_source;
