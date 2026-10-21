@@ -35,6 +35,7 @@ mod business;
 mod content;
 mod control;
 mod inbox;
+mod installation_source;
 mod mls;
 mod portal;
 mod processing;

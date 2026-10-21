@@ -12,9 +12,7 @@ use arkret::signatures::http_signature::{
     parse_signature_input, public_key_from_bytes, verify_signed_http_message,
 };
 use arkret::{AppletHandler, Did, DidCoreId, project_did_to_core_id};
-use arkret_models_integration::{
-    AppletAuthoringTransactionRequestBody, AppletTransactionRequestBody,
-};
+use arkret_models_integration::AppletTransactionRequestBody;
 use arkret_wire::{DidUrl, ServiceOperationId};
 use chrono::Utc;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
@@ -341,12 +339,12 @@ struct InvalidateDidBindingsRequest {
 }
 
 /// The operator command surface for `identity/did-usage-and-verification.md`
-/// §5.6: rotation, deactivation, witness fork and explicit revocation MUST
+/// Â§5.6: rotation, deactivation, witness fork and explicit revocation MUST
 /// invalidate the affected bindings. A bridge holds no resolver and receives no
 /// rotation notifications, so the runtime trigger for that obligation is the
 /// operator invoking this endpoint (see the README section on DID binding invalidation).
 ///
-/// Protection model: identical to `/health` and `/metrics` — the admin plane
+/// Protection model: identical to `/health` and `/metrics` â€” the admin plane
 /// binds loopback by default (BRG-06-004) and carries no request-level
 /// authentication of its own. An operator who widens `admin_bind` is expected
 /// to gate the whole plane at the network / reverse-proxy layer.
@@ -397,7 +395,7 @@ async fn admin_invalidate_did_bindings(req: &mut Request, depot: &mut Depot, res
         );
         return;
     }
-    // §5.6 `for_did` coarse sweep, scoped to this bridge's trust domain. Zero
+    // Â§5.6 `for_did` coarse sweep, scoped to this bridge's trust domain. Zero
     // dropped acceptances is still a success: the sweep is idempotent, and an
     // operator retrying a revocation must not read the retry as a failure.
     let invalidated = state.did_authority.invalidate_did(&did);
@@ -421,35 +419,9 @@ struct AppletWebState {
     edge: Arc<crate::ArkretEdge>,
     handler: Arc<BridgeAppletHandler>,
     config: Arc<Config>,
-    /// Inbound DID authority adapter. Handlers may reach its §4 entry points;
+    /// Inbound DID authority adapter. Handlers may reach its Â§4 entry points;
     /// nothing can reach the resolver it wraps.
     did_authority: Arc<DidAuthority>,
-}
-
-/// Validate an Applet-managed authoring completion pushed back to this bridge.
-///
-/// Every binding below is an SDK-owned validator; the bridge only composes them
-/// for the exact delivery it received. A completion is authoritative only when
-/// the pushing service is the governance Station the authoring request targeted,
-/// it names this Applet, and the commit it reports lands in that Realm's own
-/// stream rather than a Circle or Sidecar stream.
-fn validate_authoring_completion(
-    body: &AppletAuthoringTransactionRequestBody,
-    source_id: &DidCoreId,
-    config: &Config,
-) -> std::result::Result<(), String> {
-    let service_id =
-        project_did_to_core_id(&config.arkret.service_did).map_err(|error| error.to_string())?;
-    let applet_id = arkret::AppletId::new(config.arkret.applet_id.clone())
-        .map_err(|error| error.to_string())?;
-    crate::managed_authoring::validate_managed_authoring_completion(
-        body,
-        source_id,
-        &applet_id,
-        &service_id,
-    )
-    .map(|_| ())
-    .map_err(|error| error.to_string())
 }
 
 #[derive(Clone)]
@@ -497,7 +469,7 @@ fn applet_routes() -> Router {
             .hoop(OperationSelector(ServiceOperationId::EDGE_APPLET_READ_PROTOCOL_METADATA_V1)).get(applet_protocol))
         // The applet edge surface declares eight operations; the third_party
         // user/location lookups are not backed by a server-side discovery index
-        // here. Per applet-integration §15 an unimplemented surface MUST return a
+        // here. Per applet-integration Â§15 an unimplemented surface MUST return a
         // structured `unsupported_feature` rather than fall through to a bare 404.
         .push(Router::with_path("third_party/users")
             .hoop(OperationSelector(ServiceOperationId::EDGE_APPLET_THIRD_PARTY_USERS_READ_LIST_V1)).get(applet_third_party_unsupported))
@@ -818,20 +790,8 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
             }
         },
     };
-    let Some(idempotency_key) = header_value(req, "idempotency-key")
-        .map(|value| value.to_owned())
-        .filter(|value| !value.trim().is_empty())
-    else {
-        record_applet_transaction("bad_request");
-        bad_request(res, "Idempotency-Key header is required");
-        return;
-    };
-
     let headers = collect_headers(req);
-    let body_bytes = match req
-        .payload_with_max_size(MAX_APPLET_TRANSACTION_BODY_BYTES)
-        .await
-    {
+    let body_bytes = match req.payload().await {
         Ok(bytes) if bytes.len() <= MAX_APPLET_TRANSACTION_BODY_BYTES => bytes.to_vec(),
         Ok(bytes) => {
             record_applet_transaction("payload_too_large");
@@ -846,16 +806,6 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
             );
             return;
         }
-        Err(salvo::http::ParseError::PayloadTooLarge) => {
-            record_applet_transaction("payload_too_large");
-            applet_error(
-                res,
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "payload_too_large",
-                "completion exceeds its registered body limit",
-            );
-            return;
-        }
         Err(err) => {
             record_applet_transaction("bad_request");
             bad_request(res, format!("failed to read request body: {err}"));
@@ -863,19 +813,15 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         }
     };
 
+    if let Err(error) = crate::precheck_applet_completion_envelope(&headers, &body_bytes) {
+        unauthorized_code(res, error.code, error.message);
+        return;
+    }
     let value: Value = match serde_json::from_slice(&body_bytes) {
         Ok(value) => value,
         Err(err) => {
             record_applet_transaction("bad_request");
             bad_request(res, format!("invalid JSON body: {err}"));
-            return;
-        }
-    };
-    let request_hash = match arkret::canonical::canonical_sha256(&value) {
-        Ok(hash) => hash,
-        Err(err) => {
-            record_applet_transaction("bad_request");
-            bad_request(res, format!("non-canonical transaction JSON: {err}"));
             return;
         }
     };
@@ -889,98 +835,67 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
     };
 
     let AppletTransactionRequestBody::Authoring(authoring) = &body else {
-        bad_request(res, "group content must use an accepted managed Device");
+        // The body is a valid transaction branch in the opposite direction,
+        // but Station-to-Applet policy forbids Group delivery to base_url.
+        applet_error(
+            res,
+            StatusCode::FORBIDDEN,
+            "capability_denied",
+            "group content must use an accepted managed Device",
+        );
         return;
     };
-    // Only a locally frozen creation can trigger the authenticated governance lookup.
-    if let Err(error) = state.edge.prepared_managed_actor(authoring) {
-        unauthorized(res, error.to_string());
-        return;
-    }
-    let route = match state
-        .edge
-        .realm_route(&authoring.authoring_context.material.realm_id)
-        .await
-    {
-        Ok(route) => route,
-        Err(error) => {
-            unauthorized(res, error.to_string());
-            return;
-        }
-    };
-    let verified = match verify_http_applet_request(
-        req,
-        &headers,
-        &body_bytes,
-        &state.config,
-        state.did_authority.bindings(),
-        true,
-        Some(&route),
-    ) {
-        Ok(verified) => verified,
+    let authority = match request_authority(req, &headers) {
+        Ok(authority) => authority,
         Err(error) => {
             unauthorized_code(res, error.code, error.message);
             return;
         }
     };
-    let verified_completion = match state.edge.verify_managed_completion(authoring).await {
+    let path = req
+        .uri()
+        .path_and_query()
+        .map(|value| value.as_str().to_owned())
+        .unwrap_or_else(|| "/".to_owned());
+    let request = arkret::signatures::http_signature::SignedRequestParts {
+        method: req.method().as_str().to_owned(),
+        target_uri: request_target_uri(req, &headers, &authority, &path),
+        authority,
+        path,
+        headers,
+        body_digest: None,
+    };
+    let verified_completion = match state
+        .edge
+        .admit_managed_authoring_delivery(&request, &body_bytes, authoring)
+        .await
+    {
         Ok(completion) => completion,
         Err(error) => {
-            unauthorized(res, error.to_string());
+            let status = if error.code == "duplicate_conflict" {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::UNAUTHORIZED
+            };
+            applet_error(res, status, error.code, error.message);
             return;
         }
     };
-
-    let source = body.source_id().clone();
-    if source != verified.source_id {
-        record_applet_transaction("unauthorized");
-        unauthorized_code(
-            res,
-            "http_signature_invalid",
-            "transaction source_id does not match signed origin service DID",
-        );
-        return;
-    }
-    if let AppletTransactionRequestBody::Authoring(authoring) = &body
-        && let Err(error) =
-            validate_authoring_completion(authoring, &verified.source_id, &state.config)
-    {
-        record_applet_transaction("bad_request");
-        bad_request(
-            res,
-            format!("invalid authoring completion binding: {error}"),
-        );
-        return;
-    }
-    let authentication =
-        match build_delivery_authentication_record(&verified, authoring, &idempotency_key) {
-            Ok(value) => value,
-            Err(error) => {
-                internal_error(res, error);
-                return;
-            }
-        };
+    let outcome = verified_completion.retained_outcome().cloned().unwrap_or(
+        arkret_models_integration::AppletTransactionOutcome::Accepted {
+            committed_event_refs: Vec::new(),
+            rejections: Vec::new(),
+            retry_after_ms: None,
+        },
+    );
     let edge = state.edge.clone();
-    match run_blocking(move || {
-        crate::completion_delivery::confirm(
-            &edge,
-            verified_completion,
-            authentication,
-            request_hash,
-        )
-    })
-    .await
+    // The shared journal atomically retains the original and authenticated outcome.
+    match run_blocking(move || edge.install_verified_managed_completion(verified_completion)).await
     {
-        Ok(Some(outcome)) => {
+        Ok(()) => {
             record_applet_transaction("accepted");
             res.render(Json(outcome));
         }
-        Ok(None) => applet_error(
-            res,
-            StatusCode::CONFLICT,
-            "duplicate_conflict",
-            "delivery identity differs from its durable authentication or body",
-        ),
         Err(error) => internal_error(res, error.to_string()),
     }
 }
@@ -1172,7 +1087,7 @@ fn verify_http_applet_request_with_scenario(
     }
 
     // The HTTP Message Signature is authenticated against the accepted
-    // **source service** binding — the only purpose a bridge accepts. The
+    // **source service** binding â€” the only purpose a bridge accepts. The
     // binding came from configuration at startup, so this is a pure in-memory
     // lookup, and a method with no acceptance fails closed instead of
     // triggering one.
@@ -1253,46 +1168,6 @@ fn verify_http_applet_request_with_scenario(
         signature_label,
         signature_algorithm,
     })
-}
-
-fn build_delivery_authentication_record(
-    verified: &VerifiedAppletHttpRequest,
-    body: &AppletAuthoringTransactionRequestBody,
-    idempotency_key: &str,
-) -> std::result::Result<arkret_models_integration::AppletDeliveryAuthenticationRecord, String> {
-    let arkret_models_integration::RealmActorMaterialResult::Event {
-        producer_signer_fact:
-            arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact::Service(fact),
-        ..
-    } = &body.authoring_context.material.result
-    else {
-        return Err("historical completion requires the accepted Service signer fact".into());
-    };
-    Ok(
-        arkret_models_integration::AppletDeliveryAuthenticationRecord {
-            operation_id: ServiceOperationId::EdgeAppletCommandTransactionV1,
-            direction: arkret_models_integration::AppletDeliveryDirection::NodeToApplet,
-            source_id: verified.source_id.clone(),
-            destination_id: verified.destination_id.clone(),
-            signature_label: verified.signature_label.clone(),
-            verification_method: DidUrl::new(verified.key_id.clone())
-                .map_err(|e| format!("invalid method: {e}"))?,
-            verification_key_digest: verified
-                .source_key_state_digest
-                .parse()
-                .map_err(|e| format!("invalid key digest: {e}"))?,
-            signature_algorithm: verified.signature_algorithm,
-            registration_epoch: fact.key.registration_epoch.clone(),
-            idempotency_key: idempotency_key.to_owned(),
-            content_digest: verified
-                .content_digest
-                .clone()
-                .ok_or("verified transaction missing Content-Digest")?,
-            covered_components: verified.covered_components.clone(),
-            created: verified.created,
-            expires: verified.expires,
-        },
-    )
 }
 
 fn seed_source_service_bindings(authority: &DidAuthority, config: &Config) -> Result<()> {
@@ -1598,7 +1473,7 @@ mod tests {
     }
 
     // ========================================================================
-    // The operator invalidation endpoint is a real runtime trigger for §5.6.
+    // The operator invalidation endpoint is a real runtime trigger for Â§5.6.
     // These go through the mounted route and HTTP body parsing, not the
     // `invalidate_did` method in isolation.
     // ========================================================================
