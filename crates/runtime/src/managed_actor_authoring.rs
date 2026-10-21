@@ -45,7 +45,6 @@ const AUTHORING_WAIT_ATTEMPTS: usize = 300;
 struct ManagedActorKeyMaterial {
     root_seed: String,
     next_root_seed: String,
-    controller_seed: String,
 }
 
 #[derive(Clone)]
@@ -131,12 +130,7 @@ impl ManagedActorAuthoringService {
                 "accepted Realm actor differs from native custody".into(),
             ));
         }
-        let material: ManagedActorKeyMaterial =
-            self.decrypt_key_material(&subject_key, &record.encrypted_key_material)?;
-        let controller = SigningKey::from_bytes(&decode_managed_actor_seed(
-            "controller_seed",
-            &material.controller_seed,
-        )?);
+        let controller = self.decode_original_controller(&subject_key, &record, &identity)?;
         let did = Did::new(record.actor_did)?;
         let method = DidUrl::new(format!("{did}#managed-controller"))
             .map_err(|e| BridgeError::Database(e.into()))?;
@@ -581,7 +575,6 @@ impl ManagedActorAuthoringService {
             &ManagedActorKeyMaterial {
                 root_seed: arkret::base64url_encode(root_seed),
                 next_root_seed: arkret::base64url_encode(next_root_seed),
-                controller_seed: arkret::base64url_encode(controller_seed),
             },
         )?;
         Ok(ManagedActorIdentityRecord {
@@ -599,6 +592,10 @@ impl ManagedActorAuthoringService {
                 },
             )?,
             encrypted_key_material,
+            encrypted_controller_material: Some(self.encrypt_key_material(
+                &format!("managed-controller/v1/{subject_key}"),
+                &arkret::base64url_encode(controller_seed),
+            )?),
         })
     }
 
@@ -651,6 +648,66 @@ impl ManagedActorAuthoringService {
             ));
         }
         Ok(identity)
+    }
+
+    fn decode_original_controller(
+        &self,
+        subject: &str,
+        record: &ManagedActorIdentityRecord,
+        identity: &ManagedActorIdentity,
+    ) -> Result<SigningKey> {
+        let raw = record
+            .encrypted_controller_material
+            .as_ref()
+            .ok_or_else(|| {
+                BridgeError::Database(
+                    "daily controller key is unavailable; native recovery custody is independent"
+                        .into(),
+                )
+            })?;
+        let seed: String =
+            self.decrypt_key_material(&format!("managed-controller/v1/{subject}"), raw)?;
+        let seed = decode_managed_actor_seed("controller_seed", &seed)?;
+        let native: ManagedActorKeyMaterial =
+            self.decrypt_key_material(subject, &record.encrypted_key_material)?;
+        if seed == decode_managed_actor_seed("root_seed", &native.root_seed)?
+            || seed == decode_managed_actor_seed("next_root_seed", &native.next_root_seed)?
+        {
+            return Err(BridgeError::Database(
+                "daily controller must not share a native update key".into(),
+            ));
+        }
+        let key = SigningKey::from_bytes(&seed);
+        let ResolutionMethodHistoryEvidence::WebvhLog { log_entries, .. } =
+            &identity.method_history_evidence
+        else {
+            return Err(BridgeError::Database(
+                "controller requires native inception".into(),
+            ));
+        };
+        let document: arkret::DidDocument =
+            serde_json::from_value(log_entries[0]["state"].clone())?;
+        let method = DidUrl::new(format!(
+            "{}#managed-controller",
+            identity.initial_resolution.did
+        ))
+        .map_err(|e| BridgeError::Database(e.to_string()))?;
+        arkret::identity::validate_verification_method_relationship(
+            &document,
+            &method,
+            &identity.initial_resolution.did,
+            arkret::identity::DidVerificationRelationship::AssertionMethod,
+        )
+        .map_err(|e| BridgeError::Database(e.to_string()))?;
+        let actual =
+            arkret::identity::jws::resolve_ed25519_pubkey_from_document(&document, method.as_str())
+                .map_err(|e| BridgeError::Database(e.to_string()))?;
+        if key.verifying_key() != actual {
+            return Err(BridgeError::Database(
+                "daily controller differs from retained inception".into(),
+            ));
+        }
+        Ok(key)
     }
 
     pub(crate) fn encrypt_key_material<T: Serialize>(
@@ -735,12 +792,7 @@ impl ManagedActorAuthoringService {
             .managed_actor_identity_async(subject.clone())
             .await?
             .ok_or_else(|| BridgeError::Database("authoring identity disappeared".into()))?;
-        let keys: ManagedActorKeyMaterial =
-            self.decrypt_key_material(&subject, &record.encrypted_key_material)?;
-        let controller = SigningKey::from_bytes(&decode_managed_actor_seed(
-            "controller_seed",
-            &keys.controller_seed,
-        )?);
+        let controller = self.decode_original_controller(&subject, &record, identity)?;
         let (applet, role, registration, grant, request_id, external) = match &request.basis {
             arkret::AppletManagedActorAuthoringBasis::ProvisionBot(b) => (
                 b.applet_id.clone(),
@@ -868,36 +920,6 @@ fn verify_managed_actor_root(
             )
         })?;
     let root_seed = decode_managed_actor_seed("root_seed", &key_material.root_seed)?;
-    let controller_seed =
-        decode_managed_actor_seed("controller_seed", &key_material.controller_seed)?;
-    let controller_key = SigningKey::from_bytes(&controller_seed).verifying_key();
-    let method = format!("{did}#managed-controller");
-    let document: arkret::DidDocument = serde_json::from_value(log_entries[0]["state"].clone())
-        .map_err(|error| {
-            BridgeError::Database(format!("managed controller document is invalid: {error}"))
-        })?;
-    let stored_key =
-        arkret::identity::jws::resolve_ed25519_pubkey_from_document(&document, &method).map_err(
-            |error| BridgeError::Database(format!("managed controller method is invalid: {error}")),
-        )?;
-    arkret::identity::validate_verification_method_relationship(
-        &document,
-        &DidUrl::new(method).map_err(|error| {
-            BridgeError::Database(format!("managed controller method is invalid: {error}"))
-        })?,
-        did,
-        arkret::identity::DidVerificationRelationship::AssertionMethod,
-    )
-    .map_err(|error| {
-        BridgeError::Database(format!(
-            "managed controller assertion relationship is invalid: {error}"
-        ))
-    })?;
-    if controller_key != stored_key || controller_seed == root_seed {
-        return Err(BridgeError::Database(
-            "stored managed controller key differs from its native document".into(),
-        ));
-    }
     let public_key = PublicKeyMaterial::Ed25519Raw {
         bytes: SigningKey::from_bytes(&root_seed)
             .verifying_key()
@@ -913,11 +935,6 @@ fn verify_managed_actor_root(
         ));
     }
     let next_root_seed = decode_managed_actor_seed("next_root_seed", &key_material.next_root_seed)?;
-    if controller_seed == next_root_seed {
-        return Err(BridgeError::Database(
-            "managed controller key must differ from the next history root".into(),
-        ));
-    }
     let next_root_multibase = arkret::ed25519_pubkey_to_did_key_multibase(
         SigningKey::from_bytes(&next_root_seed)
             .verifying_key()
@@ -1188,6 +1205,7 @@ mod ghost_bundle_tests {
     use chrono::{DateTime, TimeZone};
 
     use super::*;
+    use crate::AuthoringStore as _;
 
     #[derive(Default)]
     pub(super) struct RecordingAuthoringStore(Mutex<BTreeMap<String, String>>);
@@ -1368,7 +1386,6 @@ mod ghost_bundle_tests {
         let material = ManagedActorKeyMaterial {
             root_seed: arkret::base64url_encode([0x51; 32]),
             next_root_seed: arkret::base64url_encode([0x52; 32]),
-            controller_seed: arkret::base64url_encode([0x55; 32]),
         };
         let verified = verify_managed_actor_root(
             &identity.initial_resolution.did,
@@ -1388,7 +1405,6 @@ mod ghost_bundle_tests {
         let wrong_root = ManagedActorKeyMaterial {
             root_seed: arkret::base64url_encode([0x53; 32]),
             next_root_seed: material.next_root_seed.clone(),
-            controller_seed: material.controller_seed.clone(),
         };
         assert!(
             verify_managed_actor_root(
@@ -1401,26 +1417,12 @@ mod ghost_bundle_tests {
         let wrong_next_root = ManagedActorKeyMaterial {
             root_seed: material.root_seed.clone(),
             next_root_seed: arkret::base64url_encode([0x54; 32]),
-            controller_seed: material.controller_seed.clone(),
         };
         assert!(
             verify_managed_actor_root(
                 &identity.initial_resolution.did,
                 &identity.method_history_evidence,
                 &wrong_next_root,
-            )
-            .is_err()
-        );
-        let wrong_controller = ManagedActorKeyMaterial {
-            root_seed: material.root_seed,
-            next_root_seed: material.next_root_seed,
-            controller_seed: arkret::base64url_encode([0x56; 32]),
-        };
-        assert!(
-            verify_managed_actor_root(
-                &identity.initial_resolution.did,
-                &identity.method_history_evidence,
-                &wrong_controller
             )
             .is_err()
         );
@@ -1589,6 +1591,60 @@ mod ghost_bundle_tests {
             assert!(
                 state.get("arkret").is_none(),
                 "Realm actors must not acquire Account/PCR bindings"
+            );
+            let mut record = service
+                .store
+                .clone()
+                .managed_actor_identity_async(subject.clone())
+                .await
+                .unwrap()
+                .unwrap();
+            service
+                .decode_original_controller(&subject, &record, &identity)
+                .unwrap();
+            let native_ciphertext = record.encrypted_key_material.clone();
+            let original_daily = record.encrypted_controller_material.clone();
+            record.encrypted_controller_material = Some(
+                service
+                    .encrypt_key_material(
+                        &format!("managed-controller/v1/{subject}"),
+                        &arkret::base64url_encode([0x66; 32]),
+                    )
+                    .unwrap(),
+            );
+            assert!(
+                service
+                    .decode_original_controller(&subject, &record, &identity)
+                    .is_err()
+            );
+            assert!(service.decode_identity(&subject, record.clone()).is_ok());
+            record.encrypted_controller_material = original_daily;
+            let storage_key = format!("managed-identity/v1/{subject}");
+            let before = store.load(&storage_key).unwrap();
+            record.encrypted_controller_material = None;
+            assert!(
+                store
+                    .compare_exchange_batch(
+                        &[(storage_key.clone(), before)],
+                        &[(storage_key, Some(serde_json::to_string(&record).unwrap()))],
+                    )
+                    .unwrap()
+            );
+            assert_eq!(record.encrypted_key_material, native_ciphertext);
+            assert!(
+                service
+                    .decode_original_controller(&subject, &record, &identity)
+                    .is_err()
+            );
+            assert!(service.decode_identity(&subject, record).is_ok());
+            let (_, still_public) = service
+                .published_principal(&local_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                still_public, history,
+                "losing the daily key must not disable native publication"
             );
         }
     }

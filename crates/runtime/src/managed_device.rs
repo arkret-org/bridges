@@ -39,6 +39,7 @@ mod mls;
 mod portal;
 mod processing;
 mod read_source;
+mod recovery;
 mod revocation;
 mod stream;
 mod worker;
@@ -176,14 +177,29 @@ impl ManagedDeviceRuntime {
         else {
             return Err(invalid("current control query returned another purpose"));
         };
-        let row = |target: &arkret::CurrentSelector| -> Result<(&arkret::CurrentRevision, &serde_json::Value)> {
-            entries.iter().find_map(|entry| match entry {
-                arkret::RealmActorMaterialCurrentEntry::Present { row: arkret::TypedCurrentRow::Value { selector, revision, value, .. } }
-                    if selector == target => Some((revision, value)),
-                _ => None,
-            }).ok_or_else(|| invalid("required current Realm control row missing"))
+        let row = |target: &arkret::CurrentSelector| -> Result<(
+            &arkret::CurrentRevision,
+            &serde_json::Value,
+            &arkret::CommittedEventRef,
+        )> {
+            entries
+                .iter()
+                .find_map(|entry| match entry {
+                    arkret::RealmActorMaterialCurrentEntry::Present {
+                        row:
+                            arkret::TypedCurrentRow::Value {
+                                selector,
+                                revision,
+                                value,
+                                ..
+                            },
+                        source_ref,
+                    } if selector == target => Some((revision, value, source_ref)),
+                    _ => None,
+                })
+                .ok_or_else(|| invalid("required current Realm control row missing"))
         };
-        let (revision, control) = row(&control_selector)?;
+        let (revision, control, reference) = row(&control_selector)?;
         let control: arkret::RealmActorControlValue = serde_json::from_value(control.clone())?;
         let manager: arkret::RealmActorManagerValue =
             serde_json::from_value(row(&manager_selector)?.1.clone())?;
@@ -194,15 +210,13 @@ impl ManagedDeviceRuntime {
         {
             return Err(invalid("Applet is no longer this Realm actor's manager"));
         }
+        if reference.event_id.as_str() != control.resolution.resolution_event_ref {
+            return Err(invalid(
+                "control source differs from accepted resolution writer",
+            ));
+        }
         Ok(ManagedControlState {
-            reference: arkret::CommittedEventRef {
-                event_id: arkret::EventId::new(control.resolution.resolution_event_ref.clone())?,
-                commit_id: revision.commit_id.clone(),
-                stream_position: revision.stream_position,
-                stream_ref: arkret::CommitStreamRef::RealmControl {
-                    realm_id: id.realm_id.clone(),
-                },
-            },
+            reference: reference.clone(),
             control,
             revision: revision.clone(),
             generation: generation.current_device_generation_ref,

@@ -16,6 +16,7 @@ pub(crate) struct ManagedActorIdentityRecord {
     pub(crate) initial_resolution_json: String,
     pub(crate) method_history_evidence_json: String,
     pub(crate) encrypted_key_material: String,
+    pub(crate) encrypted_controller_material: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -337,6 +338,7 @@ mod tests {
             initial_resolution_json: "resolution".into(),
             method_history_evidence_json: "evidence".into(),
             encrypted_key_material: "ciphertext".into(),
+            encrypted_controller_material: Some("opaque-controller".into()),
         };
         store
             .install_managed_actor_identity("subject", &identity)

@@ -6,6 +6,9 @@ use arkret::{ActorId, AuthoredEvent, CurrentRevision, RealmActorControlValue, Re
 
 use super::*;
 
+mod recovery;
+use recovery::PreparedRecovery;
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PreparedControlRotation {
@@ -25,6 +28,7 @@ struct ControlCustody {
     next_root_seed: String,
     controllers: BTreeMap<String, String>,
     operations: BTreeMap<String, PreparedControlRotation>,
+    recoveries: BTreeMap<String, PreparedRecovery>,
 }
 
 fn invalid(message: impl Into<String>) -> BridgeError {
@@ -97,32 +101,40 @@ impl ManagedActorAuthoringService {
         actor: &ActorId,
         method: &DidUrl,
     ) -> Result<OriginalManagedController> {
-        let mut original = self.original_managed_controller(actor).await?;
-        if original.signer.verification_method() == method.as_str() {
-            return Ok(original);
-        }
         let subject = self.custody_subject(actor).await?;
-        let raw = self
-            .control_raw(&subject)
-            .await?
-            .ok_or_else(|| invalid("current control method has no local custody"))?;
+        let Some(raw) = self.control_raw(&subject).await? else {
+            let original = self.original_managed_controller(actor).await?;
+            if original.signer.verification_method() != method.as_str() {
+                return Err(invalid("current controller has no retained custody"));
+            }
+            return Ok(original);
+        };
         let custody: ControlCustody = self.decrypt_key_material(&key(&subject), &raw)?;
         if custody.actor_id != *actor {
             return Err(invalid("control custody belongs to another Realm actor"));
         }
-        let seed = custody
-            .controllers
-            .get(method.as_str())
-            .ok_or_else(|| invalid("current control method key is unavailable"))?;
+        let Some(seed) = custody.controllers.get(method.as_str()) else {
+            let original = self.original_managed_controller(actor).await?;
+            if original.signer.verification_method() != method.as_str() {
+                return Err(invalid("current control method key is unavailable"));
+            }
+            return Ok(original);
+        };
         let signing = SigningKey::from_bytes(&decode_managed_actor_seed("controller", seed)?);
         let did =
             arkret::verification_method_did(method.as_str()).map_err(|e| invalid(e.to_string()))?;
         if project_did_to_core_id(&did)? != *actor.signing_principal_id() {
             return Err(invalid("control method belongs to another principal"));
         }
-        original.signer = arkret::Ed25519PayloadSigner::new(signing.clone(), did, method.clone());
-        original.signing_key = signing;
-        Ok(original)
+        let edge = self.edge.clone();
+        let target = actor.clone();
+        let original = crate::run_blocking(move || edge.retained_managed_actor(&target)).await?;
+        Ok(OriginalManagedController {
+            actor_id: actor.clone(),
+            signer: arkret::Ed25519PayloadSigner::new(signing.clone(), did, method.clone()),
+            signing_key: signing,
+            original: Box::new(original),
+        })
     }
 
     pub(crate) async fn retained_control_rotation(
@@ -180,9 +192,10 @@ impl ManagedActorAuthoringService {
                 next_root_seed: material.next_root_seed,
                 controllers: BTreeMap::from([(
                     controller.signer.verification_method().to_owned(),
-                    material.controller_seed,
+                    arkret::base64url_encode(controller.signing_key.to_bytes()),
                 )]),
                 operations: BTreeMap::new(),
+                recoveries: BTreeMap::new(),
             }
         };
         if custody.actor_id != *actor {
@@ -195,6 +208,10 @@ impl ManagedActorAuthoringService {
             .operations
             .values()
             .any(|operation| operation.outcome.is_none())
+            || custody
+                .recoveries
+                .values()
+                .any(|operation| operation.terminal.is_none())
         {
             return Err(invalid(
                 "recover the outstanding control operation before another rotation",
@@ -517,6 +534,7 @@ mod tests {
             next_root_seed: arkret::base64url_encode(next),
             controllers: BTreeMap::from([(method.to_string(), arkret::base64url_encode([13; 32]))]),
             operations: BTreeMap::new(),
+            recoveries: BTreeMap::new(),
         };
         let signer = arkret::Ed25519PayloadSigner::new(control, did.clone(), method.clone());
         let applet = AppletId::new(edge.applet_id()).unwrap();
