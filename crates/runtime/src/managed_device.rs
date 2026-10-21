@@ -41,6 +41,7 @@ mod processing;
 mod read_source;
 mod recovery;
 mod revocation;
+mod status;
 mod stream;
 mod worker;
 pub use content::{NativeContent, NativeContentRecipient, NativeContentSink};
