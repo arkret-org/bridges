@@ -132,15 +132,14 @@ impl ManagedActorAuthoringService {
         if let Some(retained) = custody.recoveries.get(operation) {
             return Ok(retained.clone());
         }
-        if custody
-            .operations
-            .values()
-            .any(|operation| operation.outcome.is_none())
-            || custody.recoveries.values().any(|operation| {
-                !operation.is_finished()
-                    && replaces.is_none_or(|target| operation.begin.event_id() != &target.event_id)
-            })
-        {
+        // A lost daily key must not make an unresolved normal rotation a
+        // permanent recovery barrier. The begin's control CAS orders both
+        // operations; accepted recovery then fences all normal control writes.
+        // Preserve the original rotation until its exact outcome is reconciled.
+        if custody.recoveries.values().any(|operation| {
+            !operation.is_finished()
+                && replaces.is_none_or(|target| operation.begin.event_id() != &target.event_id)
+        }) {
             return Err(invalid(
                 "resolve the outstanding native control operation before recovery",
             ));

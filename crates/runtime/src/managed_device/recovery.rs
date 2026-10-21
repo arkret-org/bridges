@@ -56,6 +56,7 @@ impl ManagedDeviceRuntime {
             self.authoring
                 .accept_recovery_reset(&prepared, commit, key)
                 .await?;
+            self.reconcile_control_after_recovery(actor).await?;
             return Ok(commit.clone());
         }
         if prepared.is_finished() {
@@ -97,6 +98,7 @@ impl ManagedDeviceRuntime {
                     self.authoring
                         .accept_recovery_reset(&prepared, &commit, &key)
                         .await?;
+                    self.reconcile_control_after_recovery(actor).await?;
                     return Ok(commit);
                 }
                 arkret::RealmActorOperationOutcome::Submitted(
@@ -163,7 +165,56 @@ impl ManagedDeviceRuntime {
         self.authoring
             .accept_recovery_reset(&prepared, &commit, &key)
             .await?;
+        self.reconcile_control_after_recovery(actor).await?;
         Ok(commit)
+    }
+
+    // A reset must not erase a normal rotation whose reply was lost. Resolve
+    // its actual original, or retain both signed cuts proving it cannot commit.
+    async fn reconcile_control_after_recovery(&self, actor: &ActorId) -> Result<()> {
+        for prepared in self.authoring.pending_control_rotations(actor).await? {
+            let current = self.recovery_current(actor).await?;
+            let outcome = self.recovery_outcome(actor, &prepared.event).await?;
+            let arkret::RealmActorMaterialResult::Outcome { outcome: state, .. } =
+                &outcome.material().result
+            else {
+                return Err(invalid(
+                    "control reconciliation returned another material purpose",
+                ));
+            };
+            match state {
+                arkret::RealmActorOperationOutcome::Submitted(
+                    AuthoritySubmitOutcome::Accepted { commit, .. },
+                ) => {
+                    let (commit, key) = self
+                        .recovery_original(actor, &prepared.event, &recovery_reference(commit))
+                        .await?;
+                    self.authoring
+                        .accept_control_rotation(&prepared, &commit, &key)
+                        .await?;
+                }
+                arkret::RealmActorOperationOutcome::Submitted(
+                    AuthoritySubmitOutcome::Rejected { .. },
+                ) => {
+                    self.authoring
+                        .record_control_rejection(&prepared, &outcome)
+                        .await?;
+                }
+                arkret::RealmActorOperationOutcome::Status {
+                    status: arkret::RealmActorOperationStatus::Unknown,
+                } => {
+                    self.authoring
+                        .close_unaccepted_control(&prepared, &current, &outcome)
+                        .await?;
+                }
+                _ => {
+                    return Err(invalid(
+                        "normal control operation has an unexpected recovery outcome",
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Close only a never-accepted original whose required revisions advanced.

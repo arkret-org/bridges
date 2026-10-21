@@ -66,6 +66,9 @@ impl ManagedDeviceRuntime {
                     .await?
             }
         };
+        if prepared.is_closed() {
+            return Err(invalid("this control operation is permanently closed"));
+        }
         if let Some((commit, key)) = &prepared.outcome {
             self.authoring
                 .accept_control_rotation(&prepared, commit, key)
@@ -104,6 +107,16 @@ impl ManagedDeviceRuntime {
             return Err(invalid("control recovery request mismatch"));
         }
         let outcome = match outcome {
+            arkret::RealmActorOperationOutcome::Submitted(AuthoritySubmitOutcome::Rejected {
+                ..
+            }) => {
+                self.authoring
+                    .record_control_rejection(&prepared, &result)
+                    .await?;
+                return Err(invalid(
+                    "the governance Station rejected this control operation",
+                ));
+            }
             arkret::RealmActorOperationOutcome::Submitted(outcome) => outcome.clone(),
             arkret::RealmActorOperationOutcome::Status {
                 status: arkret::RealmActorOperationStatus::Unknown,

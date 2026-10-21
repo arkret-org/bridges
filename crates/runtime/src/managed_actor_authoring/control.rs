@@ -8,6 +8,8 @@ use super::*;
 
 mod recovery;
 use recovery::PreparedRecovery;
+mod unaccepted;
+use unaccepted::ControlClosure;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -18,6 +20,17 @@ pub(crate) struct PreparedControlRotation {
     pub(crate) previous_reference: arkret::CommittedEventRef,
     pub(crate) event: AuthoredEvent,
     pub(crate) outcome: Option<(RealmCommit, PublicKeyMaterial)>,
+    closure: Option<ControlClosure>,
+}
+
+impl PreparedControlRotation {
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closure.is_some()
+    }
+
+    fn is_finished(&self) -> bool {
+        self.outcome.is_some() || self.is_closed()
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -207,7 +220,7 @@ impl ManagedActorAuthoringService {
         if custody
             .operations
             .values()
-            .any(|operation| operation.outcome.is_none())
+            .any(|operation| !operation.is_finished())
             || custody
                 .recoveries
                 .values()
@@ -271,6 +284,11 @@ impl ManagedActorAuthoringService {
             .ok_or_else(|| invalid("control operation vanished"))?;
         if operation.event != prepared.event {
             return Err(invalid("control original changed"));
+        }
+        if operation.is_closed() {
+            return Err(invalid(
+                "closed control intent cannot acquire an acceptance",
+            ));
         }
         if let Some((prior, prior_key)) = &operation.outcome {
             if prior != commit || prior_key != station_key {
@@ -462,6 +480,7 @@ fn prepare_successor(
         previous_reference: reference.clone(),
         event,
         outcome: None,
+        closure: None,
     };
     custody.next_root_seed = arkret::base64url_encode(next_root);
     custody
