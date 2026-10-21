@@ -624,6 +624,11 @@ mod tests {
         let edge = Arc::new(ArkretEdge::new(Arc::new(config), file.open(), sender).unwrap());
         let router = salvo::Service::new(crate::web::managed_applet_router(edge.clone()).unwrap());
         let mut response = TestClient::get("https://applet.example/_arkret/describe")
+            .add_header(
+                "arkret-operation",
+                arkret::ServiceOperationId::SERVER_READ_DESCRIBE_V1,
+                true,
+            )
             .send(&router)
             .await;
         assert_eq!(response.status_code, Some(salvo::http::StatusCode::OK));
@@ -647,8 +652,19 @@ mod tests {
             "https://applet.example{}",
             arkret::canonical_service_resolution_path(&identity.service_id)
         );
-        let mut response = TestClient::get(resolution_url).send(&router).await;
+        let mut response = TestClient::get(resolution_url.clone())
+            .add_header(
+                "arkret-operation",
+                arkret::ServiceOperationId::OPEN_SERVICE_READ_RESOLUTION_V1,
+                true,
+            )
+            .send(&router)
+            .await;
         assert_eq!(response.status_code, Some(salvo::http::StatusCode::OK));
+        assert_eq!(
+            response.headers().get("arkret-operation").unwrap(),
+            arkret::ServiceOperationId::OPEN_SERVICE_READ_RESOLUTION_V1
+        );
         let published: arkret::AuthenticatedServiceResolution = response.take_json().await.unwrap();
         assert_eq!(json!(published), json!(identity.resolution));
         arkret::identity::verify_authenticated_service_resolution_history(
@@ -675,6 +691,11 @@ mod tests {
         assert!(document.get("verificationMethod").is_some());
         let mut response =
             TestClient::get("https://applet.example/_arkret/open/services/unknown/resolution")
+                .add_header(
+                    "arkret-operation",
+                    arkret::ServiceOperationId::OPEN_SERVICE_READ_RESOLUTION_V1,
+                    true,
+                )
                 .send(&router)
                 .await;
         assert_eq!(
@@ -683,6 +704,46 @@ mod tests {
         );
         let problem: arkret_wire::Problem = response.take_json().await.unwrap();
         assert_eq!(problem.code(), "not_found");
+        for (url, operation) in [
+            (
+                "https://applet.example/_arkret/describe".to_owned(),
+                arkret::ServiceOperationId::SERVER_READ_DESCRIBE_V1,
+            ),
+            (
+                resolution_url,
+                arkret::ServiceOperationId::OPEN_SERVICE_READ_RESOLUTION_V1,
+            ),
+        ] {
+            for kind in ["missing", "wrong", "duplicate"] {
+                let mut request = TestClient::get(&url);
+                if kind == "wrong" {
+                    request = request.add_header(
+                        "arkret-operation",
+                        arkret::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+                        true,
+                    );
+                } else if kind == "duplicate" {
+                    request = request
+                        .add_header("arkret-operation", operation, false)
+                        .add_header("arkret-operation", operation, false);
+                }
+                let mut response = request.send(&router).await;
+                let (status, code) = if kind == "missing" {
+                    (
+                        salvo::http::StatusCode::BAD_REQUEST,
+                        "operation_selector_required",
+                    )
+                } else {
+                    (
+                        salvo::http::StatusCode::UNPROCESSABLE_ENTITY,
+                        "unsupported_operation_version",
+                    )
+                };
+                assert_eq!(response.status_code, Some(status), "{kind} {url}");
+                let problem: arkret_wire::Problem = response.take_json().await.unwrap();
+                assert_eq!(problem.code(), code);
+            }
+        }
         assert!(
             edge.authoring_store()
                 .entries_with_prefix("applet-configuration/v1/")

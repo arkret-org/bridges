@@ -117,15 +117,20 @@ pub(crate) fn router(config: &Config) -> Result<salvo::Router> {
         let service_id = path
             .contains("{service_id}")
             .then(|| resolution.service_id.clone());
-        router = router.push(
-            Router::with_path(path)
-                .hoop(salvo::affix_state::inject(PublicResource {
-                    content_type,
-                    body: body.into(),
-                    service_id,
-                }))
-                .get(public_resource),
-        );
+        let canonical = service_id.is_some();
+        let mut resource = Router::with_path(path)
+            .hoop(salvo::affix_state::inject(PublicResource {
+                content_type,
+                body: body.into(),
+                service_id,
+            }))
+            .get(public_resource);
+        if canonical {
+            resource = resource.hoop(crate::web::OperationSelector(
+                arkret::ServiceOperationId::OPEN_SERVICE_READ_RESOLUTION_V1,
+            ));
+        }
+        router = router.push(resource);
     }
     Ok(router)
 }

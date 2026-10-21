@@ -47,6 +47,57 @@ const MAX_APPLET_TRANSACTION_BODY_BYTES: usize = 16 * 1024 * 1024;
 const SOURCE_SERVICE_ID_HEADER: &str = "source-service-id";
 const DESTINATION_SERVICE_ID_HEADER: &str = "destination-service-id";
 
+/// Select the exact registered operation before its handler reads a body.
+pub(crate) struct OperationSelector(pub &'static str);
+
+#[async_trait]
+impl Handler for OperationSelector {
+    async fn handle(
+        &self,
+        req: &mut Request,
+        depot: &mut Depot,
+        res: &mut Response,
+        ctrl: &mut FlowCtrl,
+    ) {
+        let mut values = req.headers().get_all("arkret-operation").iter();
+        let Some(first) = values.next() else {
+            applet_error(
+                res,
+                StatusCode::BAD_REQUEST,
+                "operation_selector_required",
+                "canonical Arkret requests require Arkret-Operation",
+            );
+            ctrl.skip_rest();
+            return;
+        };
+        let valid = first
+            .to_str()
+            .ok()
+            .filter(|value| *value == self.0)
+            .and_then(ServiceOperationId::from_wire)
+            .is_some_and(|operation| {
+                operation.matches_http_request(req.method().as_str(), req.uri().path())
+            });
+        if !valid || values.next().is_some() {
+            applet_error(
+                res,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unsupported_operation_version",
+                "Arkret-Operation must select the exact supported method and path exactly once",
+            );
+            ctrl.skip_rest();
+            return;
+        }
+        ctrl.call_next(req, depot, res).await;
+        if res.status_code.unwrap_or(StatusCode::OK).is_success() {
+            res.headers_mut().insert(
+                "arkret-operation",
+                salvo::http::HeaderValue::from_static(self.0),
+            );
+        }
+    }
+}
+
 /// Start the web service and run it blocking. `extra` is each app adapter's
 /// webhook routes (optional).
 pub async fn serve(
@@ -462,9 +513,17 @@ fn service_description_router(edge: &crate::ArkretEdge) -> Result<Router> {
     let authority = Arc::new(DidAuthority::new(
         edge.config().arkret.trust_domain.clone(),
     )?);
-    let description = BridgeAppletHandler::new(edge, None, authority)?.describe()?;
+    let mut description = BridgeAppletHandler::new(edge, None, authority)?.describe()?;
+    description
+        .supported_operation_bundles
+        .push("ak.operation_bundle.applet_service.service_resolution.v1".to_owned());
+    description.supported_operation_bundles.sort();
+    description.validate()?;
     Ok(Router::new().push(identity).push(
         Router::with_path("_arkret/describe")
+            .hoop(OperationSelector(
+                ServiceOperationId::SERVER_READ_DESCRIBE_V1,
+            ))
             .hoop(affix_state::inject(description))
             .get(service_describe),
     ))
