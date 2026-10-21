@@ -706,15 +706,6 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         record_applet_transaction("missing_state");
         return;
     };
-    let Some(idempotency_key) = header_value(req, "idempotency-key")
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    else {
-        record_applet_transaction("bad_request");
-        bad_request(res, "Idempotency-Key header is required");
-        return;
-    };
-
     let headers = collect_headers(req);
     let body_bytes = match req.payload().await {
         Ok(bytes) if bytes.len() <= MAX_APPLET_TRANSACTION_BODY_BYTES => bytes.to_vec(),
@@ -818,7 +809,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         IdempotencyDirection::NodeToApplet,
         record.source_id.clone(),
         record.destination_id.clone(),
-        idempotency_key.clone(),
+        record.idempotency_key.clone(),
     );
     let delivery_authentication_record_digest = match record.stable_digest() {
         Ok(digest) => digest.to_string(),
@@ -1982,46 +1973,130 @@ mod tests {
             Arc::new(crate::ArkretEdge::new(Arc::new(config), journal.clone(), sender).unwrap());
         let claims = Arc::new(CountingIdempotencyStore::default());
         let service = salvo::Service::new(applet_completion_router(edge, claims.clone()).unwrap());
-        for (body, digest, code) in [
-            ("{invalid", None, "http_signature_required"),
+        let url = "https://bridge.example/_arkret/edge/applet/transactions".to_owned();
+        for (label, body, mutation, code) in [
+            ("all-missing", "{invalid", "all", "http_signature_required"),
             (
+                "signature-missing",
+                "{}",
+                "signature",
+                "http_signature_required",
+            ),
+            (
+                "signature-input-missing",
+                "{}",
+                "signature-input",
+                "http_signature_required",
+            ),
+            (
+                "only-digest-missing",
                 "{invalid",
-                Some(ContentDigest::compute(b"{}", ContentDigestAlgorithm::Sha256).wire_value),
+                "content-digest",
                 "http_signature_invalid",
             ),
             (
+                "wrong-exact-digest",
                 "{invalid",
-                Some(
-                    ContentDigest::compute(b"{invalid", ContentDigestAlgorithm::Sha256).wire_value,
-                ),
+                "wrong-digest",
+                "http_signature_invalid",
+            ),
+            ("malformed-json", "{invalid", "", "http_signature_invalid"),
+            ("noncanonical-json", "{ }", "", "http_signature_invalid"),
+            (
+                "source-missing",
+                "{}",
+                "source-service-id",
                 "http_signature_invalid",
             ),
             (
-                "{ }",
-                Some(ContentDigest::compute(b"{ }", ContentDigestAlgorithm::Sha256).wire_value),
+                "destination-missing",
+                "{}",
+                "destination-service-id",
+                "http_signature_invalid",
+            ),
+            (
+                "idempotency-missing",
+                "{}",
+                "idempotency-key",
                 "http_signature_invalid",
             ),
         ] {
-            let mut request =
-                TestClient::post("https://bridge.example/_arkret/edge/applet/transactions")
-                    .add_header(
-                        "arkret-operation",
-                        ServiceOperationId::EDGE_APPLET_COMMAND_TRANSACTION_V1,
-                        true,
-                    )
-                    .add_header("idempotency-key", "envelope-before-json", true)
-                    .body(body);
-            if let Some(digest) = digest {
-                request = request.add_header("content-digest", digest, true);
+            let parsed = url::Url::parse(&url).unwrap();
+            let authority = parsed.host_str().unwrap().to_owned();
+            let digest = ContentDigest::compute(body.as_bytes(), ContentDigestAlgorithm::Sha256);
+            let mut parts = arkret::http_signature::SignedRequestParts {
+                method: "POST".into(),
+                target_uri: url.clone(),
+                authority,
+                path: parsed.path().into(),
+                headers: vec![
+                    (
+                        "arkret-operation".into(),
+                        ServiceOperationId::EDGE_APPLET_COMMAND_TRANSACTION_V1.into(),
+                    ),
+                    (
+                        "source-service-id".into(),
+                        "ak:did_core:webvh:z6mkstation".into(),
+                    ),
+                    (
+                        "destination-service-id".into(),
+                        "ak:did_core:webvh:z6mkbridge".into(),
+                    ),
+                    ("idempotency-key".into(), "envelope-before-json".into()),
+                    ("content-digest".into(), digest.wire_value.clone()),
+                ],
+                body_digest: Some(digest.wire_value),
+            };
+            let signed = arkret::http_signature::sign_http_message_for_scenario(
+                &parts,
+                arkret::http_signature::HttpSignatureScenario::AppletTransactionV1,
+                &[],
+                "sig1",
+                "did:webvh:z6mkstation:station.example#key-1",
+                chrono::Utc::now().timestamp(),
+                &arkret::http_signature::signing_key_from_seed(&[0x62; 32]),
+            )
+            .unwrap();
+            parts
+                .headers
+                .push(("signature-input".into(), signed.signature_input_header));
+            parts
+                .headers
+                .push(("signature".into(), signed.signature_header));
+            if mutation == "all" {
+                parts.headers.retain(|(name, _)| name == "arkret-operation");
+            } else if mutation == "wrong-digest" {
+                parts.headers.retain(|(name, _)| name != "content-digest");
+                parts.headers.push((
+                    "content-digest".into(),
+                    ContentDigest::compute(b"{}", ContentDigestAlgorithm::Sha256).wire_value,
+                ));
+            } else if !mutation.is_empty() {
+                parts.headers.retain(|(name, _)| name != mutation);
+            }
+            let mut request = TestClient::post(&url).body(body);
+            for (name, value) in parts.headers {
+                request = request.add_header(
+                    salvo::http::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                    value,
+                    true,
+                );
             }
             let mut response = request.send(&service).await;
             assert_eq!(
                 response.status_code,
                 Some(StatusCode::UNAUTHORIZED),
-                "{body}"
+                "{label}"
             );
             let problem: arkret_wire::Problem = response.take_json().await.unwrap();
             assert_eq!(problem.code(), code);
+            if mutation == "content-digest" || mutation == "wrong-digest" {
+                assert!(
+                    problem.detail.to_ascii_lowercase().contains("digest"),
+                    "Digest failure must precede malformed business JSON: {label}: {}",
+                    problem.detail
+                );
+            }
             assert_eq!(claims.claims.load(Ordering::SeqCst), 0);
             assert_eq!(
                 journal.reads.load(Ordering::SeqCst),

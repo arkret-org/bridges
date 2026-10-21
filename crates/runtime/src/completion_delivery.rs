@@ -4,8 +4,8 @@
 use arkret::signatures::generated::http_signature_contract::HttpSignatureScenario;
 use arkret::signatures::http_signature::{
     Component, HttpMessageVerificationError, SignaturePolicyError, SignatureVerificationPolicy,
-    SignedRequestParts, parse_signature_input, public_key_from_bytes,
-    validate_signed_canonical_json_body, verify_http_content_digest,
+    SignedRequestParts, http_signature_scenario_components, parse_signature_input,
+    public_key_from_bytes, validate_signed_canonical_json_body, verify_http_content_digest,
     verify_signed_canonical_json_message,
 };
 use arkret::{
@@ -41,7 +41,12 @@ impl From<BridgeError> for CompletionAdmissionError {
 impl From<HttpMessageVerificationError> for CompletionAdmissionError {
     fn from(error: HttpMessageVerificationError) -> Self {
         let code = match &error {
-            HttpMessageVerificationError::MissingHeader(_) => "http_signature_required",
+            HttpMessageVerificationError::MissingHeader(name)
+                if name.eq_ignore_ascii_case("signature")
+                    || name.eq_ignore_ascii_case("signature-input") =>
+            {
+                "http_signature_required"
+            }
             HttpMessageVerificationError::Policy(
                 SignaturePolicyError::InvalidValidityWindow
                 | SignaturePolicyError::CreatedInFuture
@@ -64,19 +69,6 @@ pub fn precheck_applet_completion_envelope(
     headers: &[(String, String)],
     raw_body: &[u8],
 ) -> Result<(), CompletionAdmissionError> {
-    let digest = verify_http_content_digest(
-        headers
-            .iter()
-            .map(|(name, value)| (name.as_str(), value.as_str())),
-        raw_body,
-        true,
-    )?;
-    validate_signed_canonical_json_body(
-        headers
-            .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case("content-encoding")),
-        raw_body,
-    )?;
     let parts = SignedRequestParts {
         method: String::new(),
         target_uri: String::new(),
@@ -93,6 +85,22 @@ pub fn precheck_applet_completion_envelope(
     parts.header("signature").ok_or_else(|| {
         CompletionAdmissionError::from(HttpMessageVerificationError::MissingHeader("Signature"))
     })?;
+    // Header presence is metadata-only. A pure bearer/missing signature must
+    // retain its required code, while a signed envelope missing Digest is an
+    // invalid signature profile. Neither check parses business JSON.
+    let digest = verify_http_content_digest(
+        headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str())),
+        raw_body,
+        true,
+    )?;
+    validate_signed_canonical_json_body(
+        headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("content-encoding")),
+        raw_body,
+    )?;
     let input = parse_signature_input(&input).map_err(CompletionAdmissionError::invalid)?;
     let policy =
         SignatureVerificationPolicy::for_scenario(HttpSignatureScenario::AppletTransactionV1, &[])
@@ -108,6 +116,22 @@ pub fn precheck_applet_completion_envelope(
         .map_err(|error| {
             CompletionAdmissionError::from(HttpMessageVerificationError::Policy(error))
         })?;
+    // A required binding component must have a real field value as well as
+    // appearing in Signature-Input. Derive that set from the same SDK profile.
+    for component in
+        http_signature_scenario_components(HttpSignatureScenario::AppletTransactionV1, &[])
+            .map_err(|error| {
+                CompletionAdmissionError::from(HttpMessageVerificationError::Policy(error))
+            })?
+    {
+        if let Component::Header(name) = component
+            && parts.header(&name).is_none()
+        {
+            return Err(CompletionAdmissionError::invalid(format!(
+                "required signed binding header {name} is missing"
+            )));
+        }
+    }
     Ok(())
 }
 
