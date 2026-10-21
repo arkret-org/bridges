@@ -147,17 +147,10 @@ impl AppletConfigurationService {
                 arkret::RealmActorMaterialCurrentEntry::Present {
                     row:
                         arkret::TypedCurrentRow::Value {
-                            selector: found,
-                            source_stream_ref,
-                            revision,
-                            ..
+                            selector: found, ..
                         },
-                } if found == &selector => Some(CommittedEventRef {
-                    event_id: event.event_id.clone(),
-                    commit_id: revision.commit_id.clone(),
-                    stream_ref: source_stream_ref.clone(),
-                    stream_position: revision.stream_position,
-                }),
+                    source_ref,
+                } if found == &selector => Some(source_ref.clone()),
                 _ => None,
             })
             .ok_or_else(|| invalid("configuration identity has not been accepted"))?;
@@ -409,6 +402,7 @@ impl AppletConfigurationService {
                             value,
                             ..
                         },
+                    ..
                 } if found == &selector => Some(value.clone()),
                 _ => None,
             })
