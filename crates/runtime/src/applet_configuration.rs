@@ -682,6 +682,64 @@ mod tests {
             let problem: arkret::Problem = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(problem.code(), "operation_selector_required", "{path}");
         }
+        let mut headers = salvo::http::HeaderMap::new();
+        headers.insert(
+            "arkret-operation",
+            arkret::ServiceOperationId::EDGE_APPLET_CONFIGURATION_COMMAND_EXECUTE_V1
+                .parse()
+                .unwrap(),
+        );
+        let uri = "https://applet.example/_arkret/edge/applet/configuration"
+            .parse::<salvo::http::uri::Uri>()
+            .unwrap();
+        // The framework default must not truncate a permitted operation body.
+        let padded = format!("{{\"padding\":\"{}\"}}", "a".repeat(80_000)).into_bytes();
+        let (status, _, bytes) = embedded
+            .receive(
+                salvo::http::Method::POST,
+                uri.clone(),
+                headers.clone(),
+                padded,
+            )
+            .await
+            .unwrap();
+        assert_eq!(status, salvo::http::StatusCode::BAD_REQUEST);
+        assert!(
+            String::from_utf8(bytes)
+                .unwrap()
+                .contains("Idempotency-Key")
+        );
+        let oversized = format!("{{\"padding\":\"{}\"}}", "a".repeat(262_144)).into_bytes();
+        let (status, _, bytes) = embedded
+            .receive(
+                salvo::http::Method::POST,
+                uri.clone(),
+                headers.clone(),
+                oversized,
+            )
+            .await
+            .unwrap();
+        assert_eq!(status, salvo::http::StatusCode::PAYLOAD_TOO_LARGE);
+        let problem: arkret::Problem = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(problem.code(), "payload_too_large");
+        let (status, _, bytes) = embedded
+            .receive(
+                salvo::http::Method::POST,
+                uri.clone(),
+                headers.clone(),
+                br#"{"command":"configure","command":"recover"}"#.to_vec(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status, salvo::http::StatusCode::BAD_REQUEST);
+        let problem: arkret::Problem = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(problem.code(), "schema_violation");
+        headers.insert("content-encoding", "identity".parse().unwrap());
+        let (status, ..) = embedded
+            .receive(salvo::http::Method::POST, uri, headers, b"{}".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(status, salvo::http::StatusCode::UNSUPPORTED_MEDIA_TYPE);
         let router = salvo::Service::new(crate::web::managed_applet_router(edge.clone()).unwrap());
         let mut response = TestClient::get("https://applet.example/_arkret/describe")
             .add_header(

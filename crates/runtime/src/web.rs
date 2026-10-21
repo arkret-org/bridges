@@ -85,6 +85,62 @@ impl Handler for OperationSelector {
             ctrl.skip_rest();
             return;
         }
+        if req.method() == salvo::http::Method::POST {
+            if req.headers().contains_key("content-encoding") {
+                applet_error(
+                    res,
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    "unsupported_content_encoding",
+                    "Applet JSON cannot use Content-Encoding",
+                );
+                ctrl.skip_rest();
+                return;
+            }
+            let bytes = match req
+                .payload_with_max_size(MAX_APPLET_TRANSACTION_BODY_BYTES)
+                .await
+            {
+                Ok(bytes) => bytes,
+                Err(salvo::http::ParseError::PayloadTooLarge) => {
+                    applet_error(
+                        res,
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "payload_too_large",
+                        "Applet request exceeds its wire byte limit",
+                    );
+                    ctrl.skip_rest();
+                    return;
+                }
+                Err(error) => {
+                    bad_request(res, error.to_string());
+                    ctrl.skip_rest();
+                    return;
+                }
+            };
+            let operation = ServiceOperationId::from_wire(self.0).expect("registered selector");
+            let limit =
+                if self.0 == ServiceOperationId::EDGE_APPLET_CONFIGURATION_COMMAND_EXECUTE_V1 {
+                    Some(262_144)
+                } else {
+                    operation.descriptor().max_canonical_body_bytes
+                };
+            if let Err(error) = (arkret_wire::WireBodyClass::NonStreamingJsonOperation {
+                max_canonical_body_bytes: limit,
+            })
+            .admit_canonical(bytes)
+            {
+                let (status, code) = match error {
+                    arkret_wire::WireError::BodyCanonicalBytesExceeded { .. }
+                    | arkret_wire::WireError::BodyWireBytesExceeded { .. } => {
+                        (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large")
+                    }
+                    _ => (StatusCode::BAD_REQUEST, "schema_violation"),
+                };
+                applet_error(res, status, code, error.to_string());
+                ctrl.skip_rest();
+                return;
+            }
+        }
         ctrl.call_next(req, depot, res).await;
         if res.status_code.unwrap_or(StatusCode::OK).is_success() {
             res.headers_mut().insert(
@@ -658,9 +714,12 @@ async fn applet_configuration(req: &mut Request, depot: &mut Depot, res: &mut Re
         bad_request(res, "Idempotency-Key header is required");
         return;
     }
-    let bytes = match req.payload().await {
-        Ok(bytes) if bytes.len() <= 262_144 => bytes.to_vec(),
-        Ok(_) => {
+    let bytes = match req
+        .payload_with_max_size(MAX_APPLET_TRANSACTION_BODY_BYTES)
+        .await
+    {
+        Ok(bytes) => bytes.to_vec(),
+        Err(salvo::http::ParseError::PayloadTooLarge) => {
             applet_error(
                 res,
                 StatusCode::PAYLOAD_TOO_LARGE,
