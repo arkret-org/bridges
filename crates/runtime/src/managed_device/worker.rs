@@ -30,11 +30,25 @@ pub struct ManagedDeviceWorkers {
     permits: Arc<Semaphore>,
     workers: BTreeMap<String, Worker>,
     content_sink: Option<Arc<dyn NativeContentSink>>,
+    configurations: Arc<crate::applet_configuration::AppletConfigurationService>,
+    configuration_recovery: Option<JoinHandle<Result<usize>>>,
+}
+
+impl Drop for ManagedDeviceWorkers {
+    fn drop(&mut self) {
+        if let Some(task) = &self.configuration_recovery {
+            task.abort();
+        }
+    }
 }
 
 impl ManagedDeviceWorkers {
     pub fn new(edge: Arc<ArkretEdge>) -> Result<Self> {
         Ok(Self {
+            configurations: Arc::new(
+                crate::applet_configuration::AppletConfigurationService::new(edge.clone())?,
+            ),
+            configuration_recovery: None,
             runtime: Arc::new(ManagedDeviceRuntime::new(edge)?),
             permits: Arc::new(Semaphore::new(8)),
             workers: BTreeMap::new(),
@@ -50,6 +64,10 @@ impl ManagedDeviceWorkers {
     /// Explicit host shutdown waits for cancelled network futures to release
     /// their private stores. Drop still retires every reader immediately.
     pub async fn shutdown(mut self) {
+        if let Some(mut task) = self.configuration_recovery.take() {
+            task.abort();
+            let _ = (&mut task).await;
+        }
         for worker in self.workers.values_mut() {
             worker.reader.retire();
             worker.task.abort();
@@ -60,6 +78,24 @@ impl ManagedDeviceWorkers {
     }
 
     pub async fn tick(&mut self) -> Result<()> {
+        if self
+            .configuration_recovery
+            .as_ref()
+            .is_some_and(|task| task.is_finished())
+        {
+            if let Some(task) = self.configuration_recovery.take() {
+                match task.await {
+                    Ok(Ok(_)) => {}
+                    result => tracing::warn!(?result, "configuration recovery will retry"),
+                }
+            }
+        }
+        if self.configuration_recovery.is_none() {
+            let configurations = self.configurations.clone();
+            self.configuration_recovery = Some(tokio::spawn(async move {
+                configurations.recover_accepted_configurations().await
+            }));
+        }
         let fenced = self.runtime.reconcile_device_revocations().await?;
         let mut settled_revocations = Vec::new();
         for (id, worker) in &mut self.workers {

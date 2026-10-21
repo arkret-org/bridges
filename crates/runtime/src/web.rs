@@ -101,6 +101,14 @@ pub async fn serve(
         .push(Router::with_path("metrics").get(metrics_endpoint))
         .push(admin_did_bindings_router(AdminWebState { did_authority }))
         .push(applet);
+    #[cfg(feature = "managed-authoring")]
+    {
+        admin_router = admin_router.push(managed_applet_router(ctx.edge.clone())?);
+    }
+    #[cfg(not(feature = "managed-authoring"))]
+    {
+        admin_router = admin_router.push(service_description_router(&ctx.edge)?);
+    }
     if let Some(internal) = internal {
         admin_router = admin_router.push(internal);
     }
@@ -424,7 +432,7 @@ struct HttpSignatureReject {
 }
 
 fn applet_router(state: AppletWebState) -> Router {
-    Router::with_path("_arkret/edge/applet")
+    let router = Router::with_path("_arkret/edge/applet")
         .hoop(affix_state::inject(state))
         .push(Router::with_path("ping").get(applet_ping))
         .push(Router::with_path("describe").get(applet_describe))
@@ -437,7 +445,119 @@ fn applet_router(state: AppletWebState) -> Router {
         // here. Per applet-integration §15 an unimplemented surface MUST return a
         // structured `unsupported_feature` rather than fall through to a bare 404.
         .push(Router::with_path("third_party/users").get(applet_third_party_unsupported))
-        .push(Router::with_path("third_party/locations").get(applet_third_party_unsupported))
+        .push(Router::with_path("third_party/locations").get(applet_third_party_unsupported));
+    router
+}
+
+#[cfg(feature = "managed-authoring")]
+#[derive(Clone)]
+struct ConfigurationWebState {
+    service: Arc<crate::applet_configuration::AppletConfigurationService>,
+    config: Arc<Config>,
+    did_authority: Arc<DidAuthority>,
+}
+
+fn service_description_router(edge: &crate::ArkretEdge) -> Result<Router> {
+    let authority = Arc::new(DidAuthority::new(
+        edge.config().arkret.trust_domain.clone(),
+    )?);
+    let description = BridgeAppletHandler::new(edge, None, authority)?.describe()?;
+    Ok(Router::with_path("_arkret/describe")
+        .hoop(affix_state::inject(description))
+        .get(service_describe))
+}
+
+#[handler]
+async fn service_describe(depot: &mut Depot, res: &mut Response) {
+    match depot.get_typed::<arkret_models_discovery::ServiceDescribe>() {
+        Ok(description) => res.render(Json(description.clone())),
+        Err(_) => internal_error(res, "Applet service description is unavailable"),
+    }
+}
+
+/// The production managed Applet surface shared by standalone and embedded
+/// hosts. Reverse proxies must expose its native DID publication paths too.
+#[cfg(feature = "managed-authoring")]
+pub fn managed_applet_router(edge: Arc<crate::ArkretEdge>) -> Result<Router> {
+    let description = service_description_router(&edge)?;
+    let config = edge.config().clone();
+    let did_authority = Arc::new(DidAuthority::new(config.arkret.trust_domain.clone())?);
+    seed_source_service_bindings(&did_authority, &config)?;
+    let author =
+        Arc::new(crate::managed_actor_authoring::ManagedActorAuthoringService::new(edge.clone())?);
+    let service = Arc::new(crate::applet_configuration::AppletConfigurationService::new(edge)?);
+    Ok(Router::new().push(description).push(author.router()).push(
+        Router::with_path("_arkret/edge/applet/configuration")
+            .hoop(affix_state::inject(ConfigurationWebState {
+                service,
+                config,
+                did_authority,
+            }))
+            .post(applet_configuration),
+    ))
+}
+
+#[cfg(feature = "managed-authoring")]
+#[handler]
+async fn applet_configuration(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    let Ok(state) = depot.get_typed::<ConfigurationWebState>().cloned() else {
+        internal_error(res, "managed Applet state is unavailable");
+        return;
+    };
+    let headers = collect_headers(req);
+    if header_value_from(&headers, "idempotency-key").is_none_or(|key| key.trim().is_empty()) {
+        bad_request(res, "Idempotency-Key header is required");
+        return;
+    }
+    let bytes = match req.payload().await {
+        Ok(bytes) if bytes.len() <= 262_144 => bytes.to_vec(),
+        Ok(_) => {
+            applet_error(
+                res,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "payload_too_large",
+                "configuration exceeds its registered body limit",
+            );
+            return;
+        }
+        Err(error) => {
+            bad_request(res, error.to_string());
+            return;
+        }
+    };
+    let body: arkret_models_integration::AppletConfigurationExecutionRequest =
+        match serde_json::from_slice(&bytes) {
+            Ok(body) => body,
+            Err(error) => {
+                bad_request(res, error.to_string());
+                return;
+            }
+        };
+    let service = &state.service;
+    let route = match service.verify_request(&body).await {
+        Ok(route) => route,
+        Err(error) => {
+            unauthorized(res, error.to_string());
+            return;
+        }
+    };
+    if let Err(error) = verify_http_applet_request_with_scenario(
+        req,
+        &headers,
+        &bytes,
+        &state.config,
+        state.did_authority.bindings(),
+        Some(&route),
+        HttpSignatureScenario::ServiceToServiceV1,
+        &["content-digest", "idempotency-key"],
+    ) {
+        unauthorized_code(res, error.code, error.message);
+        return;
+    }
+    match service.execute(&body).await {
+        Ok(outcome) => res.render(Json(outcome)),
+        Err(error) => bad_request(res, error.to_string()),
+    }
 }
 
 #[handler]
@@ -824,6 +944,32 @@ fn verify_http_applet_request(
     require_content_digest: bool,
     realm_route: Option<&crate::realm_governance::RealmRoute>,
 ) -> std::result::Result<VerifiedAppletHttpRequest, HttpSignatureReject> {
+    verify_http_applet_request_with_scenario(
+        req,
+        headers,
+        body,
+        config,
+        bindings,
+        realm_route,
+        if require_content_digest {
+            HttpSignatureScenario::AppletTransactionV1
+        } else {
+            HttpSignatureScenario::ServiceToServiceV1
+        },
+        &[],
+    )
+}
+
+fn verify_http_applet_request_with_scenario(
+    req: &Request,
+    headers: &[(String, String)],
+    body: &[u8],
+    config: &Config,
+    bindings: &AcceptedDidBindings,
+    realm_route: Option<&crate::realm_governance::RealmRoute>,
+    scenario: HttpSignatureScenario,
+    additional_required: &[&str],
+) -> std::result::Result<VerifiedAppletHttpRequest, HttpSignatureReject> {
     let signature_input_header = header_value_from(headers, "signature-input")
         .ok_or_else(|| http_signature_required("Signature-Input header is required"))?;
     let signature_input = parse_signature_input(&signature_input_header)
@@ -921,15 +1067,8 @@ fn verify_http_applet_request(
         .map(|value| value.as_str().to_owned())
         .unwrap_or_else(|| "/".to_owned());
     let target_uri = request_target_uri(req, headers, &authority, &path);
-    let policy = SignatureVerificationPolicy::for_scenario(
-        if require_content_digest {
-            HttpSignatureScenario::AppletTransactionV1
-        } else {
-            HttpSignatureScenario::ServiceToServiceV1
-        },
-        &[],
-    )
-    .map_err(|error| map_http_signature_error(HttpMessageVerificationError::Policy(error)))?;
+    let policy = SignatureVerificationPolicy::for_scenario(scenario, additional_required)
+        .map_err(|error| map_http_signature_error(HttpMessageVerificationError::Policy(error)))?;
     let verified = verify_signed_http_message(
         req.method().as_str(),
         &target_uri,

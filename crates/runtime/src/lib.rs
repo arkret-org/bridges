@@ -39,6 +39,8 @@
 //!   bridge process.
 
 pub mod app;
+#[cfg(feature = "managed-authoring")]
+pub mod applet_configuration;
 mod arkret_edge;
 mod authoring;
 pub mod authority;
