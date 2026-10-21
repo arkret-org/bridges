@@ -15,6 +15,66 @@ use super::*;
 const CAS_ATTEMPTS: usize = 8;
 const MAX_ROSTER_PAGES: usize = 4096;
 
+struct ReceivedRoster {
+    request: MlsMemberRosterAuthorityReadRequestBody,
+    pages: Vec<arkret::MlsSelfRosterAuthorityReadOutcome>,
+    material: arkret::MlsGroupStateMaterialOutcome,
+}
+
+impl ReceivedRoster {
+    fn install(&self, group: &mut ArkretMlsGroup) -> Result<arkret::EventId> {
+        arkret::install_verified_mls_self_roster_bindings(
+            group,
+            &self.pages,
+            &self.request,
+            &self.material,
+        )
+        .map_err(invalid)?;
+        Ok(self.pages[0].roster.manifest.genesis_event_ref.clone())
+    }
+
+    fn claim_issuer(
+        &self,
+        delivery: &MlsWelcomeDelivery,
+        outcome: &arkret::KeyPackagesClaimOutcome,
+    ) -> Result<&arkret::AuthenticatedServiceResolution> {
+        let mut matches = self
+            .pages
+            .iter()
+            .flat_map(|page| &page.roster.records)
+            .filter_map(|record| match record {
+                arkret::MlsRosterRecord::Add {
+                    commit_event_ref,
+                    attestation,
+                    claim_issuer_resolution: Some(resolution),
+                    ..
+                } if commit_event_ref == &delivery.commit_event_ref
+                    && attestation.actor_id == delivery.recipient_actor_id
+                    && attestation.endpoint == delivery.recipient_endpoint
+                    && attestation.welcome_id == delivery.welcome_id
+                    && attestation.claim_id == delivery.keypackage_claim_ref =>
+                {
+                    Some((resolution, &attestation.claim_receipt))
+                }
+                _ => None,
+            });
+        let (resolution, receipt) = matches.next().ok_or_else(|| {
+            invalid("Welcome claim has no exact imported historical issuer closure")
+        })?;
+        if matches.next().is_some() {
+            return Err(invalid(
+                "Welcome claim has duplicate historical issuer closures",
+            ));
+        }
+        if canonical_json_bytes(receipt)? != canonical_json_bytes(&outcome.claim_receipt)? {
+            return Err(invalid(
+                "Welcome claim differs from its frozen historical receipt",
+            ));
+        }
+        Ok(resolution)
+    }
+}
+
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ScopeInbox {
@@ -285,17 +345,12 @@ impl ManagedDeviceRuntime {
             .await?;
         let outcome = outcome.value()?.clone();
         let route = self.edge.realm_route(&delivery.realm_id).await?;
-        let claim_did =
-            arkret::verification_method_did(outcome.claim_receipt.signature.kid.as_str())
-                .map_err(|e| invalid(e.to_string()))?;
-        let resolution = device
-            .client()
-            .resolve_service_from_did(&claim_did, arkret::ServiceKind::Station)
-            .await?;
-        arkret::verify_peer_keypackage_claim_receipt_signature(
-            &outcome.claim_receipt,
-            &resolution,
-        )?;
+        let roster = self.read_received_roster(device, reader, &accepted).await?;
+        // The frozen Add closure carries the original issuer's native history.
+        // A current governor's key or a live fetch from the former Station
+        // cannot replace that historical signature evidence after handoff.
+        let resolution = roster.claim_issuer(delivery, &outcome)?;
+        arkret::verify_peer_keypackage_claim_receipt_signature(&outcome.claim_receipt, resolution)?;
         let claim = garth::mls::verify_welcome_claim(
             delivery,
             &garth::LocalMlsEndpoint::device(
@@ -332,8 +387,7 @@ impl ManagedDeviceRuntime {
             &accepted,
         )
         .map_err(|error| invalid(error.to_string()))?;
-        self.install_received_roster(device, reader, &accepted, &mut group)
-            .await?;
+        roster.install(&mut group)?;
         let method = arkret::DidUrl::new(format!("{}#{}", record.principal_did, device.device_id))
             .map_err(invalid)?;
         let signing_key = SigningKey::from_bytes(&seed(&record.device_seed)?);
@@ -410,6 +464,16 @@ impl ManagedDeviceRuntime {
         accepted: &arkret_wire::CommittedEventFullView,
         group: &mut ArkretMlsGroup,
     ) -> Result<arkret::EventId> {
+        let roster = self.read_received_roster(device, reader, accepted).await?;
+        roster.install(group)
+    }
+
+    async fn read_received_roster(
+        &self,
+        device: &ManagedDevice,
+        reader: &ManagedDeviceReader,
+        accepted: &arkret_wire::CommittedEventFullView,
+    ) -> Result<ReceivedRoster> {
         let transition =
             garth::mls::accepted_artifact::accepted_mls_transition(accepted).map_err(invalid)?;
         let request = MlsMemberRosterAuthorityReadRequestBody {
@@ -448,15 +512,12 @@ impl ManagedDeviceRuntime {
             .client()
             .self_mls_group_state_material(&material_request)
             .await?;
-        arkret::install_verified_mls_self_roster_bindings(
-            group,
-            &pages,
-            &request,
-            material.value()?,
-        )
-        .map_err(invalid)?;
         reader.check_device(device)?;
-        Ok(pages[0].roster.manifest.genesis_event_ref.clone())
+        Ok(ReceivedRoster {
+            request,
+            pages,
+            material: material.value()?.clone(),
+        })
     }
 
     /// Cleanup sends only previously durable commands. It may complete after
@@ -508,10 +569,15 @@ impl ManagedDeviceRuntime {
                     "consume receipt signer did not govern the Realm at consumption",
                 ));
             }
-            let resolution = device
-                .client()
-                .resolve_service_from_did(&issuer_did, arkret::ServiceKind::Station)
-                .await?;
+            let resolution = if issuer == *route.authority.current_service_id() {
+                route.resolution.clone()
+            } else {
+                device
+                    .client()
+                    .resolve_service_from_did(&issuer_did, arkret::ServiceKind::Station)
+                    .await
+                    .map_err(|error| invalid(format!("historical consume issuer: {error}")))?
+            };
             arkret::verify_peer_keypackage_consume_receipt_signature(
                 receipt,
                 &issuer,
