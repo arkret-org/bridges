@@ -35,6 +35,8 @@ use crate::managed_actor_store::{
 };
 use crate::{BridgeError, PreparedGhost, PreparedManagedActor, Result};
 
+mod control;
+
 const AUTHORING_LEASE_SECS: i64 = 30;
 const AUTHORING_WAIT_ATTEMPTS: usize = 300;
 
@@ -215,6 +217,9 @@ impl ManagedActorAuthoringService {
                 "managed publication lacks native WebVH history".into(),
             ));
         };
+        let log_entries = self
+            .published_control_history(&subject, log_entries)
+            .await?;
         let entry = log_entries
             .last()
             .ok_or_else(|| BridgeError::Database("managed publication history is empty".into()))?;
@@ -1185,7 +1190,7 @@ mod ghost_bundle_tests {
     use super::*;
 
     #[derive(Default)]
-    struct RecordingAuthoringStore(Mutex<BTreeMap<String, String>>);
+    pub(super) struct RecordingAuthoringStore(Mutex<BTreeMap<String, String>>);
 
     impl runtime::AuthoringStore for RecordingAuthoringStore {
         fn load(&self, key: &str) -> Result<Option<String>> {
@@ -1265,7 +1270,7 @@ mod ghost_bundle_tests {
         TrustDomainId::new("ak:trust_domain:station.example").unwrap()
     }
 
-    fn edge(store: Arc<dyn runtime::AuthoringStore>) -> runtime::ArkretEdge {
+    pub(super) fn edge(store: Arc<dyn runtime::AuthoringStore>) -> runtime::ArkretEdge {
         let config: runtime::Config = serde_json::from_value(json!({
             "bridge": {"bridge_id": "ghost-preparation-test"},
             "arkret": {

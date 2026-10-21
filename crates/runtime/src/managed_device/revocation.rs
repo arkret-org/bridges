@@ -193,11 +193,11 @@ impl ManagedDeviceRuntime {
         let key = storage_key(&device.actor_id, operation)?;
         if self.read(&key).await?.is_none() {
             let (_, _, custody) = self.accepted_device_record(device).await?;
+            let current = self.control_state(&device.actor_id).await?;
             let controller = self
                 .authoring
-                .original_managed_controller(&device.actor_id)
+                .managed_controller(&device.actor_id, &current.control.control_method_kid)
                 .await?;
-            let current = self.control_state(&device.actor_id).await?;
             if current.control.control_method_kid.as_str()
                 != controller.signer.verification_method()
             {
@@ -349,14 +349,15 @@ impl ManagedDeviceRuntime {
                         ));
                     }
                 }
+                let current = self.control_state(&saved.event.actor_id).await?;
                 let controller = self
                     .authoring
-                    .original_managed_controller(&saved.event.actor_id)
+                    .managed_controller(&saved.event.actor_id, &current.control.control_method_kid)
                     .await?;
                 let client = route.client.clone().with_realm_actor_control_http_signer(
                     arkret::RealmActorControlHttpMetadata {
                         actor_id: saved.event.actor_id.clone(),
-                        control_ref: saved.control_ref.clone(),
+                        control_ref: current.reference,
                         nonce: crate::realm_governance::nonce()?,
                     },
                     route.authority.current_service_id().clone(),

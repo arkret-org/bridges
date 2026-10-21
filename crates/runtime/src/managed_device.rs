@@ -33,6 +33,7 @@ mod attachment;
 mod authorization;
 mod business;
 mod content;
+mod control;
 mod inbox;
 mod mls;
 mod portal;
@@ -69,6 +70,7 @@ struct DeviceRecord {
     device_seed: String,
     hpke_private_key: String,
     authorization: AuthoredEvent,
+    controller_method: arkret::DidUrl,
     controller_public_key: PublicKeyMaterial,
     creation_commit: RealmCommit,
     outcome: Option<AuthoritySubmitOutcome>,
@@ -441,7 +443,10 @@ impl ManagedDeviceRuntime {
                 .producer_proof
                 .as_ref()
                 .map(|proof| proof.verification_method.as_str())
-                != Some(format!("{}#managed-controller", record.principal_did).as_str())
+                != Some(record.controller_method.as_str())
+            || arkret::verification_method_did(record.controller_method.as_str())
+                .map_err(|e| invalid(e.to_string()))?
+                != record.principal_did
         {
             return Err(invalid(
                 "managed Device private custody differs from its original authorization",
@@ -527,14 +532,14 @@ impl ManagedDeviceRuntime {
                 "new managed Device authorization already expired".into(),
             ));
         }
+        let control = self.control_state(&plan.actor_id).await?;
         let controller = self
             .authoring
-            .original_managed_controller(&plan.actor_id)
+            .managed_controller(&plan.actor_id, &control.control.control_method_kid)
             .await?;
         if controller.actor_id != plan.actor_id {
             return Err(invalid("controller returned another managed Account"));
         }
-        let control = self.control_state(&plan.actor_id).await?;
         if control.control.control_method_kid.as_str() != controller.signer.verification_method()
             || control.control.resolution.did
                 != arkret::verification_method_did(controller.signer.verification_method())
@@ -626,6 +631,7 @@ impl ManagedDeviceRuntime {
             device_seed: arkret::base64url_encode(signing_seed),
             hpke_private_key: arkret::base64url_encode(hpke.private_key()),
             authorization,
+            controller_method: control.control.control_method_kid.clone(),
             controller_public_key: PublicKeyMaterial::Ed25519Raw {
                 bytes: controller.signer.verifying_key().to_bytes().to_vec(),
             },
@@ -697,7 +703,7 @@ impl ManagedDeviceRuntime {
         if record.outcome.is_none() {
             let controller = self
                 .authoring
-                .original_managed_controller(&plan.actor_id)
+                .managed_controller(&plan.actor_id, &record.controller_method)
                 .await?;
             let request = SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(
                 record.authorization.event().clone(),
