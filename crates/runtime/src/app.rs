@@ -483,7 +483,11 @@ impl<A: BridgeApp> crate::managed_device::NativeContentSink for AppContentSink<A
     fn requires_attachments(&self) -> bool {
         self.app.native_attachments()
     }
-    async fn deliver(&self, content: &crate::managed_device::NativeContent) -> Result<()> {
+    async fn deliver(
+        &self,
+        _recipient: &crate::managed_device::NativeContentRecipient,
+        content: &crate::managed_device::NativeContent,
+    ) -> Result<()> {
         let key = content.original().event.realm_id.to_string();
         self.ctx
             .queue

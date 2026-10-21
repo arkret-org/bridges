@@ -192,6 +192,90 @@ impl NativeContent {
     }
 }
 
+/// The exact receiving Device incarnation. A consumer can retain this lease to
+/// recheck source access before handing content to an external processor.
+/// It does not authorize publishing a reply or executing on the sender's behalf.
+#[derive(Clone)]
+pub struct NativeContentRecipient {
+    actor_id: ActorId,
+    device_id: DeviceId,
+    scope: ScopeRef,
+    client: arkret::http_client::own_station_device_results::OwnStationDeviceClient,
+    original: arkret::CommittedEventFullView,
+}
+
+impl NativeContentRecipient {
+    pub(super) fn new(
+        device: &ManagedDevice,
+        reader: &ManagedDeviceReader,
+        content: &NativeContent,
+    ) -> Result<Self> {
+        reader.check_device(device)?;
+        if device.effective_scope != content.original.event.scope_ref {
+            return Err(invalid(
+                "native content differs from the receiving Device scope",
+            ));
+        }
+        Ok(Self {
+            actor_id: device.actor_id.clone(),
+            device_id: device.device_id.clone(),
+            scope: device.effective_scope.clone(),
+            client: reader.client().clone(),
+            original: content.original.clone(),
+        })
+    }
+
+    pub fn actor_id(&self) -> &ActorId {
+        &self.actor_id
+    }
+    pub fn device_id(&self) -> &DeviceId {
+        &self.device_id
+    }
+    pub fn scope(&self) -> &ScopeRef {
+        &self.scope
+    }
+    pub(super) fn check_content(&self, content: &NativeContent) -> Result<()> {
+        self.check_incarnation()?;
+        if content.original() != &self.original {
+            return Err(invalid(
+                "native processing requires the original delivered Event",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Local cancellation is synchronous, including cloned leases and late IO.
+    pub fn check_incarnation(&self) -> Result<()> {
+        self.client.check_context().map_err(Into::into)
+    }
+
+    pub async fn validate_current(&self) -> Result<()> {
+        self.check_incarnation()?;
+        let current = self.client.snapshot_head(self.scope.realm_id()).await?;
+        current.value()?;
+        let original = garth::own_station_results::consume_own_station_device_event(
+            &self.client,
+            &self.original.event.event_id,
+            self.client
+                .committed_event_get(&self.original.event.event_id)
+                .await?,
+        )
+        .await
+        .map_err(|error| invalid(error.to_string()))?;
+        if original
+            .full()
+            .map_err(|error| invalid(error.to_string()))?
+            != &self.original
+        {
+            return Err(invalid(
+                "native consumer source changed during current validation",
+            ));
+        }
+        current.value()?;
+        self.check_incarnation()
+    }
+}
+
 /// Return success only once the external adapter has durably recorded delivery.
 /// Failure retains the exact decrypted item for restart and retry.
 #[async_trait::async_trait]
@@ -200,5 +284,9 @@ pub trait NativeContentSink: Send + Sync + 'static {
     fn requires_attachments(&self) -> bool {
         false
     }
-    async fn deliver(&self, content: &NativeContent) -> Result<()>;
+    async fn deliver(
+        &self,
+        recipient: &NativeContentRecipient,
+        content: &NativeContent,
+    ) -> Result<()>;
 }

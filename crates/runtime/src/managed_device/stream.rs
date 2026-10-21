@@ -489,7 +489,8 @@ impl ManagedDeviceRuntime {
         } else {
             content.without_attachment_bytes()
         };
-        sink.deliver(&view).await?;
+        let recipient = super::content::NativeContentRecipient::new(device, reader, &view)?;
+        sink.deliver(&recipient, &view).await?;
         for _ in 0..8 {
             let (key, previous, mut record) = self.accepted_device_record(device).await?;
             let saved = record
