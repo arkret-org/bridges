@@ -47,6 +47,8 @@ pub mod authority;
 pub mod backoff;
 pub mod blocking;
 pub mod cache;
+#[cfg(feature = "web")]
+mod completion_delivery;
 mod config;
 pub mod dead_letter;
 #[cfg(any(feature = "web", test))]
