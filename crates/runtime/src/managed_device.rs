@@ -30,6 +30,7 @@ use crate::managed_actor_authoring::ManagedActorAuthoringService;
 use crate::{ArkretEdge, AuthoringStore, BridgeError, Result, run_blocking};
 
 mod attachment;
+mod authorization;
 mod business;
 mod content;
 mod inbox;
@@ -681,19 +682,23 @@ impl ManagedDeviceRuntime {
                 "invalid initial managed Device plan".into(),
             ));
         }
-        let controller = self
-            .authoring
-            .original_managed_controller(&plan.actor_id)
-            .await?;
         let operation_key = key(&plan)?;
-        let previous = self.prepare(&plan, &operation_key).await?;
+        let mut previous = self.prepare(&plan, &operation_key).await?;
         let mut record = self.decode(&operation_key, &previous, &plan).await?;
+        if record.outcome.is_none() {
+            self.recover_authorization_outcome(&operation_key, &mut previous, &mut record)
+                .await?;
+        }
         let control = self.control_state(&plan.actor_id).await?;
         let auth_payload = payload(&record)?;
         if control.generation != auth_payload.authorized_generation_ref {
             return Err(invalid("managed Device generation has been retired"));
         }
         if record.outcome.is_none() {
+            let controller = self
+                .authoring
+                .original_managed_controller(&plan.actor_id)
+                .await?;
             let request = SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(
                 record.authorization.event().clone(),
             ));
