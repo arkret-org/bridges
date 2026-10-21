@@ -9,6 +9,27 @@ impl ManagedDeviceRuntime {
         actor: &ActorId,
         operation_id: &str,
     ) -> Result<RealmCommit> {
+        self.recover_control_intent(actor, operation_id, None).await
+    }
+
+    /// Replace only the exact accepted pending recovery selected by the caller.
+    /// A timeout or unknown outcome never selects a replacement implicitly.
+    pub async fn replace_control_recovery(
+        &self,
+        actor: &ActorId,
+        operation_id: &str,
+        replaces: &arkret::CommittedEventRef,
+    ) -> Result<RealmCommit> {
+        self.recover_control_intent(actor, operation_id, Some(replaces))
+            .await
+    }
+
+    async fn recover_control_intent(
+        &self,
+        actor: &ActorId,
+        operation_id: &str,
+        replaces: Option<&arkret::CommittedEventRef>,
+    ) -> Result<RealmCommit> {
         let mut prepared = match self
             .authoring
             .retained_recovery(actor, operation_id)
@@ -56,10 +77,19 @@ impl ManagedDeviceRuntime {
                     )
                     .await?;
                 self.authoring
-                    .prepare_recovery(actor, operation_id, &current)
+                    .prepare_recovery(actor, operation_id, &current, replaces)
                     .await?
             }
         };
+        if let Some(expected) = replaces {
+            let payload: arkret::RealmActorRecoveryBeginPayload =
+                serde_json::from_value(serde_json::to_value(&prepared.begin.payload)?)?;
+            if payload.replaces_recovery_ref.as_ref() != Some(expected) {
+                return Err(invalid(
+                    "recovery operation already binds another replacement",
+                ));
+            }
+        }
         if let Some((commit, key)) = &prepared.reset_receipt {
             self.authoring
                 .accept_recovery_reset(&prepared, commit, key)

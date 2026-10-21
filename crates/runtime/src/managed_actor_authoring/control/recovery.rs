@@ -70,6 +70,7 @@ impl ManagedActorAuthoringService {
         actor: &ActorId,
         operation: &str,
         verified: &arkret::identity::VerifiedRealmActorMaterial,
+        replaces: Option<&CommittedEventRef>,
     ) -> Result<PreparedRecovery> {
         if operation.is_empty() || operation.len() > 128 {
             return Err(invalid("recovery operation ID must be bounded"));
@@ -121,16 +122,16 @@ impl ManagedActorAuthoringService {
             .operations
             .values()
             .any(|operation| operation.outcome.is_none())
-            || custody
-                .recoveries
-                .values()
-                .any(|operation| operation.terminal.is_none())
+            || custody.recoveries.values().any(|operation| {
+                operation.terminal.is_none()
+                    && replaces.is_none_or(|target| operation.begin.event_id() != &target.event_id)
+            })
         {
             return Err(invalid(
                 "resolve the outstanding native control operation before recovery",
             ));
         }
-        let prepared = prepare(&custody, actor, operation, cut, &self.edge)?;
+        let prepared = prepare(&custody, actor, operation, cut, &self.edge, replaces)?;
         custody
             .recoveries
             .insert(operation.to_owned(), prepared.clone());
@@ -213,6 +214,24 @@ impl ManagedActorAuthoringService {
             begin.next_control_method_kid.to_string(),
             retained.controller_seed.clone(),
         );
+        if let Some(replaces) = &begin.replaces_recovery_ref {
+            for prior in custody.recoveries.values_mut() {
+                if prior.begin.event_id() != &replaces.event_id {
+                    continue;
+                }
+                if prior.terminal.is_some()
+                    || prior
+                        .begin_receipt
+                        .as_ref()
+                        .is_some_and(|(commit, _)| reference(commit) != *replaces)
+                {
+                    return Err(invalid("replacement contradicts its prior recovery"));
+                }
+                // The verified replacement begin commits supersession atomically.
+                // Its retained original and receipt are the proof for this state.
+                prior.terminal = Some(RealmActorRecoveryState::Superseded);
+            }
+        }
         self.save_control(&subject, Some(raw), &custody).await?;
         Ok(result)
     }
@@ -352,6 +371,7 @@ fn prepare(
     operation: &str,
     cut: &RealmActorMaterialOutcome,
     edge: &crate::ArkretEdge,
+    replaces: Option<&CommittedEventRef>,
 ) -> Result<PreparedRecovery> {
     let (_, identity, _) = row(
         cut,
@@ -406,7 +426,7 @@ fn prepare(
     let generation: RealmActorDeviceGenerationValue = serde_json::from_value(generation.clone())?;
     if manager.service_id != *edge.service_actor_id()
         || !recovery.enabled
-        || recovery.pending.is_some()
+        || recovery.pending.as_ref().map(|pending| &pending.begin_ref) != replaces
         || owner == "retired"
         || governance == "retired"
     {
@@ -476,7 +496,7 @@ fn prepare(
             .current_device_generation_ref
             .checked_add(1)
             .ok_or_else(|| invalid("device generation exhausted"))?,
-        replaces_recovery_ref: None,
+        replaces_recovery_ref: replaces.cloned(),
         next_resolution: resolution,
         method_history_evidence: arkret::RealmActorWebvhRecoveryPlan {
             log_entries: entries.clone(),
