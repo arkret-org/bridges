@@ -517,6 +517,65 @@ pub fn managed_applet_router(edge: Arc<crate::ArkretEdge>) -> Result<Router> {
         ))
 }
 
+/// Complete managed HTTP surface for an embedding host. The host forwards the
+/// original request; routing, operation selection and authentication stay here.
+#[cfg(feature = "managed-authoring")]
+pub struct ManagedAppletHttpHost {
+    service: Service,
+}
+
+#[cfg(feature = "managed-authoring")]
+impl ManagedAppletHttpHost {
+    pub fn new(edge: Arc<crate::ArkretEdge>) -> Result<Self> {
+        let config = edge.config().clone();
+        let did_authority = Arc::new(DidAuthority::new(config.arkret.trust_domain.clone())?);
+        seed_source_service_bindings(&did_authority, &config)?;
+        let handler = Arc::new(BridgeAppletHandler::new(
+            &edge,
+            None,
+            did_authority.clone(),
+        )?);
+        let router = Router::new()
+            .push(managed_applet_router(edge.clone())?)
+            .push(applet_router(AppletWebState {
+                edge,
+                handler,
+                config,
+                did_authority,
+            }));
+        Ok(Self {
+            service: Service::new(router),
+        })
+    }
+
+    pub async fn receive(
+        &self,
+        method: salvo::http::Method,
+        uri: salvo::http::uri::Uri,
+        headers: salvo::http::HeaderMap,
+        body: Vec<u8>,
+    ) -> Result<(StatusCode, salvo::http::HeaderMap, Vec<u8>)> {
+        let mut request = Request::new();
+        *request.method_mut() = method;
+        *request.scheme_mut() = uri
+            .scheme()
+            .cloned()
+            .unwrap_or(salvo::http::uri::Scheme::HTTPS);
+        *request.uri_mut() = uri;
+        *request.headers_mut() = headers;
+        *request.body_mut() = body.into();
+        let handler = self.service.hyper_handler(
+            request.local_addr().clone(),
+            request.remote_addr().clone(),
+            request.scheme().clone(),
+            None,
+            salvo::ConnCtrl::new(),
+            None,
+        );
+        buffered_response(handler.handle(request).await)
+    }
+}
+
 /// Canonical historical completion receiver for an embedded Applet host.
 /// Uses the edge's durable custody store and current governance verification.
 pub fn managed_completion_router(edge: Arc<crate::ArkretEdge>) -> Result<Router> {
@@ -564,13 +623,19 @@ pub async fn receive_managed_completion_http(
     ]);
     flow.call_next(&mut request, &mut depot, &mut response)
         .await;
+    buffered_response(response)
+}
+
+fn buffered_response(
+    mut response: Response,
+) -> Result<(StatusCode, salvo::http::HeaderMap, Vec<u8>)> {
     let body = match response.take_body() {
         salvo::http::ResBody::None => Vec::new(),
         salvo::http::ResBody::Once(bytes) => bytes.to_vec(),
         salvo::http::ResBody::Chunks(chunks) => chunks.into_iter().flatten().collect(),
         _ => {
             return Err(BridgeError::Runtime(
-                "completion returned a non-buffered response".into(),
+                "managed Applet returned a non-buffered response".into(),
             ));
         }
     };

@@ -622,6 +622,66 @@ mod tests {
         assert!(crate::service_identity::validate(&wrong).is_err());
         let (sender, _) = tokio::sync::mpsc::channel(1);
         let edge = Arc::new(ArkretEdge::new(Arc::new(config), file.open(), sender).unwrap());
+        let embedded = crate::web::ManagedAppletHttpHost::new(edge.clone()).unwrap();
+        let mut headers = salvo::http::HeaderMap::new();
+        headers.insert(
+            "arkret-operation",
+            arkret::ServiceOperationId::SERVER_READ_DESCRIBE_V1
+                .parse()
+                .unwrap(),
+        );
+        let (status, returned_headers, bytes) = embedded
+            .receive(
+                salvo::http::Method::GET,
+                "https://applet.example/_arkret/describe".parse().unwrap(),
+                headers,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status, salvo::http::StatusCode::OK);
+        assert_eq!(
+            returned_headers["arkret-operation"],
+            arkret::ServiceOperationId::SERVER_READ_DESCRIBE_V1
+        );
+        let embedded_description: arkret_models_discovery::ServiceDescribe =
+            serde_json::from_slice(&bytes).unwrap();
+        embedded_description.validate().unwrap();
+        let (_, _, history) = embedded
+            .receive(
+                salvo::http::Method::GET,
+                arkret::identity::DidWebvhResolver::log_url(
+                    &identity.resolution.normalized_did_document.id,
+                )
+                .unwrap()
+                .parse()
+                .unwrap(),
+                salvo::http::HeaderMap::new(),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        arkret::identity::verify_did_webvh_v1_chain_bytes(
+            &identity.resolution.normalized_did_document.id,
+            &history,
+        )
+        .unwrap();
+        for path in ["configuration", "managed-actors/author", "transactions"] {
+            let (status, _, bytes) = embedded
+                .receive(
+                    salvo::http::Method::POST,
+                    format!("https://applet.example/_arkret/edge/applet/{path}")
+                        .parse()
+                        .unwrap(),
+                    salvo::http::HeaderMap::new(),
+                    b"not-json".to_vec(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(status, salvo::http::StatusCode::BAD_REQUEST, "{path}");
+            let problem: arkret::Problem = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(problem.code(), "operation_selector_required", "{path}");
+        }
         let router = salvo::Service::new(crate::web::managed_applet_router(edge.clone()).unwrap());
         let mut response = TestClient::get("https://applet.example/_arkret/describe")
             .add_header(
