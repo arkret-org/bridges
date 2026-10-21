@@ -37,45 +37,7 @@ impl ManagedDeviceRuntime {
         {
             Some(prepared) => prepared,
             None => {
-                let realm = actor
-                    .as_realm_actor_id()
-                    .ok_or_else(|| invalid("recovery requires a Realm actor"))?;
-                let route = self.edge.realm_route(&realm.realm_id).await?;
-                let selectors = vec![
-                    arkret::CurrentSelector::RealmActorIdentity {
-                        actor_id: actor.clone(),
-                    },
-                    arkret::CurrentSelector::RealmActorControl {
-                        actor_id: actor.clone(),
-                    },
-                    arkret::CurrentSelector::RealmActorManager {
-                        actor_id: actor.clone(),
-                    },
-                    arkret::CurrentSelector::RealmActorRecovery {
-                        actor_id: actor.clone(),
-                    },
-                    arkret::CurrentSelector::RealmActorDeviceGeneration {
-                        actor_id: actor.clone(),
-                    },
-                    arkret::CurrentSelector::RealmActorStatus {
-                        actor_id: actor.clone(),
-                        gate: arkret::RealmActorStatusGate::Owner,
-                    },
-                    arkret::CurrentSelector::RealmActorStatus {
-                        actor_id: actor.clone(),
-                        gate: arkret::RealmActorStatusGate::Governance,
-                    },
-                ];
-                let current = route
-                    .material(
-                        &arkret::RealmActorMaterialRequest::Current {
-                            actor_id: actor.clone(),
-                            request_nonce: crate::realm_governance::nonce()?,
-                            selectors,
-                        },
-                        &ActorId::service(self.edge.service_actor_id().clone()),
-                    )
-                    .await?;
+                let current = self.recovery_current(actor).await?;
                 self.authoring
                     .prepare_recovery(actor, operation_id, &current, replaces)
                     .await?
@@ -96,7 +58,7 @@ impl ManagedDeviceRuntime {
                 .await?;
             return Ok(commit.clone());
         }
-        if prepared.terminal.is_some() {
+        if prepared.is_finished() {
             return Err(invalid("this recovery operation is permanently terminal"));
         }
         let outcome = self.recovery_outcome(actor, &prepared.begin).await?;
@@ -202,6 +164,73 @@ impl ManagedDeviceRuntime {
             .accept_recovery_reset(&prepared, &commit, &key)
             .await?;
         Ok(commit)
+    }
+
+    /// Close only a never-accepted original whose required revisions advanced.
+    /// Retain both signed cuts; transport failure or unknown alone is insufficient.
+    pub async fn close_unaccepted_recovery(
+        &self,
+        actor: &ActorId,
+        operation_id: &str,
+    ) -> Result<()> {
+        let prepared = self
+            .authoring
+            .retained_recovery(actor, operation_id)
+            .await?
+            .ok_or_else(|| invalid("recovery operation has no retained original"))?;
+        if prepared.closed_without_acceptance() {
+            return Ok(());
+        }
+        let current = self.recovery_current(actor).await?;
+        let outcome = self.recovery_outcome(actor, &prepared.begin).await?;
+        self.authoring
+            .close_unaccepted_recovery(&prepared, &current, &outcome)
+            .await
+    }
+
+    async fn recovery_current(
+        &self,
+        actor: &ActorId,
+    ) -> Result<arkret::identity::VerifiedRealmActorMaterial> {
+        let realm = actor
+            .as_realm_actor_id()
+            .ok_or_else(|| invalid("recovery requires a Realm actor"))?;
+        let route = self.edge.realm_route(&realm.realm_id).await?;
+        let selectors = vec![
+            arkret::CurrentSelector::RealmActorIdentity {
+                actor_id: actor.clone(),
+            },
+            arkret::CurrentSelector::RealmActorControl {
+                actor_id: actor.clone(),
+            },
+            arkret::CurrentSelector::RealmActorManager {
+                actor_id: actor.clone(),
+            },
+            arkret::CurrentSelector::RealmActorRecovery {
+                actor_id: actor.clone(),
+            },
+            arkret::CurrentSelector::RealmActorDeviceGeneration {
+                actor_id: actor.clone(),
+            },
+            arkret::CurrentSelector::RealmActorStatus {
+                actor_id: actor.clone(),
+                gate: arkret::RealmActorStatusGate::Owner,
+            },
+            arkret::CurrentSelector::RealmActorStatus {
+                actor_id: actor.clone(),
+                gate: arkret::RealmActorStatusGate::Governance,
+            },
+        ];
+        route
+            .material(
+                &arkret::RealmActorMaterialRequest::Current {
+                    actor_id: actor.clone(),
+                    request_nonce: crate::realm_governance::nonce()?,
+                    selectors,
+                },
+                &ActorId::service(self.edge.service_actor_id().clone()),
+            )
+            .await
     }
 
     async fn recovery_outcome(

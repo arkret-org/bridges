@@ -7,6 +7,9 @@ use arkret::{
 
 use super::*;
 
+mod unaccepted;
+use unaccepted::UnacceptedRecoveryProof;
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PreparedRecovery {
@@ -21,6 +24,17 @@ pub(crate) struct PreparedRecovery {
     pub(crate) reset_receipt: Option<(RealmCommit, PublicKeyMaterial)>,
     pub(crate) terminal: Option<RealmActorRecoveryState>,
     terminal_material: Option<RealmActorMaterialOutcome>,
+    unaccepted_proof: Option<UnacceptedRecoveryProof>,
+}
+
+impl PreparedRecovery {
+    pub(crate) fn closed_without_acceptance(&self) -> bool {
+        self.unaccepted_proof.is_some()
+    }
+
+    pub(crate) fn is_finished(&self) -> bool {
+        self.terminal.is_some() || self.closed_without_acceptance()
+    }
 }
 
 pub(crate) fn row<'a>(
@@ -123,7 +137,7 @@ impl ManagedActorAuthoringService {
             .values()
             .any(|operation| operation.outcome.is_none())
             || custody.recoveries.values().any(|operation| {
-                operation.terminal.is_none()
+                !operation.is_finished()
                     && replaces.is_none_or(|target| operation.begin.event_id() != &target.event_id)
             })
         {
@@ -165,7 +179,7 @@ impl ManagedActorAuthoringService {
             }
             return Ok(retained.clone());
         }
-        if retained.terminal.is_some() {
+        if retained.is_finished() {
             return Err(invalid("terminal recovery cannot be published"));
         }
         let begin: arkret::RealmActorRecoveryBeginPayload =
@@ -219,7 +233,7 @@ impl ManagedActorAuthoringService {
                 if prior.begin.event_id() != &replaces.event_id {
                     continue;
                 }
-                if prior.terminal.is_some()
+                if prior.is_finished()
                     || prior
                         .begin_receipt
                         .as_ref()
@@ -282,6 +296,7 @@ impl ManagedActorAuthoringService {
             .ok_or_else(|| invalid("recovery intent disappeared"))?;
         if retained.begin != prepared.begin
             || retained.reset_receipt.is_some()
+            || retained.closed_without_acceptance()
             || retained.terminal.is_some_and(|prior| prior != *state)
         {
             return Err(invalid(
@@ -590,5 +605,6 @@ fn prepare(
         reset_receipt: None,
         terminal: None,
         terminal_material: None,
+        unaccepted_proof: None,
     })
 }

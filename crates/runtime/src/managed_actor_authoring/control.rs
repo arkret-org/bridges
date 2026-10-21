@@ -211,7 +211,7 @@ impl ManagedActorAuthoringService {
             || custody
                 .recoveries
                 .values()
-                .any(|operation| operation.terminal.is_none())
+                .any(|operation| !operation.is_finished())
         {
             return Err(invalid(
                 "recover the outstanding control operation before another rotation",
