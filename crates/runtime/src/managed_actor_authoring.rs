@@ -151,6 +151,9 @@ impl ManagedActorAuthoringService {
         Router::new()
             .push(
                 Router::with_path("_arkret/edge/applet/managed-actors/author")
+                    .hoop(crate::web::OperationSelector(
+                        arkret::ServiceOperationId::EDGE_APPLET_MANAGED_ACTOR_COMMAND_AUTHOR_V1,
+                    ))
                     .hoop(affix_state::inject(AuthoringWebState {
                         service: self.clone(),
                     }))

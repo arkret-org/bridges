@@ -483,20 +483,31 @@ struct HttpSignatureReject {
 }
 
 fn applet_router(state: AppletWebState) -> Router {
+    applet_routes().hoop(affix_state::inject(state))
+}
+
+fn applet_routes() -> Router {
     let router = Router::with_path("_arkret/edge/applet")
-        .hoop(affix_state::inject(state))
-        .push(Router::with_path("ping").get(applet_ping))
-        .push(Router::with_path("describe").get(applet_describe))
-        .push(Router::with_path("transactions").post(applet_transactions))
-        .push(Router::with_path("actors/{actor_id}").get(applet_actor))
-        .push(Router::with_path("realms/{realm_id_or_alias}").get(applet_realm))
-        .push(Router::with_path("protocols/{protocol}").get(applet_protocol))
+        .push(Router::with_path("ping")
+            .hoop(OperationSelector(ServiceOperationId::EDGE_APPLET_READ_PING_V1)).get(applet_ping))
+        .push(Router::with_path("describe")
+            .hoop(OperationSelector(ServiceOperationId::EDGE_APPLET_READ_DESCRIBE_V1)).get(applet_describe))
+        .push(Router::with_path("transactions")
+            .hoop(OperationSelector(ServiceOperationId::EDGE_APPLET_COMMAND_TRANSACTION_V1)).post(applet_transactions))
+        .push(Router::with_path("actors/{actor_id}")
+            .hoop(OperationSelector(ServiceOperationId::EDGE_APPLET_ACTOR_READ_RESOLVE_V1)).get(applet_actor))
+        .push(Router::with_path("realms/{realm_id_or_alias}")
+            .hoop(OperationSelector(ServiceOperationId::EDGE_APPLET_REALM_READ_RESOLVE_V1)).get(applet_realm))
+        .push(Router::with_path("protocols/{protocol}")
+            .hoop(OperationSelector(ServiceOperationId::EDGE_APPLET_READ_PROTOCOL_METADATA_V1)).get(applet_protocol))
         // The applet edge surface declares eight operations; the third_party
         // user/location lookups are not backed by a server-side discovery index
         // here. Per applet-integration §15 an unimplemented surface MUST return a
         // structured `unsupported_feature` rather than fall through to a bare 404.
-        .push(Router::with_path("third_party/users").get(applet_third_party_unsupported))
-        .push(Router::with_path("third_party/locations").get(applet_third_party_unsupported));
+        .push(Router::with_path("third_party/users")
+            .hoop(OperationSelector(ServiceOperationId::EDGE_APPLET_THIRD_PARTY_USERS_READ_LIST_V1)).get(applet_third_party_unsupported))
+        .push(Router::with_path("third_party/locations")
+            .hoop(OperationSelector(ServiceOperationId::EDGE_APPLET_THIRD_PARTY_LOCATIONS_READ_LIST_V1)).get(applet_third_party_unsupported));
     router
 }
 
@@ -550,6 +561,9 @@ pub fn managed_applet_router(edge: Arc<crate::ArkretEdge>) -> Result<Router> {
     let service = Arc::new(crate::applet_configuration::AppletConfigurationService::new(edge)?);
     Ok(Router::new().push(description).push(author.router()).push(
         Router::with_path("_arkret/edge/applet/configuration")
+            .hoop(OperationSelector(
+                ServiceOperationId::EDGE_APPLET_CONFIGURATION_COMMAND_EXECUTE_V1,
+            ))
             .hoop(affix_state::inject(ConfigurationWebState {
                 service,
                 config,
@@ -1756,6 +1770,71 @@ mod tests {
     // ========================================================================
 
     use salvo::test::{ResponseExt, TestClient};
+
+    #[tokio::test]
+    async fn every_edge_route_selects_before_authentication_or_body_parsing() {
+        let service = salvo::Service::new(applet_routes());
+        let routes = [
+            ("ping", ServiceOperationId::EDGE_APPLET_READ_PING_V1),
+            ("describe", ServiceOperationId::EDGE_APPLET_READ_DESCRIBE_V1),
+            (
+                "transactions",
+                ServiceOperationId::EDGE_APPLET_COMMAND_TRANSACTION_V1,
+            ),
+            (
+                "actors/invalid",
+                ServiceOperationId::EDGE_APPLET_ACTOR_READ_RESOLVE_V1,
+            ),
+            (
+                "realms/invalid",
+                ServiceOperationId::EDGE_APPLET_REALM_READ_RESOLVE_V1,
+            ),
+            (
+                "protocols/slack",
+                ServiceOperationId::EDGE_APPLET_READ_PROTOCOL_METADATA_V1,
+            ),
+            (
+                "third_party/users",
+                ServiceOperationId::EDGE_APPLET_THIRD_PARTY_USERS_READ_LIST_V1,
+            ),
+            (
+                "third_party/locations",
+                ServiceOperationId::EDGE_APPLET_THIRD_PARTY_LOCATIONS_READ_LIST_V1,
+            ),
+        ];
+        for (path, operation) in routes {
+            let url = format!("https://applet.example/_arkret/edge/applet/{path}");
+            for selector in [None, Some("wrong"), Some(operation)] {
+                let mut request = if path == "transactions" {
+                    TestClient::post(&url).body("{invalid JSON")
+                } else {
+                    TestClient::get(&url)
+                };
+                if let Some(value) = selector {
+                    request = request.add_header("arkret-operation", value, false);
+                    if value == operation {
+                        request = request.add_header("arkret-operation", value, false);
+                    }
+                }
+                let mut response = request.send(&service).await;
+                let expected = if selector.is_none() {
+                    StatusCode::BAD_REQUEST
+                } else {
+                    StatusCode::UNPROCESSABLE_ENTITY
+                };
+                assert_eq!(response.status_code, Some(expected), "{path}: {selector:?}");
+                let problem: arkret_wire::Problem = response.take_json().await.unwrap();
+                assert_eq!(
+                    problem.code(),
+                    if selector.is_none() {
+                        "operation_selector_required"
+                    } else {
+                        "unsupported_operation_version"
+                    }
+                );
+            }
+        }
+    }
 
     const INVALIDATE_URL: &str = "http://127.0.0.1/admin/did-bindings/invalidate";
 

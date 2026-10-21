@@ -704,18 +704,34 @@ mod tests {
         );
         let problem: arkret_wire::Problem = response.take_json().await.unwrap();
         assert_eq!(problem.code(), "not_found");
-        for (url, operation) in [
+        for (url, operation, post) in [
             (
                 "https://applet.example/_arkret/describe".to_owned(),
                 arkret::ServiceOperationId::SERVER_READ_DESCRIBE_V1,
+                false,
             ),
             (
                 resolution_url,
                 arkret::ServiceOperationId::OPEN_SERVICE_READ_RESOLUTION_V1,
+                false,
+            ),
+            (
+                "https://applet.example/_arkret/edge/applet/configuration".to_owned(),
+                arkret::ServiceOperationId::EDGE_APPLET_CONFIGURATION_COMMAND_EXECUTE_V1,
+                true,
+            ),
+            (
+                "https://applet.example/_arkret/edge/applet/managed-actors/author".to_owned(),
+                arkret::ServiceOperationId::EDGE_APPLET_MANAGED_ACTOR_COMMAND_AUTHOR_V1,
+                true,
             ),
         ] {
             for kind in ["missing", "wrong", "duplicate"] {
-                let mut request = TestClient::get(&url);
+                let mut request = if post {
+                    TestClient::post(&url).body("{invalid JSON")
+                } else {
+                    TestClient::get(&url)
+                };
                 if kind == "wrong" {
                     request = request.add_header(
                         "arkret-operation",
