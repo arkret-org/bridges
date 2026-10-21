@@ -96,6 +96,16 @@ MSRV 检查保留默认 SQLite 集合：`cargo check --workspace --all-targets -
 跨仓依赖证据继续使用 SDK 现有 compatibility manifest/runner；其 all-features 检查
 会保留 SQLite，不能替代这里的 PostgreSQL-only 集合。
 配置文件使用 YAML。
+HTTP 宿主还必须配置 `arkret.service_resolution`：填写身份生成器导出的完整 SDK
+`AuthenticatedServiceResolution` 对象（YAML 中可直接嵌入 JSON），其中 `service_kind`
+为 `applet_service`，DID、当前 assertion method 和公钥必须与本宿主配置一致。
+这是公开的原生 DID 日志、见证与文档，不含私钥；不能用一个 DID 字符串或自填摘要替代。
+缺少材料、历史被篡改、角色错误或签名密钥不匹配时，HTTP 宿主拒绝启动。
+`edge` 出站嵌入可由独立身份宿主发布材料，但启用共享 HTTP 路由时同样需要完整材料。
+反向代理需要公开 `/_arkret/describe`、`/_arkret/open/services/{service_id}/resolution`
+以及 Service DID 对应的 `did.json`、`did.jsonl` 和见证路径；这些路径由共享运行时发布。
+Service 轮换时原子替换完整公开历史与当前签名密钥后重启，不改写旧日志；Bot／Ghost 的
+独立控制私钥仍由各主体的加密存储保管，不写入上述公开对象。
 所有桥都必须显式建立 app channel 到 Realm 的映射；没有 channel-realm mapping 的入站消息会直接失败,
 不再回退到默认 Realm。
 推荐在配置文件的 `mappings` 段声明静态映射；各桥 `config.sample.yaml` 均包含注释样例,启动时会自动 upsert。

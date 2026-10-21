@@ -148,6 +148,11 @@ pub struct ArkretConfig {
     pub applet_base_url: String,
     /// The service DID of this bridge acting as an Applet.
     pub service_did: Did,
+    /// Complete public native history for this Service, exported by its identity
+    /// provisioner. HTTP hosts require it; outbound-only embedding may publish
+    /// the Service through a separately configured identity host.
+    #[serde(default)]
+    pub service_resolution: Option<arkret::AuthenticatedServiceResolution>,
     /// Trust domain advertised by the applet service description.
     pub trust_domain: arkret::TrustDomainId,
     /// This bridge's applet id (`ak:applet:<uuidv7>`).

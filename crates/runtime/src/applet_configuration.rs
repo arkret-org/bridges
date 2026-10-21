@@ -581,10 +581,50 @@ mod tests {
     async fn production_managed_host_exposes_public_role_description() {
         use salvo::test::{ResponseExt, TestClient};
         let file = DatabaseFile::new();
-        let edge = edge(file.open());
-        let router = crate::web::managed_applet_router(edge.clone()).unwrap();
+        let template = edge(file.open());
+        assert!(crate::web::managed_applet_router(template.clone()).is_err());
+        let now = chrono::Utc::now();
+        let mut identity = arkret_test_kit::service_identity::ServiceIdentityFixture::webvh(
+            &"https://applet.example/".parse().unwrap(),
+            801,
+            [0x22; 32],
+            "key-1",
+            now - chrono::Duration::minutes(1),
+            now,
+        )
+        .unwrap();
+        identity.resolution.service_kind = "applet_service".to_owned();
+        let mut config = template.config().as_ref().clone();
+        config.arkret.service_did = identity.resolution.normalized_did_document.id.clone();
+        config.arkret.service_resolution = Some(identity.resolution.clone());
+        crate::service_identity::validate(&config).unwrap();
+        let mut wrong = config.clone();
+        wrong.arkret.signing_key_seed_hex = "01".repeat(32);
+        assert!(crate::service_identity::validate(&wrong).is_err());
+        wrong = config.clone();
+        wrong
+            .arkret
+            .service_resolution
+            .as_mut()
+            .unwrap()
+            .service_kind = "station".into();
+        assert!(crate::service_identity::validate(&wrong).is_err());
+        wrong = config.clone();
+        if let arkret::ResolutionMethodHistoryEvidence::WebvhLog { log_entries, .. } = &mut wrong
+            .arkret
+            .service_resolution
+            .as_mut()
+            .unwrap()
+            .method_history_evidence
+        {
+            log_entries[0]["state"]["id"] = json!("did:web:unrelated.example");
+        }
+        assert!(crate::service_identity::validate(&wrong).is_err());
+        let (sender, _) = tokio::sync::mpsc::channel(1);
+        let edge = Arc::new(ArkretEdge::new(Arc::new(config), file.open(), sender).unwrap());
+        let router = salvo::Service::new(crate::web::managed_applet_router(edge.clone()).unwrap());
         let mut response = TestClient::get("https://applet.example/_arkret/describe")
-            .send(router)
+            .send(&router)
             .await;
         assert_eq!(response.status_code, Some(salvo::http::StatusCode::OK));
         let description: arkret_models_discovery::ServiceDescribe =
@@ -592,6 +632,10 @@ mod tests {
         description.validate().unwrap();
         assert_eq!(description.service_kind, arkret::ServiceKind::AppletService);
         assert!(description.supported_profiles.is_empty());
+        assert_eq!(
+            description.service_resolution,
+            crate::service_identity::commitment(edge.config()).unwrap()
+        );
         let value = serde_json::to_value(description).unwrap();
         assert!(
             value
@@ -599,6 +643,46 @@ mod tests {
                 .contains("ak.operation_bundle.applet_service.describe.v1")
         );
         assert!(!value.to_string().contains("signing_key_seed_hex"));
+        let resolution_url = format!(
+            "https://applet.example{}",
+            arkret::canonical_service_resolution_path(&identity.service_id)
+        );
+        let mut response = TestClient::get(resolution_url).send(&router).await;
+        assert_eq!(response.status_code, Some(salvo::http::StatusCode::OK));
+        let published: arkret::AuthenticatedServiceResolution = response.take_json().await.unwrap();
+        assert_eq!(json!(published), json!(identity.resolution));
+        arkret::identity::verify_authenticated_service_resolution_history(
+            &published,
+            &identity.service_id,
+            now,
+        )
+        .unwrap();
+        let did = &identity.resolution.normalized_did_document.id;
+        let mut response =
+            TestClient::get(arkret::identity::DidWebvhResolver::log_url(did).unwrap())
+                .send(&router)
+                .await;
+        assert_eq!(response.status_code, Some(salvo::http::StatusCode::OK));
+        let log = response.take_bytes(None).await.unwrap();
+        arkret::identity::verify_did_webvh_v1_chain_bytes(did, &log).unwrap();
+        let mut response =
+            TestClient::get(arkret::identity::DidWebvhResolver::document_url(did).unwrap())
+                .send(&router)
+                .await;
+        assert_eq!(response.status_code, Some(salvo::http::StatusCode::OK));
+        let document: serde_json::Value = response.take_json().await.unwrap();
+        assert_eq!(document["id"], json!(did));
+        assert!(document.get("verificationMethod").is_some());
+        let mut response =
+            TestClient::get("https://applet.example/_arkret/open/services/unknown/resolution")
+                .send(&router)
+                .await;
+        assert_eq!(
+            response.status_code,
+            Some(salvo::http::StatusCode::NOT_FOUND)
+        );
+        let problem: arkret_wire::Problem = response.take_json().await.unwrap();
+        assert_eq!(problem.code(), "not_found");
         assert!(
             edge.authoring_store()
                 .entries_with_prefix("applet-configuration/v1/")

@@ -458,13 +458,16 @@ struct ConfigurationWebState {
 }
 
 fn service_description_router(edge: &crate::ArkretEdge) -> Result<Router> {
+    let identity = crate::service_identity::router(edge.config())?;
     let authority = Arc::new(DidAuthority::new(
         edge.config().arkret.trust_domain.clone(),
     )?);
     let description = BridgeAppletHandler::new(edge, None, authority)?.describe()?;
-    Ok(Router::with_path("_arkret/describe")
-        .hoop(affix_state::inject(description))
-        .get(service_describe))
+    Ok(Router::new().push(identity).push(
+        Router::with_path("_arkret/describe")
+            .hoop(affix_state::inject(description))
+            .get(service_describe),
+    ))
 }
 
 #[handler]
@@ -1299,7 +1302,12 @@ fn request_target_uri(
 /// surface (`/_arkret/edge/applet/*`) is part of the universal failure surface
 /// in `operations-error-mapping.json`, so the `code` must come from the closed
 /// `error-code-registry.json` set rather than being a free-form string.
-fn applet_error(res: &mut Response, status: StatusCode, code: &str, message: impl Into<String>) {
+pub(crate) fn applet_error(
+    res: &mut Response,
+    status: StatusCode,
+    code: &str,
+    message: impl Into<String>,
+) {
     let envelope = arkret_wire::Problem::from_code(code, message)
         .with_instance(arkret_wire::new_prefixed_uuid7("ak:request:"));
     let problem = envelope.with_status(status.as_u16());

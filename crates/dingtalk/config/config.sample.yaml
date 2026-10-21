@@ -15,11 +15,13 @@ arkret:
   server_url: "http://localhost:8008"
   applet_base_url: "https://bridge.example"
   service_did: "did:webvh:dingtalk-bridge.example"
+  # Replace null with the complete public AuthenticatedServiceResolution object.
+  # The HTTP host verifies its native history and current signing key at startup.
+  service_resolution: null
   trust_domain: "ak:trust_domain:example.net"
   applet_id: "ak:applet:00000000-0000-7000-8000-0000000000d6"
   signing_key_seed_hex: "0000000000000000000000000000000000000000000000000000000000000000"
   verification_method_fragment: "#key-1"
-  signer_resolution_evidence_ref: "ak:signer_evidence:sha256:0000000000000000000000000000000000000000000000000000000000000000"
   trusted_server_did: "did:webvh:arkret-server.example"
   # Copy these claims exactly from the installed canonical Applet package.
   # Empty arrays are fail-closed: no Realm transaction is accepted.

@@ -203,6 +203,9 @@ impl ArkretEdge {
         let station_id = project_did_to_core_id(&config.arkret.trusted_server_did)?;
 
         let http_key = ed25519_dalek::SigningKey::from_bytes(&config.signing_seed()?);
+        if config.arkret.service_resolution.is_some() {
+            crate::service_identity::validate(&config)?;
+        }
         if http_key.verifying_key() != signer.verifying_key() {
             return Err(BridgeError::Config(
                 "Service HTTP key differs from the producer key".into(),
@@ -962,6 +965,7 @@ pub struct BridgeAppletHandler {
     service_did: Did,
     trust_domain: arkret::TrustDomainId,
     transport_base_url: String,
+    service_resolution: Option<arkret::ResolutionCommitment>,
     resolver: Option<Arc<dyn AppletResolver>>,
     /// Inbound DID **binding store** (`did-usage-and-verification.md` §6).
     ///
@@ -997,6 +1001,13 @@ impl BridgeAppletHandler {
             service_did: service_did.clone(),
             trust_domain: edge.config.arkret.trust_domain.clone(),
             transport_base_url: management_url.to_string(),
+            service_resolution: edge
+                .config
+                .arkret
+                .service_resolution
+                .as_ref()
+                .map(|_| crate::service_identity::commitment(&edge.config))
+                .transpose()?,
             resolver,
             did_authority,
         })
@@ -1128,7 +1139,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
             .expect("Applet service describe bundle is registered")
             .operation_bundle_id
             .to_owned();
-        let description = ServiceDescribe::development(
+        let mut description = ServiceDescribe::development(
             self.service_did.clone(),
             self.trust_domain.clone(),
             service_kind,
@@ -1138,6 +1149,9 @@ impl arkret::AppletHandler for BridgeAppletHandler {
                 extension_profile_required: (),
             }],
         );
+        if let Some(resolution) = &self.service_resolution {
+            description.service_resolution = resolution.clone();
+        }
         description.validate()?;
         Ok(description)
     }

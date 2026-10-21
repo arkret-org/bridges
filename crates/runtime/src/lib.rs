@@ -64,6 +64,7 @@ mod managed_authoring;
 pub mod managed_device;
 pub mod queue;
 mod realm_governance;
+mod service_identity;
 pub mod telemetry;
 
 #[cfg(feature = "db")]
