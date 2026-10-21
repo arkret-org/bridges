@@ -388,27 +388,6 @@ async fn claim_transaction(
     run_blocking(move || store.claim(&replay, &hash, &delivery_authentication_record_digest)).await
 }
 
-/// Authenticate every Event before creating the durable idempotency claim.
-///
-/// The claim is the first transaction-processing side effect. Keeping proof
-/// verification ahead of it means an unauthenticated request cannot create a
-/// `pending` row and correctness never depends on a compensating release.
-async fn authenticate_and_claim_transaction(
-    body: AppletTransactionRequestBody,
-    store: Arc<dyn TransactionIdempotencyStore<AppletTransactionOutcome, Error = BridgeError>>,
-    replay: IdempotencyIdentity,
-    hash: String,
-    delivery_authentication_record_digest: String,
-) -> Result<std::result::Result<TransactionClaim<AppletTransactionOutcome>, String>> {
-    let authentication = run_blocking(move || Ok(verify_transaction_events(&body))).await?;
-    match authentication {
-        Ok(()) => claim_transaction(store, replay, hash, delivery_authentication_record_digest)
-            .await
-            .map(Ok),
-        Err(err) => Ok(Err(err)),
-    }
-}
-
 async fn release_transaction_claim(
     store: Arc<dyn TransactionIdempotencyStore<AppletTransactionOutcome, Error = BridgeError>>,
     replay: IdempotencyIdentity,
@@ -759,7 +738,14 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
     };
 
     let AppletTransactionRequestBody::Authoring(authoring) = &body else {
-        bad_request(res, "group content must use an accepted managed Device");
+        // The body is a valid transaction branch in the opposite direction,
+        // but Station-to-Applet policy forbids Group delivery to base_url.
+        applet_error(
+            res,
+            StatusCode::FORBIDDEN,
+            "capability_denied",
+            "group content must use an accepted managed Device",
+        );
         return;
     };
     let authority = match request_authority(req, &headers) {
@@ -835,11 +821,9 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         return;
     }
 
-    // Authenticate before the first transaction-processing side effect. An
-    // invalid Event proof must not leave a durable `pending` row behind. Once
-    // authenticated, §7.3 requires the claim before invoking the handler.
-    match authenticate_and_claim_transaction(
-        body.clone(),
+    // Fresh completion/HTTP admission above precedes the first claim. Group
+    // batches have no receiver branch here; they use an accepted native Device.
+    match claim_transaction(
         state.idempotency.clone(),
         replay.clone(),
         request_hash.clone(),
@@ -847,7 +831,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
     )
     .await
     {
-        Ok(Ok(TransactionClaim::Duplicate(response))) => {
+        Ok(TransactionClaim::Duplicate(response)) => {
             // Even cache hits retain this freshly verified signature's full
             // authentication record, atomically with the immutable original.
             if let Err(error) = state
@@ -861,7 +845,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
             res.render(Json(response));
             return;
         }
-        Ok(Ok(TransactionClaim::Pending)) => {
+        Ok(TransactionClaim::Pending) => {
             record_applet_transaction("pending");
             res.render(Json(
                 arkret_models_integration::AppletTransactionOutcome::Rejected {
@@ -871,7 +855,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
             ));
             return;
         }
-        Ok(Ok(TransactionClaim::Conflict)) => {
+        Ok(TransactionClaim::Conflict) => {
             record_applet_transaction("conflict");
             // Same (source_id, Idempotency-Key) with a different body:
             // applet-integration §7.3/§14 require the closed error code
@@ -884,12 +868,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
             );
             return;
         }
-        Ok(Ok(TransactionClaim::Claimed)) => {}
-        Ok(Err(err)) => {
-            record_applet_transaction("unauthorized");
-            unauthorized(res, err);
-            return;
-        }
+        Ok(TransactionClaim::Claimed) => {}
         Err(err) => {
             record_applet_transaction("internal_error");
             internal_error(res, err.to_string());
@@ -1188,73 +1167,6 @@ fn verify_http_applet_request_with_scenario(
     Ok(())
 }
 
-/// Structurally validate every Event proof in a pushed transaction.
-///
-/// This path performs **no** DID authority call and verifies **no** Event proof
-/// signature, and that is the ruling, not an omission
-/// (`review/spec-done` — service-local DID authority call sites): §4's
-/// exclusion list says an ordinary or high-risk Event write creates no DID
-/// authority call and that a device key MUST come from an accepted PCR
-/// authorization chain. A bridge cannot reach that chain, so resolving the
-/// signer here would prove only that a key appears in some DID document while
-/// reading as if the signer had been independently admitted.
-///
-/// The signer authority of an inbound Event is therefore carried by the source
-/// Arkret node: it completed admission and vouches for this exact body through
-/// the RFC 9421 HTTP Message Signature that
-/// [`crate::did_binding::DidAuthority::service_verification_method`] checks
-/// against the operator-configured anchor before this function runs.
-///
-/// What is still enforced here is everything a bridge can decide on its own:
-/// exactly one production producer proof per Event, a well-formed proof
-/// binding, and a signer DID that projects to the Event's `executed_by` /
-/// `actor_id`. A mismatch is a malformed push and fails closed.
-fn verify_transaction_events(
-    body: &AppletTransactionRequestBody,
-) -> std::result::Result<(), String> {
-    let body = match body {
-        AppletTransactionRequestBody::Events(body) => body,
-        // An authoring completion carries no producer Events of its own; its
-        // bindings were already checked at the delivery boundary.
-        AppletTransactionRequestBody::Authoring(_) => return Ok(()),
-    };
-    for event in &body.events {
-        let Some(proof) = event.producer_proof.as_ref() else {
-            return Err(format!(
-                "event {} must carry exactly one producer proof",
-                event.event_id
-            ));
-        };
-        let expected_signer = event.executed_by.as_ref().unwrap_or(&event.actor_id);
-        // The bridge checks immutable content-address consistency against the
-        // algorithm committed by the unique producer proof. Trusted Realm-suite
-        // admission remains the source Arkret node's responsibility; the bridge
-        // never infers governance state from the EventId prefix.
-        let selector_suite = proof.event_digest.digest_suite().map_err(|error| {
-            format!(
-                "event {} producer digest suite is invalid: {error}",
-                event.event_id
-            )
-        })?;
-        event
-            .validate_proof_bindings_with_digest_suite(selector_suite)
-            .map_err(|err| format!("event {} proof binding failed: {err}", event.event_id))?;
-        proof
-            .validate_production()
-            .map_err(|err| format!("event {} proof is not production: {err}", event.event_id))?;
-        let signer_did = verification_method_did(&proof.verification_method)?;
-        let signer_actor_id =
-            arkret::project_did_to_core_id(&signer_did).map_err(|error| error.to_string())?;
-        if &signer_actor_id != expected_signer.signing_principal_id() {
-            return Err(format!(
-                "event {} proof signer DID does not match actor_id/executed_by",
-                event.event_id
-            ));
-        }
-    }
-    Ok(())
-}
-
 /// Accept the operator-configured HTTP Message Signature trust anchors as
 /// `service`-purpose bindings, once, at startup.
 ///
@@ -1451,8 +1363,8 @@ mod tests {
 
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use arkret::signatures::{Ed25519PayloadSigner, SignEventOptions, sign_event};
-    use arkret::{Did, DidCoreId, Event, RealmId, ScopeRef, TrustDomainId};
+    use arkret::signatures::Ed25519PayloadSigner;
+    use arkret::{Did, TrustDomainId};
     use chrono::DateTime;
 
     use super::*;
@@ -1525,10 +1437,6 @@ mod tests {
         DidUrl::new(format!("{}#key-1", actor_did())).expect("did url")
     }
 
-    fn actor_id(did: &Did) -> DidCoreId {
-        arkret::project_did_to_core_id(did).expect("actor core id")
-    }
-
     fn server_did() -> Did {
         Did::new("did:webvh:z6mkfixture:server.example".to_owned()).expect("server did")
     }
@@ -1541,49 +1449,6 @@ mod tests {
         DidAuthority::new(trust_domain()).expect("authority")
     }
 
-    /// One Event signed by `seed`'s key under `verification_method`.
-    fn signed_event(actor: &Did, verification_method: &DidUrl, seed: u8, seq: u64) -> Event {
-        let realm =
-            RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").expect("realm");
-        let event = arkret_wire::test_support::raw_event(
-            "ak.message.create",
-            ScopeRef::Realm { realm_id: realm },
-            actor_id(actor),
-            arkret::project_did_to_core_id(&server_did()).expect("server core id"),
-            json!({ "body": format!("hello {seq}") }),
-        )
-        .expect("event");
-        // A received Event arrives finalized and signed, so the fixture reaches
-        // the verifier the same way.
-        let mut event = arkret_wire::AuthoredEvent::finalize_with_digest_suite(
-            event,
-            arkret::canonical::DigestSuite::Sha256,
-        )
-        .expect("fixture envelope finalizes");
-        sign_event(
-            &mut event,
-            &signer(seed, actor, verification_method),
-            SignEventOptions::new(),
-        )
-        .expect("sign event");
-        event.into_event()
-    }
-
-    fn transaction(events: Vec<Event>) -> AppletTransactionRequestBody {
-        AppletTransactionRequestBody::Events(
-            arkret_models_integration::AppletEventTransactionRequestBody {
-                applet_id: arkret::AppletId::new(
-                    "ak:applet:01904100-0000-7000-8000-000000000001".to_owned(),
-                )
-                .expect("applet id"),
-                source_id: arkret::project_did_to_core_id(&server_did()).expect("server core id"),
-                events,
-                committed_events: Vec::new(),
-                signals: Vec::new(),
-            },
-        )
-    }
-
     fn seed_source_service(authority: &DidAuthority, seed: u8, now: DateTime<Utc>) {
         authority
             .accept_configured_source_service_key(
@@ -1592,82 +1457,6 @@ mod tests {
                 now,
             )
             .expect("source service binding");
-    }
-
-    // ========================================================================
-    // Event proofs are validated structurally, never resolved.
-    // ========================================================================
-
-    #[test]
-    fn a_well_formed_transaction_is_accepted_without_any_signer_binding() {
-        let body = transaction(vec![
-            signed_event(&actor_did(), &actor_verification_method(), 42, 1),
-            signed_event(&actor_did(), &actor_verification_method(), 42, 2),
-        ]);
-        verify_transaction_events(&body).expect("structurally valid transaction");
-    }
-
-    #[test]
-    fn an_event_proof_signed_by_a_foreign_did_is_rejected() {
-        // The Event's `actor_id` and the proof's verification method disagree.
-        let foreign = Did::new("did:webvh:z6mkmallory:mallory.example".to_owned()).expect("did");
-        let foreign_method = DidUrl::new(format!("{foreign}#key-1")).expect("did url");
-        let mut event = signed_event(&foreign, &foreign_method, 42, 1);
-        event.actor_id = arkret::ActorId::service(actor_id(&actor_did()));
-
-        let err = verify_transaction_events(&transaction(vec![event]))
-            .expect_err("signer/actor mismatch must be rejected");
-        assert!(
-            err.contains("proof binding failed") || err.contains("does not match"),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn an_event_without_producer_proof_is_rejected() {
-        let mut event = signed_event(&actor_did(), &actor_verification_method(), 42, 1);
-        event.producer_proof = None;
-        let err = verify_transaction_events(&transaction(vec![event]))
-            .expect_err("a proofless event must be rejected");
-        assert!(err.contains("exactly one producer proof"), "{err}");
-    }
-
-    #[test]
-    fn an_empty_event_list_is_accepted() {
-        verify_transaction_events(&transaction(Vec::new())).expect("empty transaction");
-    }
-
-    #[tokio::test]
-    async fn a_malformed_event_proof_creates_no_idempotency_record() {
-        let mut event = signed_event(&actor_did(), &actor_verification_method(), 42, 1);
-        event.producer_proof = None;
-        let store = Arc::new(CountingIdempotencyStore::default());
-        let replay = IdempotencyIdentity::applet_transaction(
-            IdempotencyDirection::NodeToApplet,
-            project_did_to_core_id(&server_did()).expect("server core id"),
-            DidCoreId::new("ak:did_core:webvh:z6mkfixturebridge").unwrap(),
-            "invalid-proof",
-        );
-
-        let result = authenticate_and_claim_transaction(
-            transaction(vec![event]),
-            store.clone(),
-            replay,
-            "sha256:unused-by-counting-store".to_owned(),
-            "source-anchor".to_owned(),
-        )
-        .await
-        .expect("authentication worker");
-
-        assert!(
-            result.is_err(),
-            "a malformed proof must fail authentication"
-        );
-        assert_eq!(
-            store.claims.load(Ordering::SeqCst),
-            0,
-            "a malformed proof must not create an idempotency record"
-        );
     }
 
     // ========================================================================
@@ -1928,31 +1717,33 @@ mod tests {
         assert_eq!(body["invalidated_bindings"], json!(0));
     }
 
-    #[tokio::test]
-    async fn completion_route_checks_exact_digest_and_canonical_wire_before_json_or_authority() {
-        use arkret::http_signature::{ContentDigest, ContentDigestAlgorithm};
-        struct UntouchedJournal {
-            reads: AtomicUsize,
-            writes: AtomicUsize,
+    struct UntouchedJournal {
+        reads: AtomicUsize,
+        writes: AtomicUsize,
+    }
+    impl crate::AuthoringStore for UntouchedJournal {
+        fn load(&self, _: &str) -> Result<Option<String>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
         }
-        impl crate::AuthoringStore for UntouchedJournal {
-            fn load(&self, _: &str) -> Result<Option<String>> {
-                self.reads.fetch_add(1, Ordering::SeqCst);
-                Ok(None)
-            }
-            fn compare_exchange_batch(
-                &self,
-                _: &[(String, Option<String>)],
-                _: &[(String, Option<String>)],
-            ) -> Result<bool> {
-                self.writes.fetch_add(1, Ordering::SeqCst);
-                Ok(true)
-            }
-            fn entries_with_prefix(&self, _: &str) -> Result<Vec<(String, String)>> {
-                self.reads.fetch_add(1, Ordering::SeqCst);
-                Ok(Vec::new())
-            }
+        fn compare_exchange_batch(
+            &self,
+            _: &[(String, Option<String>)],
+            _: &[(String, Option<String>)],
+        ) -> Result<bool> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            Ok(true)
         }
+        fn entries_with_prefix(&self, _: &str) -> Result<Vec<(String, String)>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+    }
+    fn completion_test_receiver() -> (
+        salvo::Service,
+        Arc<UntouchedJournal>,
+        Arc<CountingIdempotencyStore>,
+    ) {
         let journal = Arc::new(UntouchedJournal {
             reads: AtomicUsize::new(0),
             writes: AtomicUsize::new(0),
@@ -1973,6 +1764,13 @@ mod tests {
             Arc::new(crate::ArkretEdge::new(Arc::new(config), journal.clone(), sender).unwrap());
         let claims = Arc::new(CountingIdempotencyStore::default());
         let service = salvo::Service::new(applet_completion_router(edge, claims.clone()).unwrap());
+        (service, journal, claims)
+    }
+
+    #[tokio::test]
+    async fn completion_route_checks_exact_digest_and_canonical_wire_before_json_or_authority() {
+        use arkret::http_signature::{ContentDigest, ContentDigestAlgorithm};
+        let (service, journal, claims) = completion_test_receiver();
         let url = "https://bridge.example/_arkret/edge/applet/transactions".to_owned();
         for (label, body, mutation, code) in [
             ("all-missing", "{invalid", "all", "http_signature_required"),
@@ -2105,5 +1903,145 @@ mod tests {
             );
             assert_eq!(journal.writes.load(Ordering::SeqCst), 0);
         }
+    }
+
+    #[tokio::test]
+    async fn production_http_receiver_refuses_signed_group_envelope_without_claim_or_journal_access()
+     {
+        use arkret::http_signature::{
+            ContentDigest, ContentDigestAlgorithm, HttpSignatureScenario,
+            SignatureVerificationPolicy, SignedRequestParts, public_key_from_bytes,
+            sign_http_message_for_scenario, signing_key_from_seed,
+            verify_signed_canonical_json_message,
+        };
+        let (service, journal, claims) = completion_test_receiver();
+        let source = DidCoreId::new("ak:did_core:webvh:z6mkstation").unwrap();
+        let source_did = Did::new("did:webvh:z6mkstation:station.example").unwrap();
+        let source_method = DidUrl::new(format!("{source_did}#key-1")).unwrap();
+        let raw_event = arkret_wire::test_support::raw_event(
+            "ak.message.create",
+            arkret::ScopeRef::Realm {
+                realm_id: arkret::RealmId::new(
+                    "ak:realm:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                )
+                .unwrap(),
+            },
+            source.clone(),
+            source.clone(),
+            json!({"body":"Group delivery cannot use the Applet management receiver"}),
+        )
+        .unwrap();
+        let mut authored = arkret::AuthoredEvent::finalize_with_digest_suite(
+            raw_event,
+            arkret::DigestSuite::Sha256,
+        )
+        .unwrap();
+        arkret::signatures::sign_event(
+            &mut authored,
+            &signer(0x62, &source_did, &source_method),
+            arkret::signatures::SignEventOptions::new(),
+        )
+        .unwrap();
+        let event = authored.into_event();
+        event
+            .validate_proof_bindings_with_digest_suite(arkret::DigestSuite::Sha256)
+            .unwrap();
+        let body =
+            AppletTransactionRequestBody::Events(arkret::AppletEventTransactionRequestBody {
+                applet_id: arkret::AppletId::new("ak:applet:01904100-0000-7000-8000-000000000001")
+                    .unwrap(),
+                source_id: source.clone(),
+                events: vec![event],
+                committed_events: Vec::new(),
+                signals: Vec::new(),
+            });
+        body.validate().unwrap();
+        let bytes = arkret::canonical::canonical_json_bytes(&body).unwrap();
+        let digest = ContentDigest::compute(&bytes, ContentDigestAlgorithm::Sha256);
+        let mut parts = SignedRequestParts {
+            method: "POST".into(),
+            target_uri: "https://bridge.example/_arkret/edge/applet/transactions".into(),
+            authority: "bridge.example".into(),
+            path: "/_arkret/edge/applet/transactions".into(),
+            headers: vec![
+                (
+                    "arkret-operation".into(),
+                    ServiceOperationId::EDGE_APPLET_COMMAND_TRANSACTION_V1.into(),
+                ),
+                ("source-service-id".into(), source.to_string()),
+                (
+                    "destination-service-id".into(),
+                    "ak:did_core:webvh:z6mkbridge".into(),
+                ),
+                ("idempotency-key".into(), "retired-group-route".into()),
+                ("content-digest".into(), digest.wire_value.clone()),
+            ],
+            body_digest: Some(digest.wire_value),
+        };
+        let key = signing_key_from_seed(&[0x62; 32]);
+        let signature = sign_http_message_for_scenario(
+            &parts,
+            HttpSignatureScenario::AppletTransactionV1,
+            &[],
+            "sig1",
+            source_method.as_str(),
+            Utc::now().timestamp(),
+            &key,
+        )
+        .unwrap();
+        parts
+            .headers
+            .push(("signature-input".into(), signature.signature_input_header));
+        parts
+            .headers
+            .push(("signature".into(), signature.signature_header));
+        // Establish the negative fixture's complete transport prerequisites
+        // with the real SDK verifier. This is no claim of SUT Event acceptance.
+        verify_signed_canonical_json_message(
+            &parts.method,
+            &parts.target_uri,
+            &parts.authority,
+            &parts.path,
+            parts
+                .headers
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str())),
+            false,
+            &bytes,
+            &public_key_from_bytes(&key.verifying_key().to_bytes()).unwrap(),
+            &SignatureVerificationPolicy::for_scenario(
+                HttpSignatureScenario::AppletTransactionV1,
+                &[],
+            )
+            .unwrap(),
+            Utc::now().timestamp(),
+        )
+        .unwrap();
+        let mut request = TestClient::post(&parts.target_uri).body(bytes);
+        for (name, value) in parts.headers {
+            request = request.add_header(
+                salvo::http::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                value,
+                true,
+            );
+        }
+        let mut response = request.send(&service).await;
+        assert_eq!(response.status_code, Some(StatusCode::FORBIDDEN));
+        assert!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("application/problem+json"))
+        );
+        let problem: arkret_wire::Problem = response.take_json().await.unwrap();
+        assert_eq!(problem.code(), "capability_denied");
+        assert_eq!(
+            problem.problem_type,
+            "https://arkret.org/problems/capability_denied"
+        );
+        assert_eq!(claims.claims.load(Ordering::SeqCst), 0);
+        assert_eq!(journal.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(journal.writes.load(Ordering::SeqCst), 0);
     }
 }
