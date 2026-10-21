@@ -56,7 +56,6 @@ struct DurableWelcome {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ManagedQueueProgress {
     pub durable_welcomes: usize,
-    pub pending_content: usize,
     pub acknowledged: bool,
     pub has_more: bool,
 }
@@ -98,6 +97,11 @@ fn page_digest(page: &DeviceMessagesGetOutcome) -> Result<String> {
 }
 
 fn check_page(page: &DeviceMessagesGetOutcome, device: &ManagedDevice) -> Result<()> {
+    page.validate_realm_device_recipient(
+        &device.actor_id,
+        &device.device_id,
+        &device.effective_scope,
+    )?;
     if page.deliveries.len() > 100
         || page.lost == Some(true)
         || (!page.deliveries.is_empty()
@@ -569,14 +573,11 @@ impl ManagedDeviceRuntime {
                     progress.durable_welcomes += 1;
                 }
                 RecipientDelivery::DeviceMessage { .. } => {
-                    progress.pending_content += 1;
+                    return Err(invalid("Realm Device queue cannot process DeviceMessage"));
                 }
             }
         }
         self.drain_durable_welcome_consumes(device).await?;
-        if progress.pending_content != 0 {
-            return Ok(progress);
-        }
         progress.acknowledged =
             self.complete_durable_recipient_page(device).await? && page.ack_token.is_some();
         Ok(progress)

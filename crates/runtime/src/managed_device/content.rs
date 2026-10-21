@@ -280,6 +280,10 @@ impl NativeContentRecipient {
 /// Failure retains the exact decrypted item for restart and retry.
 #[async_trait::async_trait]
 pub trait NativeContentSink: Send + Sync + 'static {
+    /// Retry already durable adapter output without blocking receive progress.
+    async fn flush(&self, _device: &ManagedDevice, _reader: &ManagedDeviceReader) -> Result<()> {
+        Ok(())
+    }
     /// Local adapter demand, never a protocol permission or an implicit grant.
     fn requires_attachments(&self) -> bool {
         false

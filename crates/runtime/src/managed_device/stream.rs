@@ -135,6 +135,69 @@ fn head(row: &CommittedEventView) -> CommitStreamHead {
 }
 
 impl ManagedDeviceRuntime {
+    pub(super) async fn verify_current_content_send(
+        &self,
+        device: &ManagedDevice,
+        reader: &ManagedDeviceReader,
+        record: &DeviceRecord,
+        group: &arkret::mls::ArkretMlsGroup,
+        base: &arkret::CommittedEventFullView,
+    ) -> Result<()> {
+        reader.check_device(device)?;
+        let response = reader
+            .client()
+            .snapshot_head(device.effective_scope.realm_id())
+            .await?;
+        let current = garth::own_station_results::consume_own_station_device_snapshot(&response)
+            .map_err(|error| invalid(error.to_string()))?;
+        let expected = if let Some(saved) = state(record, device)? {
+            if current.governance_generation < saved.current.governance_generation {
+                return Err(invalid("native send governance generation rolled back"));
+            }
+            saved.head.clone()
+        } else {
+            head(&CommittedEventView::Full(base.clone()))
+        };
+        current_covers(current, &expected)?;
+        let mut groups = current.current_state_entries.iter().filter_map(|row| {
+            let arkret::TypedCurrentRow::Value {
+                selector, value, ..
+            } = row;
+            matches!(selector, arkret::CurrentSelector::MlsGroup { scope_ref }
+                if scope_ref == &device.effective_scope)
+            .then_some(value)
+        });
+        let value = groups
+            .next()
+            .ok_or_else(|| invalid("native send has no current MLS group"))?;
+        if groups.next().is_some() {
+            return Err(invalid("native send has duplicate current MLS groups"));
+        }
+        let public: arkret::MlsGroupCurrent = serde_json::from_value(value.clone())?;
+        if public.effective_scope != device.effective_scope
+            || public.current_mls_commit_event_ref != base.event.event_id
+            || public.epoch != group.epoch()
+            || public.covered_key_access_revision != public.current_key_access_revision
+        {
+            return Err(invalid(
+                "native send requires the current covered MLS checkpoint",
+            ));
+        }
+        arkret::mls::verify_current_send_governance_binding(
+            &group
+                .authenticated_governance_binding()
+                .map_err(|e| invalid(e.to_string()))?,
+            &arkret::mls::MlsCurrentSendState::new(
+                public.effective_scope,
+                public.epoch,
+                public.current_key_access_revision,
+            ),
+        )
+        .map_err(|e| invalid(e.code()))?;
+        response.value()?;
+        reader.check_device(device)
+    }
+
     /// Local private diagnostics, not another protocol notification or proof
     /// of current read access. No rejected plaintext is retained or delivered.
     pub async fn last_rejected_content(

@@ -247,10 +247,6 @@ fn spawn_worker(
                 break;
             }
             match runtime.poll_welcome_queue(&device, &reader).await {
-                Ok(progress) if progress.pending_content > 0 => {
-                    tracing::warn!(account = %device.actor_id, pending = progress.pending_content,
-                        "native content remains durable and unacknowledged");
-                }
                 Ok(_) => {}
                 Err(error) => tracing::warn!(account = %device.actor_id, %error,
                     "native recipient recovery remains pending"),
@@ -260,6 +256,9 @@ fn spawn_worker(
                     "native stream recovery remains pending");
             }
             if let Some(sink) = sink.as_ref() {
+                if let Err(error) = sink.flush(&device, &reader).await {
+                    tracing::warn!(actor = %device.actor_id, %error, "native adapter output remains pending");
+                }
                 if let Err(error) = runtime.drain_content(&device, &reader, sink.as_ref()).await {
                     tracing::warn!(actor = %device.actor_id, %error, "native content delivery remains pending");
                 }

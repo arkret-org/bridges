@@ -828,12 +828,7 @@ impl ManagedDeviceRuntime {
                 .map_or(8, |c| c.key_package_inventory_target);
             self.maintain_mls_key_packages(&device, target).await?;
             self.poll_welcome_queue(&device, &reader).await?;
-            let progress = self.poll_content_stream(&device, &reader).await?;
-            if progress.pending_events != 0 {
-                return Err(BridgeError::App(
-                    "managed content is waiting for the preceding verified stream".into(),
-                ));
-            }
+            self.poll_content_stream(&device, &reader).await?;
         }
         for _ in 0..8 {
             if let Some(event) = self
@@ -855,6 +850,11 @@ impl ManagedDeviceRuntime {
                     })?;
                 let base = super::inbox::accepted_group_original(&record, &device)?
                     .ok_or_else(|| invalid("MLS original missing"))?;
+                // A durable plaintext delivery awaiting its consumer's ACK is
+                // not an MLS transition. Sending still requires fresh public
+                // coordinates matching the installed private GroupContext.
+                self.verify_current_content_send(&device, &reader, &record, &group, &base)
+                    .await?;
                 let mut seal = |content_type: &str, bytes: &[u8]| -> Result<_> {
                     let header = arkret::EventContentPreEncryptionHeader::reconstruct(
                         "1.0",

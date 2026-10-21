@@ -42,7 +42,9 @@ mod stream;
 mod worker;
 pub use content::{NativeContent, NativeContentRecipient, NativeContentSink};
 pub use inbox::ManagedQueueProgress;
-pub use processing::{NativeReplyClaim, NativeReplyPreparation, NativeReplyTicket};
+pub use processing::{
+    NativeReplyClaim, NativeReplyPreparation, NativeReplyTicket, PendingNativeReply,
+};
 pub use read_source::ManagedDeviceReader;
 pub use stream::ManagedStreamProgress;
 pub use worker::ManagedDeviceWorkers;
@@ -334,7 +336,7 @@ impl ManagedDeviceRuntime {
         let Some(raw) = self.read(&operation_key).await? else {
             return Ok(None);
         };
-        let record: DeviceRecord = self.authoring.decrypt_key_material(&operation_key, &raw)?;
+        let record: DeviceRecord = self.decrypt_device_record(&operation_key, &raw).await?;
         if record.plan.actor_id != *actor_id || record.plan.operation_id != operation_id {
             return Err(invalid(
                 "recovered Device operation belongs to another Account or operation",
@@ -369,13 +371,22 @@ impl ManagedDeviceRuntime {
         .await
     }
 
-    fn decode(
+    async fn decrypt_device_record(&self, key: &str, raw: &str) -> Result<DeviceRecord> {
+        // Deep private MLS/stream records must not consume the caller's poll
+        // stack or block its executor during authenticated decryption/decoding.
+        let authoring = self.authoring.clone();
+        let key = key.to_owned();
+        let raw = raw.to_owned();
+        run_blocking(move || authoring.decrypt_key_material(&key, &raw)).await
+    }
+
+    async fn decode(
         &self,
         operation_key: &str,
         raw: &str,
         plan: &InitialManagedDevicePlan,
     ) -> Result<DeviceRecord> {
-        let record: DeviceRecord = self.authoring.decrypt_key_material(operation_key, raw)?;
+        let record: DeviceRecord = self.decrypt_device_record(operation_key, raw).await?;
         if canonical_json_bytes(&record.plan)? != canonical_json_bytes(plan)? {
             return Err(invalid(
                 "managed Device operation was already bound to another plan",
@@ -507,7 +518,7 @@ impl ManagedDeviceRuntime {
             return Err(invalid("this Device operation was permanently retired"));
         }
         if let Some(raw) = self.read(operation_key).await? {
-            self.decode(operation_key, &raw, plan)?;
+            self.decode(operation_key, &raw, plan).await?;
             return Ok(raw);
         }
         if plan.expires_at <= Utc::now() {
@@ -647,7 +658,7 @@ impl ManagedDeviceRuntime {
             .read(operation_key)
             .await?
             .ok_or_else(|| invalid("concurrent Device preparation disappeared"))?;
-        self.decode(operation_key, &winner, plan)?;
+        self.decode(operation_key, &winner, plan).await?;
         Ok(winner)
     }
 
@@ -676,7 +687,7 @@ impl ManagedDeviceRuntime {
             .await?;
         let operation_key = key(&plan)?;
         let previous = self.prepare(&plan, &operation_key).await?;
-        let mut record = self.decode(&operation_key, &previous, &plan)?;
+        let mut record = self.decode(&operation_key, &previous, &plan).await?;
         let control = self.control_state(&plan.actor_id).await?;
         let auth_payload = payload(&record)?;
         if control.generation != auth_payload.authorized_generation_ref {
@@ -779,7 +790,7 @@ impl ManagedDeviceRuntime {
                     .read(&operation_key)
                     .await?
                     .ok_or_else(|| invalid("Device outcome disappeared"))?;
-                let winner = self.decode(&operation_key, &winner, &plan)?;
+                let winner = self.decode(&operation_key, &winner, &plan).await?;
                 match (&record.outcome, &winner.outcome) {
                     (
                         Some(AuthoritySubmitOutcome::Accepted { commit: first, .. }),

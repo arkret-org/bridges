@@ -7,6 +7,24 @@ use super::*;
 pub struct NativeReplyTicket {
     key: String,
     input_digest: String,
+    source: Option<Arc<ReplySource>>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplySource {
+    actor_id: ActorId,
+    content: NativeContent,
+    processing_binding: serde_json::Value,
+}
+
+/// Durable model output waiting for publication, independently of input ACK.
+pub struct PendingNativeReply {
+    pub ticket: NativeReplyTicket,
+    pub recipient: NativeContentRecipient,
+    pub content: NativeContent,
+    pub processing_binding: serde_json::Value,
+    pub text: String,
 }
 
 #[cfg(test)]
@@ -42,6 +60,7 @@ mod tests {
         let ticket = NativeReplyTicket {
             key: "managed-native-reply/v1/test".into(),
             input_digest: canonical_sha256(&"original-input").unwrap(),
+            source: None,
         };
         {
             let runtime = runtime(&path);
@@ -92,6 +111,7 @@ mod tests {
             let wrong = NativeReplyTicket {
                 key: ticket.key.clone(),
                 input_digest: canonical_sha256(&"changed-input").unwrap(),
+                source: None,
             };
             assert!(runtime.reply_record(&wrong).await.is_err());
             let event =
@@ -121,6 +141,7 @@ mod tests {
         let ticket = NativeReplyTicket {
             key: "managed-native-reply/v1/unknown".into(),
             input_digest: canonical_sha256(&"input").unwrap(),
+            source: None,
         };
         {
             let runtime = runtime(&path);
@@ -179,6 +200,7 @@ pub enum NativeReplyPreparation {
 #[serde(deny_unknown_fields)]
 struct ReplyRecord {
     input_digest: String,
+    source: Option<ReplySource>,
     phase: ReplyPhase,
 }
 
@@ -229,6 +251,7 @@ impl ManagedDeviceRuntime {
     ) -> Result<bool> {
         let record = ReplyRecord {
             input_digest: ticket.input_digest.clone(),
+            source: ticket.source.as_deref().cloned(),
             phase,
         };
         let encrypted = self.authoring.encrypt_key_material(&ticket.key, &record)?;
@@ -265,6 +288,11 @@ impl ManagedDeviceRuntime {
                 content.message(),
                 processing_binding,
             ))?,
+            source: Some(Arc::new(ReplySource {
+                actor_id: recipient.actor_id().clone(),
+                content: content.without_attachment_bytes(),
+                processing_binding: serde_json::to_value(processing_binding)?,
+            })),
         };
         for _ in 0..8 {
             if let Some((raw, record)) = self.reply_record(&ticket).await? {
@@ -295,6 +323,72 @@ impl ManagedDeviceRuntime {
             }
         }
         Err(invalid("native reply preparation contended"))
+    }
+
+    /// Rebuild only source-reading capabilities; publishing still performs all
+    /// current Device, membership, grant and MLS gates. No provider claim is made.
+    pub async fn pending_native_reply_outputs(
+        &self,
+        device: &ManagedDevice,
+        reader: &ManagedDeviceReader,
+    ) -> Result<Vec<PendingNativeReply>> {
+        reader.check_device(device)?;
+        let store = self.store.clone();
+        let authoring = self.authoring.clone();
+        let records = run_blocking(move || {
+            store
+                .entries_with_prefix("managed-native-reply/v1/")?
+                .into_iter()
+                .map(|(key, raw)| {
+                    let record: ReplyRecord = authoring.decrypt_key_material(&key, &raw)?;
+                    Ok((key, record))
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .await?;
+        let mut pending = Vec::new();
+        for (key, record) in records {
+            let ReplyPhase::Output { text, .. } = record.phase else {
+                continue;
+            };
+            let source = record
+                .source
+                .ok_or_else(|| invalid("native output source missing"))?;
+            if source.actor_id != device.actor_id
+                || source.content.original().event.scope_ref != device.effective_scope
+            {
+                continue;
+            }
+            let expected_key = format!(
+                "managed-native-reply/v1/{}",
+                canonical_sha256(&(&source.actor_id, &source.content.original().event.event_id,))?
+            );
+            if key != expected_key
+                || record.input_digest
+                    != canonical_sha256(&(
+                        &source.actor_id,
+                        source.content.original(),
+                        source.content.message(),
+                        &source.processing_binding,
+                    ))?
+            {
+                return Err(invalid("native output differs from its frozen source"));
+            }
+            let recipient = NativeContentRecipient::new(device, reader, &source.content)?;
+            pending.push(PendingNativeReply {
+                ticket: NativeReplyTicket {
+                    key,
+                    input_digest: record.input_digest,
+                    source: Some(Arc::new(source.clone())),
+                },
+                recipient,
+                content: source.content,
+                processing_binding: source.processing_binding,
+                text,
+            });
+        }
+        reader.check_device(device)?;
+        Ok(pending)
     }
 
     /// Called by the actual provider transport immediately before IO. The fixed

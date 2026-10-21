@@ -488,7 +488,7 @@ impl ManagedDeviceRuntime {
                 .await?;
             return Ok(());
         };
-        let record: DeviceRecord = self.authoring.decrypt_key_material(&key, &raw)?;
+        let record: DeviceRecord = self.decrypt_device_record(&key, &raw).await?;
         self.validate(&record)?;
         if record.authorization != saved.authorization
             || !matches!(&record.outcome, Some(AuthoritySubmitOutcome::Accepted { commit, .. })

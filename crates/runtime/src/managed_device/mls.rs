@@ -251,7 +251,7 @@ impl ManagedDeviceRuntime {
             .read(&operation_key)
             .await?
             .ok_or_else(|| invalid("MLS Device custody is unavailable"))?;
-        let record: DeviceRecord = self.authoring.decrypt_key_material(&operation_key, &raw)?;
+        let record: DeviceRecord = self.decrypt_device_record(&operation_key, &raw).await?;
         self.validate(&record)?;
         if record.plan.actor_id != device.actor_id
             || record.plan.operation_id != device.operation_id
