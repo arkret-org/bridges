@@ -47,6 +47,7 @@ pub mod authority;
 pub mod backoff;
 pub mod blocking;
 pub mod cache;
+mod completion_delivery;
 mod config;
 pub mod dead_letter;
 #[cfg(any(feature = "web", test))]
@@ -78,7 +79,7 @@ use std::sync::Arc;
 pub use app::{AppletResolver, ResolvedActor, ResolvedRealm};
 #[cfg(feature = "runtime")]
 pub use app::{BridgeApp, BridgeContext};
-pub use arkret_edge::{ArkretEdge, PRODUCER_DIGEST_SUITE};
+pub use arkret_edge::{ArkretEdge, PRODUCER_DIGEST_SUITE, VerifiedManagedCompletion};
 #[cfg(feature = "db")]
 pub use authoring::DbAuthoringStore;
 pub use authoring::{AuthoringJournal, AuthoringStore, external_operation_key};
@@ -91,6 +92,7 @@ pub use authority::{
 pub use backoff::{BRIDGE_RETRY, bridge_retry_delay};
 pub use blocking::run_blocking;
 pub use cache::{PersistedToken, TokenCache, TokenStore};
+pub use completion_delivery::{CompletionAdmissionError, precheck_applet_completion_envelope};
 pub use config::{
     Config, DatabaseConfig, ManagedActorAuthoringConfig, ManagedDeviceBootstrapConfig,
     WebhookRateLimitConfig,

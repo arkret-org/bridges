@@ -34,6 +34,12 @@ pub(crate) struct ManagedAuthoringIdentity {
     pub effective_scope: ScopeRef,
 }
 
+pub(crate) enum ManagedDeliveryAdmission {
+    New,
+    Accepted(arkret::AppletTransactionOutcome),
+    Conflict,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ManagedAuthoringInstall {
     Installed,
@@ -390,15 +396,20 @@ impl AuthoringJournal {
 
     /// Fresh signed envelopes may differ after handoff. The accepted Event,
     /// original Commit and historical signer fact must stay byte-identical.
-    pub(crate) fn install_managed_authoring(
+    pub(crate) fn install_managed_authoring_delivery(
         &self,
         identity: &ManagedAuthoringIdentity,
         body: &AppletAuthoringTransactionRequestBody,
         roots: &ManagedAuthoringRoots,
+        delivery: Option<&arkret::AppletDeliveryAuthenticationRecord>,
     ) -> Result<ManagedAuthoringInstall> {
         self.verify_prepared_managed_signer(body)?;
         let key = original_key(&identity.actor_id)?;
-        if self.store.load(&key)?.is_some() {
+        let original = self.store.load(&key)?;
+        let replay = original.is_some();
+        let mut expected = vec![(key.clone(), original.clone())];
+        let mut writes = Vec::new();
+        if replay {
             let (prior, _) = self.retained_managed_actor(&identity.actor_id)?;
             if canonical_json_bytes(&prior.authoring_context.material.result)?
                 != canonical_json_bytes(&body.authoring_context.material.result)?
@@ -407,25 +418,76 @@ impl AuthoringJournal {
                     "creation completion conflicts with its immutable acceptance",
                 ));
             }
-            return Ok(ManagedAuthoringInstall::ExactReplay);
-        }
-        if canonical_sha256(body)? != roots.completion_digest.as_str() {
+        } else if canonical_sha256(body)? != roots.completion_digest.as_str() {
             return Err(invalid("verification roots cover a different completion"));
-        }
-        let root_key = roots_key(&identity.actor_id)?;
-        if self.store.compare_exchange_batch(
-            &[(key.clone(), None), (root_key.clone(), None)],
-            &[
+        } else {
+            let root_key = roots_key(&identity.actor_id)?;
+            expected.push((root_key.clone(), None));
+            writes.extend([
                 (key, Some(encoded(body)?)),
                 (root_key, Some(encoded(roots)?)),
-            ],
-        )? {
-            Ok(ManagedAuthoringInstall::Installed)
+            ]);
+        }
+        if let Some(record) = delivery {
+            let receipt_key = delivery_key(record)?;
+            let prior = self.store.load(&receipt_key)?;
+            if delivery_receipt_conflicts(
+                prior.as_deref(),
+                &Hash::new(canonical_sha256(body)?)?,
+                record,
+            )? {
+                return Err(invalid(
+                    "duplicate_conflict: completion differs from its durable delivery receipt",
+                ));
+            }
+            expected.push((receipt_key.clone(), prior.clone()));
+            if prior.is_none() {
+                writes.push((
+                    receipt_key,
+                    Some(encoded(&ManagedDeliveryReceipt {
+                        canonical_body_digest: Hash::new(canonical_sha256(body)?)?,
+                        stable_digest: record.stable_digest().map_err(invalid)?,
+                        record: record.clone(),
+                        outcome: completion_outcome(),
+                    })?),
+                ));
+            }
+            // Keep each verified signature's complete record; times never
+            // participate in the stable idempotency identity.
+            let audit_key = format!(
+                "managed-authoring/delivery-audit/{}",
+                canonical_sha256(record)?
+            );
+            let prior_audit = self.store.load(&audit_key)?;
+            expected.push((audit_key.clone(), prior_audit));
+            writes.push((audit_key, Some(encoded(record)?)));
+        }
+        if writes.is_empty() || self.store.compare_exchange_batch(&expected, &writes)? {
+            Ok(if replay {
+                ManagedAuthoringInstall::ExactReplay
+            } else {
+                ManagedAuthoringInstall::Installed
+            })
         } else {
             Err(invalid(
                 "creation installation contended; retry exact completion",
             ))
         }
+    }
+
+    pub(crate) fn managed_delivery_admission(
+        &self,
+        body: &AppletAuthoringTransactionRequestBody,
+        record: &arkret::AppletDeliveryAuthenticationRecord,
+    ) -> Result<ManagedDeliveryAdmission> {
+        let Some(raw) = self.store.load(&delivery_key(record)?)? else {
+            return Ok(ManagedDeliveryAdmission::New);
+        };
+        if delivery_receipt_conflicts(Some(&raw), &Hash::new(canonical_sha256(body)?)?, record)? {
+            return Ok(ManagedDeliveryAdmission::Conflict);
+        }
+        let receipt: ManagedDeliveryReceipt = serde_json::from_str(&raw)?;
+        Ok(ManagedDeliveryAdmission::Accepted(receipt.outcome))
     }
     pub(crate) fn load_managed_authoring(
         &self,
@@ -495,6 +557,53 @@ impl AuthoringJournal {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManagedDeliveryReceipt {
+    canonical_body_digest: Hash,
+    stable_digest: Hash,
+    record: arkret::AppletDeliveryAuthenticationRecord,
+    outcome: arkret::AppletTransactionOutcome,
+}
+
+fn delivery_receipt_conflicts(
+    raw: Option<&str>,
+    body_digest: &Hash,
+    record: &arkret::AppletDeliveryAuthenticationRecord,
+) -> Result<bool> {
+    let Some(raw) = raw else {
+        return Ok(false);
+    };
+    let prior: ManagedDeliveryReceipt = serde_json::from_str(raw)?;
+    Ok(
+        prior.stable_digest != prior.record.stable_digest().map_err(invalid)?
+            || prior.stable_digest != record.stable_digest().map_err(invalid)?
+            || prior.canonical_body_digest != *body_digest
+            || prior.outcome != completion_outcome(),
+    )
+}
+
+fn completion_outcome() -> arkret::AppletTransactionOutcome {
+    arkret::AppletTransactionOutcome::Accepted {
+        committed_event_refs: Vec::new(),
+        rejections: Vec::new(),
+        retry_after_ms: None,
+    }
+}
+
+fn delivery_key(record: &arkret::AppletDeliveryAuthenticationRecord) -> Result<String> {
+    Ok(format!(
+        "managed-authoring/delivery/{}",
+        encoded(&(
+            record.operation_id,
+            record.direction,
+            &record.source_id,
+            &record.destination_id,
+            &record.idempotency_key,
+        ))?
+    ))
+}
+
 pub(crate) fn verify_creation_service(
     event: &Event,
     method: &DidUrl,
@@ -512,4 +621,105 @@ pub(crate) fn verify_creation_service(
     let bytes = canonical_json_bytes(&event.digest_payload()?)?;
     arkret::signatures::verify_ed25519_detached_jws_proof(proof, &bytes, &event.actor_id, key)
         .map_err(invalid)
+}
+
+#[cfg(test)]
+mod delivery_receipt_tests {
+    use super::*;
+    use crate::{AuthoringStore, FileAuthoringStore};
+
+    fn record() -> arkret::AppletDeliveryAuthenticationRecord {
+        serde_json::from_value(serde_json::json!({
+            "operation_id":"ak.edge.applet.command.transaction.v1", "direction":"node_to_applet",
+            "source_id":"ak:did_core:webvh:zstation", "destination_id":"ak:did_core:webvh:zapplet",
+            "signature_label":"sig1", "verification_method":"did:webvh:zstation:station.example#key-1",
+            "verification_key_digest":format!("sha256:{}", "1".repeat(64)), "signature_algorithm":"ed25519",
+            "registration_epoch":format!("sha256:{}", "2".repeat(64)), "idempotency_key":"completion-1",
+            "content_digest":"sha-256=:Zm94:", "covered_components":["@method","content-digest","idempotency-key"],
+            "created":1800000000, "expires":1800000300
+        })).unwrap()
+    }
+
+    #[test]
+    fn cold_delivery_receipt_keeps_full_times_and_rejects_changed_body_or_authority() {
+        let directory = std::env::temp_dir().join(format!(
+            "bridge-delivery-receipt-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("journal.redb");
+        let first = record();
+        let body_digest = Hash::new(format!("sha256:{}", "3".repeat(64))).unwrap();
+        let key = delivery_key(&first).unwrap();
+        let receipt = ManagedDeliveryReceipt {
+            canonical_body_digest: body_digest.clone(),
+            stable_digest: first.stable_digest().unwrap(),
+            record: first.clone(),
+            outcome: completion_outcome(),
+        };
+        {
+            let store = FileAuthoringStore::new(path.clone()).unwrap();
+            assert!(
+                store
+                    .compare_exchange_batch(
+                        &[(key.clone(), None)],
+                        &[(key.clone(), Some(encoded(&receipt).unwrap()))]
+                    )
+                    .unwrap()
+            );
+        }
+        {
+            let reopened = FileAuthoringStore::new(path).unwrap();
+            let raw = reopened.load(&key).unwrap().unwrap();
+            let restored: ManagedDeliveryReceipt = serde_json::from_str(&raw).unwrap();
+            assert_eq!(restored.record, first);
+            let mut retry = first.clone();
+            retry.created += 20;
+            retry.expires += 20;
+            assert!(!delivery_receipt_conflicts(Some(&raw), &body_digest, &retry).unwrap());
+            assert!(
+                delivery_receipt_conflicts(
+                    Some(&raw),
+                    &Hash::new(format!("sha256:{}", "4".repeat(64))).unwrap(),
+                    &retry
+                )
+                .unwrap()
+            );
+            retry.registration_epoch = Hash::new(format!("sha256:{}", "5".repeat(64))).unwrap();
+            assert!(delivery_receipt_conflicts(Some(&raw), &body_digest, &retry).unwrap());
+            retry = first.clone();
+            retry.verification_key_digest =
+                Hash::new(format!("sha256:{}", "6".repeat(64))).unwrap();
+            assert!(delivery_receipt_conflicts(Some(&raw), &body_digest, &retry).unwrap());
+            assert_eq!(restored.outcome, completion_outcome());
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn receipt_identity_is_closed_and_retained_digest_corruption_fails_closed() {
+        let first = record();
+        let digest = Hash::new(format!("sha256:{}", "3".repeat(64))).unwrap();
+        let mut receipt = ManagedDeliveryReceipt {
+            canonical_body_digest: digest.clone(),
+            stable_digest: Hash::new(format!("sha256:{}", "f".repeat(64))).unwrap(),
+            record: first.clone(),
+            outcome: completion_outcome(),
+        };
+        assert!(
+            delivery_receipt_conflicts(Some(&encoded(&receipt).unwrap()), &digest, &first).unwrap()
+        );
+        receipt.stable_digest = first.stable_digest().unwrap();
+        let mut other = first.clone();
+        other.destination_id = arkret::DidCoreId::new("ak:did_core:webvh:zother").unwrap();
+        assert_ne!(delivery_key(&first).unwrap(), delivery_key(&other).unwrap());
+        assert!(
+            !delivery_receipt_conflicts(Some(&encoded(&receipt).unwrap()), &digest, &first)
+                .unwrap()
+        );
+    }
 }

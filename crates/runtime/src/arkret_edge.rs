@@ -98,7 +98,7 @@ pub struct ArkretEdge {
     service_actor_id: DidCoreId,
     applet_id: AppletId,
     /// Immutable frozen publications and their exact committed references.
-    journal: AuthoringJournal,
+    pub(crate) journal: AuthoringJournal,
     /// Identity of the governance Station this edge submits to. Recorded with
     /// every observed answer so a Station replacement is visible in the journal.
     station_id: DidCoreId,
@@ -538,7 +538,12 @@ impl ArkretEdge {
             &self.applet_id,
             &self.service_actor_id,
         )?;
-        let arkret::RealmActorMaterialResult::Event { event, commit, .. } = &material.result else {
+        let arkret::RealmActorMaterialResult::Event {
+            event,
+            commit,
+            producer_signer_fact,
+        } = &material.result
+        else {
             return Err(BridgeError::App(
                 "creation completion requires Event material".into(),
             ));
@@ -560,6 +565,37 @@ impl ArkretEdge {
                 &ActorId::service(self.service_actor_id.clone()),
             )
             .await?;
+        // A still-live pushed object proves an earlier private read. Re-read
+        // the exact acceptance with a fresh nonce so a former manager cannot
+        // use a cached completion after the current manager changes. Event
+        // material reads deliberately do not require an active install/grant.
+        let mut current_request = request.clone();
+        if let arkret::RealmActorMaterialRequest::Event { request_nonce, .. } = &mut current_request
+        {
+            *request_nonce = crate::realm_governance::nonce()?;
+        }
+        let current = route
+            .material(
+                &current_request,
+                &ActorId::service(self.service_actor_id.clone()),
+            )
+            .await?;
+        if arkret::canonical::canonical_json_bytes(&current.material().result)?
+            != arkret::canonical::canonical_json_bytes(&material.result)?
+        {
+            return Err(BridgeError::App(
+                "current manager read returned a different creation acceptance".into(),
+            ));
+        }
+        let arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact::Service(
+            fact,
+        ) = producer_signer_fact
+        else {
+            return Err(BridgeError::App(
+                "creation completion requires its historical Service signer fact".into(),
+            ));
+        };
+        let registration_epoch = fact.key.registration_epoch.clone();
         let issuer = route
             .authority
             .authority_service_at(commit.governance_generation)
@@ -573,6 +609,11 @@ impl ArkretEdge {
                 commit.committed_at,
             )
             .await?;
+        material.validate_for_request(
+            &request,
+            &ActorId::service(self.service_actor_id.clone()),
+            chrono::Utc::now(),
+        )?;
         let (method, service_key) = self.journal.prepared_service_root(body)?;
         let roots = ManagedAuthoringRoots {
             completion_digest: arkret::Hash::new(arkret::canonical::canonical_sha256(body)?)?,
@@ -588,17 +629,30 @@ impl ArkretEdge {
             body: body.clone(),
             identity,
             roots,
+            route,
+            destination_id: self.service_actor_id.clone(),
+            registration_epoch,
+            delivery: None,
+            retained_outcome: None,
         })
     }
 
-    pub(crate) fn install_verified_managed_completion(
+    pub fn install_verified_managed_completion(
         &self,
         verified: VerifiedManagedCompletion,
     ) -> Result<()> {
-        self.journal.install_managed_authoring(
+        if verified.body.applet_id != self.applet_id
+            || verified.destination_id != self.service_actor_id
+        {
+            return Err(BridgeError::App(
+                "verified completion belongs to another receiver".into(),
+            ));
+        }
+        self.journal.install_managed_authoring_delivery(
             &verified.identity,
             &verified.body,
             &verified.roots,
+            verified.delivery.as_ref(),
         )?;
         Ok(())
     }
@@ -1029,10 +1083,32 @@ fn host_is_loopback(host: Option<&str>) -> bool {
     }
 }
 
-pub(crate) struct VerifiedManagedCompletion {
-    body: AppletAuthoringTransactionRequestBody,
+/// Opaque admission capability. Hosts cannot manufacture authority or bypass
+/// freshness checks by deserializing a completion into this type.
+pub struct VerifiedManagedCompletion {
+    pub(crate) body: AppletAuthoringTransactionRequestBody,
     identity: ManagedAuthoringIdentity,
     roots: ManagedAuthoringRoots,
+    pub(crate) route: crate::realm_governance::RealmRoute,
+    pub(crate) destination_id: DidCoreId,
+    pub(crate) registration_epoch: arkret::Hash,
+    pub(crate) delivery: Option<arkret::AppletDeliveryAuthenticationRecord>,
+    pub(crate) retained_outcome: Option<arkret::AppletTransactionOutcome>,
+}
+
+impl VerifiedManagedCompletion {
+    /// Exact outcome retained atomically with the original and delivery record.
+    /// It is exposed only after this request's complete fresh admission.
+    pub fn retained_outcome(&self) -> Option<&arkret::AppletTransactionOutcome> {
+        self.retained_outcome.as_ref()
+    }
+
+    /// Full receiver-derived authentication record, including this delivery's times.
+    pub fn delivery_authentication_record(
+        &self,
+    ) -> Option<&arkret::AppletDeliveryAuthenticationRecord> {
+        self.delivery.as_ref()
+    }
 }
 
 fn retained_managed_actor(
