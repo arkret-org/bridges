@@ -40,7 +40,7 @@ static PROMETHEUS_HANDLE: OnceLock<std::result::Result<PrometheusHandle, String>
 /// it the body is buffered
 /// into memory in full *before* signature verification, an unauthenticated
 /// memory-pressure vector on any deployment that exposes this surface.
-const MAX_APPLET_TRANSACTION_BODY_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_APPLET_TRANSACTION_BODY_BYTES: usize = 16 * 1024 * 1024;
 const SOURCE_SERVICE_ID_HEADER: &str = "source-service-id";
 const DESTINATION_SERVICE_ID_HEADER: &str = "destination-service-id";
 
@@ -492,21 +492,12 @@ async fn service_describe(depot: &mut Depot, res: &mut Response) {
 #[cfg(feature = "managed-authoring")]
 pub fn managed_applet_router(edge: Arc<crate::ArkretEdge>) -> Result<Router> {
     let description = service_description_router(&edge)?;
+    let completion = managed_completion_router(edge.clone())?;
     let config = edge.config().clone();
     let did_authority = Arc::new(DidAuthority::new(config.arkret.trust_domain.clone())?);
     seed_source_service_bindings(&did_authority, &config)?;
     let author =
         Arc::new(crate::managed_actor_authoring::ManagedActorAuthoringService::new(edge.clone())?);
-    let completion = Router::with_path("_arkret/edge/applet/transactions")
-        .hoop(OperationSelector(
-            ServiceOperationId::EDGE_APPLET_COMMAND_TRANSACTION_V1,
-        ))
-        .hoop(affix_state::inject(CompletionWebState {
-            edge: edge.clone(),
-            config: config.clone(),
-            did_authority: did_authority.clone(),
-        }))
-        .post(applet_transactions);
     let service = Arc::new(crate::applet_configuration::AppletConfigurationService::new(edge)?);
     Ok(Router::new()
         .push(description)
@@ -524,6 +515,70 @@ pub fn managed_applet_router(edge: Arc<crate::ArkretEdge>) -> Result<Router> {
                 }))
                 .post(applet_configuration),
         ))
+}
+
+/// Canonical historical completion receiver for an embedded Applet host.
+/// Uses the edge's durable custody store and current governance verification.
+pub fn managed_completion_router(edge: Arc<crate::ArkretEdge>) -> Result<Router> {
+    Ok(Router::with_path("_arkret/edge/applet/transactions")
+        .hoop(OperationSelector(
+            ServiceOperationId::EDGE_APPLET_COMMAND_TRANSACTION_V1,
+        ))
+        .hoop(affix_state::inject(completion_state(edge)?))
+        .post(applet_transactions))
+}
+
+fn completion_state(edge: Arc<crate::ArkretEdge>) -> Result<CompletionWebState> {
+    let config = edge.config().clone();
+    let did_authority = Arc::new(DidAuthority::new(config.arkret.trust_domain.clone())?);
+    seed_source_service_bindings(&did_authority, &config)?;
+    Ok(CompletionWebState {
+        edge,
+        config,
+        did_authority,
+    })
+}
+
+/// HTTP transport adapter for hosts using a different web framework or version.
+/// Signed URI, headers and body are transferred without rewriting or parsing.
+pub async fn receive_managed_completion_http(
+    edge: Arc<crate::ArkretEdge>,
+    method: salvo::http::Method,
+    uri: salvo::http::uri::Uri,
+    headers: salvo::http::HeaderMap,
+    body: Vec<u8>,
+) -> Result<(StatusCode, salvo::http::HeaderMap, Vec<u8>)> {
+    let mut request = Request::new();
+    *request.method_mut() = method;
+    *request.uri_mut() = uri;
+    *request.headers_mut() = headers;
+    *request.body_mut() = body.into();
+    let mut depot = Depot::new();
+    depot.inject(completion_state(edge)?);
+    let mut response = Response::new();
+    let mut flow = FlowCtrl::new(vec![
+        Arc::new(OperationSelector(
+            ServiceOperationId::EDGE_APPLET_COMMAND_TRANSACTION_V1,
+        )),
+        Arc::new(applet_transactions),
+    ]);
+    flow.call_next(&mut request, &mut depot, &mut response)
+        .await;
+    let body = match response.take_body() {
+        salvo::http::ResBody::None => Vec::new(),
+        salvo::http::ResBody::Once(bytes) => bytes.to_vec(),
+        salvo::http::ResBody::Chunks(chunks) => chunks.into_iter().flatten().collect(),
+        _ => {
+            return Err(BridgeError::Runtime(
+                "completion returned a non-buffered response".into(),
+            ));
+        }
+    };
+    Ok((
+        response.status_code.unwrap_or(StatusCode::OK),
+        std::mem::take(response.headers_mut()),
+        body,
+    ))
 }
 
 #[cfg(feature = "managed-authoring")]
@@ -649,7 +704,10 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
     };
 
     let headers = collect_headers(req);
-    let body_bytes = match req.payload().await {
+    let body_bytes = match req
+        .payload_with_max_size(MAX_APPLET_TRANSACTION_BODY_BYTES)
+        .await
+    {
         Ok(bytes) if bytes.len() <= MAX_APPLET_TRANSACTION_BODY_BYTES => bytes.to_vec(),
         Ok(bytes) => {
             record_applet_transaction("payload_too_large");
@@ -661,6 +719,16 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
                     "transaction body is {} bytes; limit is {MAX_APPLET_TRANSACTION_BODY_BYTES} bytes",
                     bytes.len()
                 ),
+            );
+            return;
+        }
+        Err(salvo::http::ParseError::PayloadTooLarge) => {
+            record_applet_transaction("payload_too_large");
+            applet_error(
+                res,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "payload_too_large",
+                "completion exceeds its registered body limit",
             );
             return;
         }
