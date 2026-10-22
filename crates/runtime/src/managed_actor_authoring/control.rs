@@ -254,25 +254,6 @@ impl ManagedActorAuthoringService {
         Ok(custody.operations.get(operation_id).cloned())
     }
 
-    pub(crate) async fn prepare_control_rotation(
-        &self,
-        actor: &ActorId,
-        operation_id: &str,
-        current: &RealmActorControlValue,
-        reference: &arkret::CommittedEventRef,
-        retire_previous: bool,
-    ) -> Result<PreparedControlRotation> {
-        self.prepare_control_update(
-            actor,
-            operation_id,
-            current,
-            reference,
-            retire_previous,
-            None,
-        )
-        .await
-    }
-
     pub(crate) async fn prepare_control_update(
         &self,
         actor: &ActorId,

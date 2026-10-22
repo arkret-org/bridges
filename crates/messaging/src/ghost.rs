@@ -107,10 +107,6 @@ pub struct GhostProvisionAuthoringRequest {
 
 /// The provider owns independent native DID custody and exact creation replay.
 #[async_trait::async_trait]
-#[expect(
-    clippy::double_must_use,
-    reason = "async-trait adds must_use to the returned Future."
-)]
 pub trait GhostProvisionRequestProvider: Send + Sync {
     async fn author_request(
         &self,

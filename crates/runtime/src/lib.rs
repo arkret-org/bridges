@@ -213,10 +213,10 @@ where
                     tracing::warn!(%error, "publication recovery failed");
                 }
                 #[cfg(feature = "managed-authoring")]
-                if let Some(workers) = device_workers.as_mut() {
-                    if let Err(error) = workers.tick().await {
-                        tracing::warn!(%error, "native managed Device recovery failed");
-                    }
+                if let Some(workers) = device_workers.as_mut()
+                    && let Err(error) = workers.tick().await
+                {
+                    tracing::warn!(%error, "native managed Device recovery failed");
                 }
             }
         })

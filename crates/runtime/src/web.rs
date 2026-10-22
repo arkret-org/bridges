@@ -8,7 +8,7 @@ use ::metrics::{counter, describe_counter};
 use arkret::identity::public_key_material_from_binding;
 use arkret::signatures::generated::http_signature_contract::HttpSignatureScenario;
 use arkret::signatures::http_signature::{
-    Component, HttpMessageVerificationError, SignaturePolicyError, SignatureVerificationPolicy,
+    HttpMessageVerificationError, SignaturePolicyError, SignatureVerificationPolicy,
     parse_signature_input, public_key_from_bytes, verify_signed_http_message,
 };
 use arkret::{AppletHandler, Did, DidCoreId, project_did_to_core_id};
@@ -427,21 +427,6 @@ struct AppletWebState {
 #[derive(Clone)]
 struct CompletionWebState {
     edge: Arc<crate::ArkretEdge>,
-    config: Arc<Config>,
-    did_authority: Arc<DidAuthority>,
-}
-
-struct VerifiedAppletHttpRequest {
-    source_id: DidCoreId,
-    destination_id: DidCoreId,
-    key_id: String,
-    source_key_state_digest: String,
-    content_digest: Option<String>,
-    covered_components: Vec<String>,
-    created: i64,
-    expires: i64,
-    signature_label: String,
-    signature_algorithm: arkret_models_integration::HttpMessageSignatureAlgorithm,
 }
 
 struct HttpSignatureReject {
@@ -454,7 +439,7 @@ fn applet_router(state: AppletWebState) -> Router {
 }
 
 fn applet_routes() -> Router {
-    let router = Router::with_path("_arkret/edge/applet")
+    Router::with_path("_arkret/edge/applet")
         .push(Router::with_path("ping")
             .hoop(OperationSelector(ServiceOperationId::EDGE_APPLET_READ_PING_V1)).get(applet_ping))
         .push(Router::with_path("describe")
@@ -474,8 +459,7 @@ fn applet_routes() -> Router {
         .push(Router::with_path("third_party/users")
             .hoop(OperationSelector(ServiceOperationId::EDGE_APPLET_THIRD_PARTY_USERS_READ_LIST_V1)).get(applet_third_party_unsupported))
         .push(Router::with_path("third_party/locations")
-            .hoop(OperationSelector(ServiceOperationId::EDGE_APPLET_THIRD_PARTY_LOCATIONS_READ_LIST_V1)).get(applet_third_party_unsupported));
-    router
+            .hoop(OperationSelector(ServiceOperationId::EDGE_APPLET_THIRD_PARTY_LOCATIONS_READ_LIST_V1)).get(applet_third_party_unsupported))
 }
 
 #[cfg(feature = "managed-authoring")]
@@ -624,11 +608,7 @@ fn completion_state(edge: Arc<crate::ArkretEdge>) -> Result<CompletionWebState> 
     let config = edge.config().clone();
     let did_authority = Arc::new(DidAuthority::new(config.arkret.trust_domain.clone())?);
     seed_source_service_bindings(&did_authority, &config)?;
-    Ok(CompletionWebState {
-        edge,
-        config,
-        did_authority,
-    })
+    Ok(CompletionWebState { edge })
 }
 
 /// HTTP transport adapter for hosts using a different web framework or version.
@@ -646,7 +626,7 @@ pub async fn receive_managed_completion_http(
     *request.headers_mut() = headers;
     *request.body_mut() = body.into();
     let mut depot = Depot::new();
-    depot.inject(completion_state(edge)?);
+    depot.insert_typed(completion_state(edge)?);
     let mut response = Response::new();
     let mut flow = FlowCtrl::new(vec![
         Arc::new(OperationSelector(
@@ -786,8 +766,6 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         Err(_) => match depot.get_typed::<AppletWebState>() {
             Ok(state) => CompletionWebState {
                 edge: state.edge.clone(),
-                config: state.config.clone(),
-                did_authority: state.did_authority.clone(),
             },
             Err(_) => {
                 internal_error(res, "completion host is unavailable");
@@ -1146,7 +1124,7 @@ fn verify_http_applet_request(
     bindings: &AcceptedDidBindings,
     require_content_digest: bool,
     realm_route: Option<&crate::realm_governance::RealmRoute>,
-) -> std::result::Result<VerifiedAppletHttpRequest, HttpSignatureReject> {
+) -> std::result::Result<(), HttpSignatureReject> {
     verify_http_applet_request_with_scenario(
         req,
         headers,
@@ -1163,6 +1141,10 @@ fn verify_http_applet_request(
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "HTTP verification binds the complete request bytes, scenario and accepted authority context."
+)]
 fn verify_http_applet_request_with_scenario(
     req: &Request,
     headers: &[(String, String)],
@@ -1172,7 +1154,7 @@ fn verify_http_applet_request_with_scenario(
     realm_route: Option<&crate::realm_governance::RealmRoute>,
     scenario: HttpSignatureScenario,
     additional_required: &[&str],
-) -> std::result::Result<VerifiedAppletHttpRequest, HttpSignatureReject> {
+) -> std::result::Result<(), HttpSignatureReject> {
     let signature_input_header = header_value_from(headers, "signature-input")
         .ok_or_else(|| http_signature_required("Signature-Input header is required"))?;
     let signature_input = parse_signature_input(&signature_input_header)
@@ -1254,13 +1236,11 @@ fn verify_http_applet_request_with_scenario(
                     "source service verification method {key_id_url} is no longer accepted: {err}"
                 )),
             })?;
-        let bytes = public_key_material_from_binding(&accepted, &key_id_url)
+        public_key_material_from_binding(&accepted, &key_id_url)
             .map_err(|err| http_signature_invalid(err.to_string()))?
             .ed25519_bytes()
-            .map_err(|err| http_signature_invalid(err.to_string()))?;
-        bytes
+            .map_err(|err| http_signature_invalid(err.to_string()))?
     };
-    let source_key_state_digest = arkret::canonical::canonical_digest(&public_key_bytes);
     let public_key = public_key_from_bytes(&public_key_bytes)
         .map_err(|err| http_signature_invalid(err.to_string()))?;
     let authority = request_authority(req, headers)?;
@@ -1272,7 +1252,7 @@ fn verify_http_applet_request_with_scenario(
     let target_uri = request_target_uri(req, headers, &authority, &path);
     let policy = SignatureVerificationPolicy::for_scenario(scenario, additional_required)
         .map_err(|error| map_http_signature_error(HttpMessageVerificationError::Policy(error)))?;
-    let verified = verify_signed_http_message(
+    let _ = verify_signed_http_message(
         req.method().as_str(),
         &target_uri,
         &authority,
@@ -1286,34 +1266,7 @@ fn verify_http_applet_request_with_scenario(
         now_unix_seconds,
     )
     .map_err(map_http_signature_error)?;
-    let content_digest = verified
-        .content_digest
-        .as_ref()
-        .map(|digest| digest.wire_value.clone());
-    let covered_components = verified
-        .signature_input
-        .covered_components
-        .iter()
-        .map(Component::canonical_name)
-        .collect();
-    let signature_label = verified.signature_input.label.clone();
-    let signature_algorithm = serde_json::from_value(json!(verified.signature_input.algorithm))
-        .map_err(|error| http_signature_invalid(format!("invalid signature algorithm: {error}")))?;
-    let key_id = verified.signature_input.key_id.clone();
-    let created = verified.signature_input.created;
-    let expires = verified.signature_input.expires;
-    Ok(VerifiedAppletHttpRequest {
-        source_id: origin,
-        destination_id: destination,
-        key_id,
-        source_key_state_digest,
-        content_digest,
-        covered_components,
-        created,
-        expires,
-        signature_label,
-        signature_algorithm,
-    })
+    Ok(())
 }
 
 fn seed_source_service_bindings(authority: &DidAuthority, config: &Config) -> Result<()> {
@@ -1350,10 +1303,6 @@ fn collect_headers(req: &Request) -> Vec<(String, String)> {
                 .map(|value| (name.as_str().to_ascii_lowercase(), value.trim().to_owned()))
         })
         .collect()
-}
-
-fn header_value(req: &Request, name: &str) -> Option<String> {
-    header_value_from(&collect_headers(req), name)
 }
 
 fn header_value_from(headers: &[(String, String)], name: &str) -> Option<String> {

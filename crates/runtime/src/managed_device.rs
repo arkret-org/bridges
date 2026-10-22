@@ -441,7 +441,7 @@ impl ManagedDeviceRuntime {
             || p.hpke_key.as_str() != arkret::identity_root::x25519_public_multikey(&hpke_public)
             || p.authorization_binding_kind
                 != DeviceAuthorizationBindingKind::RealmManagedDelegation
-            || !matches!(&p.authorized_by, DeviceOrPrincipalRef::Principal(id) if id == &*record.plan.actor_id.signing_principal_id())
+            || !matches!(&p.authorized_by, DeviceOrPrincipalRef::Principal(id) if id == record.plan.actor_id.signing_principal_id())
             || p.device_key_algorithm.as_str() != "Ed25519"
             || p.recovery_session_id.is_some()
             || p.pairing_challenge_transcript_digest.is_some()

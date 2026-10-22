@@ -100,9 +100,9 @@ impl ManagedDeviceRuntime {
             .initial_resolution
             .did;
         let offer = receiving.management_transfer_offer(plan, &did).await?;
-        let proposal = self.management_control_proposal(&offer).await?;
+        let proposal = self.management_control_transcript(&offer).await?;
         let signature = receiving
-            .accept_management_control_proposal(plan, &proposal)
+            .sign_management_control_transcript(plan, &proposal)
             .await?;
         let commit = self.submit_management_control(plan, &signature).await?;
         let release = self.release_management_native(plan, &commit).await?;
@@ -165,7 +165,7 @@ impl ManagedDeviceRuntime {
 
     /// Prepare the old holder's exact native proposal after checking the current
     /// owner pause, recovery gate and manager. This does not publish it yet.
-    pub async fn management_control_proposal(
+    pub async fn management_control_transcript(
         &self,
         offer: &ManagementTransferOffer,
     ) -> Result<arkret::RealmActorControlAcceptanceTranscript> {
@@ -183,7 +183,7 @@ impl ManagedDeviceRuntime {
     }
 
     /// Sign only this receiving host's exact proposal with its new daily key.
-    pub async fn accept_management_control_proposal(
+    pub async fn sign_management_control_transcript(
         &self,
         plan: &ManagementTransferPlan,
         proposal: &arkret::RealmActorControlAcceptanceTranscript,

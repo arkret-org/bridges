@@ -1064,15 +1064,15 @@ impl ManagedActorAuthoringService {
             self.reused_ghost_did(&preview.authoring_request, &existing)
                 .await?;
             return Ok(PreparedGhost::Reuse {
-                authoring_request: preview.authoring_request,
-                existing,
+                authoring_request: Box::new(preview.authoring_request),
+                existing: Box::new(existing),
             });
         }
         let create_event = self.author(&preview.authoring_request).await?;
-        Ok(PreparedGhost::Create(PreparedManagedActor {
+        Ok(PreparedGhost::Create(Box::new(PreparedManagedActor {
             authoring_request: preview.authoring_request,
             create_event,
-        }))
+        })))
     }
 }
 

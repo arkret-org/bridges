@@ -158,10 +158,6 @@ impl BridgeContext {
 /// The generic contract implemented by any bridge adapter.
 #[cfg(feature = "runtime")]
 #[async_trait]
-#[expect(
-    clippy::double_must_use,
-    reason = "async-trait adds an unconditional must_use attribute to its boxed Future methods."
-)]
 pub trait BridgeApp: Send + Sync + 'static {
     /// Whether this host consumes decrypted attachment bytes.
     fn native_attachments(&self) -> bool {

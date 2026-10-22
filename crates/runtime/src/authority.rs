@@ -50,10 +50,6 @@ fn protocol<T, E: std::fmt::Display>(result: std::result::Result<T, E>) -> Resul
 
 /// Network boundary for the authenticated current governance Station.
 #[async_trait]
-#[expect(
-    clippy::double_must_use,
-    reason = "async-trait adds an unconditional must_use attribute to its boxed Future methods."
-)]
 pub trait GovernanceStationTransport: Send + Sync {
     async fn submit(
         &self,

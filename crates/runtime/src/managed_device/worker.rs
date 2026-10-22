@@ -82,12 +82,11 @@ impl ManagedDeviceWorkers {
             .configuration_recovery
             .as_ref()
             .is_some_and(|task| task.is_finished())
+            && let Some(task) = self.configuration_recovery.take()
         {
-            if let Some(task) = self.configuration_recovery.take() {
-                match task.await {
-                    Ok(Ok(_)) => {}
-                    result => tracing::warn!(?result, "configuration recovery will retry"),
-                }
+            match task.await {
+                Ok(Ok(_)) => {}
+                result => tracing::warn!(?result, "configuration recovery will retry"),
             }
         }
         if self.configuration_recovery.is_none() {

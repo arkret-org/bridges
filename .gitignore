@@ -8,3 +8,4 @@
 .claude/
 *.pem
 *.log
+artifacts/

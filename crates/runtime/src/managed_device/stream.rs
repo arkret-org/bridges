@@ -62,15 +62,14 @@ fn validate_state(saved: &ScopeStream, scope: &ScopeRef) -> Result<()> {
             "native stream custody has another scope or incomplete progress",
         ));
     }
-    if let Some(delivery) = &saved.delivery {
-        if delivery.original().event.scope_ref != *scope
+    if let Some(delivery) = &saved.delivery
+        && (delivery.original().event.scope_ref != *scope
             || head(&CommittedEventView::Full(delivery.original().clone()))
-                != saved.processed_through
-        {
-            return Err(invalid(
-                "native delivery differs from the durable processed cut",
-            ));
-        }
+                != saved.processed_through)
+    {
+        return Err(invalid(
+            "native delivery differs from the durable processed cut",
+        ));
     }
     if let Some(rejected) = &saved.last_rejected_content {
         let rejected_head = head(&CommittedEventView::Full(rejected.clone()));

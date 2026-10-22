@@ -12,6 +12,7 @@ WORKDIR /workspace
 FROM chef AS planner
 COPY bridges ./bridges
 COPY arkret-rust-sdk ./arkret-rust-sdk
+COPY garth ./garth
 WORKDIR /workspace/bridges
 RUN cargo chef prepare --recipe-path recipe.json
 
@@ -20,6 +21,7 @@ ARG BRIDGE_BIN
 COPY --from=planner /workspace/bridges/recipe.json ./bridges/recipe.json
 COPY bridges ./bridges
 COPY arkret-rust-sdk ./arkret-rust-sdk
+COPY garth ./garth
 WORKDIR /workspace/bridges
 RUN cargo chef cook --release --locked --bin "${BRIDGE_BIN}"
 RUN cargo build --release --locked --bin "${BRIDGE_BIN}"

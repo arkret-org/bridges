@@ -213,7 +213,7 @@ fn same_scope_source_ignores_a_business_parent_that_sorts_first() {
         })
         .find(|candidate| candidate < source)
         .unwrap();
-    let mut effective_ids = vec![source.clone(), competing.clone()];
+    let mut effective_ids = [source.clone(), competing.clone()];
     effective_ids.sort();
     assert_eq!(
         effective_ids[0], competing,

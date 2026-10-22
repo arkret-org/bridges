@@ -443,6 +443,10 @@ impl ManagedDeviceRuntime {
     /// Atomically freeze original ciphertext with the advanced private send
     /// ratchet. The publication is indexed separately so each send is bounded
     /// by current group state, rather than rewriting all previous messages.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Freeze the complete publication and original Device custody in one transaction."
+    )]
     async fn freeze_publication(
         &self,
         device: &ManagedDevice,
@@ -913,13 +917,10 @@ impl ManagedDeviceRuntime {
             let (key, previous, mut record) = self.accepted_device_record(device).await?;
             let mut value = serde_json::to_value(&content)?;
             if encrypt {
-                let mut group =
-                    super::inbox::restore_group(&record, &device)?.ok_or_else(|| {
-                        BridgeError::App(
-                            "managed Device is waiting for an accepted MLS Welcome".into(),
-                        )
-                    })?;
-                let base = super::inbox::accepted_group_original(&record, &device)?
+                let mut group = super::inbox::restore_group(&record, device)?.ok_or_else(|| {
+                    BridgeError::App("managed Device is waiting for an accepted MLS Welcome".into())
+                })?;
+                let base = super::inbox::accepted_group_original(&record, device)?
                     .ok_or_else(|| invalid("MLS original missing"))?;
                 // A durable plaintext delivery awaiting its consumer's ACK is
                 // not an MLS transition. Sending still requires fresh public

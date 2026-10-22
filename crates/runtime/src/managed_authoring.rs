@@ -4,7 +4,7 @@ use arkret::canonical::{canonical_json_bytes, canonical_sha256};
 use arkret::signatures::PublicKeyMaterial;
 use arkret::{
     ActorId, AppletAuthoringTransactionRequestBody, AppletId, AppletManagedActorAuthoringRequest,
-    Did, DidUrl, Event, Hash, RealmActorCreatePayload, RealmActorMaterialResult, ScopeRef,
+    DidUrl, Event, Hash, RealmActorCreatePayload, RealmActorMaterialResult, ScopeRef,
 };
 use serde::{Deserialize, Serialize};
 
@@ -20,10 +20,10 @@ pub struct PreparedManagedActor {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum PreparedGhost {
-    Create(PreparedManagedActor),
+    Create(Box<PreparedManagedActor>),
     Reuse {
-        authoring_request: AppletManagedActorAuthoringRequest,
-        existing: arkret::ExistingManagedActor,
+        authoring_request: Box<AppletManagedActorAuthoringRequest>,
+        existing: Box<arkret::ExistingManagedActor>,
     },
 }
 

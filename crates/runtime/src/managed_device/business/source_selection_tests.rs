@@ -28,7 +28,7 @@ fn terminal_parent_rejects_disjoint_circles_without_rejecting_narrow_or_realm_wi
         "authority_depth":0, "issuer_authority_refs":[], "authority_root_refs":[],
     })).unwrap();
     assert!(!parent_scope_candidate(&fixture, &scope));
-    let mut grants = vec![fixture.clone(), fixture.clone()];
+    let mut grants = [fixture.clone(), fixture.clone()];
     grants[1].resources = vec![WireResourceSelector::circle(realm.clone(), circle(62))];
     assert!(std::ptr::eq(
         grants

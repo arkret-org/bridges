@@ -57,7 +57,7 @@ pub(crate) struct PublicationRecord {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "result", rename_all = "snake_case")]
 pub(crate) enum StationAnswer {
-    Authority(AuthoritySubmitOutcome),
+    Authority(Box<AuthoritySubmitOutcome>),
     Applet(arkret::AppletTransactionOutcome),
 }
 
@@ -196,7 +196,7 @@ impl AuthoringJournal {
             scope,
             operation,
             station,
-            &StationAnswer::Authority(outcome.clone()),
+            &StationAnswer::Authority(Box::new(outcome.clone())),
             committed,
         )
         .await

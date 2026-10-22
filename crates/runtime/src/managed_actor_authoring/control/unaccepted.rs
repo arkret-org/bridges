@@ -7,11 +7,11 @@ use super::*;
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum ControlClosure {
     Unaccepted {
-        advanced_current: RealmActorMaterialOutcome,
-        subsequent_unknown: RealmActorMaterialOutcome,
+        advanced_current: Box<RealmActorMaterialOutcome>,
+        subsequent_unknown: Box<RealmActorMaterialOutcome>,
     },
     Rejected {
-        outcome: RealmActorMaterialOutcome,
+        outcome: Box<RealmActorMaterialOutcome>,
     },
 }
 
@@ -89,8 +89,8 @@ impl ManagedActorAuthoringService {
         self.save_control_closure(
             prepared,
             ControlClosure::Unaccepted {
-                advanced_current: current.clone(),
-                subsequent_unknown: outcome.clone(),
+                advanced_current: Box::new(current.clone()),
+                subsequent_unknown: Box::new(outcome.clone()),
             },
         )
         .await
@@ -119,7 +119,7 @@ impl ManagedActorAuthoringService {
         self.save_control_closure(
             prepared,
             ControlClosure::Rejected {
-                outcome: outcome.clone(),
+                outcome: Box::new(outcome.clone()),
             },
         )
         .await
