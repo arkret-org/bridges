@@ -189,3 +189,9 @@ jobs:
       - name: Check MSRV
         run: cargo check --workspace --all-targets --locked
         working-directory: bridges
+
+      - name: Check embedded web without standalone runtime
+        run: cargo check -p arkret-bridge-runtime --all-targets --no-default-features --features managed-authoring,web --locked
+        env:
+          RUSTFLAGS: -D warnings
+        working-directory: bridges

@@ -2,24 +2,33 @@
 //! the arkret applet routes (`/_arkret/edge/applet/*`) to receive event pushes
 //! from the arkret server.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+#[cfg(feature = "runtime")]
+use std::sync::OnceLock;
 
-use ::metrics::{counter, describe_counter};
+use ::metrics::counter;
+#[cfg(feature = "runtime")]
+use ::metrics::describe_counter;
+#[cfg(any(feature = "runtime", test))]
+use arkret::Did;
 use arkret::identity::public_key_material_from_binding;
 use arkret::signatures::generated::http_signature_contract::HttpSignatureScenario;
 use arkret::signatures::http_signature::{
     HttpMessageVerificationError, SignaturePolicyError, SignatureVerificationPolicy,
     parse_signature_input, public_key_from_bytes, verify_signed_http_message,
 };
-use arkret::{AppletHandler, Did, DidCoreId, project_did_to_core_id};
+use arkret::{AppletHandler, DidCoreId, project_did_to_core_id};
 use arkret_models_integration::AppletTransactionRequestBody;
 use arkret_wire::{DidUrl, ServiceOperationId};
 use chrono::Utc;
+#[cfg(feature = "runtime")]
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use salvo::affix_state;
 use salvo::http::StatusCode;
 use salvo::prelude::*;
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(any(feature = "runtime", test))]
+use serde_json::json;
 
 #[cfg(feature = "runtime")]
 use crate::app::BridgeContext;
@@ -31,6 +40,7 @@ use crate::did_binding::{
 use crate::error::{BridgeError, Result};
 use crate::run_blocking;
 
+#[cfg(feature = "runtime")]
 static PROMETHEUS_HANDLE: OnceLock<std::result::Result<PrometheusHandle, String>> = OnceLock::new();
 /// Upper bound on the inbound edge `transactions` body, mirroring the webhook
 /// surface's bounded read. The Applet authoring completion may contain a full
@@ -259,12 +269,14 @@ pub async fn serve(
     ))
 }
 
+#[cfg(feature = "runtime")]
 #[handler]
 async fn health(res: &mut Response) {
     counter!("arkret_bridge_health_requests_total").increment(1);
     res.render(Json(serde_json::json!({ "status": "ok" })));
 }
 
+#[cfg(feature = "runtime")]
 #[handler]
 async fn metrics_endpoint(res: &mut Response) {
     counter!("arkret_bridge_metrics_scrapes_total").increment(1);
@@ -279,6 +291,7 @@ async fn metrics_endpoint(res: &mut Response) {
     }
 }
 
+#[cfg(feature = "runtime")]
 fn prometheus_handle() -> std::result::Result<&'static PrometheusHandle, String> {
     match PROMETHEUS_HANDLE.get_or_init(|| {
         let handle = PrometheusBuilder::new()
@@ -315,17 +328,20 @@ fn record_applet_transaction(result: &'static str) {
     counter!("arkret_bridge_applet_transactions_total", "result" => result).increment(1);
 }
 
+#[cfg(any(feature = "runtime", test))]
 fn record_did_binding_invalidation(result: &'static str) {
     counter!("arkret_bridge_did_binding_invalidations_total", "result" => result).increment(1);
 }
 
 /// Operator command surface state for the admin plane (`/admin/*`).
+#[cfg(any(feature = "runtime", test))]
 #[derive(Clone)]
 struct AdminWebState {
     did_authority: Arc<DidAuthority>,
 }
 
 /// Body of `POST /admin/did-bindings/invalidate`.
+#[cfg(any(feature = "runtime", test))]
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InvalidateDidBindingsRequest {
@@ -348,12 +364,14 @@ struct InvalidateDidBindingsRequest {
 /// binds loopback by default (BRG-06-004) and carries no request-level
 /// authentication of its own. An operator who widens `admin_bind` is expected
 /// to gate the whole plane at the network / reverse-proxy layer.
+#[cfg(any(feature = "runtime", test))]
 fn admin_did_bindings_router(state: AdminWebState) -> Router {
     Router::with_path("admin/did-bindings/invalidate")
         .hoop(affix_state::inject(state))
         .post(admin_invalidate_did_bindings)
 }
 
+#[cfg(any(feature = "runtime", test))]
 #[handler]
 async fn admin_invalidate_did_bindings(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let Ok(state) = depot.get_typed::<AdminWebState>() else {
