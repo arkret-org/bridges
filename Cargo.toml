@@ -41,7 +41,7 @@ arkret-models-integration = { version = "0.3.0", path = "../arkret-rust-sdk/crat
 arkret-retry = { version = "0.3.0", path = "../arkret-rust-sdk/crates/retry", default-features = false }
 arkret-signatures = { version = "0.3.0", path = "../arkret-rust-sdk/crates/signatures", default-features = false, features = ["signer"] }
 arkret-wire = { version = "0.3.0", path = "../arkret-rust-sdk/crates/wire", default-features = false }
-async-trait = "0.1"
+async-trait = "0.1.92"
 base64 = "0.23"
 cbc = { version = "0.2", features = ["block-padding"] }
 chacha20poly1305 = "0.11"

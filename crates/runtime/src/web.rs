@@ -440,26 +440,66 @@ fn applet_router(state: AppletWebState) -> Router {
 
 fn applet_routes() -> Router {
     Router::with_path("_arkret/edge/applet")
-        .push(Router::with_path("ping")
-            .hoop(OperationSelector(ServiceOperationId::EDGE_APPLET_READ_PING_V1)).get(applet_ping))
-        .push(Router::with_path("describe")
-            .hoop(OperationSelector(ServiceOperationId::EDGE_APPLET_READ_DESCRIBE_V1)).get(applet_describe))
-        .push(Router::with_path("transactions")
-            .hoop(OperationSelector(ServiceOperationId::EDGE_APPLET_COMMAND_TRANSACTION_V1)).post(applet_transactions))
-        .push(Router::with_path("actors/{actor_id}")
-            .hoop(OperationSelector(ServiceOperationId::EDGE_APPLET_ACTOR_READ_RESOLVE_V1)).get(applet_actor))
-        .push(Router::with_path("realms/{realm_id_or_alias}")
-            .hoop(OperationSelector(ServiceOperationId::EDGE_APPLET_REALM_READ_RESOLVE_V1)).get(applet_realm))
-        .push(Router::with_path("protocols/{protocol}")
-            .hoop(OperationSelector(ServiceOperationId::EDGE_APPLET_READ_PROTOCOL_METADATA_V1)).get(applet_protocol))
+        .push(
+            Router::with_path("ping")
+                .hoop(OperationSelector(
+                    ServiceOperationId::EDGE_APPLET_READ_PING_V1,
+                ))
+                .get(applet_ping),
+        )
+        .push(
+            Router::with_path("describe")
+                .hoop(OperationSelector(
+                    ServiceOperationId::EDGE_APPLET_READ_DESCRIBE_V1,
+                ))
+                .get(applet_describe),
+        )
+        .push(
+            Router::with_path("transactions")
+                .hoop(OperationSelector(
+                    ServiceOperationId::EDGE_APPLET_COMMAND_TRANSACTION_V1,
+                ))
+                .post(applet_transactions),
+        )
+        .push(
+            Router::with_path("actors/{actor_id}")
+                .hoop(OperationSelector(
+                    ServiceOperationId::EDGE_APPLET_ACTOR_READ_RESOLVE_V1,
+                ))
+                .get(applet_actor),
+        )
+        .push(
+            Router::with_path("realms/{realm_id_or_alias}")
+                .hoop(OperationSelector(
+                    ServiceOperationId::EDGE_APPLET_REALM_READ_RESOLVE_V1,
+                ))
+                .get(applet_realm),
+        )
+        .push(
+            Router::with_path("protocols/{protocol}")
+                .hoop(OperationSelector(
+                    ServiceOperationId::EDGE_APPLET_READ_PROTOCOL_METADATA_V1,
+                ))
+                .get(applet_protocol),
+        )
         // The applet edge surface declares eight operations; the third_party
         // user/location lookups are not backed by a server-side discovery index
         // here. Per applet-integration Â§15 an unimplemented surface MUST return a
         // structured `unsupported_feature` rather than fall through to a bare 404.
-        .push(Router::with_path("third_party/users")
-            .hoop(OperationSelector(ServiceOperationId::EDGE_APPLET_THIRD_PARTY_USERS_READ_LIST_V1)).get(applet_third_party_unsupported))
-        .push(Router::with_path("third_party/locations")
-            .hoop(OperationSelector(ServiceOperationId::EDGE_APPLET_THIRD_PARTY_LOCATIONS_READ_LIST_V1)).get(applet_third_party_unsupported))
+        .push(
+            Router::with_path("third_party/users")
+                .hoop(OperationSelector(
+                    ServiceOperationId::EDGE_APPLET_THIRD_PARTY_USERS_READ_LIST_V1,
+                ))
+                .get(applet_third_party_unsupported),
+        )
+        .push(
+            Router::with_path("third_party/locations")
+                .hoop(OperationSelector(
+                    ServiceOperationId::EDGE_APPLET_THIRD_PARTY_LOCATIONS_READ_LIST_V1,
+                ))
+                .get(applet_third_party_unsupported),
+        )
 }
 
 #[cfg(feature = "managed-authoring")]
