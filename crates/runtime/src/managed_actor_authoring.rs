@@ -12,8 +12,7 @@ use arkret::{
     AppletId, AppletManagedActorAuthoringRequest, AppletManagedActorPurpose, Did, DidCoreId, Event,
     GhostPreviewRequestBody, Hash, ResolutionCommitment, ResolutionDidBindingEvidenceKind,
     ResolutionDidBindingEvidenceReceipt, ResolutionDidBindingMethodProof,
-    ResolutionMethodEvidenceBoundary, ResolutionMethodHistoryEvidence, namespace_pattern_matches,
-    project_did_to_core_id,
+    ResolutionMethodEvidenceBoundary, ResolutionMethodHistoryEvidence, project_did_to_core_id,
 };
 #[cfg(feature = "web")]
 use arkret::{AppletManagedActorAuthorOutcome, AppletManagedActorAuthorRequestBody};
@@ -202,7 +201,14 @@ impl ManagedActorAuthoringService {
             .published_identity_async(url.to_string())
             .await?
         else {
-            return self.published_transferred_principal(url.as_str()).await;
+            let indexed = self.published_control_principal(url.as_str()).await?;
+            return match self.published_transferred_principal(url.as_str()).await? {
+                Some(transferred) => Ok(Some(control::manager::continuous_publication(
+                    indexed,
+                    transferred,
+                )?)),
+                None => Ok(indexed),
+            };
         };
         let identity = self.decode_identity(&subject, record)?;
         let ResolutionMethodHistoryEvidence::WebvhLog { log_entries, .. } =

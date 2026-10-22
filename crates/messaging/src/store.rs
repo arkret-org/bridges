@@ -577,7 +577,7 @@ mod tests {
     }
 
     #[test]
-    fn portal_lookup_rejects_ambiguous_realm_and_alias() {
+    fn portal_lookup_preserves_unique_realm_and_rejects_ambiguous_alias() {
         let store = sqlite_store("portal-lookup-ambiguity").unwrap();
         let (_, realm, ..) = identity(9);
         store
@@ -591,15 +591,15 @@ mod tests {
                 .app_channel_id,
             "a"
         );
-        store
-            .upsert_channel_realm("b", realm.as_str(), Some("second"))
-            .unwrap();
         assert!(
             store
-                .channel_by_realm_or_alias(realm.as_str())
-                .unwrap()
-                .is_none()
+                .upsert_channel_realm("b", realm.as_str(), Some("second"))
+                .is_err()
         );
+        let (_, other_realm, ..) = identity(10);
+        store
+            .upsert_channel_realm("b", other_realm.as_str(), Some("second"))
+            .unwrap();
         assert_eq!(
             store
                 .channel_by_realm_or_alias("second")
@@ -609,7 +609,7 @@ mod tests {
             "b"
         );
         store
-            .upsert_channel_realm("b", realm.as_str(), Some("first"))
+            .upsert_channel_realm("b", other_realm.as_str(), Some("first"))
             .unwrap();
         assert!(store.channel_by_realm_or_alias("first").unwrap().is_none());
     }

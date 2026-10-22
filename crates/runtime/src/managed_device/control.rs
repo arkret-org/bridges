@@ -35,11 +35,40 @@ impl ManagedDeviceRuntime {
             .await
     }
 
+    /// Move this subject's native publication without changing its Realm Actor ID.
+    /// The configured principal publisher must already serve the target authority.
+    pub async fn relocate_control(
+        &self,
+        actor: &ActorId,
+        operation_id: &str,
+        target_did: &arkret::Did,
+    ) -> Result<RealmCommit> {
+        if operation_id.is_empty() || operation_id.len() > 128 {
+            return Err(invalid(
+                "control relocation requires a bounded operation ID",
+            ));
+        }
+        let operation = format!("relocate:{}", canonical_sha256(&(actor, operation_id))?);
+        self.control_transition_at(actor, &operation, None, Some(target_did))
+            .await
+    }
+
     pub(super) async fn control_transition(
         &self,
         actor: &ActorId,
         operation_id: &str,
         retire_method: Option<&arkret::DidUrl>,
+    ) -> Result<RealmCommit> {
+        self.control_transition_at(actor, operation_id, retire_method, None)
+            .await
+    }
+
+    async fn control_transition_at(
+        &self,
+        actor: &ActorId,
+        operation_id: &str,
+        retire_method: Option<&arkret::DidUrl>,
+        target_did: Option<&arkret::Did>,
     ) -> Result<RealmCommit> {
         let prepared = match self
             .authoring
@@ -56,16 +85,24 @@ impl ManagedDeviceRuntime {
                     ));
                 }
                 self.authoring
-                    .prepare_control_rotation(
+                    .prepare_control_update(
                         actor,
                         operation_id,
                         &current.control,
                         &current.reference,
                         retire_method.is_some(),
+                        target_did,
                     )
                     .await?
             }
         };
+        if let Some(target) = target_did {
+            let payload: arkret::RealmActorControlUpdatePayload =
+                serde_json::from_value(serde_json::to_value(&prepared.event.payload)?)?;
+            if payload.next_resolution.did != *target {
+                return Err(invalid("relocation retry names another target address"));
+            }
+        }
         if prepared.is_closed() {
             return Err(invalid("this control operation is permanently closed"));
         }

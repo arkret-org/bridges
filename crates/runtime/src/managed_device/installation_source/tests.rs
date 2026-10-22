@@ -50,6 +50,7 @@ fn fixture() -> (InstallationHint, AppletAuthorityMaterialOutcome) {
     let payload = AppletRegistrationPayload {
         applet_id: applet.clone(),
         service_id: service.signing_principal_id().clone(),
+        expected_revision: None,
         controller_principal_id: service.signing_principal_id().clone(),
         base_url: "https://applet.example".into(),
         claimed_profiles: vec![],
@@ -157,6 +158,7 @@ fn fixture() -> (InstallationHint, AppletAuthorityMaterialOutcome) {
         outcome: AppletInstallOutcome {
             install_id: "actual-install-result".into(),
             applet_id: applet.clone(),
+            service_id: "ak:did_core:web:applet.example".parse().unwrap(),
             registration_event_ref: registration.event_id.clone(),
             registration_epoch: epoch.clone(),
             capability_grant_refs: vec![id],
@@ -168,6 +170,7 @@ fn fixture() -> (InstallationHint, AppletAuthorityMaterialOutcome) {
     };
     let material = AppletAuthorityMaterialOutcome {
         applet_id: applet,
+        service_id: "ak:did_core:web:applet.example".parse().unwrap(),
         effective_scope: scope,
         current_binding: AppletInstallationCurrentBinding::Active {
             registration_ref: arkret::CommittedEventRef {
