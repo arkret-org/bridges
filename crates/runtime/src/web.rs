@@ -552,27 +552,32 @@ pub struct ManagedAppletHttpHost {
     service: Service,
 }
 
+/// Complete embedded Applet surface for hosts that mount Salvo routers directly.
+#[cfg(feature = "managed-authoring")]
+pub fn managed_applet_host_router(edge: Arc<crate::ArkretEdge>) -> Result<Router> {
+    let config = edge.config().clone();
+    let did_authority = Arc::new(DidAuthority::new(config.arkret.trust_domain.clone())?);
+    seed_source_service_bindings(&did_authority, &config)?;
+    let handler = Arc::new(BridgeAppletHandler::new(
+        &edge,
+        None,
+        did_authority.clone(),
+    )?);
+    Ok(Router::new()
+        .push(managed_applet_router(edge.clone())?)
+        .push(applet_router(AppletWebState {
+            edge,
+            handler,
+            config,
+            did_authority,
+        })))
+}
+
 #[cfg(feature = "managed-authoring")]
 impl ManagedAppletHttpHost {
     pub fn new(edge: Arc<crate::ArkretEdge>) -> Result<Self> {
-        let config = edge.config().clone();
-        let did_authority = Arc::new(DidAuthority::new(config.arkret.trust_domain.clone())?);
-        seed_source_service_bindings(&did_authority, &config)?;
-        let handler = Arc::new(BridgeAppletHandler::new(
-            &edge,
-            None,
-            did_authority.clone(),
-        )?);
-        let router = Router::new()
-            .push(managed_applet_router(edge.clone())?)
-            .push(applet_router(AppletWebState {
-                edge,
-                handler,
-                config,
-                did_authority,
-            }));
         Ok(Self {
-            service: Service::new(router),
+            service: Service::new(managed_applet_host_router(edge)?),
         })
     }
 
@@ -905,17 +910,116 @@ async fn applet_actor(req: &mut Request, depot: &mut Depot, res: &mut Response) 
     let Some(state) = applet_state(depot, res) else {
         return;
     };
-    if let Err(err) =
-        verify_http_applet_get_request(req, &state.config, state.did_authority.bindings())
+    let raw = req.param::<String>("actor_id").unwrap_or_default();
+    let actor: arkret::ActorId = match serde_json::from_str(&raw) {
+        Ok(actor) => actor,
+        Err(_) => {
+            applet_error(
+                res,
+                StatusCode::BAD_REQUEST,
+                "param_invalid",
+                "complete canonical ActorId required",
+            );
+            return;
+        }
+    };
+    if actor.validate().is_err()
+        || arkret::canonical::canonical_json_bytes(&actor)
+            .map_or(true, |bytes| bytes != raw.as_bytes())
     {
-        unauthorized_code(res, err.code, err.message);
+        applet_error(
+            res,
+            StatusCode::BAD_REQUEST,
+            "param_invalid",
+            "complete canonical ActorId required",
+        );
         return;
     }
-    let actor_id = req.param::<String>("actor_id").unwrap_or_default();
-    let handler = state.handler.clone();
-    match run_blocking(move || handler.resolve_actor(&actor_id).map_err(BridgeError::from)).await {
-        Ok(body) => res.render(Json(body)),
-        Err(err) => internal_error(res, err.to_string()),
+    let result: Result<arkret_models_integration::AppletActorView> = async {
+        let id = actor
+            .as_realm_actor_id()
+            .ok_or_else(|| BridgeError::App("Realm actor required".into()))?;
+        // Resolve only retained originals. Unknown identifiers cannot trigger discovery.
+        let edge = state.edge.clone();
+        let known = actor.clone();
+        let original = run_blocking(move || edge.retained_actor_creation(&known)).await?;
+        let creation = crate::managed_authoring::creation_payload(&original.event)?;
+        if creation.actor_id != actor || creation.applet_id.as_str() != state.edge.applet_id() {
+            return Err(BridgeError::App("unknown managed actor".into()));
+        }
+        let route = state.edge.realm_route(&id.realm_id).await?;
+        verify_http_applet_request(
+            req,
+            &collect_headers(req),
+            &[],
+            &state.config,
+            state.did_authority.bindings(),
+            false,
+            Some(&route),
+        )
+        .map_err(|error| BridgeError::App(error.message))?;
+        let selector = arkret::CurrentSelector::RealmActorManager {
+            actor_id: actor.clone(),
+        };
+        let material = route
+            .material(
+                &arkret::RealmActorMaterialRequest::Current {
+                    actor_id: actor.clone(),
+                    request_nonce: crate::realm_governance::nonce()?,
+                    selectors: vec![selector.clone()],
+                },
+                &arkret::ActorId::service(state.edge.service_actor_id().clone()),
+            )
+            .await?;
+        let arkret::RealmActorMaterialResult::Current { entries } = &material.material().result
+        else {
+            return Err(BridgeError::App("manager current unavailable".into()));
+        };
+        let manager = entries
+            .iter()
+            .find_map(|entry| match entry {
+                arkret::RealmActorMaterialCurrentEntry::Present {
+                    row:
+                        arkret::TypedCurrentRow::Value {
+                            selector: found,
+                            value,
+                            ..
+                        },
+                    ..
+                } if *found == selector => Some(value.clone()),
+                _ => None,
+            })
+            .ok_or_else(|| BridgeError::App("manager current unavailable".into()))?;
+        let manager: arkret::RealmActorManagerValue = serde_json::from_value(manager)?;
+        if manager.service_id != *state.edge.service_actor_id() {
+            return Err(BridgeError::App("manager changed".into()));
+        }
+        let handler = state.handler.clone();
+        let view =
+            run_blocking(move || handler.resolve_actor(&raw).map_err(BridgeError::from)).await?;
+        if view.exists {
+            if view.actor_id.as_ref() != Some(&actor) {
+                return Err(BridgeError::App(
+                    "resolved actor differs from accepted original".into(),
+                ));
+            }
+            Ok(view)
+        } else {
+            Ok(arkret_models_integration::AppletActorView {
+                exists: true,
+                actor_id: Some(actor),
+                display_name: None,
+                external_ref: None,
+            })
+        }
+    }
+    .await;
+    match result {
+        Ok(view) => res.render(Json(view)),
+        Err(error) => {
+            tracing::warn!(%error, "Managed actor lookup remains unavailable");
+            applet_error(res, StatusCode::NOT_FOUND, "not_found", "actor not found");
+        }
     }
 }
 
@@ -924,17 +1028,59 @@ async fn applet_realm(req: &mut Request, depot: &mut Depot, res: &mut Response) 
     let Some(state) = applet_state(depot, res) else {
         return;
     };
-    if let Err(err) =
-        verify_http_applet_get_request(req, &state.config, state.did_authority.bindings())
-    {
-        unauthorized_code(res, err.code, err.message);
-        return;
-    }
-    let realm = req.param::<String>("realm_id_or_alias").unwrap_or_default();
+    let alias = req.param::<String>("realm_id_or_alias").unwrap_or_default();
     let handler = state.handler.clone();
-    match run_blocking(move || handler.resolve_realm(&realm).map_err(BridgeError::from)).await {
-        Ok(body) => res.render(Json(body)),
-        Err(err) => internal_error(res, err.to_string()),
+    let key = alias.clone();
+    let result: Result<arkret_models_integration::AppletRealmView> = async {
+        let view =
+            run_blocking(move || handler.resolve_realm(&key).map_err(BridgeError::from)).await?;
+        let realm = view
+            .realm_id
+            .as_ref()
+            .filter(|_| view.exists)
+            .ok_or_else(|| BridgeError::App("unknown portal".into()))?;
+        if !state
+            .config
+            .arkret
+            .applet_namespaces
+            .realms
+            .iter()
+            .any(|claim| {
+                arkret_models_integration::namespace_pattern_matches(
+                    arkret_models_integration::AppletNamespaceDomain::Realms,
+                    &claim.pattern,
+                    &alias,
+                ) || arkret_models_integration::namespace_pattern_matches(
+                    arkret_models_integration::AppletNamespaceDomain::Realms,
+                    &claim.pattern,
+                    realm.as_str(),
+                )
+            })
+        {
+            return Err(BridgeError::App(
+                "portal is outside this Service namespace".into(),
+            ));
+        }
+        let route = state.edge.realm_route(realm).await?;
+        verify_http_applet_request(
+            req,
+            &collect_headers(req),
+            &[],
+            &state.config,
+            state.did_authority.bindings(),
+            false,
+            Some(&route),
+        )
+        .map_err(|error| BridgeError::App(error.message))?;
+        Ok(view)
+    }
+    .await;
+    match result {
+        Ok(view) => res.render(Json(view)),
+        Err(error) => {
+            tracing::warn!(%error, "Portal lookup remains unavailable");
+            applet_error(res, StatusCode::NOT_FOUND, "not_found", "portal not found");
+        }
     }
 }
 

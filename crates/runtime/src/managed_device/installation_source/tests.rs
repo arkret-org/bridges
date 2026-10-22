@@ -221,7 +221,7 @@ fn same_scope_source_ignores_a_business_parent_that_sorts_first() {
             hint.outcome.applet_id.as_str(),
             &hint.effective_scope,
             &hint.effective_scope,
-            source,
+            Some(source),
             None,
         )
         .unwrap();
@@ -260,7 +260,7 @@ fn another_scope_requires_the_exact_typed_install_outcome() {
             applet.as_str(),
             &hint.effective_scope,
             &creation_scope,
-            &source,
+            Some(&source),
             None
         )
         .is_err()
@@ -269,7 +269,7 @@ fn another_scope_requires_the_exact_typed_install_outcome() {
         applet.as_str(),
         &hint.effective_scope,
         &creation_scope,
-        &source,
+        Some(&source),
         Some(&hint),
     )
     .unwrap();
@@ -288,7 +288,7 @@ fn another_scope_requires_the_exact_typed_install_outcome() {
             applet.as_str(),
             &scope,
             &creation_scope,
-            &source,
+            Some(&source),
             Some(&hint)
         )
         .is_err()
@@ -300,7 +300,7 @@ fn another_scope_requires_the_exact_typed_install_outcome() {
             applet.as_str(),
             &scope,
             &creation_scope,
-            &source,
+            Some(&source),
             Some(&hint)
         )
         .is_err()
@@ -354,4 +354,44 @@ fn inactive_missing_wrong_scope_epoch_or_service_material_fails_closed() {
             "mutation {mutation}"
         );
     }
+}
+
+#[test]
+fn replacement_service_never_reuses_the_creation_services_installation_source() {
+    let (hint, _) = fixture();
+    assert!(
+        source_request(
+            hint.outcome.applet_id.as_str(),
+            &hint.effective_scope,
+            &hint.effective_scope,
+            None,
+            None
+        )
+        .is_err()
+    );
+    let (request, registration) = source_request(
+        hint.outcome.applet_id.as_str(),
+        &hint.effective_scope,
+        &hint.effective_scope,
+        None,
+        Some(&hint),
+    )
+    .unwrap();
+    assert_eq!(request.grant_ids, hint.outcome.capability_grant_refs);
+    assert_eq!(registration.unwrap().0, hint.outcome.registration_event_ref);
+    let other = "ak:did_core:web:other-service.example".parse().unwrap();
+    assert_ne!(
+        hint_key(
+            hint.outcome.applet_id.as_str(),
+            &hint.outcome.service_id,
+            &hint.effective_scope
+        )
+        .unwrap(),
+        hint_key(
+            hint.outcome.applet_id.as_str(),
+            &other,
+            &hint.effective_scope
+        )
+        .unwrap()
+    );
 }

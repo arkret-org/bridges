@@ -456,16 +456,6 @@ impl ArkretEdge {
             })
     }
 
-    /// Reuse a Station-selected Ghost only after comparing all immutable
-    /// anchors to this runtime's accepted original creation evidence.
-    pub fn reused_ghost_did(
-        &self,
-        request: &arkret::AppletManagedActorAuthoringRequest,
-        existing: &arkret::ExistingManagedActor,
-    ) -> Result<Did> {
-        self.journal.reused_ghost_did(request, existing)
-    }
-
     pub fn prepare_managed_authoring(
         &self,
         command: &PreparedManagedActor,
@@ -513,6 +503,23 @@ impl ArkretEdge {
 
     pub(crate) fn managed_actor_ids(&self) -> Result<Vec<ActorId>> {
         self.journal.managed_actor_ids()
+    }
+
+    /// Historical creation is shared by local authoring and accepted custody.
+    /// It describes the original creator, never the current manager's identity.
+    pub(crate) fn retained_actor_creation(
+        &self,
+        actor: &ActorId,
+    ) -> Result<arkret::CommittedEventFullView> {
+        let original = self.retained_managed_actor(actor)?;
+        let arkret::RealmActorMaterialResult::Event { event, commit, .. } =
+            original.authoring_context.material.result
+        else {
+            return Err(BridgeError::Database(
+                "creation original is unavailable".into(),
+            ));
+        };
+        Ok(arkret::CommittedEventFullView { event, commit })
     }
 
     /// Authenticate a pushed completion against fresh governance and the
@@ -1116,10 +1123,26 @@ fn retained_managed_actor(
     actor: &ActorId,
     _station: &DidCoreId,
     applet: &AppletId,
-    service: &DidCoreId,
+    _service: &DidCoreId,
 ) -> Result<AppletAuthoringTransactionRequestBody> {
     let (body, roots) = journal.retained_managed_actor(actor)?;
-    let identity = validate_managed_authoring_completion(&body, &body.source_id, applet, service)?;
+    // Retained creation is historical evidence. Service changes preserve its signer.
+    let candidate = crate::managed_authoring::creation_payload(
+        match &body.authoring_context.material.result {
+            arkret::RealmActorMaterialResult::Event { event, .. } => event,
+            _ => {
+                return Err(BridgeError::Database(
+                    "retained creation is not an Event".into(),
+                ));
+            }
+        },
+    )?;
+    let identity = validate_managed_authoring_completion(
+        &body,
+        &body.source_id,
+        applet,
+        &candidate.service_id,
+    )?;
     if identity.actor_id != *actor {
         return Err(BridgeError::Database(
             "retained creation names another actor".into(),
@@ -1326,7 +1349,7 @@ mod tests {
                 "signing_key_seed_hex": "11".repeat(32),
                 "verification_method_fragment": "#key-1",
                 "trusted_server_did": "did:webvh:z6mkstation:station.example",
-                "applet_namespaces": {"actors":[],"realms":[],"handles":[]},
+                "applet_namespaces": {"realms":[],"handles":[]},
                 "managed_actor_authoring": {"principal_endpoint":"https://ghost.example", "key_encryption_key_hex":"22".repeat(32)}
             }
         })).unwrap();

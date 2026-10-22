@@ -35,7 +35,8 @@ use crate::managed_actor_store::{
 };
 use crate::{BridgeError, PreparedGhost, PreparedManagedActor, Result};
 
-mod control;
+pub(crate) mod control;
+pub use control::manager::{ManagementTransferOffer, ManagementTransferPlan};
 
 const AUTHORING_LEASE_SECS: i64 = 30;
 const AUTHORING_WAIT_ATTEMPTS: usize = 300;
@@ -73,11 +74,11 @@ pub struct ManagedActorAuthoringService {
     key_encryption_key: [u8; 32],
 }
 
-pub(crate) struct OriginalManagedController {
+pub(crate) struct ManagedController {
     pub(crate) actor_id: arkret::ActorId,
     pub(crate) signer: arkret::Ed25519PayloadSigner,
     pub(crate) signing_key: SigningKey,
-    pub(crate) original: Box<arkret::AppletAuthoringTransactionRequestBody>,
+    pub(crate) original: Box<arkret::CommittedEventFullView>,
 }
 
 impl ManagedActorAuthoringService {
@@ -101,7 +102,7 @@ impl ManagedActorAuthoringService {
     pub(crate) async fn original_managed_controller(
         &self,
         actor: &arkret::ActorId,
-    ) -> Result<OriginalManagedController> {
+    ) -> Result<ManagedController> {
         let realm_actor = actor.as_realm_actor_id().ok_or_else(|| {
             BridgeError::App("managed custody requires a full Realm actor".into())
         })?;
@@ -134,11 +135,11 @@ impl ManagedActorAuthoringService {
         let did = Did::new(record.actor_did)?;
         let method = DidUrl::new(format!("{did}#managed-controller"))
             .map_err(|e| BridgeError::Database(e.into()))?;
-        Ok(OriginalManagedController {
+        Ok(ManagedController {
             actor_id: actor.clone(),
             signing_key: controller.clone(),
             signer: arkret::Ed25519PayloadSigner::new(controller, did, method),
-            original: Box::new(original),
+            original: Box::new(self.edge.retained_actor_creation(actor)?),
         })
     }
 
@@ -201,7 +202,7 @@ impl ManagedActorAuthoringService {
             .published_identity_async(url.to_string())
             .await?
         else {
-            return Ok(None);
+            return self.published_transferred_principal(url.as_str()).await;
         };
         let identity = self.decode_identity(&subject, record)?;
         let ResolutionMethodHistoryEvidence::WebvhLog { log_entries, .. } =
@@ -220,7 +221,14 @@ impl ManagedActorAuthoringService {
         let document = serde_json::from_value(entry["state"].clone()).map_err(|error| {
             BridgeError::Database(format!("managed publication document: {error}"))
         })?;
-        Ok(Some((document, log_entries)))
+        let original = (document, log_entries);
+        let publication = match self.published_transferred_principal(url.as_str()).await? {
+            Some(transferred) => {
+                control::manager::continuous_publication(Some(original), transferred)?
+            }
+            None => original,
+        };
+        Ok(Some(publication))
     }
 
     /// Author or recover the exact Station-signed request using durable private custody.
@@ -515,25 +523,6 @@ impl ManagedActorAuthoringService {
             BridgeError::App(format!("managed actor WebVH inception failed: {error}"))
         })?;
         let did = Did::new(inception.did.clone())?;
-        if request.purpose == AppletManagedActorPurpose::ProvisionGhost
-            && !self
-                .config
-                .arkret
-                .applet_namespaces
-                .actors
-                .iter()
-                .any(|entry| {
-                    namespace_pattern_matches(
-                        arkret::AppletNamespaceDomain::Actors,
-                        &entry.pattern,
-                        did.as_str(),
-                    )
-                })
-        {
-            return Err(BridgeError::Config(format!(
-                "generated managed actor DID `{did}` is outside applet_namespaces.actors"
-            )));
-        }
         let method_history_head = canonical_sha256(&inception.log_entry)?;
         let document: arkret::DidDocument =
             serde_json::from_value(inception.log_entry["state"].clone())?;
@@ -975,6 +964,49 @@ fn decode_managed_actor_seed(name: &str, encoded: &str) -> Result<[u8; 32]> {
 /// The original creation and independent native DID custody remain unchanged
 /// across a later governance handoff.
 impl ManagedActorAuthoringService {
+    /// Match immutable creation and mapping facts retained by this custody owner.
+    pub async fn reused_ghost_did(
+        &self,
+        request: &AppletManagedActorAuthoringRequest,
+        existing: &arkret::ExistingManagedActor,
+    ) -> Result<Did> {
+        let basis = request
+            .basis
+            .ghost()
+            .ok_or_else(|| BridgeError::App("Ghost reuse requires a Ghost basis".into()))?;
+        let original = self.managed_creation(&existing.ghost_actor_id).await?;
+        let event = &original.event;
+        let commit = &original.commit;
+        let payload = crate::managed_authoring::creation_payload(event)?;
+        let expected = arkret::CommittedEventRef {
+            event_id: event.event_id.clone(),
+            commit_id: commit.commit_id.clone(),
+            stream_ref: commit.stream_ref.clone(),
+            stream_position: commit.stream_position,
+        };
+        let external = payload
+            .external_ref
+            .ok_or_else(|| BridgeError::App("reuse target is not a Ghost".into()))?;
+        if payload.applet_id != basis.applet_id
+            || basis.service_id != *self.edge.service_actor_id()
+            || payload.actor_id != existing.ghost_actor_id
+            || expected != existing.creation_ref
+            || existing
+                .ghost_actor_id
+                .as_realm_actor_id()
+                .map(|id| &id.realm_id)
+                != basis.effective_scope.realm_id_opt()
+            || external.protocol != basis.external_ref.protocol
+            || external.instance_id != basis.external_ref.instance_id
+            || external.external_id != basis.external_ref.external_id
+        {
+            return Err(BridgeError::App(
+                "Ghost reuse differs from the original Realm identity and mapping".into(),
+            ));
+        }
+        Ok(payload.initial_resolution.did)
+    }
+
     pub async fn prepare_ghost(
         &self,
         applet_id: &AppletId,
@@ -1023,8 +1055,8 @@ impl ManagedActorAuthoringService {
         if let Some(existing) = preview.existing_managed_actor {
             self.validate_request(&preview.authoring_request, true)
                 .await?;
-            self.edge
-                .reused_ghost_did(&preview.authoring_request, &existing)?;
+            self.reused_ghost_did(&preview.authoring_request, &existing)
+                .await?;
             return Ok(PreparedGhost::Reuse {
                 authoring_request: preview.authoring_request,
                 existing,
@@ -1300,7 +1332,7 @@ mod ghost_bundle_tests {
                 "signing_key_seed_hex": "22".repeat(32),
                 "verification_method_fragment": "#key-1",
                 "trusted_server_did": STATION_DID,
-                "applet_namespaces": {"actors": [{"pattern":"did:webvh:*:applet.example:webvh:*","exclusive":true}], "realms": [], "handles": []},
+                "applet_namespaces": {"realms": [], "handles": []},
                 "managed_actor_authoring": {
                     "principal_endpoint": "https://applet.example/actors/slack",
                     "key_encryption_key_hex": "33".repeat(32)

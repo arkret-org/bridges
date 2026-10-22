@@ -39,7 +39,7 @@ mod tests {
                 "service_did":"did:webvh:zservicescid:applet.example", "trust_domain":"ak:trust_domain:example.net",
                 "applet_id":"ak:applet:01904100-0000-7000-8000-bbbbbbbbbbbb", "signing_key_seed_hex":"22".repeat(32),
                 "verification_method_fragment":"#key-1", "trusted_server_did":"did:webvh:zstationscid:station.example",
-                "applet_namespaces":{"actors":[],"realms":[],"handles":[]},
+                "applet_namespaces":{"realms":[],"handles":[]},
                 "managed_actor_authoring":{"principal_endpoint":"https://applet.example", "key_encryption_key_hex":"33".repeat(32)}
             }
         })).unwrap();
@@ -270,10 +270,11 @@ impl ManagedDeviceRuntime {
         if recipient.scope() != &content.original().event.scope_ref {
             return Err(invalid("native reply source has another scope"));
         }
-        let original = self.edge.retained_managed_actor(recipient.actor_id())?;
-        let creation = crate::managed_authoring::creation_payload(
-            crate::managed_authoring::creation_event(&original)?,
-        )?;
+        let original = self
+            .authoring
+            .managed_creation(recipient.actor_id())
+            .await?;
+        let creation = crate::managed_authoring::creation_payload(&original.event)?;
         if creation.actor_role != arkret::RealmActorCreatePayloadActorRole::Bot {
             return Err(invalid("native model replies require a managed Bot"));
         }

@@ -511,50 +511,6 @@ impl AuthoringJournal {
         }
         Ok(Some(body))
     }
-    pub(crate) fn reused_ghost_did(
-        &self,
-        request: &AppletManagedActorAuthoringRequest,
-        existing: &arkret::ExistingManagedActor,
-    ) -> Result<Did> {
-        let basis = request
-            .basis
-            .ghost()
-            .ok_or_else(|| invalid("Ghost reuse requires a Ghost basis"))?;
-        let (body, _) = self.retained_managed_actor(&existing.ghost_actor_id)?;
-        let RealmActorMaterialResult::Event { event, commit, .. } =
-            &body.authoring_context.material.result
-        else {
-            return Err(invalid("original creation material missing"));
-        };
-        let payload = creation_payload(event)?;
-        let expected = arkret::CommittedEventRef {
-            event_id: event.event_id.clone(),
-            commit_id: commit.commit_id.clone(),
-            stream_ref: commit.stream_ref.clone(),
-            stream_position: commit.stream_position,
-        };
-        let external = payload
-            .external_ref
-            .ok_or_else(|| invalid("reuse target is not a Ghost"))?;
-        if payload.applet_id != basis.applet_id
-            || payload.service_id != basis.service_id
-            || payload.actor_id != existing.ghost_actor_id
-            || expected != existing.creation_ref
-            || existing
-                .ghost_actor_id
-                .as_realm_actor_id()
-                .map(|id| &id.realm_id)
-                != basis.effective_scope.realm_id_opt()
-            || external.protocol != basis.external_ref.protocol
-            || external.instance_id != basis.external_ref.instance_id
-            || external.external_id != basis.external_ref.external_id
-        {
-            return Err(invalid(
-                "Ghost reuse differs from the original Realm identity and mapping",
-            ));
-        }
-        Ok(payload.initial_resolution.did)
-    }
 }
 
 #[derive(Serialize, Deserialize)]

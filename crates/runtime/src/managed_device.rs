@@ -36,7 +36,9 @@ mod content;
 mod control;
 mod inbox;
 mod installation_source;
+mod manager;
 mod mls;
+pub use crate::managed_actor_authoring::{ManagementTransferOffer, ManagementTransferPlan};
 mod portal;
 mod processing;
 mod read_source;
@@ -262,8 +264,7 @@ impl ManagedDeviceRuntime {
         let mut actions = config.actions.clone();
         actions.sort_by(|left, right| left.as_str().as_bytes().cmp(right.as_str().as_bytes()));
         actions.dedup();
-        let edge = self.edge.clone();
-        let actors = run_blocking(move || edge.managed_actor_ids()).await?;
+        let actors = self.authoring.managed_actor_ids().await?;
         use futures::StreamExt as _;
         let mut devices = futures::stream::iter(actors)
             .map(|actor| {
@@ -302,12 +303,16 @@ impl ManagedDeviceRuntime {
             return Err(invalid("managed creation requires a Realm actor"));
         }
         let actor_id = actor.clone();
-        let edge = self.edge.clone();
-        let local_actor = actor.clone();
-        let original = run_blocking(move || edge.retained_managed_actor(&local_actor)).await?;
-        let creation = crate::managed_authoring::creation_event(&original)?;
+        let original = self.authoring.managed_creation(actor).await?;
+        let creation = &original.event;
         let scope = crate::managed_authoring::creation_payload(creation)?.creation_scope;
-        let operation_id = format!("initial-device/{}", creation.event_id);
+        let current = self.control_state(actor).await?;
+        // A manager change or recovery retires the old generation without erasing
+        // its Device/MLS custody. Bootstrap a separate authorization for this cut.
+        let operation_id = format!(
+            "initial-device/{}/{}",
+            creation.event_id, current.generation
+        );
         if let Some(device) = self
             .recover_initial_device(&actor_id, &operation_id, &scope)
             .await?
@@ -651,10 +656,7 @@ impl ManagedDeviceRuntime {
             controller_public_key: PublicKeyMaterial::Ed25519Raw {
                 bytes: controller.signer.verifying_key().to_bytes().to_vec(),
             },
-            creation_commit: match &controller.original.authoring_context.material.result {
-                arkret::RealmActorMaterialResult::Event { commit, .. } => commit.clone(),
-                _ => return Err(invalid("creation Commit missing")),
-            },
+            creation_commit: controller.original.commit.clone(),
             outcome: None,
             accepted_station_key: None,
             mls: mls::ManagedMlsState::default(),

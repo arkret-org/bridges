@@ -24,23 +24,23 @@ unimplemented = "deny"
 # Applet bridge runtime and chat/social helper layer.
 aes = "0.9"
 anyhow = "1.0"
-arkret = { version = "0.3.0", path = "../arkret-rust-sdk/crates/sdk", default-features = false, features = [
+arkret = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/sdk", default-features = false, features = [
     "client",
     "server",
     "signer",
 ] }
-arkret-canonical = { version = "0.3.0", path = "../arkret-rust-sdk/crates/canonical", default-features = false }
+arkret-canonical = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/canonical", default-features = false }
 arkret-bridge-messaging = { version = "0.3.0", path = "crates/messaging", default-features = false }
 arkret-bridge-runtime = { version = "0.3.0", path = "crates/runtime", default-features = false }
-arkret-egress-reqwest = { version = "0.3.0", path = "../arkret-rust-sdk/crates/egress-reqwest" }
-arkret-event-draft = { version = "0.3.0", path = "../arkret-rust-sdk/crates/event-draft", default-features = false }
-arkret-identifiers = { version = "0.3.0", path = "../arkret-rust-sdk/crates/identifiers", default-features = false }
-arkret-models-collaboration = { version = "0.3.0", path = "../arkret-rust-sdk/crates/models-collaboration", default-features = false }
-arkret-models-discovery = { version = "0.3.0", path = "../arkret-rust-sdk/crates/models-discovery", default-features = false }
-arkret-models-integration = { version = "0.3.0", path = "../arkret-rust-sdk/crates/models-integration", default-features = false }
-arkret-retry = { version = "0.3.0", path = "../arkret-rust-sdk/crates/retry", default-features = false }
-arkret-signatures = { version = "0.3.0", path = "../arkret-rust-sdk/crates/signatures", default-features = false, features = ["signer"] }
-arkret-wire = { version = "0.3.0", path = "../arkret-rust-sdk/crates/wire", default-features = false }
+arkret-egress-reqwest = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/egress-reqwest" }
+arkret-event-draft = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/event-draft", default-features = false }
+arkret-identifiers = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/identifiers", default-features = false }
+arkret-models-collaboration = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/models-collaboration", default-features = false }
+arkret-models-discovery = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/models-discovery", default-features = false }
+arkret-models-integration = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/models-integration", default-features = false }
+arkret-retry = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/retry", default-features = false }
+arkret-signatures = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/signatures", default-features = false, features = ["signer"] }
+arkret-wire = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/wire", default-features = false }
 async-trait = "0.1"
 base64 = "0.23"
 cbc = { version = "0.2", features = ["block-padding"] }
@@ -51,7 +51,7 @@ diesel = { version = "2.3", default-features = false, features = ["r2d2", "chron
 diesel_migrations = "2.3"
 ed25519-dalek = "3.0"
 futures = "0.3"
-garth = { version = "0.3.0", path = "../garth", default-features = false }
+garth = { version = "0.3.0", path = "../garth-realm-actors", default-features = false }
 getrandom = "0.4"
 hex = "0.4"
 hmac = "0.13"

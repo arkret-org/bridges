@@ -106,10 +106,8 @@ impl ManagedDeviceRuntime {
         device: &ManagedDevice,
         action: &str,
     ) -> Result<arkret::GrantId> {
-        let original = self.edge.retained_managed_actor(&device.actor_id)?;
-        let creation = crate::managed_authoring::creation_payload(
-            crate::managed_authoring::creation_event(&original)?,
-        )?;
+        let original = self.authoring.managed_creation(&device.actor_id).await?;
+        let creation = crate::managed_authoring::creation_payload(&original.event)?;
         let role = match creation.actor_role {
             arkret::RealmActorCreatePayloadActorRole::Bot => ManagedActorRole::Bot,
             arkret::RealmActorCreatePayloadActorRole::Ghost => ManagedActorRole::Ghost,
@@ -233,6 +231,32 @@ impl ManagedDeviceRuntime {
         }
         if !matches!(device.effective_scope, ScopeRef::Realm { .. }) {
             return Err(invalid("managed membership requires a Realm or Circle"));
+        }
+        // Membership belongs to the full Realm identity, not to the Device that
+        // originally joined. Retained originals survive a manager/generation change.
+        if let Some((_, _, saved)) = self
+            .publication(&device.actor_id, &device.effective_scope, "realm-self-join")
+            .await?
+            && Self::accepted_publication(&saved)?.is_some()
+        {
+            let reader = self.open_reader(device).await?;
+            let response = reader
+                .client()
+                .snapshot_head(device.effective_scope.realm_id())
+                .await?;
+            let snapshot =
+                garth::own_station_results::consume_own_station_device_snapshot(&response)
+                    .map_err(|e| invalid(e.to_string()))?;
+            let joined = snapshot.current_state_entries.iter().any(|row| {
+                let arkret::TypedCurrentRow::Value { selector, value, .. } = row;
+                matches!(selector, arkret::CurrentSelector::MemberState { actor_id } if actor_id == &device.actor_id)
+                    && serde_json::to_value(value).is_ok_and(|value| value["membership"] == "join")
+            });
+            return if joined {
+                Ok(())
+            } else {
+                Err(invalid("the retained Realm join is no longer current"))
+            };
         }
         let body = serde_json::from_value(
             serde_json::json!({"member_id":device.actor_id,"membership":"join"}),

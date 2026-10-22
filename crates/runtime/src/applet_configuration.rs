@@ -257,6 +257,7 @@ impl AppletConfigurationService {
                             .applet_bot_preview(
                                 record.intent.applet_id.as_str(),
                                 &arkret::AppletBotPreviewRequestBody {
+                                    service_id: record.intent.service_id.clone(),
                                     effective_scope: record.intent.effective_scope.clone(),
                                     request_id: author_request_id(&record.intent)?,
                                     display_name: display_name.clone(),
@@ -371,8 +372,8 @@ impl AppletConfigurationService {
         intent: &Intent,
         actor: &ActorId,
     ) -> Result<CommittedEventRef> {
-        let original = self.authoring.original_managed_controller(actor).await?;
-        let event = crate::managed_authoring::creation_event(&original.original)?;
+        let original = self.authoring.managed_creation(actor).await?;
+        let event = &original.event;
         let candidate = crate::managed_authoring::creation_payload(event)?;
         if candidate.applet_id != intent.applet_id || candidate.actor_id != *actor {
             return Err(invalid("selected identity belongs to another Applet"));
@@ -417,13 +418,7 @@ impl AppletConfigurationService {
                 "selected identity is not currently managed by this registration",
             ));
         }
-        let arkret::RealmActorMaterialResult::Event { commit, .. } =
-            &original.original.authoring_context.material.result
-        else {
-            return Err(invalid(
-                "selected identity has no retained original creation",
-            ));
-        };
+        let commit = &original.commit;
         Ok(CommittedEventRef {
             event_id: event.event_id.clone(),
             commit_id: commit.commit_id.clone(),
@@ -513,7 +508,6 @@ mod tests {
                 "verification_method_fragment": "#key-1",
                 "trusted_server_did": "did:webvh:zstationscid:station.example",
                 "applet_namespaces": {
-                    "actors": [{"pattern": "did:webvh:*:applet.example:webvh:*", "exclusive": true}],
                     "realms": [], "handles": []
                 },
                 "managed_actor_authoring": {

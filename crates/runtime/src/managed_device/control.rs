@@ -35,7 +35,7 @@ impl ManagedDeviceRuntime {
             .await
     }
 
-    async fn control_transition(
+    pub(super) async fn control_transition(
         &self,
         actor: &ActorId,
         operation_id: &str,

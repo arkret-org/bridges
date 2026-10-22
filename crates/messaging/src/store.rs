@@ -392,10 +392,16 @@ impl MessageStore {
         use schema::channel_realm_mappings::dsl;
 
         let mut conn = self.db.conn()?;
-        Ok(dsl::channel_realm_mappings
+        let mut matches = dsl::channel_realm_mappings
             .filter(dsl::arkret_realm_id.eq(key).or(dsl::portal_alias.eq(key)))
-            .first::<ChannelRealmMapping>(&mut conn)
-            .optional()?)
+            .limit(2)
+            .load::<ChannelRealmMapping>(&mut conn)?;
+        // A Realm may host multiple portals. Never pick an arbitrary mapping.
+        Ok(if matches.len() == 1 {
+            matches.pop()
+        } else {
+            None
+        })
     }
 }
 
@@ -568,6 +574,44 @@ mod tests {
             .expect("mapping");
         assert_eq!(mapping.app_channel_id, "channel-1");
         assert_eq!(mapping.app_message_id, "app-message-1");
+    }
+
+    #[test]
+    fn portal_lookup_rejects_ambiguous_realm_and_alias() {
+        let store = sqlite_store("portal-lookup-ambiguity").unwrap();
+        let (_, realm, ..) = identity(9);
+        store
+            .upsert_channel_realm("a", realm.as_str(), Some("first"))
+            .unwrap();
+        assert_eq!(
+            store
+                .channel_by_realm_or_alias(realm.as_str())
+                .unwrap()
+                .unwrap()
+                .app_channel_id,
+            "a"
+        );
+        store
+            .upsert_channel_realm("b", realm.as_str(), Some("second"))
+            .unwrap();
+        assert!(
+            store
+                .channel_by_realm_or_alias(realm.as_str())
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .channel_by_realm_or_alias("second")
+                .unwrap()
+                .unwrap()
+                .app_channel_id,
+            "b"
+        );
+        store
+            .upsert_channel_realm("b", realm.as_str(), Some("first"))
+            .unwrap();
+        assert!(store.channel_by_realm_or_alias("first").unwrap().is_none());
     }
 
     #[test]

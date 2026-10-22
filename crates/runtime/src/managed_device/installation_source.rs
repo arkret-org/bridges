@@ -21,10 +21,10 @@ struct InstallationHint {
     outcome: AppletInstallOutcome,
 }
 
-fn hint_key(applet: &str, scope: &ScopeRef) -> Result<String> {
+fn hint_key(applet: &str, service: &arkret::DidCoreId, scope: &ScopeRef) -> Result<String> {
     Ok(format!(
         "managed-installation-source/v1/{}",
-        canonical_sha256(&(applet, scope))?
+        canonical_sha256(&(applet, service, scope))?
     ))
 }
 
@@ -32,7 +32,7 @@ fn source_request(
     applet: &str,
     scope: &ScopeRef,
     creation_scope: &ScopeRef,
-    creation_source: &arkret::GrantId,
+    creation_source: Option<&arkret::GrantId>,
     hint: Option<&InstallationHint>,
 ) -> Result<(
     AppletAuthorityMaterialRequestBody,
@@ -43,7 +43,10 @@ fn source_request(
             "installation source must stay in the actor's Realm",
         ));
     }
-    if scope == creation_scope {
+    if scope == creation_scope && hint.is_none() {
+        let creation_source = creation_source.ok_or_else(|| {
+            invalid("a replacement Service requires its own accepted installation outcome")
+        })?;
         return Ok((
             AppletAuthorityMaterialRequestBody {
                 effective_scope: scope.clone(),
@@ -117,15 +120,24 @@ fn source_grant(
     let [id] = request.grant_ids.as_slice() else {
         return Err(invalid("installation source requires one exact grant"));
     };
-    let [
-        ExactCurrentResultsReadOutcome::Present {
-            entry: ExactCurrentResultEntry::CapabilityGrant(row),
-            ..
-        },
-    ] = material.current_results.as_slice()
-    else {
-        return Err(invalid("installation source has no exact current grant"));
-    };
+    let mut rows = material
+        .current_results
+        .iter()
+        .filter_map(|entry| match entry {
+            ExactCurrentResultsReadOutcome::Present {
+                entry: ExactCurrentResultEntry::CapabilityGrant(row),
+                ..
+            } if &row.selector.grant_id == id => Some(row),
+            _ => None,
+        });
+    let row = rows
+        .next()
+        .ok_or_else(|| invalid("installation source has no exact current grant"))?;
+    if rows.next().is_some() {
+        return Err(invalid(
+            "installation source repeats the exact current grant",
+        ));
+    }
     let bindings: Vec<_> = row
         .value
         .constraints
@@ -148,7 +160,9 @@ fn source_grant(
 
 impl ManagedDeviceRuntime {
     /// Remember the result returned by an actual installation operation for a
-    /// second scope. This is a local source hint, not proof of membership in
+    /// second scope or replacement Service. The host passes the exact SDK install
+    /// result before starting that Service's managed business work. This is a
+    /// local source hint, not proof of membership in
     /// the installation aggregate or a cached business allow. Every use reads
     /// fresh exact material; the Station still enforces the exact installation.
     pub async fn remember_installation_outcome(
@@ -161,7 +175,11 @@ impl ManagedDeviceRuntime {
             outcome: outcome.clone(),
         };
         self.read_installation_hint(&hint).await?;
-        let key = hint_key(self.edge.applet_id(), effective_scope)?;
+        let key = hint_key(
+            self.edge.applet_id(),
+            self.edge.service_actor_id(),
+            effective_scope,
+        )?;
         let current = self.read(&key).await?;
         let next = self.authoring.encrypt_key_material(&key, &hint)?;
         if !self.cas(&key, current, next).await? {
@@ -177,6 +195,7 @@ impl ManagedDeviceRuntime {
             hint.effective_scope,
             ScopeRef::Realm { .. } | ScopeRef::Circle { .. }
         ) || hint.outcome.applet_id.as_str() != self.edge.applet_id()
+            || hint.outcome.service_id != *self.edge.service_actor_id()
         {
             return Err(invalid(
                 "installation hint belongs to another Applet or scope",
@@ -204,23 +223,25 @@ impl ManagedDeviceRuntime {
         let creation = crate::managed_authoring::creation_payload(
             crate::managed_authoring::creation_event(&original)?,
         )?;
-        let hint = if creation.creation_scope != device.effective_scope {
-            let key = hint_key(self.edge.applet_id(), &device.effective_scope)?;
-            self.read(&key)
-                .await?
-                .map(|raw| {
-                    self.authoring
-                        .decrypt_key_material::<InstallationHint>(&key, &raw)
-                })
-                .transpose()?
-        } else {
-            None
-        };
+        let key = hint_key(
+            self.edge.applet_id(),
+            self.edge.service_actor_id(),
+            &device.effective_scope,
+        )?;
+        let hint = self
+            .read(&key)
+            .await?
+            .map(|raw| {
+                self.authoring
+                    .decrypt_key_material::<InstallationHint>(&key, &raw)
+            })
+            .transpose()?;
         let (request, mut registration) = source_request(
             self.edge.applet_id(),
             &device.effective_scope,
             &creation.creation_scope,
-            &creation.creation_authorization_ref,
+            (creation.service_id == *self.edge.service_actor_id())
+                .then_some(&creation.creation_authorization_ref),
             hint.as_ref(),
         )?;
         if registration.is_none() {

@@ -8,8 +8,7 @@ impl ManagedDeviceRuntime {
     /// Select an existing local identity without minting another Bot or Ghost.
     /// Device bootstrap and every remote read independently check current access.
     pub async fn local_actor_for_realm(&self, realm: &arkret::RealmId) -> Result<Option<ActorId>> {
-        let edge = self.edge.clone();
-        let mut actors = run_blocking(move || edge.managed_actor_ids()).await?;
+        let mut actors = self.authoring.managed_actor_ids().await?;
         actors.sort();
         Ok(actors.into_iter().find(|actor| {
             actor

@@ -133,7 +133,7 @@ pub(crate) fn require_ghost_provision_provider(
 // at a call site without a type error.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn provision_ghost_actor(
-    edge: &runtime::ArkretEdge,
+    edge: &Arc<runtime::ArkretEdge>,
     store: std::sync::Arc<MessageStore>,
     provider: &dyn GhostProvisionRequestProvider,
     config: &runtime::Config,
@@ -186,7 +186,7 @@ pub(crate) async fn provision_ghost_actor(
         Some(request_json) => request_json,
         None => {
             let request = provider.author_request(&authoring_request).await?;
-            let _ = validate_authored_ghost_request(&authoring_request, &request, edge)?;
+            let _ = validate_authored_ghost_request(&authoring_request, &request, edge).await?;
             let request_json = serde_json::to_string(&request).map_err(|error| {
                 BridgeError::App(format!("Ghost provision encode failed: {error}"))
             })?;
@@ -198,7 +198,7 @@ pub(crate) async fn provision_ghost_actor(
     let request: PreparedGhost = serde_json::from_str(&request_json).map_err(|error| {
         BridgeError::Database(format!("stored Ghost creation invalid: {error}"))
     })?;
-    let did = validate_authored_ghost_request(&authoring_request, &request, edge)?;
+    let did = validate_authored_ghost_request(&authoring_request, &request, edge).await?;
     let (actor_id, creation_ref) = match &request {
         PreparedGhost::Reuse { existing, .. } => (
             existing.ghost_actor_id.clone(),
@@ -231,10 +231,10 @@ pub(crate) async fn provision_ghost_actor(
     })
 }
 
-fn validate_authored_ghost_request(
+async fn validate_authored_ghost_request(
     expected: &GhostProvisionAuthoringRequest,
     prepared: &PreparedGhost,
-    edge: &runtime::ArkretEdge,
+    edge: &Arc<runtime::ArkretEdge>,
 ) -> Result<Did> {
     let request = match prepared {
         PreparedGhost::Create(value) => &value.authoring_request,
@@ -260,7 +260,11 @@ fn validate_authored_ghost_request(
         ));
     }
     match prepared {
-        PreparedGhost::Reuse { existing, .. } => edge.reused_ghost_did(request, existing),
+        PreparedGhost::Reuse { existing, .. } => {
+            runtime::managed_actor_authoring::ManagedActorAuthoringService::new(edge.clone())?
+                .reused_ghost_did(request, existing)
+                .await
+        }
         PreparedGhost::Create(value) => {
             let payload: arkret::RealmActorCreatePayload =
                 serde_json::from_value(serde_json::to_value(&value.create_event.payload)?)?;

@@ -151,10 +151,7 @@ impl ManagedDeviceRuntime {
                 },
             )?
             .with_applet_id(
-                crate::managed_authoring::creation_payload(
-                    crate::managed_authoring::creation_event(&controller.original)?,
-                )?
-                .applet_id,
+                crate::managed_authoring::creation_payload(&controller.original.event)?.applet_id,
             )
             .into_intent(at)?
             .author_with_digest_suite(crate::PRODUCER_DIGEST_SUITE)?;

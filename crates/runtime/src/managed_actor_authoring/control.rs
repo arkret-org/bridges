@@ -6,6 +6,7 @@ use arkret::{ActorId, AuthoredEvent, CurrentRevision, RealmActorControlValue, Re
 
 use super::*;
 
+pub(crate) mod manager;
 mod recovery;
 use recovery::PreparedRecovery;
 mod unaccepted;
@@ -53,6 +54,9 @@ fn key(subject: &str) -> String {
 
 impl ManagedActorAuthoringService {
     async fn custody_subject(&self, actor: &ActorId) -> Result<String> {
+        if let Some(origin) = self.transferred_origin(actor).await? {
+            return Ok(origin.subject);
+        }
         let edge = self.edge.clone();
         let actor = actor.clone();
         let original = crate::run_blocking(move || edge.retained_managed_actor(&actor)).await?;
@@ -113,7 +117,7 @@ impl ManagedActorAuthoringService {
         &self,
         actor: &ActorId,
         method: &DidUrl,
-    ) -> Result<OriginalManagedController> {
+    ) -> Result<ManagedController> {
         let subject = self.custody_subject(actor).await?;
         let Some(raw) = self.control_raw(&subject).await? else {
             let original = self.original_managed_controller(actor).await?;
@@ -139,10 +143,8 @@ impl ManagedActorAuthoringService {
         if project_did_to_core_id(&did)? != *actor.signing_principal_id() {
             return Err(invalid("control method belongs to another principal"));
         }
-        let edge = self.edge.clone();
-        let target = actor.clone();
-        let original = crate::run_blocking(move || edge.retained_managed_actor(&target)).await?;
-        Ok(OriginalManagedController {
+        let original = self.managed_creation(actor).await?;
+        Ok(ManagedController {
             actor_id: actor.clone(),
             signer: arkret::Ed25519PayloadSigner::new(signing.clone(), did, method.clone()),
             signing_key: signing,
@@ -230,9 +232,7 @@ impl ManagedActorAuthoringService {
                 "recover the outstanding control operation before another rotation",
             ));
         }
-        let creation = crate::managed_authoring::creation_payload(
-            crate::managed_authoring::creation_event(&controller.original)?,
-        )?;
+        let creation = crate::managed_authoring::creation_payload(&controller.original.event)?;
         let prepared = prepare_successor(
             &mut custody,
             actor,

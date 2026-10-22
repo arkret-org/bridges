@@ -183,9 +183,9 @@ pub struct ArkretConfig {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedActorAuthoringConfig {
-    /// Public HTTPS base used in managed `did:webvh` identities. The generated
-    /// DID is checked against the installed Applet actor namespace before any
-    /// key or authoring result becomes visible.
+    /// Public HTTPS base used to host managed `did:webvh` documents. It is
+    /// independent of the Service endpoint and is never an actor namespace.
+    /// The same Applet retains custody and native DID continuity on Service changes.
     pub principal_endpoint: String,
     /// 32-byte hexadecimal key encrypting managed-actor root/next/controller seeds at
     /// rest. It is deliberately separate from the Applet service signing key.
@@ -560,7 +560,6 @@ arkret:
   verification_method_fragment: "#key-1"
   trusted_server_did: "did:webvh:server.example"
   applet_namespaces:
-    actors: []
     realms: []
     handles: []
   managed_actor_authoring:
@@ -620,7 +619,7 @@ arkret:
     #[test]
     fn config_requires_explicit_applet_namespaces() {
         let text = minimal_config("").replace(
-            "  applet_namespaces:\n    actors: []\n    realms: []\n    handles: []\n",
+            "  applet_namespaces:\n    realms: []\n    handles: []\n",
             "",
         );
         let error = Config::from_yaml_with_base_dir(&text, None)
