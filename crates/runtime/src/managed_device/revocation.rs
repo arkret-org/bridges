@@ -1,7 +1,7 @@
 //! Original control-signed revoke requests and authenticated terminal outcomes.
 use arkret::{
-    CommittedEventRef, Hash, RealmActorDeviceRevokeState, RealmActorMaterialOutcome,
-    RealmActorMaterialRequest, RealmActorMaterialResult, RealmActorOperationOutcome,
+    CommittedEventRef, Hash, RealmActorDeviceRevokeState, RealmActorMaterial,
+    RealmActorMaterialOutcome, RealmActorMaterialRequest, RealmActorOperationOutcome,
 };
 use arkret_models_collaboration::events_payloads::DeviceRevokePayload;
 
@@ -104,7 +104,7 @@ impl Revocation {
         let Some(material) = &self.material else {
             return Ok(None);
         };
-        let RealmActorMaterialResult::Outcome {
+        let RealmActorMaterial::Outcome {
             target_request_digest,
             outcome:
                 RealmActorOperationOutcome::DeviceRevoke {
@@ -147,7 +147,7 @@ impl ManagedDeviceRuntime {
         retired.authorization.verify_identity()?;
         let authorization: DeviceAuthorizePayload =
             serde_json::from_value(serde_json::to_value(&retired.authorization.payload)?)?;
-        let RealmActorMaterialResult::Outcome {
+        let RealmActorMaterial::Outcome {
             outcome:
                 RealmActorOperationOutcome::DeviceRevoke {
                     authorization_ref,
@@ -300,7 +300,7 @@ impl ManagedDeviceRuntime {
                 let requester = ActorId::service(self.edge.service_actor_id().clone());
                 let material = route.material(&query, &requester).await?;
                 match &material.material().result {
-                    RealmActorMaterialResult::Outcome {
+                    RealmActorMaterial::Outcome {
                         outcome: RealmActorOperationOutcome::DeviceRevoke { proposal_ref, .. },
                         ..
                     } => {
@@ -314,7 +314,7 @@ impl ManagedDeviceRuntime {
                                 &requester,
                             )
                             .await?;
-                        let RealmActorMaterialResult::Event { event, commit, .. } =
+                        let RealmActorMaterial::Event { event, commit, .. } =
                             &original.material().result
                         else {
                             return Err(invalid("revoke recovery has no accepted original"));
@@ -333,7 +333,7 @@ impl ManagedDeviceRuntime {
                         }
                         continue;
                     }
-                    RealmActorMaterialResult::Outcome {
+                    RealmActorMaterial::Outcome {
                         outcome:
                             RealmActorOperationOutcome::Status {
                                 status: arkret::RealmActorOperationStatus::Unknown,

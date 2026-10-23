@@ -1,6 +1,6 @@
 //! Same-Applet Service replacement; the Station alone accepts per-actor manager changes.
 use arkret::identity::VerifiedRealmActorMaterial;
-use arkret::{CurrentSelector, RealmActorMaterialRequest, RealmActorMaterialResult};
+use arkret::{CurrentSelector, RealmActorMaterial, RealmActorMaterialRequest};
 
 use super::*;
 use crate::managed_actor_authoring::control::manager::{reference, revision};
@@ -29,7 +29,7 @@ fn row<'a>(
     material: &'a VerifiedRealmActorMaterial,
     selector: &CurrentSelector,
 ) -> Result<(&'a serde_json::Value, &'a arkret::CommittedEventRef)> {
-    let RealmActorMaterialResult::Current { entries } = &material.material().result else {
+    let RealmActorMaterial::Current { entries } = &material.material().result else {
         return Err(invalid("manager transfer requires a verified current cut"));
     };
     entries
@@ -358,7 +358,7 @@ impl ManagedDeviceRuntime {
                     .await?
             }
         };
-        let RealmActorMaterialResult::Outcome { outcome, .. } = &observed.material().result else {
+        let RealmActorMaterial::Outcome { outcome, .. } = &observed.material().result else {
             return Err(invalid("manager outcome returned another purpose"));
         };
         let accepted = match outcome {

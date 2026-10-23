@@ -4,7 +4,7 @@ use arkret::canonical::{canonical_json_bytes, canonical_sha256};
 use arkret::signatures::PublicKeyMaterial;
 use arkret::{
     ActorId, AppletAuthoringTransactionRequestBody, AppletId, AppletManagedActorAuthoringRequest,
-    DidUrl, Event, Hash, RealmActorCreatePayload, RealmActorMaterialResult, ScopeRef,
+    DidUrl, Event, Hash, RealmActorCreatePayload, RealmActorMaterial, ScopeRef,
 };
 use serde::{Deserialize, Serialize};
 
@@ -98,7 +98,7 @@ pub(crate) fn authoring_scope(request: &AppletManagedActorAuthoringRequest) -> &
 
 pub(crate) fn creation_event(body: &AppletAuthoringTransactionRequestBody) -> Result<&Event> {
     match &body.authoring_context.material.result {
-        RealmActorMaterialResult::Event { event, .. }
+        RealmActorMaterial::Event { event, .. }
             if event.kind == arkret_wire::event_kind_str::REALM_ACTOR_CREATE =>
         {
             Ok(event)

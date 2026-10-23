@@ -67,7 +67,7 @@ fn validate_closure(
     let request = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
         arkret::EventAdmissionSubmission::new(prepared.begin.event().clone()),
     );
-    let RealmActorMaterialResult::Outcome {
+    let RealmActorMaterial::Outcome {
         target_request_digest,
         outcome:
             arkret::RealmActorOperationOutcome::Status {

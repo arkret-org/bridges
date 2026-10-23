@@ -1,7 +1,7 @@
 //! Durable recovery plans remain private until their begin Event is accepted.
 use arkret::{
     CommittedEventRef, CurrentSelector, RealmActorDeviceGenerationValue, RealmActorManagerValue,
-    RealmActorMaterialCurrentEntry, RealmActorMaterialOutcome, RealmActorMaterialResult,
+    RealmActorMaterial, RealmActorMaterialCurrentEntry, RealmActorMaterialOutcome,
     RealmActorRecoveryState, RealmActorRecoveryValue, TypedCurrentRow,
 };
 
@@ -41,7 +41,7 @@ pub(crate) fn row<'a>(
     cut: &'a RealmActorMaterialOutcome,
     selector: &CurrentSelector,
 ) -> Result<(&'a CurrentRevision, &'a Value, &'a CommittedEventRef)> {
-    let RealmActorMaterialResult::Current { entries } = &cut.result else {
+    let RealmActorMaterial::Current { entries } = &cut.result else {
         return Err(invalid("recovery requires a verified current cut"));
     };
     entries
@@ -259,7 +259,7 @@ impl ManagedActorAuthoringService {
             arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
                 arkret::EventAdmissionSubmission::new(prepared.begin.event().clone()),
             );
-        let arkret::RealmActorMaterialResult::Outcome {
+        let arkret::RealmActorMaterial::Outcome {
             target_request_digest,
             outcome:
                 arkret::RealmActorOperationOutcome::Recovery {

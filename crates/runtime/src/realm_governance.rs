@@ -164,7 +164,7 @@ impl RealmRoute {
         requester: &ActorId,
     ) -> Result<VerifiedRealmActorMaterial> {
         let commits = match &material.result {
-            arkret::RealmActorMaterialResult::Event { commit, .. } => vec![commit],
+            arkret::RealmActorMaterial::Event { commit, .. } => vec![commit],
             _ => vec![],
         };
         let keys = garth::historical_station_keys::fetch_historical_station_keys_for_commits(

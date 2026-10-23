@@ -1,6 +1,6 @@
 //! Local custody coordination for the existing manager-change protocol.
 //! Service replacement requires retained Applet data and keys before public coordination.
-use arkret::{CommittedEventFullView, CommittedEventRef, RealmActorMaterialResult};
+use arkret::{CommittedEventFullView, CommittedEventRef, RealmActorMaterial};
 
 use super::*;
 
@@ -849,7 +849,7 @@ impl ManagedActorAuthoringService {
                 "management current or creation belongs to another actor",
             ));
         }
-        let RealmActorMaterialResult::Event {
+        let RealmActorMaterial::Event {
             event: created,
             commit,
             ..
@@ -976,8 +976,7 @@ impl ManagedActorAuthoringService {
         verified: &arkret::identity::VerifiedRealmActorMaterial,
     ) -> Result<RealmCommit> {
         let (raw, mut incoming) = self.incoming(plan).await?;
-        let RealmActorMaterialResult::Event { event, commit, .. } = &verified.material().result
-        else {
+        let RealmActorMaterial::Event { event, commit, .. } = &verified.material().result else {
             return Err(invalid("manager acceptance original missing"));
         };
         if verified.material().actor_id != plan.actor_id

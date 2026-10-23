@@ -177,8 +177,7 @@ impl ManagedDeviceRuntime {
                 &ActorId::service(self.edge.service_actor_id().clone()),
             )
             .await?;
-        let arkret::RealmActorMaterialResult::Current { entries } = &verified.material().result
-        else {
+        let arkret::RealmActorMaterial::Current { entries } = &verified.material().result else {
             return Err(invalid("current control query returned another purpose"));
         };
         let row = |target: &arkret::CurrentSelector| -> Result<(

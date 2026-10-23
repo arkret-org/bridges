@@ -137,8 +137,7 @@ impl AppletConfigurationService {
                 &requester,
             )
             .await?;
-        let arkret::RealmActorMaterialResult::Current { entries } = &current.material().result
-        else {
+        let arkret::RealmActorMaterial::Current { entries } = &current.material().result else {
             return Err(invalid("configuration identity current is unavailable"));
         };
         let target = entries
@@ -166,7 +165,7 @@ impl AppletConfigurationService {
                 &requester,
             )
             .await?;
-        let arkret::RealmActorMaterialResult::Event {
+        let arkret::RealmActorMaterial::Event {
             event: accepted, ..
         } = &original.material().result
         else {
@@ -391,8 +390,7 @@ impl AppletConfigurationService {
                 &ActorId::service(intent.service_id.clone()),
             )
             .await?;
-        let arkret::RealmActorMaterialResult::Current { entries } = &material.material().result
-        else {
+        let arkret::RealmActorMaterial::Current { entries } = &material.material().result else {
             return Err(invalid("selected identity manager result is unavailable"));
         };
         let manager = entries

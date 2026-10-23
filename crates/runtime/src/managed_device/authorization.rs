@@ -28,7 +28,7 @@ impl ManagedDeviceRuntime {
                 &requester,
             )
             .await?;
-        let arkret::RealmActorMaterialResult::Outcome {
+        let arkret::RealmActorMaterial::Outcome {
             target_request_digest,
             outcome,
         } = &verified.material().result
@@ -69,7 +69,7 @@ impl ManagedDeviceRuntime {
                 &requester,
             )
             .await?;
-        let arkret::RealmActorMaterialResult::Event {
+        let arkret::RealmActorMaterial::Event {
             event,
             commit: original_commit,
             ..

@@ -1,5 +1,5 @@
 //! Local terminal evidence never invents an accepted or rejected protocol Event.
-use arkret::{CurrentSelector, RealmActorMaterialOutcome, RealmActorMaterialResult};
+use arkret::{CurrentSelector, RealmActorMaterial, RealmActorMaterialOutcome};
 
 use super::*;
 
@@ -48,7 +48,7 @@ impl ManagedActorAuthoringService {
             || current.requester_actor_id != outcome.requester_actor_id
             || !matches!(
                 &outcome.result,
-                RealmActorMaterialResult::Outcome {
+                RealmActorMaterial::Outcome {
                     outcome: arkret::RealmActorOperationOutcome::Status {
                         status: arkret::RealmActorOperationStatus::Unknown
                     },
@@ -105,7 +105,7 @@ impl ManagedActorAuthoringService {
         self.require_control_outcome(prepared, outcome)?;
         if !matches!(
             &outcome.result,
-            RealmActorMaterialResult::Outcome {
+            RealmActorMaterial::Outcome {
                 outcome: arkret::RealmActorOperationOutcome::Submitted(
                     arkret::AuthoritySubmitOutcome::Rejected { .. }
                 ),
@@ -137,7 +137,7 @@ impl ManagedActorAuthoringService {
         if prepared.outcome.is_some()
             || outcome.actor_id != prepared.actor_id
             || outcome.requester_actor_id != ActorId::service(self.edge.service_actor_id().clone())
-            || !matches!(&outcome.result, RealmActorMaterialResult::Outcome { target_request_digest, .. }
+            || !matches!(&outcome.result, RealmActorMaterial::Outcome { target_request_digest, .. }
                 if target_request_digest.as_str() == canonical_sha256(&request)?)
         {
             return Err(invalid(

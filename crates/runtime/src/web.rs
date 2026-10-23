@@ -1007,8 +1007,7 @@ async fn applet_actor(req: &mut Request, depot: &mut Depot, res: &mut Response) 
                 &arkret::ActorId::service(state.edge.service_actor_id().clone()),
             )
             .await?;
-        let arkret::RealmActorMaterialResult::Current { entries } = &material.material().result
-        else {
+        let arkret::RealmActorMaterial::Current { entries } = &material.material().result else {
             return Err(BridgeError::App("manager current unavailable".into()));
         };
         let manager = entries

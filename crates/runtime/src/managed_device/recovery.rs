@@ -63,8 +63,7 @@ impl ManagedDeviceRuntime {
             return Err(invalid("this recovery operation is permanently terminal"));
         }
         let outcome = self.recovery_outcome(actor, &prepared.begin).await?;
-        let arkret::RealmActorMaterialResult::Outcome { outcome: state, .. } =
-            &outcome.material().result
+        let arkret::RealmActorMaterial::Outcome { outcome: state, .. } = &outcome.material().result
         else {
             return Err(invalid("recovery begin returned another material purpose"));
         };
@@ -137,8 +136,7 @@ impl ManagedDeviceRuntime {
             .as_ref()
             .ok_or_else(|| invalid("accepted begin did not retain its reset"))?;
         let outcome = self.recovery_outcome(actor, reset).await?;
-        let arkret::RealmActorMaterialResult::Outcome { outcome, .. } = &outcome.material().result
-        else {
+        let arkret::RealmActorMaterial::Outcome { outcome, .. } = &outcome.material().result else {
             return Err(invalid("recovery reset returned another material purpose"));
         };
         let commit = match outcome {
@@ -175,7 +173,7 @@ impl ManagedDeviceRuntime {
         for prepared in self.authoring.pending_control_rotations(actor).await? {
             let current = self.recovery_current(actor).await?;
             let outcome = self.recovery_outcome(actor, &prepared.event).await?;
-            let arkret::RealmActorMaterialResult::Outcome { outcome: state, .. } =
+            let arkret::RealmActorMaterial::Outcome { outcome: state, .. } =
                 &outcome.material().result
             else {
                 return Err(invalid(
@@ -365,8 +363,7 @@ impl ManagedDeviceRuntime {
                 &ActorId::service(self.edge.service_actor_id().clone()),
             )
             .await?;
-        let arkret::RealmActorMaterialResult::Event { event, commit, .. } =
-            &result.material().result
+        let arkret::RealmActorMaterial::Event { event, commit, .. } = &result.material().result
         else {
             return Err(invalid("recovery original unavailable"));
         };

@@ -1,6 +1,6 @@
 //! Durable owner-gate changes use the existing control-signed Event contract.
 use arkret::{
-    RealmActorMaterialRequest, RealmActorMaterialResult, RealmActorOperationOutcome,
+    RealmActorMaterial, RealmActorMaterialRequest, RealmActorOperationOutcome,
     RealmActorOperationStatus, RealmActorStatusSetPayload, RealmActorStatusSetPayloadGate,
     RealmActorStatusSetPayloadState,
 };
@@ -62,7 +62,7 @@ impl OwnerStatusIntent {
         let Some(material) = &self.accepted else {
             return Ok(None);
         };
-        let RealmActorMaterialResult::Event { event, commit, .. } = &material.result else {
+        let RealmActorMaterial::Event { event, commit, .. } = &material.result else {
             return Err(invalid("owner receipt has no exact original"));
         };
         if event != self.event.event()
@@ -114,7 +114,7 @@ impl ManagedDeviceRuntime {
                     &ActorId::service(self.edge.service_actor_id().clone()),
                 )
                 .await?;
-            let RealmActorMaterialResult::Current { entries } = &material.material().result else {
+            let RealmActorMaterial::Current { entries } = &material.material().result else {
                 return Err(invalid("owner status query returned another purpose"));
             };
             let revision = entries
@@ -195,7 +195,7 @@ impl ManagedDeviceRuntime {
                     &requester,
                 )
                 .await?;
-            let RealmActorMaterialResult::Outcome {
+            let RealmActorMaterial::Outcome {
                 target_request_digest,
                 outcome,
             } = &outcome.material().result

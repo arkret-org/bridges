@@ -245,7 +245,7 @@ impl ManagedDeviceRuntime {
             hint.as_ref(),
         )?;
         if registration.is_none() {
-            let arkret::RealmActorMaterialResult::Event {
+            let arkret::RealmActorMaterial::Event {
                 producer_signer_fact,
                 ..
             } = &original.authoring_context.material.result

@@ -512,7 +512,7 @@ impl ArkretEdge {
         actor: &ActorId,
     ) -> Result<arkret::CommittedEventFullView> {
         let original = self.retained_managed_actor(actor)?;
-        let arkret::RealmActorMaterialResult::Event { event, commit, .. } =
+        let arkret::RealmActorMaterial::Event { event, commit, .. } =
             original.authoring_context.material.result
         else {
             return Err(BridgeError::Database(
@@ -545,7 +545,7 @@ impl ArkretEdge {
             &self.applet_id,
             &self.service_actor_id,
         )?;
-        let arkret::RealmActorMaterialResult::Event {
+        let arkret::RealmActorMaterial::Event {
             event,
             commit,
             producer_signer_fact,
@@ -1129,7 +1129,7 @@ fn retained_managed_actor(
     // Retained creation is historical evidence. Service changes preserve its signer.
     let candidate = crate::managed_authoring::creation_payload(
         match &body.authoring_context.material.result {
-            arkret::RealmActorMaterialResult::Event { event, .. } => event,
+            arkret::RealmActorMaterial::Event { event, .. } => event,
             _ => {
                 return Err(BridgeError::Database(
                     "retained creation is not an Event".into(),
@@ -1149,7 +1149,7 @@ fn retained_managed_actor(
         ));
     }
     let material = &body.authoring_context.material;
-    let arkret::RealmActorMaterialResult::Event {
+    let arkret::RealmActorMaterial::Event {
         event,
         commit,
         producer_signer_fact,
