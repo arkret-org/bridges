@@ -91,6 +91,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build image
+        id: image
         uses: docker/build-push-action@v6
         with:
           context: image-binaries
@@ -131,11 +132,11 @@ jobs:
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         shell: bash
         env:
-          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}/arkret-bridge-${{ matrix.bridge }}
         run: |
-          while IFS= read -r image; do
-            [ -n "$image" ] && cosign sign --yes "$image"
-          done <<< "$IMAGE_TAGS"
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          cosign sign --yes "${IMAGE_REPOSITORY}@${IMAGE_DIGEST}"
 
   build:
     name: Build (${{ matrix.target }})
