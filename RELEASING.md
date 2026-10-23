@@ -20,3 +20,7 @@ Linux x64/ARM64, Windows x64 and macOS ARM64. Linux builds target Ubuntu 24.04
 (glibc 2.39 or newer). Provider credentials and configuration are supplied by
 the operator. The container job also publishes Linux amd64/arm64 images for
 each bridge on a tag; it must succeed before the GitHub Release is created.
+
+Release containers reuse the checked and checksummed Linux binaries from the
+platform build jobs, with an Ubuntu 24.04 runtime matching their glibc baseline.
+They do not recompile Rust once per bridge or architecture.

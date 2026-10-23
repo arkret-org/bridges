@@ -18,6 +18,7 @@ jobs:
       contents: read
       id-token: write
       packages: write
+    needs: build
     name: Container images
     runs-on: ubuntu-latest
     strategy:
@@ -45,19 +46,23 @@ jobs:
         with:
           path: bridges
 
-      - name: Checkout Arkret Rust SDK
-        uses: actions/checkout@v6
+      - name: Download verified Linux binary bundles
+        uses: actions/download-artifact@v5
         with:
-          repository: ${{ github.repository_owner }}/arkret-rust-sdk
-          path: arkret-rust-sdk
-          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
+          pattern: release-*-unknown-linux-gnu
+          merge-multiple: true
+          path: native-bundles
 
-      - name: Checkout Garth
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.repository_owner }}/garth
-          path: garth
-          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
+      - name: Verify and extract native executables
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd native-bundles && sha256sum --check ./*.sha256)
+          mkdir -p native-binaries/amd64 native-binaries/arm64
+          tar -xzf native-bundles/bridges-*-x86_64-unknown-linux-gnu.tar.gz --strip-components=1 -C native-binaries/amd64
+          tar -xzf native-bundles/bridges-*-aarch64-unknown-linux-gnu.tar.gz --strip-components=1 -C native-binaries/arm64
+          test -x "native-binaries/amd64/arkret-bridge-${{ matrix.bridge }}"
+          test -x "native-binaries/arm64/arkret-bridge-${{ matrix.bridge }}"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -86,7 +91,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: bridges/Dockerfile
+          file: bridges/.ci/Dockerfile.release
           push: ${{ startsWith(github.ref, 'refs/tags/') }}
           build-args: |
             BRIDGE_BIN=arkret-bridge-${{ matrix.bridge }}
