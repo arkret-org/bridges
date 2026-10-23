@@ -10,3 +10,9 @@
 !arkret-rust-sdk/Cargo.lock
 !arkret-rust-sdk/crates
 !arkret-rust-sdk/crates/**
+!garth
+!garth/**
+garth/.git
+garth/target
+garth/artifacts
+garth/release-assets

@@ -2,11 +2,10 @@
 # Release binaries are built on Ubuntu 24.04; keep the runtime glibc compatible.
 FROM ubuntu:24.04
 ARG TARGETARCH
-ARG BRIDGE_BIN
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libssl3t64 libsqlite3-0 \
     && rm -rf /var/lib/apt/lists/*
-COPY --chmod=755 native-binaries/${TARGETARCH}/${BRIDGE_BIN} /usr/local/bin/arkret-bridge
+COPY --chmod=755 ${TARGETARCH}/arkret-bridge /usr/local/bin/arkret-bridge
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/arkret-bridge"]
 CMD ["--config", "/etc/arkret-bridge/config.yaml"]
