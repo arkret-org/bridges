@@ -534,9 +534,9 @@ fn service_description_router(edge: &crate::ArkretEdge) -> Result<Router> {
         edge.config().arkret.trust_domain.clone(),
     )?);
     let mut description = BridgeAppletHandler::new(edge, None, authority)?.describe()?;
-    description
-        .supported_operation_bundles
-        .push("ak.operation_bundle.applet_service.service_resolution.v1".to_owned());
+    description.supported_operation_bundles.push(
+        arkret_wire::OperationBundleDescriptor::APPLET_SERVICE_SERVICE_RESOLUTION_V1.to_owned(),
+    );
     description.supported_operation_bundles.sort();
     description.validate()?;
     Ok(Router::new().push(identity).push(

@@ -346,7 +346,9 @@ impl ManagedDeviceRuntime {
                 .await?;
             return Ok(());
         }
-        let child = self.terminal_child(device, "ak.circle.member.add").await?;
+        let child = self
+            .terminal_child(device, arkret_wire::CapabilityActionId::CIRCLE_MEMBER_ADD)
+            .await?;
         let body = serde_json::from_value(serde_json::json!({
             "circle_id": circle_id, "member_id": device.actor_id,
             "membership": "join", "parent_membership_revision": revision,
