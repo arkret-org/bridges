@@ -108,12 +108,20 @@ jobs:
           path: bridges
           format: cyclonedx-json
           output-file: sbom-arkret-bridge-${{ matrix.bridge }}.cyclonedx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Checksum SBOM
+        shell: bash
+        run: sha256sum "sbom-arkret-bridge-${{ matrix.bridge }}.cyclonedx.json" > "sbom-arkret-bridge-${{ matrix.bridge }}.cyclonedx.json.sha256"
 
       - name: Upload SBOM
         uses: actions/upload-artifact@v4
         with:
-          name: sbom-arkret-bridge-${{ matrix.bridge }}
-          path: sbom-arkret-bridge-${{ matrix.bridge }}.cyclonedx.json
+          name: release-sbom-arkret-bridge-${{ matrix.bridge }}
+          path: |
+            sbom-arkret-bridge-${{ matrix.bridge }}.cyclonedx.json
+            sbom-arkret-bridge-${{ matrix.bridge }}.cyclonedx.json.sha256
 
       - name: Install cosign
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
@@ -189,7 +197,7 @@ jobs:
       - name: Build release executables
         run: cargo build --release --locked --target ${{ matrix.target }} --workspace --bins
       - name: Package release
-        run: python .ci/package-release.py --target ${{ matrix.target }} --binary arkret-bridge-dingtalk --binary arkret-bridge-discord --binary arkret-bridge-feishu --binary arkret-bridge-googlechat --binary arkret-bridge-imessage --binary arkret-bridge-line --binary arkret-bridge-messenger --binary arkret-bridge-qq --binary arkret-bridge-slack --binary arkret-bridge-teams --binary arkret-bridge-telegram --binary arkret-bridge-wechat --binary arkret-bridge-whatsapp --binary arkret-bridge-zulip
+        run: python .ci/package-release.py --target ${{ matrix.target }} --binary arkret-bridge-dingtalk --binary arkret-bridge-discord --binary arkret-bridge-feishu --binary arkret-bridge-googlechat --binary arkret-bridge-imessage --binary arkret-bridge-line --binary arkret-bridge-messenger --binary arkret-bridge-qq --binary arkret-bridge-slack --binary arkret-bridge-teams --binary arkret-bridge-telegram --binary arkret-bridge-wechat --binary arkret-bridge-whatsapp --binary arkret-bridge-zulip --resource crates/dingtalk/config/config.sample.yaml=config/dingtalk.yaml --resource crates/discord/config/config.sample.yaml=config/discord.yaml --resource crates/feishu/config/config.sample.yaml=config/feishu.yaml --resource crates/googlechat/config/config.sample.yaml=config/googlechat.yaml --resource crates/imessage/config/config.sample.yaml=config/imessage.yaml --resource crates/line/config/config.sample.yaml=config/line.yaml --resource crates/messenger/config/config.sample.yaml=config/messenger.yaml --resource crates/qq/config/config.sample.yaml=config/qq.yaml --resource crates/slack/config/config.sample.yaml=config/slack.yaml --resource crates/teams/config/config.sample.yaml=config/teams.yaml --resource crates/telegram/config/config.sample.yaml=config/telegram.yaml --resource crates/wechat/config/config.sample.yaml=config/wechat.yaml --resource crates/whatsapp/config/config.sample.yaml=config/whatsapp.yaml --resource crates/zulip/config/config.sample.yaml=config/zulip.yaml
       - name: Upload release assets
         uses: actions/upload-artifact@v4
         with:

@@ -24,3 +24,7 @@ each bridge on a tag; it must succeed before the GitHub Release is created.
 Release containers reuse the checked and checksummed Linux binaries from the
 platform build jobs, with an Ubuntu 24.04 runtime matching their glibc baseline.
 They do not recompile Rust once per bridge or architecture.
+
+The archives include `config/<bridge>.yaml` provider configuration samples.
+Checksummed source SBOMs are attached by the final release job; image jobs do
+not independently modify GitHub releases.
