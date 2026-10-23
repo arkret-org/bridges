@@ -8,14 +8,16 @@ on:
 
 permissions:
   contents: read
-  id-token: write
-  packages: write
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   containers:
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
     name: Container images
     runs-on: ubuntu-latest
     strategy:
@@ -57,6 +59,9 @@ jobs:
           path: garth
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -87,6 +92,7 @@ jobs:
             BRIDGE_BIN=arkret-bridge-${{ matrix.bridge }}
           labels: ${{ steps.meta.outputs.labels }}
           tags: ${{ steps.meta.outputs.tags }}
+          platforms: linux/amd64,linux/arm64
           cache-from: type=gha,scope=${{ matrix.bridge }}
           cache-to: type=gha,mode=max,scope=${{ matrix.bridge }}
 
@@ -116,3 +122,95 @@ jobs:
           while IFS= read -r image; do
             [ -n "$image" ] && cosign sign --yes "$image"
           done <<< "$IMAGE_TAGS"
+
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: arkret-org/bridges
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            platform: linux
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            platform: windows
+          - os: macos-15
+            target: aarch64-apple-darwin
+            platform: macos
+    steps:
+      - name: Checkout bridges
+        uses: actions/checkout@v6
+        with:
+          path: arkret-org/bridges
+      - name: Checkout arkret-rust-sdk
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository_owner }}/arkret-rust-sdk
+          path: arkret-org/arkret-rust-sdk
+          ref: db0f5b44dec117b6b316690650efd0adb3a0f990
+          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
+      - name: Checkout garth
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository_owner }}/garth
+          path: arkret-org/garth
+          ref: 8cfc6775b84528ff75c1ce37e6f879bfb1bfaf33
+          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev cmake ninja-build nasm
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: arkret-org/bridges
+          key: release-${{ matrix.target }}
+      - name: Build release executables
+        run: cargo build --release --locked --target ${{ matrix.target }} --workspace --bins
+      - name: Package release
+        run: python .ci/package-release.py --target ${{ matrix.target }} --binary arkret-bridge-dingtalk --binary arkret-bridge-discord --binary arkret-bridge-feishu --binary arkret-bridge-googlechat --binary arkret-bridge-imessage --binary arkret-bridge-line --binary arkret-bridge-messenger --binary arkret-bridge-qq --binary arkret-bridge-slack --binary arkret-bridge-teams --binary arkret-bridge-telegram --binary arkret-bridge-wechat --binary arkret-bridge-whatsapp --binary arkret-bridge-zulip
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: arkret-org/bridges/release-assets/*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: [build, containers]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release-assets
+      - name: Verify release checksums
+        working-directory: release-assets
+        run: sha256sum --check ./*.sha256
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
+          files: release-assets/*
