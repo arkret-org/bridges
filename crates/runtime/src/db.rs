@@ -1,4 +1,4 @@
-//! Generic database access (diesel + r2d2). Defaults to sqlite; features can
+//! Generic database access through Horme query leases. Defaults to sqlite; features can
 //! switch to postgres.
 //!
 //! The core only owns the connection pool and a generic migration runner.
@@ -7,14 +7,22 @@
 //! them, via [`DatabaseManager::run_migrations`]. This keeps the core free of
 //! any chat/messaging assumptions so it can back non-social bridges too.
 
-use std::sync::Arc;
+use std::future::Future;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use arkret::{IdempotencyIdentity, TransactionClaim, TransactionIdempotencyStore};
 use arkret_models_integration::AppletTransactionOutcome;
-use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
-use diesel::r2d2::{ConnectionManager, Pool, PooledConnection};
+use diesel_async::SimpleAsyncConnection;
+#[cfg(feature = "sqlite")]
+use diesel_async::sync_connection_wrapper::SyncConnectionWrapper;
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
+#[cfg(any(feature = "sqlite", test))]
+use horme::GetConnection;
+use horme::pool::AsyncDieselConnectionManager;
+use horme::pool::deadpool::Pool;
+use horme::{OptionalExtension, RunQueryDsl};
 
 use crate::cache::{PersistedToken, TokenStore};
 use crate::config::DatabaseConfig;
@@ -30,99 +38,210 @@ use crate::idempotency::{
 /// SQLite and PostgreSQL, so every backend embeds the same migration.
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
-/// The backend connection type (selected by feature, exactly one).
+/// Synchronous backend used for migrations and wrapped async execution.
 #[cfg(feature = "sqlite")]
 pub type DbConnection = diesel::SqliteConnection;
 #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
 pub type DbConnection = diesel::PgConnection;
 
-pub type DbPool = Pool<ConnectionManager<DbConnection>>;
-pub type DbConn = PooledConnection<ConnectionManager<DbConnection>>;
+#[cfg(feature = "sqlite")]
+type AsyncDbConnection = SyncConnectionWrapper<DbConnection>;
+#[cfg(all(feature = "postgres", not(feature = "sqlite")))]
+type AsyncDbConnection = diesel_async::AsyncPgConnection;
+pub type DbPool = Pool<AsyncDbConnection>;
+pub type DbConn = horme::Db<DbPool>;
 
-/// Generic connection pool wrapper.
+/// Pool and executor for the SDK's synchronous persistence contracts.
 pub struct DatabaseManager {
     pool: DbPool,
+    runtime: &'static tokio::runtime::Runtime,
+    #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
+    database_url: String,
 }
 
+static DATABASE_RUNTIME: OnceLock<std::io::Result<tokio::runtime::Runtime>> = OnceLock::new();
+
 impl DatabaseManager {
-    /// Build the connection pool from the configuration. No schema is created
-    /// here — call [`DatabaseManager::run_migrations`] from each layer for its
-    /// own tables.
+    /// Build an async pool without leasing a connection.
     pub fn connect(cfg: &DatabaseConfig) -> Result<Self> {
+        let runtime = DATABASE_RUNTIME
+            .get_or_init(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .thread_name("bridge-database")
+                    .enable_all()
+                    .build()
+            })
+            .as_ref()
+            .map_err(|error| BridgeError::Database(error.to_string()))?;
         let url = normalize_url(&cfg.url);
-        #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
-        let url = bounded_postgres_url(&url)?;
-        let manager = ConnectionManager::<DbConnection>::new(url);
-        let pool = Pool::builder()
-            .max_size(cfg.pool_size)
-            .connection_timeout(std::time::Duration::from_secs(5))
-            .connection_customizer(Box::new(SessionLimits))
-            .build(manager)
-            .map_err(|e| BridgeError::Database(e.to_string()))?;
-        Ok(Self { pool })
+        let manager = AsyncDieselConnectionManager::<AsyncDbConnection>::new(url.clone());
+        let budget = Duration::from_secs(5);
+        let pool = Pool::builder(manager)
+            .max_size(cfg.pool_size as usize)
+            .wait_timeout(Some(budget))
+            .create_timeout(Some(budget))
+            .recycle_timeout(Some(budget))
+            .runtime(deadpool::Runtime::Tokio1)
+            .post_create(horme::pool::deadpool::Hook::async_fn(|conn: &mut AsyncDbConnection, _| Box::pin(async move {
+                #[cfg(feature = "sqlite")]
+                let sql = "PRAGMA busy_timeout = 5000;";
+                #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
+                let sql = "SET statement_timeout = '30s'; SET lock_timeout = '5s'; SET idle_in_transaction_session_timeout = '60s';";
+                conn.batch_execute(sql).await.map_err(|error| {
+                    horme::pool::deadpool::HookError::Backend(diesel_async::pooled_connection::PoolError::QueryError(error))
+                })?;
+                Ok(())
+            })))
+            .build()
+            .map_err(|error| BridgeError::Database(error.to_string()))?;
+        Ok(Self {
+            pool,
+            runtime,
+            #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
+            database_url: url,
+        })
     }
 
-    pub fn conn(&self) -> Result<DbConn> {
-        self.pool.get().map_err(Into::into)
+    /// Each buffered query leases independently from this handle.
+    pub fn queries(&self) -> DbConn {
+        horme::Db::new(self.pool.clone())
     }
 
-    /// Run the embedded, versioned migrations for one layer's tables. Each
-    /// layer passes its own [`EmbeddedMigrations`] (built with
-    /// [`embed_migrations!`] against its per-backend migration directory).
-    /// Already-applied migrations are skipped via `__diesel_schema_migrations`,
-    /// so this is safe to call once per store at startup.
+    /// Drive a synchronous persistence operation without nesting Tokio runtimes.
+    /// Async bridge callers already dispatch these contracts via `run_blocking`.
+    pub fn block_on<F: Future + Send>(&self, future: F) -> F::Output
+    where
+        F::Output: Send,
+    {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| self.runtime.block_on(future))
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+        } else {
+            self.runtime.block_on(future)
+        }
+    }
+
+    /// Apply the caller's migrations on a deliberately scoped physical lease.
     pub fn run_migrations(&self, migrations: EmbeddedMigrations) -> Result<()> {
-        let mut conn = self.conn()?;
-        conn.run_pending_migrations(migrations)
-            .map_err(|e| BridgeError::Database(e.to_string()))?;
-        Ok(())
+        #[cfg(feature = "sqlite")]
+        {
+            self.block_on(async {
+                let mut db = self.queries();
+                let mut lease = db.get_mut_conn().await?;
+                lease
+                    .spawn_blocking(move |connection| {
+                        connection
+                            .run_pending_migrations(migrations)
+                            .map(|_| ())
+                            .map_err(diesel::result::Error::QueryBuilderError)
+                    })
+                    .await?;
+                Ok(())
+            })
+        }
+        #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
+        {
+            let url = bounded_postgres_url(&self.database_url)?;
+            self.block_on(async {
+                tokio::task::spawn_blocking(move || {
+                    use diesel::Connection;
+                    let mut connection = diesel::PgConnection::establish(&url)
+                        .map_err(|error| BridgeError::Database(error.to_string()))?;
+                    connection
+                        .run_pending_migrations(migrations)
+                        .map(|_| ())
+                        .map_err(|error| BridgeError::Database(error.to_string()))
+                })
+                .await
+                .map_err(|error| BridgeError::Database(error.to_string()))?
+            })
+        }
     }
 
     pub fn cleanup_expired_runtime_rows(&self) -> Result<usize> {
-        let mut conn = self.conn()?;
-        let now = now_ts();
-        conn.transaction::<_, diesel::result::Error, _>(|conn| {
-            let mut deleted = 0;
-            deleted += diesel::delete(
-                idempotency_schema::transaction_idempotency::table
-                    .filter(idempotency_schema::transaction_idempotency::expires_at.le(now)),
-            )
-            .execute(conn)?;
-            deleted += diesel::delete(
-                idempotency_schema::event_dedup::table
-                    .filter(idempotency_schema::event_dedup::expires_at.le(now)),
-            )
-            .execute(conn)?;
-            deleted += diesel::delete(
-                idempotency_schema::webhook_replay_guard::table
-                    .filter(idempotency_schema::webhook_replay_guard::expires_at.le(now)),
-            )
-            .execute(conn)?;
-            deleted += diesel::delete(
-                idempotency_schema::token_cache::table
-                    .filter(idempotency_schema::token_cache::expires_at.le(now)),
-            )
-            .execute(conn)?;
-            Ok(deleted)
+        self.block_on(async {
+            let mut db = self.queries();
+            let now = now_ts();
+            db.transaction(async |conn| {
+                let mut deleted = 0;
+                deleted += diesel::delete(
+                    idempotency_schema::transaction_idempotency::table
+                        .filter(idempotency_schema::transaction_idempotency::expires_at.le(now)),
+                )
+                .execute(conn)
+                .await?;
+                deleted += diesel::delete(
+                    idempotency_schema::event_dedup::table
+                        .filter(idempotency_schema::event_dedup::expires_at.le(now)),
+                )
+                .execute(conn)
+                .await?;
+                deleted += diesel::delete(
+                    idempotency_schema::webhook_replay_guard::table
+                        .filter(idempotency_schema::webhook_replay_guard::expires_at.le(now)),
+                )
+                .execute(conn)
+                .await?;
+                deleted += diesel::delete(
+                    idempotency_schema::token_cache::table
+                        .filter(idempotency_schema::token_cache::expires_at.le(now)),
+                )
+                .execute(conn)
+                .await?;
+                Ok::<_, horme::Error>(deleted)
+            })
+            .await
+            .map_err(Into::into)
         })
-        .map_err(Into::into)
     }
 }
 
-#[derive(Debug)]
-struct SessionLimits;
+#[cfg(all(test, feature = "postgres", not(feature = "sqlite")))]
+mod wait_bound_tests {
+    use super::*;
 
-impl diesel::r2d2::CustomizeConnection<DbConnection, diesel::r2d2::Error> for SessionLimits {
-    fn on_acquire(&self, conn: &mut DbConnection) -> std::result::Result<(), diesel::r2d2::Error> {
-        #[cfg(feature = "sqlite")]
-        let sql = "PRAGMA busy_timeout = 5000;";
-        #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
-        let sql = "SET statement_timeout = '30s'; SET lock_timeout = '5s'; SET idle_in_transaction_session_timeout = '60s';";
-        conn.batch_execute(sql)
-            .map_err(diesel::r2d2::Error::QueryError)
+    #[test]
+    fn postgres_sessions_bound_lock_wait_and_preserve_pool_capacity() {
+        let database_url =
+            std::env::var("BRIDGES_TEST_DATABASE_URL").expect("isolated test database required");
+        let db = DatabaseManager::connect(&DatabaseConfig {
+            url: database_url,
+            pool_size: 2,
+        })
+        .unwrap();
+        db.block_on(async {
+        let mut first_db = db.queries();
+        let mut second_db = db.queries();
+        let mut first = first_db.get_mut_conn().await.unwrap();
+        let mut second = second_db.get_mut_conn().await.unwrap();
+        let bounded: bool = diesel::select(diesel::dsl::sql::<diesel::sql_types::Bool>(
+            "current_setting('statement_timeout')::interval = interval '30 seconds' AND current_setting('lock_timeout')::interval = interval '5 seconds'",
+        ))
+        .get_result(&mut *second).await
+        .unwrap();
+        assert!(bounded);
+        first
+            .batch_execute("BEGIN; SELECT pg_advisory_xact_lock(876543210);")
+            .await
+            .unwrap();
+        let start = std::time::Instant::now();
+        let result = second.batch_execute("SELECT pg_advisory_xact_lock(876543210)").await;
+        first.batch_execute("ROLLBACK").await.unwrap();
+        assert!(result.is_err());
+        assert!(start.elapsed() < std::time::Duration::from_secs(7));
+        drop(second);
+        assert!(second_db.get_mut_conn().await.is_ok());
+        });
     }
 }
 
+/// Normalize `sqlite://path` into the plain path diesel sqlite accepts; other
+/// URLs are returned unchanged.
 #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
 fn bounded_postgres_url(raw: &str) -> Result<String> {
     let mut url = url::Url::parse(raw)
@@ -154,42 +273,6 @@ fn bounded_postgres_url(raw: &str) -> Result<String> {
     Ok(url.into())
 }
 
-#[cfg(all(test, feature = "postgres", not(feature = "sqlite")))]
-mod wait_bound_tests {
-    use super::*;
-
-    #[test]
-    fn postgres_sessions_bound_lock_wait_and_preserve_pool_capacity() {
-        let database_url =
-            std::env::var("BRIDGES_TEST_DATABASE_URL").expect("isolated test database required");
-        let db = DatabaseManager::connect(&DatabaseConfig {
-            url: database_url,
-            pool_size: 2,
-        })
-        .unwrap();
-        let mut first = db.conn().unwrap();
-        let mut second = db.conn().unwrap();
-        let bounded: bool = diesel::select(diesel::dsl::sql::<diesel::sql_types::Bool>(
-            "current_setting('statement_timeout')::interval = interval '30 seconds' AND current_setting('lock_timeout')::interval = interval '5 seconds'",
-        ))
-        .get_result(&mut second)
-        .unwrap();
-        assert!(bounded);
-        first
-            .batch_execute("BEGIN; SELECT pg_advisory_xact_lock(876543210);")
-            .unwrap();
-        let start = std::time::Instant::now();
-        let result = second.batch_execute("SELECT pg_advisory_xact_lock(876543210)");
-        first.batch_execute("ROLLBACK").unwrap();
-        assert!(result.is_err());
-        assert!(start.elapsed() < std::time::Duration::from_secs(7));
-        drop(second);
-        assert!(db.conn().is_ok());
-    }
-}
-
-/// Normalize `sqlite://path` into the plain path diesel sqlite accepts; other
-/// URLs are returned unchanged.
 fn normalize_url(url: &str) -> String {
     if let Some(rest) = url.strip_prefix("sqlite://") {
         rest.to_owned()
@@ -317,104 +400,111 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
         hash: &str,
         delivery_authentication_record_digest: &str,
     ) -> Result<TransactionClaim<AppletTransactionOutcome>> {
-        use idempotency_schema::transaction_idempotency::dsl;
+        self.db.block_on(async {
+            use idempotency_schema::transaction_idempotency::dsl;
 
-        let mut conn = self.db.conn()?;
-        let now = now_ts();
-        // Two attempts: a lost insert race re-reads the winner's row once.
-        for _ in 0..2 {
-            let row = dsl::transaction_idempotency
-                .filter(dsl::operation_id.eq(&replay.operation_id))
-                .filter(dsl::direction.eq(replay.direction.as_str()))
-                .filter(dsl::source_id.eq(replay.source_id.as_str()))
-                .filter(dsl::destination_id.eq(replay.destination_id.as_str()))
-                .filter(dsl::idempotency_key.eq(&replay.idempotency_key))
-                .select((
-                    dsl::body_hash,
-                    dsl::delivery_authentication_record_digest,
-                    dsl::status,
-                    dsl::outcome,
-                    dsl::created_at,
-                ))
-                .first::<TransactionIdempotencyRow>(&mut conn)
-                .optional()?;
-            match row {
-                Some(row)
-                    if row.body_hash != hash
-                        || row.delivery_authentication_record_digest
-                            != delivery_authentication_record_digest =>
-                {
-                    return Ok(TransactionClaim::Conflict);
-                }
-                Some(row) if row.status == STATUS_COMPLETED => {
-                    let outcome = row.outcome.ok_or_else(|| {
-                        BridgeError::Database("completed idempotency record has no outcome".into())
-                    })?;
-                    let response: AppletTransactionOutcome = serde_json::from_str(&outcome)
-                        .map_err(|err| {
-                            BridgeError::Database(format!(
-                                "recorded transaction outcome is unreadable: {err}"
-                            ))
-                        })?;
-                    return Ok(TransactionClaim::Duplicate(response));
-                }
-                Some(row) => {
-                    // Pending with the same hash. A claim older than the grace
-                    // window is presumed crashed mid-flight and taken over;
-                    // otherwise ask the server to retry shortly.
-                    if row.created_at + PENDING_TAKEOVER_GRACE_SECS <= now {
-                        let claimed = diesel::update(
-                            dsl::transaction_idempotency
-                                .filter(dsl::operation_id.eq(&replay.operation_id))
-                                .filter(dsl::direction.eq(replay.direction.as_str()))
-                                .filter(dsl::source_id.eq(replay.source_id.as_str()))
-                                .filter(dsl::destination_id.eq(replay.destination_id.as_str()))
-                                .filter(dsl::idempotency_key.eq(&replay.idempotency_key))
-                                .filter(dsl::status.eq(STATUS_PENDING))
-                                .filter(dsl::created_at.eq(row.created_at)),
-                        )
-                        .set((
-                            dsl::created_at.eq(now),
-                            dsl::expires_at.eq(now + IDEMPOTENCY_TTL_SECS),
-                        ))
-                        .execute(&mut conn)?;
-                        if claimed == 1 {
-                            return Ok(TransactionClaim::Claimed);
-                        }
-                        continue;
+            let mut conn = self.db.queries();
+            let now = now_ts();
+            // Two attempts: a lost insert race re-reads the winner's row once.
+            for _ in 0..2 {
+                let row = dsl::transaction_idempotency
+                    .filter(dsl::operation_id.eq(&replay.operation_id))
+                    .filter(dsl::direction.eq(replay.direction.as_str()))
+                    .filter(dsl::source_id.eq(replay.source_id.as_str()))
+                    .filter(dsl::destination_id.eq(replay.destination_id.as_str()))
+                    .filter(dsl::idempotency_key.eq(&replay.idempotency_key))
+                    .select((
+                        dsl::body_hash,
+                        dsl::delivery_authentication_record_digest,
+                        dsl::status,
+                        dsl::outcome,
+                        dsl::created_at,
+                    ))
+                    .first::<TransactionIdempotencyRow>(&mut conn)
+                    .await
+                    .optional()?;
+                match row {
+                    Some(row)
+                        if row.body_hash != hash
+                            || row.delivery_authentication_record_digest
+                                != delivery_authentication_record_digest =>
+                    {
+                        return Ok(TransactionClaim::Conflict);
                     }
-                    return Ok(TransactionClaim::Pending);
-                }
-                None => {
-                    let inserted = diesel::insert_into(dsl::transaction_idempotency)
-                        .values((
-                            dsl::operation_id.eq(&replay.operation_id),
-                            dsl::direction.eq(replay.direction.as_str()),
-                            dsl::source_id.eq(replay.source_id.as_str()),
-                            dsl::destination_id.eq(replay.destination_id.as_str()),
-                            dsl::idempotency_key.eq(&replay.idempotency_key),
-                            dsl::body_hash.eq(hash),
-                            dsl::delivery_authentication_record_digest
-                                .eq(delivery_authentication_record_digest),
-                            dsl::status.eq(STATUS_PENDING),
-                            dsl::outcome.eq(None::<String>),
-                            dsl::created_at.eq(now),
-                            dsl::expires_at.eq(now + IDEMPOTENCY_TTL_SECS),
-                        ))
-                        .execute(&mut conn);
-                    match inserted {
-                        Ok(_) => return Ok(TransactionClaim::Claimed),
-                        Err(diesel::result::Error::DatabaseError(
-                            diesel::result::DatabaseErrorKind::UniqueViolation,
-                            _,
-                        )) => continue,
-                        Err(err) => return Err(err.into()),
+                    Some(row) if row.status == STATUS_COMPLETED => {
+                        let outcome = row.outcome.ok_or_else(|| {
+                            BridgeError::Database(
+                                "completed idempotency record has no outcome".into(),
+                            )
+                        })?;
+                        let response: AppletTransactionOutcome = serde_json::from_str(&outcome)
+                            .map_err(|err| {
+                                BridgeError::Database(format!(
+                                    "recorded transaction outcome is unreadable: {err}"
+                                ))
+                            })?;
+                        return Ok(TransactionClaim::Duplicate(response));
+                    }
+                    Some(row) => {
+                        // Pending with the same hash. A claim older than the grace
+                        // window is presumed crashed mid-flight and taken over;
+                        // otherwise ask the server to retry shortly.
+                        if row.created_at + PENDING_TAKEOVER_GRACE_SECS <= now {
+                            let claimed = diesel::update(
+                                dsl::transaction_idempotency
+                                    .filter(dsl::operation_id.eq(&replay.operation_id))
+                                    .filter(dsl::direction.eq(replay.direction.as_str()))
+                                    .filter(dsl::source_id.eq(replay.source_id.as_str()))
+                                    .filter(dsl::destination_id.eq(replay.destination_id.as_str()))
+                                    .filter(dsl::idempotency_key.eq(&replay.idempotency_key))
+                                    .filter(dsl::status.eq(STATUS_PENDING))
+                                    .filter(dsl::created_at.eq(row.created_at)),
+                            )
+                            .set((
+                                dsl::created_at.eq(now),
+                                dsl::expires_at.eq(now + IDEMPOTENCY_TTL_SECS),
+                            ))
+                            .execute(&mut conn)
+                            .await?;
+                            if claimed == 1 {
+                                return Ok(TransactionClaim::Claimed);
+                            }
+                            continue;
+                        }
+                        return Ok(TransactionClaim::Pending);
+                    }
+                    None => {
+                        let inserted = diesel::insert_into(dsl::transaction_idempotency)
+                            .values((
+                                dsl::operation_id.eq(&replay.operation_id),
+                                dsl::direction.eq(replay.direction.as_str()),
+                                dsl::source_id.eq(replay.source_id.as_str()),
+                                dsl::destination_id.eq(replay.destination_id.as_str()),
+                                dsl::idempotency_key.eq(&replay.idempotency_key),
+                                dsl::body_hash.eq(hash),
+                                dsl::delivery_authentication_record_digest
+                                    .eq(delivery_authentication_record_digest),
+                                dsl::status.eq(STATUS_PENDING),
+                                dsl::outcome.eq(None::<String>),
+                                dsl::created_at.eq(now),
+                                dsl::expires_at.eq(now + IDEMPOTENCY_TTL_SECS),
+                            ))
+                            .execute(&mut conn)
+                            .await;
+                        match inserted {
+                            Ok(_) => return Ok(TransactionClaim::Claimed),
+                            Err(horme::Error::Query(diesel::result::Error::DatabaseError(
+                                diesel::result::DatabaseErrorKind::UniqueViolation,
+                                _,
+                            ))) => continue,
+                            Err(err) => return Err(err.into()),
+                        }
                     }
                 }
             }
-        }
-        // Lost the insert race twice in a row; let the server retry.
-        Ok(TransactionClaim::Pending)
+            // Lost the insert race twice in a row; let the server retry.
+            Ok(TransactionClaim::Pending)
+        })
     }
 
     fn record(
@@ -424,36 +514,39 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
         delivery_authentication_record_digest: &str,
         response: &AppletTransactionOutcome,
     ) -> Result<()> {
-        use idempotency_schema::transaction_idempotency::dsl;
+        self.db.block_on(async {
+            use idempotency_schema::transaction_idempotency::dsl;
 
-        let outcome = serde_json::to_string(response)
-            .map_err(|err| BridgeError::Database(format!("serialize outcome: {err}")))?;
-        let mut conn = self.db.conn()?;
-        let updated = diesel::update(
-            dsl::transaction_idempotency
-                .filter(dsl::operation_id.eq(&replay.operation_id))
-                .filter(dsl::direction.eq(replay.direction.as_str()))
-                .filter(dsl::source_id.eq(replay.source_id.as_str()))
-                .filter(dsl::destination_id.eq(replay.destination_id.as_str()))
-                .filter(dsl::idempotency_key.eq(&replay.idempotency_key))
-                .filter(dsl::body_hash.eq(hash))
-                .filter(
-                    dsl::delivery_authentication_record_digest
-                        .eq(delivery_authentication_record_digest),
-                ),
-        )
-        .set((
-            dsl::status.eq(STATUS_COMPLETED),
-            dsl::outcome.eq(Some(outcome)),
-            dsl::expires_at.eq(now_ts() + IDEMPOTENCY_TTL_SECS),
-        ))
-        .execute(&mut conn)?;
-        if updated != 1 {
-            return Err(BridgeError::Database(
-                "idempotency outcome did not update the exact pending claim".to_owned(),
-            ));
-        }
-        Ok(())
+            let outcome = serde_json::to_string(response)
+                .map_err(|err| BridgeError::Database(format!("serialize outcome: {err}")))?;
+            let mut conn = self.db.queries();
+            let updated = diesel::update(
+                dsl::transaction_idempotency
+                    .filter(dsl::operation_id.eq(&replay.operation_id))
+                    .filter(dsl::direction.eq(replay.direction.as_str()))
+                    .filter(dsl::source_id.eq(replay.source_id.as_str()))
+                    .filter(dsl::destination_id.eq(replay.destination_id.as_str()))
+                    .filter(dsl::idempotency_key.eq(&replay.idempotency_key))
+                    .filter(dsl::body_hash.eq(hash))
+                    .filter(
+                        dsl::delivery_authentication_record_digest
+                            .eq(delivery_authentication_record_digest),
+                    ),
+            )
+            .set((
+                dsl::status.eq(STATUS_COMPLETED),
+                dsl::outcome.eq(Some(outcome)),
+                dsl::expires_at.eq(now_ts() + IDEMPOTENCY_TTL_SECS),
+            ))
+            .execute(&mut conn)
+            .await?;
+            if updated != 1 {
+                return Err(BridgeError::Database(
+                    "idempotency outcome did not update the exact pending claim".to_owned(),
+                ));
+            }
+            Ok(())
+        })
     }
 
     fn release(
@@ -462,25 +555,28 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
         hash: &str,
         delivery_authentication_record_digest: &str,
     ) -> Result<()> {
-        use idempotency_schema::transaction_idempotency::dsl;
+        self.db.block_on(async {
+            use idempotency_schema::transaction_idempotency::dsl;
 
-        let mut conn = self.db.conn()?;
-        diesel::delete(
-            dsl::transaction_idempotency
-                .filter(dsl::operation_id.eq(&replay.operation_id))
-                .filter(dsl::direction.eq(replay.direction.as_str()))
-                .filter(dsl::source_id.eq(replay.source_id.as_str()))
-                .filter(dsl::destination_id.eq(replay.destination_id.as_str()))
-                .filter(dsl::idempotency_key.eq(&replay.idempotency_key))
-                .filter(dsl::body_hash.eq(hash))
-                .filter(
-                    dsl::delivery_authentication_record_digest
-                        .eq(delivery_authentication_record_digest),
-                )
-                .filter(dsl::status.eq(STATUS_PENDING)),
-        )
-        .execute(&mut conn)?;
-        Ok(())
+            let mut conn = self.db.queries();
+            diesel::delete(
+                dsl::transaction_idempotency
+                    .filter(dsl::operation_id.eq(&replay.operation_id))
+                    .filter(dsl::direction.eq(replay.direction.as_str()))
+                    .filter(dsl::source_id.eq(replay.source_id.as_str()))
+                    .filter(dsl::destination_id.eq(replay.destination_id.as_str()))
+                    .filter(dsl::idempotency_key.eq(&replay.idempotency_key))
+                    .filter(dsl::body_hash.eq(hash))
+                    .filter(
+                        dsl::delivery_authentication_record_digest
+                            .eq(delivery_authentication_record_digest),
+                    )
+                    .filter(dsl::status.eq(STATUS_PENDING)),
+            )
+            .execute(&mut conn)
+            .await?;
+            Ok(())
+        })
     }
 }
 
@@ -502,54 +598,59 @@ impl DbEventDedupStore {
 
 impl EventDedupStore for DbEventDedupStore {
     fn check_and_record(&self, event_id: &str, fingerprint: i64) -> Result<DedupVerdict> {
-        use idempotency_schema::event_dedup::dsl;
+        self.db.block_on(async {
+            use idempotency_schema::event_dedup::dsl;
 
-        let mut conn = self.db.conn()?;
-        let now = now_ts();
-        for _ in 0..2 {
-            let seen = dsl::event_dedup
-                .filter(dsl::event_id.eq(event_id))
-                .select(dsl::fingerprint)
-                .first::<i64>(&mut conn)
-                .optional()?;
-            match seen {
-                Some(prev) if prev == fingerprint => {
-                    return Ok(DedupVerdict::DuplicateSameContent);
-                }
-                Some(_) => return Ok(DedupVerdict::DuplicateConflict),
-                None => {
-                    let inserted = diesel::insert_into(dsl::event_dedup)
-                        .values((
-                            dsl::event_id.eq(event_id),
-                            dsl::fingerprint.eq(fingerprint),
-                            dsl::expires_at.eq(now + IDEMPOTENCY_TTL_SECS),
-                        ))
-                        .execute(&mut conn);
-                    match inserted {
-                        Ok(_) => return Ok(DedupVerdict::Fresh),
-                        Err(diesel::result::Error::DatabaseError(
-                            diesel::result::DatabaseErrorKind::UniqueViolation,
-                            _,
-                        )) => continue,
-                        Err(err) => return Err(err.into()),
+            let mut conn = self.db.queries();
+            let now = now_ts();
+            for _ in 0..2 {
+                let seen = dsl::event_dedup
+                    .filter(dsl::event_id.eq(event_id))
+                    .select(dsl::fingerprint)
+                    .first::<i64>(&mut conn)
+                    .await
+                    .optional()?;
+                match seen {
+                    Some(prev) if prev == fingerprint => {
+                        return Ok(DedupVerdict::DuplicateSameContent);
+                    }
+                    Some(_) => return Ok(DedupVerdict::DuplicateConflict),
+                    None => {
+                        let inserted = diesel::insert_into(dsl::event_dedup)
+                            .values((
+                                dsl::event_id.eq(event_id),
+                                dsl::fingerprint.eq(fingerprint),
+                                dsl::expires_at.eq(now + IDEMPOTENCY_TTL_SECS),
+                            ))
+                            .execute(&mut conn)
+                            .await;
+                        match inserted {
+                            Ok(_) => return Ok(DedupVerdict::Fresh),
+                            Err(horme::Error::Query(diesel::result::Error::DatabaseError(
+                                diesel::result::DatabaseErrorKind::UniqueViolation,
+                                _,
+                            ))) => continue,
+                            Err(err) => return Err(err.into()),
+                        }
                     }
                 }
             }
-        }
-        // Lost the insert race twice: another writer recorded the id; treat the
-        // mismatch case conservatively as a same-content duplicate is wrong, so
-        // re-read once more and fall back to conflict on persistent absence.
-        let seen = {
-            use idempotency_schema::event_dedup::dsl;
-            dsl::event_dedup
-                .filter(dsl::event_id.eq(event_id))
-                .select(dsl::fingerprint)
-                .first::<i64>(&mut conn)
-                .optional()?
-        };
-        Ok(match seen {
-            Some(prev) if prev == fingerprint => DedupVerdict::DuplicateSameContent,
-            _ => DedupVerdict::DuplicateConflict,
+            // Lost the insert race twice: another writer recorded the id; treat the
+            // mismatch case conservatively as a same-content duplicate is wrong, so
+            // re-read once more and fall back to conflict on persistent absence.
+            let seen = {
+                use idempotency_schema::event_dedup::dsl;
+                dsl::event_dedup
+                    .filter(dsl::event_id.eq(event_id))
+                    .select(dsl::fingerprint)
+                    .first::<i64>(&mut conn)
+                    .await
+                    .optional()?
+            };
+            Ok(match seen {
+                Some(prev) if prev == fingerprint => DedupVerdict::DuplicateSameContent,
+                _ => DedupVerdict::DuplicateConflict,
+            })
         })
     }
 }
@@ -573,51 +674,61 @@ impl DbReplayGuardStore {
 
 impl ReplayGuardStore for DbReplayGuardStore {
     fn contains(&self, key: &str) -> Result<bool> {
-        use idempotency_schema::webhook_replay_guard::dsl;
+        self.db.block_on(async {
+            use idempotency_schema::webhook_replay_guard::dsl;
 
-        let mut conn = self.db.conn()?;
-        let seen = dsl::webhook_replay_guard
-            .filter(dsl::replay_key.eq(key))
-            .filter(dsl::expires_at.gt(now_ts()))
-            .select(dsl::replay_key)
-            .first::<String>(&mut conn)
-            .optional()?;
-        Ok(seen.is_some())
+            let mut conn = self.db.queries();
+            let seen = dsl::webhook_replay_guard
+                .filter(dsl::replay_key.eq(key))
+                .filter(dsl::expires_at.gt(now_ts()))
+                .select(dsl::replay_key)
+                .first::<String>(&mut conn)
+                .await
+                .optional()?;
+            Ok(seen.is_some())
+        })
     }
 
     fn check_and_record(&self, key: &str, ttl_secs: i64) -> Result<ReplayGuardVerdict> {
-        use idempotency_schema::webhook_replay_guard::dsl;
+        self.db.block_on(async {
+            use idempotency_schema::webhook_replay_guard::dsl;
 
-        let mut conn = self.db.conn()?;
-        let now = now_ts();
-        diesel::delete(
-            dsl::webhook_replay_guard
-                .filter(dsl::replay_key.eq(key))
-                .filter(dsl::expires_at.le(now)),
-        )
-        .execute(&mut conn)?;
-        let inserted = diesel::insert_into(dsl::webhook_replay_guard)
-            .values((dsl::replay_key.eq(key), dsl::expires_at.eq(now + ttl_secs)))
-            .execute(&mut conn);
-        match inserted {
-            Ok(_) => Ok(ReplayGuardVerdict::Fresh),
-            // A concurrent writer (another replica) won the insert race, or the
-            // key is already present: either way this delivery is a replay.
-            Err(diesel::result::Error::DatabaseError(
-                diesel::result::DatabaseErrorKind::UniqueViolation,
-                _,
-            )) => Ok(ReplayGuardVerdict::Replay),
-            Err(err) => Err(err.into()),
-        }
+            let mut conn = self.db.queries();
+            let now = now_ts();
+            diesel::delete(
+                dsl::webhook_replay_guard
+                    .filter(dsl::replay_key.eq(key))
+                    .filter(dsl::expires_at.le(now)),
+            )
+            .execute(&mut conn)
+            .await?;
+            let inserted = diesel::insert_into(dsl::webhook_replay_guard)
+                .values((dsl::replay_key.eq(key), dsl::expires_at.eq(now + ttl_secs)))
+                .execute(&mut conn)
+                .await;
+            match inserted {
+                Ok(_) => Ok(ReplayGuardVerdict::Fresh),
+                // A concurrent writer (another replica) won the insert race, or the
+                // key is already present: either way this delivery is a replay.
+                Err(horme::Error::Query(diesel::result::Error::DatabaseError(
+                    diesel::result::DatabaseErrorKind::UniqueViolation,
+                    _,
+                ))) => Ok(ReplayGuardVerdict::Replay),
+                Err(err) => Err(err.into()),
+            }
+        })
     }
 
     fn forget(&self, key: &str) -> Result<()> {
-        use idempotency_schema::webhook_replay_guard::dsl;
+        self.db.block_on(async {
+            use idempotency_schema::webhook_replay_guard::dsl;
 
-        let mut conn = self.db.conn()?;
-        diesel::delete(dsl::webhook_replay_guard.filter(dsl::replay_key.eq(key)))
-            .execute(&mut conn)?;
-        Ok(())
+            let mut conn = self.db.queries();
+            diesel::delete(dsl::webhook_replay_guard.filter(dsl::replay_key.eq(key)))
+                .execute(&mut conn)
+                .await?;
+            Ok(())
+        })
     }
 }
 
@@ -640,33 +751,42 @@ impl DbTokenStore {
 
 impl TokenStore for DbTokenStore {
     fn load(&self, key: &str) -> Result<Option<PersistedToken>> {
-        use idempotency_schema::token_cache::dsl;
+        self.db.block_on(async {
+            use idempotency_schema::token_cache::dsl;
 
-        let mut conn = self.db.conn()?;
-        let row = dsl::token_cache
-            .filter(dsl::cache_key.eq(key))
-            .select((dsl::token_value, dsl::expires_at))
-            .first::<(String, i64)>(&mut conn)
-            .optional()?;
-        Ok(row.map(|(value, expires_at)| PersistedToken { value, expires_at }))
+            let mut conn = self.db.queries();
+            let row = dsl::token_cache
+                .filter(dsl::cache_key.eq(key))
+                .select((dsl::token_value, dsl::expires_at))
+                .first::<(String, i64)>(&mut conn)
+                .await
+                .optional()?;
+            Ok(row.map(|(value, expires_at)| PersistedToken { value, expires_at }))
+        })
     }
 
     fn store(&self, key: &str, token: &str, expires_at: i64) -> Result<()> {
-        use idempotency_schema::token_cache::dsl;
+        self.db.block_on(async {
+            use idempotency_schema::token_cache::dsl;
 
-        let mut conn = self.db.conn()?;
-        conn.transaction::<_, diesel::result::Error, _>(|conn| {
-            diesel::delete(dsl::token_cache.filter(dsl::cache_key.eq(key))).execute(conn)?;
-            diesel::insert_into(dsl::token_cache)
-                .values((
-                    dsl::cache_key.eq(key),
-                    dsl::token_value.eq(token),
-                    dsl::expires_at.eq(expires_at),
-                ))
-                .execute(conn)?;
-            Ok(())
+            let mut conn = self.db.queries();
+            conn.transaction(async |conn| {
+                diesel::delete(dsl::token_cache.filter(dsl::cache_key.eq(key)))
+                    .execute(conn)
+                    .await?;
+                diesel::insert_into(dsl::token_cache)
+                    .values((
+                        dsl::cache_key.eq(key),
+                        dsl::token_value.eq(token),
+                        dsl::expires_at.eq(expires_at),
+                    ))
+                    .execute(conn)
+                    .await?;
+                Ok::<_, horme::Error>(())
+            })
+            .await
+            .map_err(Into::into)
         })
-        .map_err(Into::into)
     }
 }
 
@@ -717,106 +837,120 @@ impl From<OutboundDeadLetterRow> for OutboundDeadLetter {
 
 impl OutboundDeadLetterStore for DbOutboundDeadLetterStore {
     fn record(&self, record: OutboundDeadLetterRecord) -> Result<()> {
-        use idempotency_schema::outbound_dead_letters::dsl;
+        self.db.block_on(async {
+            use idempotency_schema::outbound_dead_letters::dsl;
 
-        let mut conn = self.db.conn()?;
-        let now = now_ts();
-        let new_attempts = i32::try_from(record.attempts).unwrap_or(i32::MAX);
-        let previous_attempts = dsl::outbound_dead_letters
-            .filter(dsl::event_id.eq(record.event_id.as_str()))
-            .select(dsl::attempts)
-            .first::<i32>(&mut conn)
-            .optional()?
-            .unwrap_or(0);
-        let attempts = previous_attempts.saturating_add(new_attempts);
-        let updated = diesel::update(
-            dsl::outbound_dead_letters.filter(dsl::event_id.eq(record.event_id.as_str())),
-        )
-        .set((
-            dsl::realm_id.eq(record.realm_id.as_str()),
-            dsl::kind.eq(record.kind.as_str()),
-            dsl::attempts.eq(attempts),
-            dsl::retriable.eq(record.retriable),
-            dsl::last_error.eq(record.last_error.as_str()),
-            dsl::event_json.eq(record.event_json.as_str()),
-            dsl::updated_at.eq(now),
-        ))
-        .execute(&mut conn)?;
-        if updated == 0 {
-            diesel::insert_into(dsl::outbound_dead_letters)
-                .values((
-                    dsl::event_id.eq(record.event_id.as_str()),
-                    dsl::realm_id.eq(record.realm_id.as_str()),
-                    dsl::kind.eq(record.kind.as_str()),
-                    dsl::attempts.eq(attempts),
-                    dsl::retriable.eq(record.retriable),
-                    dsl::last_error.eq(record.last_error.as_str()),
-                    dsl::event_json.eq(record.event_json.as_str()),
-                    dsl::first_seen_at.eq(now),
-                    dsl::updated_at.eq(now),
-                ))
-                .execute(&mut conn)?;
-        }
-        Ok(())
+            let mut conn = self.db.queries();
+            let now = now_ts();
+            let new_attempts = i32::try_from(record.attempts).unwrap_or(i32::MAX);
+            let previous_attempts = dsl::outbound_dead_letters
+                .filter(dsl::event_id.eq(record.event_id.as_str()))
+                .select(dsl::attempts)
+                .first::<i32>(&mut conn)
+                .await
+                .optional()?
+                .unwrap_or(0);
+            let attempts = previous_attempts.saturating_add(new_attempts);
+            let updated = diesel::update(
+                dsl::outbound_dead_letters.filter(dsl::event_id.eq(record.event_id.as_str())),
+            )
+            .set((
+                dsl::realm_id.eq(record.realm_id.as_str()),
+                dsl::kind.eq(record.kind.as_str()),
+                dsl::attempts.eq(attempts),
+                dsl::retriable.eq(record.retriable),
+                dsl::last_error.eq(record.last_error.as_str()),
+                dsl::event_json.eq(record.event_json.as_str()),
+                dsl::updated_at.eq(now),
+            ))
+            .execute(&mut conn)
+            .await?;
+            if updated == 0 {
+                diesel::insert_into(dsl::outbound_dead_letters)
+                    .values((
+                        dsl::event_id.eq(record.event_id.as_str()),
+                        dsl::realm_id.eq(record.realm_id.as_str()),
+                        dsl::kind.eq(record.kind.as_str()),
+                        dsl::attempts.eq(attempts),
+                        dsl::retriable.eq(record.retriable),
+                        dsl::last_error.eq(record.last_error.as_str()),
+                        dsl::event_json.eq(record.event_json.as_str()),
+                        dsl::first_seen_at.eq(now),
+                        dsl::updated_at.eq(now),
+                    ))
+                    .execute(&mut conn)
+                    .await?;
+            }
+            Ok(())
+        })
     }
 
     fn clear(&self, event_id: &str) -> Result<()> {
-        use idempotency_schema::outbound_dead_letters::dsl;
+        self.db.block_on(async {
+            use idempotency_schema::outbound_dead_letters::dsl;
 
-        let mut conn = self.db.conn()?;
-        diesel::delete(dsl::outbound_dead_letters.filter(dsl::event_id.eq(event_id)))
-            .execute(&mut conn)?;
-        Ok(())
+            let mut conn = self.db.queries();
+            diesel::delete(dsl::outbound_dead_letters.filter(dsl::event_id.eq(event_id)))
+                .execute(&mut conn)
+                .await?;
+            Ok(())
+        })
     }
 
     fn load(&self, event_id: &str) -> Result<Option<OutboundDeadLetter>> {
-        use idempotency_schema::outbound_dead_letters::dsl;
+        self.db.block_on(async {
+            use idempotency_schema::outbound_dead_letters::dsl;
 
-        let mut conn = self.db.conn()?;
-        dsl::outbound_dead_letters
-            .filter(dsl::event_id.eq(event_id))
-            .select((
-                dsl::event_id,
-                dsl::realm_id,
-                dsl::kind,
-                dsl::attempts,
-                dsl::retriable,
-                dsl::last_error,
-                dsl::event_json,
-                dsl::first_seen_at,
-                dsl::updated_at,
-            ))
-            .first::<OutboundDeadLetterRow>(&mut conn)
-            .optional()
-            .map(|row| row.map(Into::into))
-            .map_err(Into::into)
+            let mut conn = self.db.queries();
+            dsl::outbound_dead_letters
+                .filter(dsl::event_id.eq(event_id))
+                .select((
+                    dsl::event_id,
+                    dsl::realm_id,
+                    dsl::kind,
+                    dsl::attempts,
+                    dsl::retriable,
+                    dsl::last_error,
+                    dsl::event_json,
+                    dsl::first_seen_at,
+                    dsl::updated_at,
+                ))
+                .first::<OutboundDeadLetterRow>(&mut conn)
+                .await
+                .optional()
+                .map(|row| row.map(Into::into))
+                .map_err(Into::into)
+        })
     }
 
     fn list_due(&self, now_ts: i64, limit: u32) -> Result<Vec<OutboundDeadLetter>> {
-        use idempotency_schema::outbound_dead_letters::dsl;
+        self.db.block_on(async {
+            use idempotency_schema::outbound_dead_letters::dsl;
 
-        let mut conn = self.db.conn()?;
-        dsl::outbound_dead_letters
-            .filter(
-                dsl::updated_at
-                    .le(now_ts - crate::dead_letter::OUTBOUND_DEAD_LETTER_REPLAY_INTERVAL_SECS),
-            )
-            .order(dsl::updated_at.asc())
-            .limit(i64::from(limit))
-            .select((
-                dsl::event_id,
-                dsl::realm_id,
-                dsl::kind,
-                dsl::attempts,
-                dsl::retriable,
-                dsl::last_error,
-                dsl::event_json,
-                dsl::first_seen_at,
-                dsl::updated_at,
-            ))
-            .load::<OutboundDeadLetterRow>(&mut conn)
-            .map(|rows| rows.into_iter().map(Into::into).collect())
-            .map_err(Into::into)
+            let mut conn = self.db.queries();
+            dsl::outbound_dead_letters
+                .filter(
+                    dsl::updated_at
+                        .le(now_ts - crate::dead_letter::OUTBOUND_DEAD_LETTER_REPLAY_INTERVAL_SECS),
+                )
+                .order(dsl::updated_at.asc())
+                .limit(i64::from(limit))
+                .select((
+                    dsl::event_id,
+                    dsl::realm_id,
+                    dsl::kind,
+                    dsl::attempts,
+                    dsl::retriable,
+                    dsl::last_error,
+                    dsl::event_json,
+                    dsl::first_seen_at,
+                    dsl::updated_at,
+                ))
+                .load::<OutboundDeadLetterRow>(&mut conn)
+                .await
+                .map(|rows| rows.into_iter().map(Into::into).collect())
+                .map_err(Into::into)
+        })
     }
 }
 
@@ -825,6 +959,41 @@ mod tests {
     use arkret::IdempotencyDirection;
 
     use super::*;
+
+    #[test]
+    fn query_handles_release_a_single_connection_and_transaction_rolls_back() {
+        let db = memory_db();
+        db.block_on(async {
+            let mut first = db.queries();
+            let mut second = db.queries();
+            diesel::sql_query("CREATE TABLE lease_probe (id INTEGER PRIMARY KEY)")
+                .execute(&mut first)
+                .await
+                .unwrap();
+            diesel::sql_query("INSERT INTO lease_probe VALUES (1)")
+                .execute(&mut second)
+                .await
+                .unwrap();
+            let result = first
+                .transaction(async |conn| {
+                    diesel::sql_query("INSERT INTO lease_probe VALUES (2)")
+                        .execute(conn)
+                        .await?;
+                    Err::<(), _>(horme::Error::Query(
+                        diesel::result::Error::RollbackTransaction,
+                    ))
+                })
+                .await;
+            assert!(result.is_err());
+            let count: i64 = diesel::select(diesel::dsl::sql::<diesel::sql_types::BigInt>(
+                "(SELECT COUNT(*) FROM lease_probe)",
+            ))
+            .get_result(&mut second)
+            .await
+            .unwrap();
+            assert_eq!(count, 1);
+        });
+    }
 
     fn memory_db() -> Arc<DatabaseManager> {
         Arc::new(
@@ -908,16 +1077,19 @@ mod tests {
             store.claim(&replay, "hash-a", "anchor-a"),
             Ok(TransactionClaim::Claimed)
         ));
-        let mut conn = db.conn().unwrap();
-        diesel::update(
-            dsl::transaction_idempotency
-                .filter(dsl::operation_id.eq(&replay.operation_id))
-                .filter(dsl::idempotency_key.eq(&replay.idempotency_key)),
-        )
-        .set(dsl::created_at.eq(now_ts() - PENDING_TAKEOVER_GRACE_SECS - 1))
-        .execute(&mut conn)
-        .unwrap();
-        drop(conn);
+        db.block_on(async {
+            let mut conn = db.queries();
+            diesel::update(
+                dsl::transaction_idempotency
+                    .filter(dsl::operation_id.eq(&replay.operation_id))
+                    .filter(dsl::idempotency_key.eq(&replay.idempotency_key)),
+            )
+            .set(dsl::created_at.eq(now_ts() - PENDING_TAKEOVER_GRACE_SECS - 1))
+            .execute(&mut conn)
+            .await
+            .unwrap();
+            drop(conn);
+        });
 
         assert!(matches!(
             store.claim(&replay, "hash-a", "anchor-a"),

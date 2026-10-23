@@ -27,13 +27,16 @@ full     = ["db", "web", "runtime", "managed-authoring"]
 # ../../../savfox-ai/savfox before deleting any shared-layer pub symbol.
 edge     = []
 managed-authoring = [ "dep:chacha20poly1305", "dep:futures", "arkret/mls", "arkret/blob-aead"]
-db       = ["dep:diesel", "dep:diesel_migrations"]
-sqlite   = ["db", "diesel/sqlite", "dep:libsqlite3-sys"]
-postgres = ["db", "diesel/postgres"]
+db       = ["dep:diesel", "dep:diesel_migrations", "dep:horme", "dep:diesel-async", "dep:deadpool"]
+sqlite   = ["db", "diesel/sqlite", "horme/sqlite", "dep:libsqlite3-sys"]
+postgres = ["db", "diesel/postgres", "horme/postgres"]
 web      = ["dep:metrics", "dep:metrics-exporter-prometheus", "dep:salvo"]
 runtime  = ["db", "web"]
 
 [dependencies]
+horme = { workspace = true, optional = true }
+diesel-async = { workspace = true, optional = true }
+deadpool = { workspace = true, optional = true }
 anyhow = { workspace = true }
 arkret = { workspace = true }
 arkret-canonical = { workspace = true }

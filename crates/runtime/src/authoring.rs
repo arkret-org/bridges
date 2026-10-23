@@ -517,88 +517,114 @@ impl DbAuthoringStore {
 #[cfg(feature = "db")]
 impl AuthoringStore for DbAuthoringStore {
     fn load(&self, key: &str) -> Result<Option<String>> {
-        use diesel::prelude::*;
-        use schema::authoring_journal::dsl;
-        let mut conn = self.db.conn()?;
-        Ok(dsl::authoring_journal
-            .filter(dsl::entry_key.eq(key))
-            .select(dsl::entry_value)
-            .first(&mut conn)
-            .optional()?)
+        self.db.block_on(async {
+            use diesel::prelude::*;
+            use horme::{OptionalExtension, RunQueryDsl};
+            use schema::authoring_journal::dsl;
+            let mut conn = self.db.queries();
+            Ok(dsl::authoring_journal
+                .filter(dsl::entry_key.eq(key))
+                .select(dsl::entry_value)
+                .first(&mut conn)
+                .await
+                .optional()?)
+        })
     }
     fn compare_exchange_batch(
         &self,
         expected: &[(String, Option<String>)],
         writes: &[(String, Option<String>)],
     ) -> Result<bool> {
-        use diesel::prelude::*;
-        use schema::authoring_journal::dsl;
-        let mut conn = self.db.conn()?;
-        let result = conn.transaction::<(), diesel::result::Error, _>(|conn| {
-            // Conditional updates lock existing guards. Inserting absent guards
-            // claims their unique keys; rollback removes every speculative guard.
-            let mut checks: Vec<_> = expected.iter().collect();
-            checks.sort_by(|a, b| a.0.cmp(&b.0));
-            for (key, value) in checks {
-                let count = match value {
-                    Some(value) => diesel::update(
-                        dsl::authoring_journal
-                            .filter(dsl::entry_key.eq(key))
-                            .filter(dsl::entry_value.eq(value)),
-                    )
-                    .set(dsl::entry_value.eq(value))
-                    .execute(conn)?,
-                    None => diesel::insert_into(dsl::authoring_journal)
-                        .values((dsl::entry_key.eq(key), dsl::entry_value.eq("")))
-                        .on_conflict(dsl::entry_key)
-                        .do_nothing()
-                        .execute(conn)?,
-                };
-                if count != 1 {
-                    return Err(diesel::result::Error::RollbackTransaction);
-                }
-            }
-            for (key, value) in expected {
-                if value.is_none() && !writes.iter().any(|(written, _)| written == key) {
-                    diesel::delete(dsl::authoring_journal.filter(dsl::entry_key.eq(key)))
-                        .execute(conn)?;
-                }
-            }
-            for (key, value) in writes {
-                match value {
-                    Some(value) => {
-                        diesel::insert_into(dsl::authoring_journal)
-                            .values((dsl::entry_key.eq(key), dsl::entry_value.eq(value)))
-                            .on_conflict(dsl::entry_key)
-                            .do_update()
-                            .set(dsl::entry_value.eq(value))
-                            .execute(conn)?;
+        self.db.block_on(async {
+            use diesel::prelude::*;
+            use horme::RunQueryDsl;
+            use schema::authoring_journal::dsl;
+            let mut conn = self.db.queries();
+            let result = conn
+                .transaction(async |conn| {
+                    // Conditional updates lock existing guards. Inserting absent guards
+                    // claims their unique keys; rollback removes every speculative guard.
+                    let mut checks: Vec<_> = expected.iter().collect();
+                    checks.sort_by(|a, b| a.0.cmp(&b.0));
+                    for (key, value) in checks {
+                        let count = match value {
+                            Some(value) => {
+                                diesel::update(
+                                    dsl::authoring_journal
+                                        .filter(dsl::entry_key.eq(key))
+                                        .filter(dsl::entry_value.eq(value)),
+                                )
+                                .set(dsl::entry_value.eq(value))
+                                .execute(conn)
+                                .await?
+                            }
+                            None => {
+                                diesel::insert_into(dsl::authoring_journal)
+                                    .values((dsl::entry_key.eq(key), dsl::entry_value.eq("")))
+                                    .on_conflict(dsl::entry_key)
+                                    .do_nothing()
+                                    .execute(conn)
+                                    .await?
+                            }
+                        };
+                        if count != 1 {
+                            return Err(horme::Error::Query(
+                                diesel::result::Error::RollbackTransaction,
+                            ));
+                        }
                     }
-                    None => {
-                        diesel::delete(dsl::authoring_journal.filter(dsl::entry_key.eq(key)))
-                            .execute(conn)?;
+                    for (key, value) in expected {
+                        if value.is_none() && !writes.iter().any(|(written, _)| written == key) {
+                            diesel::delete(dsl::authoring_journal.filter(dsl::entry_key.eq(key)))
+                                .execute(conn)
+                                .await?;
+                        }
                     }
-                }
+                    for (key, value) in writes {
+                        match value {
+                            Some(value) => {
+                                diesel::insert_into(dsl::authoring_journal)
+                                    .values((dsl::entry_key.eq(key), dsl::entry_value.eq(value)))
+                                    .on_conflict(dsl::entry_key)
+                                    .do_update()
+                                    .set(dsl::entry_value.eq(value))
+                                    .execute(conn)
+                                    .await?;
+                            }
+                            None => {
+                                diesel::delete(
+                                    dsl::authoring_journal.filter(dsl::entry_key.eq(key)),
+                                )
+                                .execute(conn)
+                                .await?;
+                            }
+                        }
+                    }
+                    Ok(())
+                })
+                .await;
+            match result {
+                Ok(()) => Ok(true),
+                Err(horme::Error::Query(diesel::result::Error::RollbackTransaction)) => Ok(false),
+                Err(error) => Err(error.into()),
             }
-            Ok(())
-        });
-        match result {
-            Ok(()) => Ok(true),
-            Err(diesel::result::Error::RollbackTransaction) => Ok(false),
-            Err(error) => Err(error.into()),
-        }
+        })
     }
     fn entries_with_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>> {
-        use diesel::prelude::*;
-        use schema::authoring_journal::dsl;
-        let mut conn = self.db.conn()?;
-        // Prefixes are private fixed ASCII namespaces, never caller SQL patterns.
-        Ok(dsl::authoring_journal
-            .filter(dsl::entry_key.ge(prefix))
-            .filter(dsl::entry_key.lt(format!("{prefix}\u{10ffff}")))
-            .select((dsl::entry_key, dsl::entry_value))
-            .order(dsl::entry_key.asc())
-            .load(&mut conn)?)
+        self.db.block_on(async {
+            use diesel::prelude::*;
+            use horme::RunQueryDsl;
+            use schema::authoring_journal::dsl;
+            let mut conn = self.db.queries();
+            // Prefixes are private fixed ASCII namespaces, never caller SQL patterns.
+            Ok(dsl::authoring_journal
+                .filter(dsl::entry_key.ge(prefix))
+                .filter(dsl::entry_key.lt(format!("{prefix}\u{10ffff}")))
+                .select((dsl::entry_key, dsl::entry_value))
+                .order(dsl::entry_key.asc())
+                .load(&mut conn)
+                .await?)
+        })
     }
 }
 

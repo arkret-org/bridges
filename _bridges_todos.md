@@ -14,6 +14,8 @@
 
 ## Changelog(已落地的共享层改动)
 
+- 2026-10-23：runtime/messaging 的 Diesel 执行迁移至 horme 0.4，普通查询按需借用连接，CAS、token 替换等原子写继续使用显式事务；同步 SDK 存储契约由独立 Tokio executor 驱动，SQLite 通过 upstream SyncConnectionWrapper 执行。验证结果见协调仓 Horme 实施任务。
+
 | 日期 | 改动面 | 摘要 |
 |---|---|---|
 | 2026-06-25 | runtime + messaging | 新增 `arkret_bridge_messages_total` 指标(`record_bridge_message`),入站提交 / 出站投递 / 入站媒体各计成功失败;messaging `MessageContext` 增 `report_outbound_bridge_error`,出站 `send_to_app` 失败补审计 + retriable 分类(对称入站) |

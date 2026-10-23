@@ -12,6 +12,7 @@ use arkret_bridge_runtime::db::DatabaseManager;
 use arkret_bridge_runtime::{BridgeError, Result, run_blocking};
 use diesel::prelude::*;
 use diesel_migrations::{EmbeddedMigrations, embed_migrations};
+use horme::{OptionalExtension, RunQueryDsl};
 
 pub use crate::models::{ChannelRealmMapping, MessageMapping, UserMapping};
 use crate::models::{NewChannelRealmMapping, NewMessageMapping, NewUserMapping, UserMappingRow};
@@ -42,14 +43,17 @@ impl MessageStore {
     }
 
     pub fn prepared_ghost_provision(&self, provision_key: &str) -> Result<Option<String>> {
-        use schema::prepared_ghost_provisions::dsl;
+        self.db.block_on(async {
+            use schema::prepared_ghost_provisions::dsl;
 
-        let mut conn = self.db.conn()?;
-        Ok(dsl::prepared_ghost_provisions
-            .filter(dsl::provision_key.eq(provision_key))
-            .select(dsl::request_json)
-            .first::<String>(&mut conn)
-            .optional()?)
+            let mut conn = self.db.queries();
+            Ok(dsl::prepared_ghost_provisions
+                .filter(dsl::provision_key.eq(provision_key))
+                .select(dsl::request_json)
+                .first::<String>(&mut conn)
+                .await
+                .optional()?)
+        })
     }
 
     pub async fn prepared_ghost_provision_async(
@@ -67,28 +71,32 @@ impl MessageStore {
         provision_key: &str,
         request_json: &str,
     ) -> Result<String> {
-        use schema::prepared_ghost_provisions::dsl;
+        self.db.block_on(async {
+            use schema::prepared_ghost_provisions::dsl;
 
-        let mut conn = self.db.conn()?;
-        let inserted = diesel::insert_into(dsl::prepared_ghost_provisions)
-            .values((
-                dsl::provision_key.eq(provision_key),
-                dsl::request_json.eq(request_json),
-                dsl::created_at.eq(now_ts()),
-            ))
-            .execute(&mut conn);
-        match inserted {
-            Ok(_) => Ok(request_json.to_owned()),
-            Err(diesel::result::Error::DatabaseError(
-                diesel::result::DatabaseErrorKind::UniqueViolation,
-                _,
-            )) => dsl::prepared_ghost_provisions
-                .filter(dsl::provision_key.eq(provision_key))
-                .select(dsl::request_json)
-                .first::<String>(&mut conn)
-                .map_err(Into::into),
-            Err(error) => Err(error.into()),
-        }
+            let mut conn = self.db.queries();
+            let inserted = diesel::insert_into(dsl::prepared_ghost_provisions)
+                .values((
+                    dsl::provision_key.eq(provision_key),
+                    dsl::request_json.eq(request_json),
+                    dsl::created_at.eq(now_ts()),
+                ))
+                .execute(&mut conn)
+                .await;
+            match inserted {
+                Ok(_) => Ok(request_json.to_owned()),
+                Err(horme::Error::Query(diesel::result::Error::DatabaseError(
+                    diesel::result::DatabaseErrorKind::UniqueViolation,
+                    _,
+                ))) => dsl::prepared_ghost_provisions
+                    .filter(dsl::provision_key.eq(provision_key))
+                    .select(dsl::request_json)
+                    .first::<String>(&mut conn)
+                    .await
+                    .map_err(Into::into),
+                Err(error) => Err(error.into()),
+            }
+        })
     }
 
     pub async fn prepare_ghost_provision_async(
@@ -105,74 +113,88 @@ impl MessageStore {
         realm_id: &str,
         alias: Option<&str>,
     ) -> Result<()> {
-        use schema::channel_realm_mappings::dsl;
+        self.db.block_on(async {
+            use schema::channel_realm_mappings::dsl;
 
-        let mut conn = self.db.conn()?;
-        let exists = dsl::channel_realm_mappings
-            .filter(dsl::app_channel_id.eq(app_channel))
-            .first::<ChannelRealmMapping>(&mut conn)
-            .optional()?;
-        if let Some(existing) = exists {
-            // A realm change invalidates the cached portal strand (the strand
-            // belongs to the previous realm); it is re-resolved lazily.
-            let portal_strand_id = if existing.arkret_realm_id == realm_id {
-                existing.portal_strand_id.clone()
+            let mut conn = self.db.queries();
+            let exists = dsl::channel_realm_mappings
+                .filter(dsl::app_channel_id.eq(app_channel))
+                .first::<ChannelRealmMapping>(&mut conn)
+                .await
+                .optional()?;
+            if let Some(existing) = exists {
+                // A realm change invalidates the cached portal strand (the strand
+                // belongs to the previous realm); it is re-resolved lazily.
+                let portal_strand_id = if existing.arkret_realm_id == realm_id {
+                    existing.portal_strand_id.clone()
+                } else {
+                    None
+                };
+                diesel::update(dsl::channel_realm_mappings.filter(dsl::id.eq(existing.id)))
+                    .set((
+                        dsl::arkret_realm_id.eq(realm_id),
+                        dsl::portal_alias.eq(alias),
+                        dsl::portal_strand_id.eq(portal_strand_id),
+                    ))
+                    .execute(&mut conn)
+                    .await?;
             } else {
-                None
-            };
-            diesel::update(dsl::channel_realm_mappings.filter(dsl::id.eq(existing.id)))
-                .set((
-                    dsl::arkret_realm_id.eq(realm_id),
-                    dsl::portal_alias.eq(alias),
-                    dsl::portal_strand_id.eq(portal_strand_id),
-                ))
-                .execute(&mut conn)?;
-        } else {
-            diesel::insert_into(dsl::channel_realm_mappings)
-                .values(NewChannelRealmMapping {
-                    app_channel_id: app_channel,
-                    arkret_realm_id: realm_id,
-                    portal_alias: alias,
-                    portal_strand_id: None,
-                    created_at: now_ts(),
-                })
-                .execute(&mut conn)?;
-        }
-        Ok(())
+                diesel::insert_into(dsl::channel_realm_mappings)
+                    .values(NewChannelRealmMapping {
+                        app_channel_id: app_channel,
+                        arkret_realm_id: realm_id,
+                        portal_alias: alias,
+                        portal_strand_id: None,
+                        created_at: now_ts(),
+                    })
+                    .execute(&mut conn)
+                    .await?;
+            }
+            Ok(())
+        })
     }
 
     /// The full portal mapping row for an app channel (realm + cached portal
     /// strand, applet-integration §10.1).
     pub fn portal_for_channel(&self, app_channel: &str) -> Result<Option<ChannelRealmMapping>> {
-        use schema::channel_realm_mappings::dsl;
+        self.db.block_on(async {
+            use schema::channel_realm_mappings::dsl;
 
-        let mut conn = self.db.conn()?;
-        Ok(dsl::channel_realm_mappings
-            .filter(dsl::app_channel_id.eq(app_channel))
-            .first::<ChannelRealmMapping>(&mut conn)
-            .optional()?)
+            let mut conn = self.db.queries();
+            Ok(dsl::channel_realm_mappings
+                .filter(dsl::app_channel_id.eq(app_channel))
+                .first::<ChannelRealmMapping>(&mut conn)
+                .await
+                .optional()?)
+        })
     }
 
     /// Persist the resolved portal strand for an app channel (§10.1 step 1 cache).
     pub fn set_channel_portal_strand(&self, app_channel: &str, strand_id: &str) -> Result<()> {
-        use schema::channel_realm_mappings::dsl;
+        self.db.block_on(async {
+            use schema::channel_realm_mappings::dsl;
 
-        let mut conn = self.db.conn()?;
-        diesel::update(dsl::channel_realm_mappings.filter(dsl::app_channel_id.eq(app_channel)))
-            .set(dsl::portal_strand_id.eq(Some(strand_id)))
-            .execute(&mut conn)?;
-        Ok(())
+            let mut conn = self.db.queries();
+            diesel::update(dsl::channel_realm_mappings.filter(dsl::app_channel_id.eq(app_channel)))
+                .set(dsl::portal_strand_id.eq(Some(strand_id)))
+                .execute(&mut conn)
+                .await?;
+            Ok(())
+        })
     }
 
     /// The portal mapping row for a realm (arkret → app direction).
     pub fn channel_for_realm(&self, realm_id: &str) -> Result<Option<ChannelRealmMapping>> {
-        use schema::channel_realm_mappings::dsl;
+        self.db.block_on(async {
+            use schema::channel_realm_mappings::dsl;
 
-        let mut conn = self.db.conn()?;
-        Ok(dsl::channel_realm_mappings
-            .filter(dsl::arkret_realm_id.eq(realm_id))
-            .first::<ChannelRealmMapping>(&mut conn)
-            .optional()?)
+            let mut conn = self.db.queries();
+            Ok(dsl::channel_realm_mappings
+                .filter(dsl::arkret_realm_id.eq(realm_id))
+                .first::<ChannelRealmMapping>(&mut conn)
+                .await
+                .optional()?)
+        })
     }
 
     pub fn record_message(
@@ -183,47 +205,52 @@ impl MessageStore {
         arkret_event_id: &str,
         realm_id: &str,
     ) -> Result<()> {
-        use schema::message_mappings::dsl;
+        self.db.block_on(async {
+            use schema::message_mappings::dsl;
 
-        if app_channel.trim().is_empty() {
-            return Err(BridgeError::App("app_channel must not be empty".into()));
-        }
-        if app_message_id.trim().is_empty() {
-            return Err(BridgeError::App("app_message_id must not be empty".into()));
-        }
-        if normalized_sender.trim().is_empty() {
-            return Err(BridgeError::App(
-                "normalized_sender must not be empty".into(),
-            ));
-        }
+            if app_channel.trim().is_empty() {
+                return Err(BridgeError::App("app_channel must not be empty".into()));
+            }
+            if app_message_id.trim().is_empty() {
+                return Err(BridgeError::App("app_message_id must not be empty".into()));
+            }
+            if normalized_sender.trim().is_empty() {
+                return Err(BridgeError::App(
+                    "normalized_sender must not be empty".into(),
+                ));
+            }
 
-        let mut conn = self.db.conn()?;
-        let exists = dsl::message_mappings
-            .filter(dsl::app_channel_id.eq(app_channel))
-            .filter(dsl::app_message_id.eq(app_message_id))
-            .filter(dsl::normalized_sender.eq(normalized_sender))
-            .first::<MessageMapping>(&mut conn)
-            .optional()?;
-        if let Some(existing) = exists {
-            diesel::update(dsl::message_mappings.filter(dsl::id.eq(existing.id)))
-                .set((
-                    dsl::arkret_event_id.eq(arkret_event_id),
-                    dsl::arkret_realm_id.eq(realm_id),
-                ))
-                .execute(&mut conn)?;
-        } else {
-            diesel::insert_into(dsl::message_mappings)
-                .values(NewMessageMapping {
-                    app_channel_id: app_channel,
-                    app_message_id,
-                    normalized_sender,
-                    arkret_event_id,
-                    arkret_realm_id: realm_id,
-                    created_at: now_ts(),
-                })
-                .execute(&mut conn)?;
-        }
-        Ok(())
+            let mut conn = self.db.queries();
+            let exists = dsl::message_mappings
+                .filter(dsl::app_channel_id.eq(app_channel))
+                .filter(dsl::app_message_id.eq(app_message_id))
+                .filter(dsl::normalized_sender.eq(normalized_sender))
+                .first::<MessageMapping>(&mut conn)
+                .await
+                .optional()?;
+            if let Some(existing) = exists {
+                diesel::update(dsl::message_mappings.filter(dsl::id.eq(existing.id)))
+                    .set((
+                        dsl::arkret_event_id.eq(arkret_event_id),
+                        dsl::arkret_realm_id.eq(realm_id),
+                    ))
+                    .execute(&mut conn)
+                    .await?;
+            } else {
+                diesel::insert_into(dsl::message_mappings)
+                    .values(NewMessageMapping {
+                        app_channel_id: app_channel,
+                        app_message_id,
+                        normalized_sender,
+                        arkret_event_id,
+                        arkret_realm_id: realm_id,
+                        created_at: now_ts(),
+                    })
+                    .execute(&mut conn)
+                    .await?;
+            }
+            Ok(())
+        })
     }
 
     /// Dedup lookup keyed by the §16 minimum key set: protocol/tenant/channel
@@ -234,16 +261,19 @@ impl MessageStore {
         app_message_id: &str,
         normalized_sender: &str,
     ) -> Result<Option<String>> {
-        use schema::message_mappings::dsl;
+        self.db.block_on(async {
+            use schema::message_mappings::dsl;
 
-        let mut conn = self.db.conn()?;
-        Ok(dsl::message_mappings
-            .filter(dsl::app_channel_id.eq(app_channel))
-            .filter(dsl::app_message_id.eq(app_message_id))
-            .filter(dsl::normalized_sender.eq(normalized_sender))
-            .select(dsl::arkret_event_id)
-            .first::<String>(&mut conn)
-            .optional()?)
+            let mut conn = self.db.queries();
+            Ok(dsl::message_mappings
+                .filter(dsl::app_channel_id.eq(app_channel))
+                .filter(dsl::app_message_id.eq(app_message_id))
+                .filter(dsl::normalized_sender.eq(normalized_sender))
+                .select(dsl::arkret_event_id)
+                .first::<String>(&mut conn)
+                .await
+                .optional()?)
+        })
     }
 
     /// Resolve the target event for an app-side delete/recall. Delete webhooks
@@ -255,26 +285,32 @@ impl MessageStore {
         app_channel: &str,
         app_message_id: &str,
     ) -> Result<Option<String>> {
-        use schema::message_mappings::dsl;
+        self.db.block_on(async {
+            use schema::message_mappings::dsl;
 
-        let mut conn = self.db.conn()?;
-        Ok(dsl::message_mappings
-            .filter(dsl::app_channel_id.eq(app_channel))
-            .filter(dsl::app_message_id.eq(app_message_id))
-            .order(dsl::created_at.asc())
-            .select(dsl::arkret_event_id)
-            .first::<String>(&mut conn)
-            .optional()?)
+            let mut conn = self.db.queries();
+            Ok(dsl::message_mappings
+                .filter(dsl::app_channel_id.eq(app_channel))
+                .filter(dsl::app_message_id.eq(app_message_id))
+                .order(dsl::created_at.asc())
+                .select(dsl::arkret_event_id)
+                .first::<String>(&mut conn)
+                .await
+                .optional()?)
+        })
     }
 
     pub fn app_message_for_event(&self, arkret_event_id: &str) -> Result<Option<MessageMapping>> {
-        use schema::message_mappings::dsl;
+        self.db.block_on(async {
+            use schema::message_mappings::dsl;
 
-        let mut conn = self.db.conn()?;
-        Ok(dsl::message_mappings
-            .filter(dsl::arkret_event_id.eq(arkret_event_id))
-            .first::<MessageMapping>(&mut conn)
-            .optional()?)
+            let mut conn = self.db.queries();
+            Ok(dsl::message_mappings
+                .filter(dsl::arkret_event_id.eq(arkret_event_id))
+                .first::<MessageMapping>(&mut conn)
+                .await
+                .optional()?)
+        })
     }
 
     // The argument list mirrors the user_mappings row shape one-to-one; a
@@ -292,6 +328,7 @@ impl MessageStore {
         creation_ref: &CommittedEventRef,
         display: Option<&str>,
     ) -> Result<()> {
+        self.db.block_on(async {
         use schema::user_mappings::dsl;
 
         if actor_id.as_realm_actor_id().map(|id| &id.realm_id) != Some(realm_id)
@@ -306,7 +343,7 @@ impl MessageStore {
             ));
         }
         let actor_key = actor_id.to_string();
-        let mut conn = self.db.conn()?;
+        let mut conn = self.db.queries();
         let creation = serde_json::to_string(creation_ref)?;
         let inserted = diesel::insert_into(dsl::user_mappings)
             .values(NewUserMapping {
@@ -321,13 +358,13 @@ impl MessageStore {
                 display_name: display,
                 created_at: now_ts(),
             })
-            .execute(&mut conn);
+            .execute(&mut conn).await;
         match inserted {
             Ok(_) => Ok(()),
-            Err(diesel::result::Error::DatabaseError(
+            Err(horme::Error::Query(diesel::result::Error::DatabaseError(
                 diesel::result::DatabaseErrorKind::UniqueViolation,
                 _,
-            )) => {
+            ))) => {
                 let updated = diesel::update(
                     dsl::user_mappings
                         .filter(dsl::applet_id.eq(applet_id.as_str()))
@@ -340,7 +377,7 @@ impl MessageStore {
                         .filter(dsl::creation_ref.eq(&creation)),
                 )
                 .set(dsl::display_name.eq(display))
-                .execute(&mut conn)?;
+                .execute(&mut conn).await?;
                 if updated != 1 {
                     return Err(BridgeError::Database(
                         "Ghost mapping cannot replace its bound Realm identity or original creation".to_owned(),
@@ -350,6 +387,7 @@ impl MessageStore {
             }
             Err(err) => Err(err.into()),
         }
+    })
     }
 
     pub fn ghost_actor_for_app_user(
@@ -360,47 +398,56 @@ impl MessageStore {
         tenant: &str,
         external_user_id: &str,
     ) -> Result<Option<UserMapping>> {
-        use schema::user_mappings::dsl;
+        self.db.block_on(async {
+            use schema::user_mappings::dsl;
 
-        let mut conn = self.db.conn()?;
-        let row = dsl::user_mappings
-            .filter(dsl::applet_id.eq(applet_id.as_str()))
-            .filter(dsl::realm_id.eq(realm_id.as_str()))
-            .filter(dsl::protocol.eq(protocol))
-            .filter(dsl::tenant.eq(tenant))
-            .filter(dsl::external_user_id.eq(external_user_id))
-            .first::<UserMappingRow>(&mut conn)
-            .optional()?;
-        row.map(typed_user_mapping).transpose()
+            let mut conn = self.db.queries();
+            let row = dsl::user_mappings
+                .filter(dsl::applet_id.eq(applet_id.as_str()))
+                .filter(dsl::realm_id.eq(realm_id.as_str()))
+                .filter(dsl::protocol.eq(protocol))
+                .filter(dsl::tenant.eq(tenant))
+                .filter(dsl::external_user_id.eq(external_user_id))
+                .first::<UserMappingRow>(&mut conn)
+                .await
+                .optional()?;
+            row.map(typed_user_mapping).transpose()
+        })
     }
 
     /// Reverse lookup for ghost resolution: find the user row by stable Arkret actor identity.
     pub fn user_by_actor(&self, actor_id: &ActorId) -> Result<Option<UserMapping>> {
-        use schema::user_mappings::dsl;
+        self.db.block_on(async {
+            use schema::user_mappings::dsl;
 
-        let mut conn = self.db.conn()?;
-        let row = dsl::user_mappings
-            .filter(dsl::arkret_actor_id.eq(actor_id.to_string()))
-            .first::<UserMappingRow>(&mut conn)
-            .optional()?;
-        row.map(typed_user_mapping).transpose()
+            let mut conn = self.db.queries();
+            let row = dsl::user_mappings
+                .filter(dsl::arkret_actor_id.eq(actor_id.to_string()))
+                .first::<UserMappingRow>(&mut conn)
+                .await
+                .optional()?;
+            row.map(typed_user_mapping).transpose()
+        })
     }
 
     /// Reverse lookup for portal resolution: find the channel mapping by arkret
     /// realm id or by portal alias.
     pub fn channel_by_realm_or_alias(&self, key: &str) -> Result<Option<ChannelRealmMapping>> {
-        use schema::channel_realm_mappings::dsl;
+        self.db.block_on(async {
+            use schema::channel_realm_mappings::dsl;
 
-        let mut conn = self.db.conn()?;
-        let mut matches = dsl::channel_realm_mappings
-            .filter(dsl::arkret_realm_id.eq(key).or(dsl::portal_alias.eq(key)))
-            .limit(2)
-            .load::<ChannelRealmMapping>(&mut conn)?;
-        // A Realm may host multiple portals. Never pick an arbitrary mapping.
-        Ok(if matches.len() == 1 {
-            matches.pop()
-        } else {
-            None
+            let mut conn = self.db.queries();
+            let mut matches = dsl::channel_realm_mappings
+                .filter(dsl::arkret_realm_id.eq(key).or(dsl::portal_alias.eq(key)))
+                .limit(2)
+                .load::<ChannelRealmMapping>(&mut conn)
+                .await?;
+            // A Realm may host multiple portals. Never pick an arbitrary mapping.
+            Ok(if matches.len() == 1 {
+                matches.pop()
+            } else {
+                None
+            })
         })
     }
 }
@@ -775,15 +822,18 @@ mod tests {
                 &applet, &realm, "p", "t", "user", &actor, &did, &creation, None,
             )
             .unwrap();
-        let mut conn = store.db.conn().unwrap();
-        diesel::update(schema::user_mappings::table)
-            .set(
-                schema::user_mappings::creation_ref
-                    .eq(serde_json::to_string(&identity(2).4).unwrap()),
-            )
-            .execute(&mut conn)
-            .unwrap();
-        drop(conn);
+        store.db.block_on(async {
+            let mut conn = store.db.queries();
+            diesel::update(schema::user_mappings::table)
+                .set(
+                    schema::user_mappings::creation_ref
+                        .eq(serde_json::to_string(&identity(2).4).unwrap()),
+                )
+                .execute(&mut conn)
+                .await
+                .unwrap();
+            drop(conn);
+        });
         assert!(
             store
                 .ghost_actor_for_app_user(&applet, &realm, "p", "t", "user")

@@ -13,6 +13,7 @@ sqlite = ["arkret-bridge-runtime/runtime", "arkret-bridge-runtime/managed-author
 postgres = ["arkret-bridge-runtime/runtime", "arkret-bridge-runtime/managed-authoring", "arkret-bridge-runtime/postgres"]
 
 [dependencies]
+horme.workspace = true
 aes = { workspace = true }
 anyhow = { workspace = true }
 arkret = { workspace = true }

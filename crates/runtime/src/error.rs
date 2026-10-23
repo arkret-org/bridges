@@ -99,8 +99,8 @@ impl From<diesel::result::Error> for BridgeError {
 }
 
 #[cfg(feature = "db")]
-impl From<diesel::r2d2::PoolError> for BridgeError {
-    fn from(e: diesel::r2d2::PoolError) -> Self {
+impl From<horme::Error> for BridgeError {
+    fn from(e: horme::Error) -> Self {
         BridgeError::Database(e.to_string())
     }
 }
