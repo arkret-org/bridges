@@ -10,8 +10,8 @@
 use std::sync::Arc;
 
 use arkret::identity::{
-    AcceptedDidBinding, BindingInvalidation, DidBindingPurpose, DidBindingStatus, DidDocument,
-    EvidenceReceipt, InMemoryVerifiedDidBindingStore, LimitedTrust, MethodEvidence,
+    AcceptedDidBinding, BindingInvalidation, DidBindingEvidenceReceipt, DidBindingPurpose,
+    DidBindingStatus, DidDocument, InMemoryVerifiedDidBindingStore, LimitedTrust, MethodEvidence,
     ResolverFailMode, ResolverPolicy, VerifiedDidBinding, VerifiedDidBindingDocumentInput,
     VerifiedDidBindingKey, VerifiedDidBindingStore, document_canonical_digest, policy_digest,
 };
@@ -214,7 +214,7 @@ impl DidAuthority {
     /// # Why `source_key_state_digest` is no longer folded into the evidence
     ///
     /// It used to be a `method` extension member of the SDK evidence envelope.
-    /// The §5.2 [`EvidenceReceipt`] that replaced that envelope is a closed
+    /// The §5.2 [`DidBindingEvidenceReceipt`] that replaced that envelope is a closed
     /// three-member structure (`method` / `document_digest` / `method_proofs`)
     /// with no caller-supplied extension slot — deliberately, because "the
     /// caller supplies the evidence" is the shape the spec judges
@@ -244,7 +244,7 @@ impl DidAuthority {
         // A config-pinned anchor is not a resolution, so the method publishes no
         // proofs: `MethodEvidence::none()` is the normative degenerate form, not
         // a placeholder.
-        let receipt = EvidenceReceipt::new(
+        let receipt = DidBindingEvidenceReceipt::new(
             did.method(),
             document_canonical_digest(&document)
                 .map_err(|err| format!("source service document digest failed: {err}"))?,
@@ -392,7 +392,7 @@ mod tests {
 
         // "Auditable" means "recomputable": an auditor rebuilds the retained
         // receipt from the pinned document and gets the stored digest back.
-        let recomputed = EvidenceReceipt::new(
+        let recomputed = DidBindingEvidenceReceipt::new(
             binding.did().method(),
             document_canonical_digest(accepted.document()).expect("document digest"),
             &MethodEvidence::none(),
@@ -576,3 +576,5 @@ mod tests {
         );
     }
 }
+
+use arkret::DidBindingEvidenceReceiptExt;

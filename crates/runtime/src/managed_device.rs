@@ -189,7 +189,7 @@ impl ManagedDeviceRuntime {
                 .iter()
                 .find_map(|entry| match entry {
                     arkret::RealmActorMaterialCurrentEntry::Present {
-                        row:
+                        current_state:
                             arkret::CurrentState::Value {
                                 selector,
                                 revision,
@@ -206,7 +206,7 @@ impl ManagedDeviceRuntime {
         let control: arkret::RealmActorControlValue = serde_json::from_value(control.clone())?;
         let manager: arkret::RealmActorManagerValue =
             serde_json::from_value(row(&manager_selector)?.1.clone())?;
-        let generation: arkret::RealmActorDeviceGenerationValue =
+        let generation: arkret::DeviceGenerationState =
             serde_json::from_value(row(&generation_selector)?.1.clone())?;
         if manager.service_id != *self.edge.service_actor_id()
             || generation.current_device_generation_ref == 0

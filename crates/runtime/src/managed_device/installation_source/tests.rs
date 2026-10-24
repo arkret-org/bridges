@@ -141,7 +141,7 @@ fn fixture() -> (InstallationHint, AppletAuthorityMaterialResponseBody) {
             stream_position: 1,
             commit_id: commit.commit_id.clone(),
         },
-        entry: ExactCurrentStateEntry::CapabilityGrant(CurrentCapabilityGrant {
+        current_state: ExactCurrentState::CapabilityGrant(CurrentCapabilityGrant {
             selector: CapabilityGrantExactCurrentSelector {
                 kind: CapabilityGrantExactCurrentSelectorKind::CapabilityGrant,
                 grant_id: id.clone(),
@@ -188,12 +188,16 @@ fn fixture() -> (InstallationHint, AppletAuthorityMaterialResponseBody) {
                 event: registration,
                 commit: registration_commit,
                 producer_device_evidence: None,
+
+                producer_signer_fact: None,
             },
         grant_events: vec![
             arkret_models_collaboration::applet_installation_authority::AppletCommittedEvent {
                 event: grant,
                 commit,
                 producer_device_evidence: None,
+
+                producer_signer_fact: None,
             },
         ],
         current_states: vec![row],

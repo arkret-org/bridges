@@ -547,6 +547,23 @@ pub fn validate_applet_committed_delivery(
             ));
         }
     }
+    if let Some(fact) = &pair.producer_signer_fact {
+        protocol(fact.validate_commit_binding(
+            &arkret_wire::CommittedEventFullView {
+                event: pair.event.clone(),
+                commit: pair.commit.clone(),
+            },
+            digest_suite,
+        ))?;
+        let original_key = protocol(arkret_canonical::base64url_decode(
+            fact.public_key_base64url.as_str(),
+        ))?;
+        if original_key.as_slice() != protocol(producer_key.ed25519_bytes())?.as_slice() {
+            return Err(BridgeProtocolError::Protocol(
+                "Realm Device key differs from its original accepted signer fact".into(),
+            ));
+        }
+    }
     if &producer_id
         != pair
             .event
@@ -759,6 +776,8 @@ mod tests {
             commit,
             event,
             producer_device_evidence: None,
+
+            producer_signer_fact: None,
         };
         let reference =
             validate_applet_committed_delivery(&pair, DigestSuite::Sha256, &producer.0, &public)
@@ -846,6 +865,8 @@ mod tests {
             event,
             commit,
             producer_device_evidence: None,
+
+            producer_signer_fact: None,
         };
         let actual_device = committed_delivery_device_key(&method).unwrap().unwrap();
         assert!(
@@ -1016,6 +1037,8 @@ mod tests {
             event,
             commit,
             producer_device_evidence: Some(evidence.clone()),
+
+            producer_signer_fact: None,
         };
         assert!(
             verify_current_account_device_signer_evidence(

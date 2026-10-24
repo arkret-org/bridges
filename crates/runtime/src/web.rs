@@ -1017,7 +1017,7 @@ async fn applet_actor(req: &mut Request, depot: &mut Depot, res: &mut Response) 
             .iter()
             .find_map(|entry| match entry {
                 arkret::RealmActorMaterialCurrentEntry::Present {
-                    row:
+                    current_state:
                         arkret::CurrentState::Value {
                             selector: found,
                             value,

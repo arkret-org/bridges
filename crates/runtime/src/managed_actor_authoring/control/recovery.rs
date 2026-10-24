@@ -1,6 +1,6 @@
 //! Durable recovery plans remain private until their begin Event is accepted.
 use arkret::{
-    CommittedEventRef, CurrentSelector, CurrentState, RealmActorDeviceGenerationValue,
+    CommittedEventRef, CurrentSelector, CurrentState, DeviceGenerationState,
     RealmActorManagerValue, RealmActorMaterial, RealmActorMaterialCurrentEntry,
     RealmActorMaterialResponseBody, RealmActorRecoveryState, RealmActorRecoveryValue,
 };
@@ -48,7 +48,7 @@ pub(crate) fn row<'a>(
         .iter()
         .find_map(|entry| match entry {
             RealmActorMaterialCurrentEntry::Present {
-                row:
+                current_state:
                     CurrentState::Value {
                         selector: found,
                         revision,
@@ -437,7 +437,7 @@ fn prepare(
             actor_id: actor.clone(),
         },
     )?;
-    let generation: RealmActorDeviceGenerationValue = serde_json::from_value(generation.clone())?;
+    let generation: DeviceGenerationState = serde_json::from_value(generation.clone())?;
     if manager.service_id != *edge.service_actor_id()
         || !recovery.enabled
         || recovery.pending.as_ref().map(|pending| &pending.begin_ref) != replaces
@@ -556,13 +556,13 @@ fn prepare(
             to_method_history_head: head.clone(),
             to_version_id: rotation.version_id,
         },
-        evidence: ResolutionDidBindingEvidenceReceipt {
-            kind: ResolutionDidBindingEvidenceKind::AkDidBindingEvidenceV1,
+        evidence: DidBindingEvidenceReceipt {
+            kind: DidBindingEvidenceKind::AkDidBindingEvidenceV1,
             method: "webvh".into(),
             document_digest: arkret::identity::document_canonical_digest(&document)
                 .map_err(|e| invalid(e.to_string()))?,
-            method_proofs: vec![ResolutionDidBindingMethodProof {
-                kind: arkret::ResolutionDidBindingMethodProofKind::WebvhLog,
+            method_proofs: vec![DidBindingMethodProof {
+                kind: arkret::DidBindingMethodProofKind::WebvhLog,
                 history_head: head,
                 witnesses: vec![],
                 witness_proofs_digest: Hash::new(canonical_sha256(&Vec::<Value>::new())?)?,

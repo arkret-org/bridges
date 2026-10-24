@@ -177,13 +177,13 @@ fn native_material(
             to_method_history_head: head.clone(),
             to_version_id: version(last)?,
         },
-        evidence: ResolutionDidBindingEvidenceReceipt {
-            kind: ResolutionDidBindingEvidenceKind::AkDidBindingEvidenceV1,
+        evidence: DidBindingEvidenceReceipt {
+            kind: DidBindingEvidenceKind::AkDidBindingEvidenceV1,
             method: "webvh".into(),
             document_digest: arkret::identity::document_canonical_digest(&document)
                 .map_err(|e| invalid(e.to_string()))?,
-            method_proofs: vec![ResolutionDidBindingMethodProof {
-                kind: arkret::ResolutionDidBindingMethodProofKind::WebvhLog,
+            method_proofs: vec![DidBindingMethodProof {
+                kind: arkret::DidBindingMethodProofKind::WebvhLog,
                 history_head: head.clone(),
                 witnesses: vec![],
                 witness_proofs_digest: Hash::new(canonical_sha256(&witnesses)?)?,
@@ -882,8 +882,7 @@ impl ManagedActorAuthoringService {
                 actor_id: actor_id.clone(),
             },
         )?;
-        let generation: arkret::RealmActorDeviceGenerationValue =
-            serde_json::from_value(generation.clone())?;
+        let generation: arkret::DeviceGenerationState = serde_json::from_value(generation.clone())?;
         if control.control_method_kid != incoming.offer.method
             || control.resolution.did != incoming.offer.did
         {

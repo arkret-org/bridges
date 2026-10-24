@@ -80,7 +80,7 @@ fn accepted_refs(publication: &Publication) -> Result<BTreeSet<String>> {
         .iter()
         .map(|entry| entry.keypackage_ref.clone())
         .collect();
-    let mut accepted: BTreeSet<_> = outcome.key_package_refs.iter().cloned().collect();
+    let mut accepted: BTreeSet<_> = outcome.keypackage_refs.iter().cloned().collect();
     // The contract permits omission of refs. An all-accepted response is
     // unambiguous; a partial response must identify the actual accepted subset.
     if accepted.is_empty()
@@ -90,8 +90,7 @@ fn accepted_refs(publication: &Publication) -> Result<BTreeSet<String>> {
         accepted = submitted.clone();
     }
     if accepted.len() != outcome.accepted as usize
-        || (!outcome.key_package_refs.is_empty()
-            && accepted.len() != outcome.key_package_refs.len())
+        || (!outcome.keypackage_refs.is_empty() && accepted.len() != outcome.keypackage_refs.len())
         || !accepted.is_subset(&submitted)
         || (accepted.len() != submitted.len() && outcome.rejections.is_empty())
     {

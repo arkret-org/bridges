@@ -5,7 +5,7 @@ use arkret_models_collaboration::applet_installation_authority::{
     AppletInstallationCurrentBinding,
 };
 use arkret_models_collaboration::exact_current_state::{
-    ExactCurrentStateEntry, ExactCurrentStateReadResponseBody,
+    ExactCurrentState, ExactCurrentStateReadResponseBody,
 };
 use arkret_models_collaboration::governance::grant_constraint::{
     CapabilityGrant, CapabilityGrantStatus, GrantConstraintKind, GrantConstraintSubkind,
@@ -125,7 +125,7 @@ fn source_grant(
         .iter()
         .filter_map(|entry| match entry {
             ExactCurrentStateReadResponseBody::Present {
-                entry: ExactCurrentStateEntry::CapabilityGrant(row),
+                current_state: ExactCurrentState::CapabilityGrant(row),
                 ..
             } if &row.selector.grant_id == id => Some(row),
             _ => None,

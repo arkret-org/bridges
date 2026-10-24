@@ -9,10 +9,10 @@ use std::sync::Arc;
 use arkret::canonical::{canonical_json_bytes, canonical_sha256};
 use arkret::signatures::{Ed25519DetachedJwsVerifier, PublicKeyMaterial};
 use arkret::{
-    AppletId, AppletManagedActorAuthoringRequest, AppletManagedActorPurpose, Did, DidCoreId, Event,
-    GhostPreviewRequestBody, Hash, ResolutionCommitment, ResolutionDidBindingEvidenceKind,
-    ResolutionDidBindingEvidenceReceipt, ResolutionDidBindingMethodProof,
-    ResolutionMethodEvidenceBoundary, ResolutionMethodHistoryEvidence, project_did_to_core_id,
+    AppletId, AppletManagedActorAuthoringRequest, AppletManagedActorPurpose, Did,
+    DidBindingEvidenceKind, DidBindingEvidenceReceipt, DidBindingMethodProof, DidCoreId, Event,
+    GhostPreviewRequestBody, Hash, ResolutionCommitment, ResolutionMethodEvidenceBoundary,
+    ResolutionMethodHistoryEvidence, project_did_to_core_id,
 };
 #[cfg(feature = "web")]
 use arkret::{AppletManagedActorAuthorRequestBody, AppletManagedActorAuthorResponseBody};
@@ -546,12 +546,12 @@ impl ManagedActorAuthoringService {
         };
         let method_history_evidence = ResolutionMethodHistoryEvidence::WebvhLog {
             boundary,
-            evidence: ResolutionDidBindingEvidenceReceipt {
-                kind: ResolutionDidBindingEvidenceKind::AkDidBindingEvidenceV1,
+            evidence: DidBindingEvidenceReceipt {
+                kind: DidBindingEvidenceKind::AkDidBindingEvidenceV1,
                 method: "webvh".to_owned(),
                 document_digest,
-                method_proofs: vec![ResolutionDidBindingMethodProof {
-                    kind: arkret::ResolutionDidBindingMethodProofKind::WebvhLog,
+                method_proofs: vec![DidBindingMethodProof {
+                    kind: arkret::DidBindingMethodProofKind::WebvhLog,
                     history_head: method_history_head.clone(),
                     witnesses: Vec::new(),
                     witness_proofs_digest,
@@ -1401,12 +1401,12 @@ mod ghost_bundle_tests {
                     to_method_history_head: method_history_head.clone(),
                     to_version_id: inception.version_id,
                 },
-                evidence: ResolutionDidBindingEvidenceReceipt {
-                    kind: ResolutionDidBindingEvidenceKind::AkDidBindingEvidenceV1,
+                evidence: DidBindingEvidenceReceipt {
+                    kind: DidBindingEvidenceKind::AkDidBindingEvidenceV1,
                     method: "webvh".to_owned(),
                     document_digest,
-                    method_proofs: vec![ResolutionDidBindingMethodProof {
-                        kind: arkret::ResolutionDidBindingMethodProofKind::WebvhLog,
+                    method_proofs: vec![DidBindingMethodProof {
+                        kind: arkret::DidBindingMethodProofKind::WebvhLog,
                         history_head: method_history_head,
                         witnesses: Vec::new(),
                         witness_proofs_digest,

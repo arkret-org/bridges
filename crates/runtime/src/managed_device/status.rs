@@ -123,7 +123,7 @@ impl ManagedDeviceRuntime {
                 .iter()
                 .find_map(|entry| match entry {
                     arkret::RealmActorMaterialCurrentEntry::Present {
-                        row:
+                        current_state:
                             arkret::CurrentState::Value {
                                 selector: actual,
                                 revision,

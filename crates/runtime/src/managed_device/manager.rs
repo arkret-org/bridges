@@ -36,7 +36,7 @@ fn row<'a>(
         .iter()
         .find_map(|entry| match entry {
             arkret::RealmActorMaterialCurrentEntry::Present {
-                row:
+                current_state:
                     arkret::CurrentState::Value {
                         selector: found,
                         value,
