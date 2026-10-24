@@ -84,12 +84,12 @@ fn accepted_refs(publication: &Publication) -> Result<BTreeSet<String>> {
     // The contract permits omission of refs. An all-accepted response is
     // unambiguous; a partial response must identify the actual accepted subset.
     if accepted.is_empty()
-        && outcome.accepted as usize == submitted.len()
+        && outcome.accepted_count as usize == submitted.len()
         && outcome.rejections.is_empty()
     {
         accepted = submitted.clone();
     }
-    if accepted.len() != outcome.accepted as usize
+    if accepted.len() != outcome.accepted_count as usize
         || (!outcome.keypackage_refs.is_empty() && accepted.len() != outcome.keypackage_refs.len())
         || !accepted.is_subset(&submitted)
         || (accepted.len() != submitted.len() && outcome.rejections.is_empty())
