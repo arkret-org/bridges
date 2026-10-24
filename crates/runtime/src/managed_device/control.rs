@@ -112,7 +112,7 @@ impl ManagedDeviceRuntime {
                 .await?;
             return Ok(commit.clone());
         }
-        let request = SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(
+        let request = SelfAuthoritySubmitRequestBody::Event(EventAdmissionSubmission::new(
             prepared.event.event().clone(),
         ));
         let digest = arkret::Hash::new(canonical_sha256(&request)?)?;
@@ -123,7 +123,7 @@ impl ManagedDeviceRuntime {
         let requester = ActorId::service(self.edge.service_actor_id().clone());
         let result = route
             .material(
-                &arkret::RealmActorMaterialRequest::Outcome {
+                &arkret::RealmActorMaterialRequestBody::RequestStatus {
                     actor_id: actor.clone(),
                     request_nonce: crate::realm_governance::nonce()?,
                     target_request_digest: digest.clone(),
@@ -131,10 +131,10 @@ impl ManagedDeviceRuntime {
                 &requester,
             )
             .await?;
-        let arkret::RealmActorMaterial::Outcome {
+        let arkret::RealmActorMaterial::RequestStatus {
             target_request_digest,
-            outcome,
-        } = &result.material().result
+            request_status: outcome,
+        } = &result.material().material
         else {
             return Err(invalid(
                 "control recovery returned another material purpose",
@@ -144,7 +144,7 @@ impl ManagedDeviceRuntime {
             return Err(invalid("control recovery request mismatch"));
         }
         let outcome = match outcome {
-            arkret::RealmActorOperationOutcome::Submitted(AuthoritySubmitOutcome::Rejected {
+            arkret::RealmActorRequestStatus::Submitted(AuthoritySubmitResponseBody::Rejected {
                 ..
             }) => {
                 self.authoring
@@ -154,8 +154,8 @@ impl ManagedDeviceRuntime {
                     "the governance Station rejected this control operation",
                 ));
             }
-            arkret::RealmActorOperationOutcome::Submitted(outcome) => outcome.clone(),
-            arkret::RealmActorOperationOutcome::Status {
+            arkret::RealmActorRequestStatus::Submitted(outcome) => outcome.clone(),
+            arkret::RealmActorRequestStatus::Status {
                 status: arkret::RealmActorOperationStatus::Unknown,
             } => {
                 let current = self.control_state(actor).await?;
@@ -194,7 +194,7 @@ impl ManagedDeviceRuntime {
                 )?;
                 let options = arkret::ClientRequestOptions::new()
                     .idempotency_key(prepared.event.event_id().as_str());
-                let SelfAuthoritySubmitOutcome::Ordinary(outcome) =
+                let SelfAuthoritySubmitResponseBody::Ordinary(outcome) =
                     client.submit_to_realm_authority(&request, &options).await?
                 else {
                     return Err(invalid("control update returned an aggregate outcome"));
@@ -207,14 +207,14 @@ impl ManagedDeviceRuntime {
                 ));
             }
         };
-        let AuthoritySubmitOutcome::Accepted { commit, .. } = outcome else {
+        let AuthoritySubmitResponseBody::Accepted { commit, .. } = outcome else {
             return Err(invalid(
                 "control rotation has not been accepted; retain its original",
             ));
         };
         let original = route
             .material(
-                &arkret::RealmActorMaterialRequest::Event {
+                &arkret::RealmActorMaterialRequestBody::Event {
                     actor_id: actor.clone(),
                     request_nonce: crate::realm_governance::nonce()?,
                     target: arkret::CommittedEventRef {
@@ -231,7 +231,7 @@ impl ManagedDeviceRuntime {
             event,
             commit: actual,
             ..
-        } = &original.material().result
+        } = &original.material().material
         else {
             return Err(invalid("control acceptance original is unavailable"));
         };

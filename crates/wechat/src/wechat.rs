@@ -540,8 +540,8 @@ async fn wechat_delivery(req: &mut Request, depot: &mut Depot, res: &mut Respons
     .await;
     match outcome {
         // WeChat treats the literal body "success" as acknowledgement.
-        webhook::SubmitOutcome::Accepted => webhook::ok_text(res, "success"),
-        webhook::SubmitOutcome::Retry => webhook::submission_retry(res),
+        webhook::SubmitResponseBody::Accepted => webhook::ok_text(res, "success"),
+        webhook::SubmitResponseBody::Retry => webhook::submission_retry(res),
     }
 }
 

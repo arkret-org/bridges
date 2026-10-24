@@ -36,7 +36,7 @@ pub(crate) struct ManagedAuthoringIdentity {
 
 pub(crate) enum ManagedDeliveryAdmission {
     New,
-    Accepted(arkret::AppletTransactionOutcome),
+    Accepted(arkret::AppletTransactionResponseBody),
     Conflict,
 }
 
@@ -97,7 +97,7 @@ pub(crate) fn authoring_scope(request: &AppletManagedActorAuthoringRequest) -> &
 }
 
 pub(crate) fn creation_event(body: &AppletAuthoringTransactionRequestBody) -> Result<&Event> {
-    match &body.authoring_context.material.result {
+    match &body.authoring_context.material.material {
         RealmActorMaterial::Event { event, .. }
             if event.kind == arkret_wire::event_kind_str::REALM_ACTOR_CREATE =>
         {
@@ -411,8 +411,8 @@ impl AuthoringJournal {
         let mut writes = Vec::new();
         if replay {
             let (prior, _) = self.retained_managed_actor(&identity.actor_id)?;
-            if canonical_json_bytes(&prior.authoring_context.material.result)?
-                != canonical_json_bytes(&body.authoring_context.material.result)?
+            if canonical_json_bytes(&prior.authoring_context.material.material)?
+                != canonical_json_bytes(&body.authoring_context.material.material)?
             {
                 return Err(invalid(
                     "creation completion conflicts with its immutable acceptance",
@@ -519,7 +519,7 @@ struct ManagedDeliveryReceipt {
     canonical_body_digest: Hash,
     stable_digest: Hash,
     record: arkret::AppletDeliveryAuthenticationRecord,
-    outcome: arkret::AppletTransactionOutcome,
+    outcome: arkret::AppletTransactionResponseBody,
 }
 
 fn delivery_receipt_conflicts(
@@ -539,8 +539,8 @@ fn delivery_receipt_conflicts(
     )
 }
 
-fn completion_outcome() -> arkret::AppletTransactionOutcome {
-    arkret::AppletTransactionOutcome::Accepted {
+fn completion_outcome() -> arkret::AppletTransactionResponseBody {
+    arkret::AppletTransactionResponseBody::Accepted {
         committed_event_refs: Vec::new(),
         rejections: Vec::new(),
         retry_after_ms: None,

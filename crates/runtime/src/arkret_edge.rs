@@ -31,20 +31,20 @@ use arkret::{
 };
 use arkret_event_draft::{EventSpec, TypedEventDraft};
 use arkret_models_collaboration::authority_commit::{
-    SelfAuthoritySubmitOutcome, SelfAuthoritySubmitRequest,
+    SelfAuthoritySubmitRequestBody, SelfAuthoritySubmitResponseBody,
 };
 #[cfg(any(feature = "web", test))]
 use arkret_models_discovery::{ServiceDescribe, TransportBinding};
 #[cfg(any(feature = "web", test))]
 use arkret_models_integration::{
-    AppletActorView, AppletPingOutcome, AppletProtocolMetadata, AppletRealmView,
-    AppletTransactionOutcome,
+    AppletActorView, AppletPingResponseBody, AppletProtocolMetadata, AppletRealmView,
+    AppletTransactionResponseBody,
 };
 use arkret_models_integration::{
     AppletAuthoringTransactionRequestBody, AppletTransactionRequestBody,
 };
 use arkret_wire::{
-    AuthorityRejectionStatus, AuthoritySubmitOutcome, DidUrl, EventAdmissionSubmission,
+    AuthorityRejectionStatus, AuthoritySubmitResponseBody, DidUrl, EventAdmissionSubmission,
     SignalEnvelope,
 };
 #[cfg(test)]
@@ -303,14 +303,14 @@ impl ArkretEdge {
     pub async fn provision_bot(
         &self,
         body: &PreparedManagedActor,
-    ) -> Result<AuthoritySubmitOutcome> {
+    ) -> Result<AuthoritySubmitResponseBody> {
         self.submit_managed_creation(body).await
     }
 
     pub async fn submit_managed_creation(
         &self,
         body: &PreparedManagedActor,
-    ) -> Result<AuthoritySubmitOutcome> {
+    ) -> Result<AuthoritySubmitResponseBody> {
         let candidate = creation_payload(&body.create_event)?;
         if candidate.applet_id != self.applet_id || candidate.service_id != self.service_actor_id {
             return Err(BridgeError::App(
@@ -327,7 +327,7 @@ impl ArkretEdge {
             digest_suite: PRODUCER_DIGEST_SUITE,
         };
         let request = arkret::VerifiedSubmission::verify(
-            SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(
+            SelfAuthoritySubmitRequestBody::Event(EventAdmissionSubmission::new(
                 body.create_event.clone(),
             )),
             |_| Ok(context.clone()),
@@ -340,19 +340,19 @@ impl ArkretEdge {
                 &ClientRequestOptions::new().idempotency_key(body.create_event.event_id.as_str()),
             )
             .await?;
-        let SelfAuthoritySubmitOutcome::Ordinary(outcome) = outcome else {
+        let SelfAuthoritySubmitResponseBody::Ordinary(outcome) = outcome else {
             return Err(BridgeError::App(
                 "creation returned an aggregate outcome".into(),
             ));
         };
-        if let AuthoritySubmitOutcome::Accepted { commit, .. } = &outcome {
+        if let AuthoritySubmitResponseBody::Accepted { commit, .. } = &outcome {
             let target = arkret::CommittedEventRef {
                 event_id: body.create_event.event_id.clone(),
                 commit_id: commit.commit_id.clone(),
                 stream_ref: commit.stream_ref.clone(),
                 stream_position: commit.stream_position,
             };
-            let query = arkret::RealmActorMaterialRequest::Event {
+            let query = arkret::RealmActorMaterialRequestBody::Event {
                 actor_id: candidate.actor_id,
                 request_nonce: crate::realm_governance::nonce()?,
                 target,
@@ -513,7 +513,7 @@ impl ArkretEdge {
     ) -> Result<arkret::CommittedEventFullView> {
         let original = self.retained_managed_actor(actor)?;
         let arkret::RealmActorMaterial::Event { event, commit, .. } =
-            original.authoring_context.material.result
+            original.authoring_context.material.material
         else {
             return Err(BridgeError::Database(
                 "creation original is unavailable".into(),
@@ -549,13 +549,13 @@ impl ArkretEdge {
             event,
             commit,
             producer_signer_fact,
-        } = &material.result
+        } = &material.material
         else {
             return Err(BridgeError::App(
                 "creation completion requires Event material".into(),
             ));
         };
-        let request = arkret::RealmActorMaterialRequest::Event {
+        let request = arkret::RealmActorMaterialRequestBody::Event {
             actor_id: identity.actor_id.clone(),
             request_nonce: material.request_nonce.clone(),
             target: arkret::CommittedEventRef {
@@ -577,7 +577,8 @@ impl ArkretEdge {
         // use a cached completion after the current manager changes. Event
         // material reads deliberately do not require an active install/grant.
         let mut current_request = request.clone();
-        if let arkret::RealmActorMaterialRequest::Event { request_nonce, .. } = &mut current_request
+        if let arkret::RealmActorMaterialRequestBody::Event { request_nonce, .. } =
+            &mut current_request
         {
             *request_nonce = crate::realm_governance::nonce()?;
         }
@@ -587,8 +588,8 @@ impl ArkretEdge {
                 &ActorId::service(self.service_actor_id.clone()),
             )
             .await?;
-        if arkret::canonical::canonical_json_bytes(&current.material().result)?
-            != arkret::canonical::canonical_json_bytes(&material.result)?
+        if arkret::canonical::canonical_json_bytes(&current.material().material)?
+            != arkret::canonical::canonical_json_bytes(&material.material)?
         {
             return Err(BridgeError::App(
                 "current manager read returned a different creation acceptance".into(),
@@ -892,8 +893,9 @@ impl ArkretEdge {
                 ))
             });
         }
-        let request =
-            SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(event.event().clone()));
+        let request = SelfAuthoritySubmitRequestBody::Event(EventAdmissionSubmission::new(
+            event.event().clone(),
+        ));
         let producer = arkret::ProducerVerificationContext {
             actor: arkret::ActorId::service(self.service_actor_id.clone()),
             verification_method: self.service_verification_method()?,
@@ -910,14 +912,14 @@ impl ArkretEdge {
             .client
             .submit_to_realm_authority(&request, &options)
             .await?;
-        let SelfAuthoritySubmitOutcome::Ordinary(outcome) = outcome else {
+        let SelfAuthoritySubmitResponseBody::Ordinary(outcome) = outcome else {
             return Err(BridgeError::Arkret(
                 "ordinary Event submission returned an aggregate outcome".to_owned(),
             ));
         };
         // A retryable answer settles nothing: the frozen bytes stay replayable
         // and the pending index is left in place for the recovery loop.
-        if let AuthoritySubmitOutcome::Accepted { commit, .. } = &outcome {
+        if let AuthoritySubmitResponseBody::Accepted { commit, .. } = &outcome {
             let keys = garth::historical_station_keys::fetch_historical_station_keys_for_commits(
                 &route.client,
                 &route.bundle,
@@ -995,9 +997,9 @@ impl ArkretEdge {
 }
 
 /// The Station reason code carried by a terminal rejection.
-fn rejection_reason(outcome: &AuthoritySubmitOutcome) -> &str {
+fn rejection_reason(outcome: &AuthoritySubmitResponseBody) -> &str {
     match outcome {
-        AuthoritySubmitOutcome::Rejected {
+        AuthoritySubmitResponseBody::Rejected {
             status: AuthorityRejectionStatus::Rejected,
             reason_code,
         } => reason_code.as_str(),
@@ -1100,13 +1102,13 @@ pub struct VerifiedManagedCompletion {
     pub(crate) destination_id: DidCoreId,
     pub(crate) registration_epoch: arkret::Hash,
     pub(crate) delivery: Option<arkret::AppletDeliveryAuthenticationRecord>,
-    pub(crate) retained_outcome: Option<arkret::AppletTransactionOutcome>,
+    pub(crate) retained_outcome: Option<arkret::AppletTransactionResponseBody>,
 }
 
 impl VerifiedManagedCompletion {
     /// Exact outcome retained atomically with the original and delivery record.
     /// It is exposed only after this request's complete fresh admission.
-    pub fn retained_outcome(&self) -> Option<&arkret::AppletTransactionOutcome> {
+    pub fn retained_outcome(&self) -> Option<&arkret::AppletTransactionResponseBody> {
         self.retained_outcome.as_ref()
     }
 
@@ -1128,7 +1130,7 @@ fn retained_managed_actor(
     let (body, roots) = journal.retained_managed_actor(actor)?;
     // Retained creation is historical evidence. Service changes preserve its signer.
     let candidate = crate::managed_authoring::creation_payload(
-        match &body.authoring_context.material.result {
+        match &body.authoring_context.material.material {
             arkret::RealmActorMaterial::Event { event, .. } => event,
             _ => {
                 return Err(BridgeError::Database(
@@ -1153,7 +1155,7 @@ fn retained_managed_actor(
         event,
         commit,
         producer_signer_fact,
-    } = &material.result
+    } = &material.material
     else {
         return Err(BridgeError::Database(
             "retained creation Event is missing".into(),
@@ -1220,8 +1222,8 @@ impl arkret::AppletHandler for BridgeAppletHandler {
         })
     }
 
-    fn ping(&self) -> std::result::Result<AppletPingOutcome, WireError> {
-        Ok(AppletPingOutcome {
+    fn ping(&self) -> std::result::Result<AppletPingResponseBody, WireError> {
+        Ok(AppletPingResponseBody {
             applet_id: self.applet_id.clone(),
             // The wire field is the stable identity core; the configured
             // resolvable DID is projected through the registered method
@@ -1259,7 +1261,7 @@ impl arkret::AppletHandler for BridgeAppletHandler {
         &self,
         _idempotency_key: &str,
         req: AppletTransactionRequestBody,
-    ) -> std::result::Result<AppletTransactionOutcome, WireError> {
+    ) -> std::result::Result<AppletTransactionResponseBody, WireError> {
         let _ = req;
         Err(WireError::Protocol(
             "Applet transactions require the async verified Realm creation adapter; group content uses a managed Device".into(),
@@ -1504,13 +1506,13 @@ mod tests {
                 .unwrap(),
             signed_digest: arkret::Hash::new(format!("sha256:{}", "00".repeat(32))).unwrap(),
             created_at: "2026-09-16T00:00:00Z".parse().unwrap(),
-            sig: Base64UrlString::new("c2lnbmF0dXJl").unwrap(),
+            signature: Base64UrlString::new("c2lnbmF0dXJl").unwrap(),
         }
     }
 
     /// One accepted Realm-stream commit for `event` at `position`.
-    fn accepted(event: &AuthoredEvent, position: u64) -> AuthoritySubmitOutcome {
-        AuthoritySubmitOutcome::Accepted {
+    fn accepted(event: &AuthoredEvent, position: u64) -> AuthoritySubmitResponseBody {
+        AuthoritySubmitResponseBody::Accepted {
             status: arkret_wire::AuthorityCommitStatus::Committed,
             commit: RealmCommit {
                 commit_id: arkret::RealmCommitId::from_digest([position as u8 + 1; 32]),
@@ -1533,15 +1535,15 @@ mod tests {
         }
     }
 
-    fn rejected(reason: &str) -> AuthoritySubmitOutcome {
-        AuthoritySubmitOutcome::Rejected {
+    fn rejected(reason: &str) -> AuthoritySubmitResponseBody {
+        AuthoritySubmitResponseBody::Rejected {
             status: AuthorityRejectionStatus::Rejected,
             reason_code: reason.to_owned(),
         }
     }
 
-    fn unavailable(reason: &str) -> AuthoritySubmitOutcome {
-        AuthoritySubmitOutcome::Rejected {
+    fn unavailable(reason: &str) -> AuthoritySubmitResponseBody {
+        AuthoritySubmitResponseBody::Rejected {
             status: AuthorityRejectionStatus::RetryableUnavailable,
             reason_code: reason.to_owned(),
         }
@@ -1660,14 +1662,14 @@ mod tests {
             }
         );
 
-        let AuthoritySubmitOutcome::Accepted { status, mut commit } = good.clone() else {
+        let AuthoritySubmitResponseBody::Accepted { status, mut commit } = good.clone() else {
             unreachable!("fixture is an acceptance")
         };
         commit.event_ref = arkret::EventId::from_digest(DigestSuite::Sha256, [8; 32]);
         assert!(
             publication_outcome(
                 &event,
-                &AuthoritySubmitOutcome::Accepted {
+                &AuthoritySubmitResponseBody::Accepted {
                     status,
                     commit: commit.clone()
                 }

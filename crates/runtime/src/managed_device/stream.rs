@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use arkret_wire::{
     CommitStreamHead, CommitStreamRef, CommittedEventView, EventKind, RealmStateSnapshot,
-    StreamScanDirection, StreamScanRequest,
+    StreamScanDirection, StreamScanRequestBody,
 };
 
 use super::*;
@@ -159,7 +159,7 @@ impl ManagedDeviceRuntime {
         };
         current_covers(current, &expected)?;
         let mut groups = current.current_state_entries.iter().filter_map(|row| {
-            let arkret::TypedCurrentRow::Value {
+            let arkret::CurrentState::Value {
                 selector, value, ..
             } = row;
             matches!(selector, arkret::CurrentSelector::MlsGroup { scope_ref }
@@ -172,7 +172,7 @@ impl ManagedDeviceRuntime {
         if groups.next().is_some() {
             return Err(invalid("native send has duplicate current MLS groups"));
         }
-        let public: arkret::MlsGroupCurrent = serde_json::from_value(value.clone())?;
+        let public: arkret::MlsGroupValue = serde_json::from_value(value.clone())?;
         if public.effective_scope != device.effective_scope
             || public.current_mls_commit_event_ref != base.event.event_id
             || public.epoch != group.epoch()
@@ -277,7 +277,7 @@ impl ManagedDeviceRuntime {
             if limit == 0 {
                 None
             } else {
-                let request = StreamScanRequest {
+                let request = StreamScanRequestBody {
                     realm_id: device.effective_scope.realm_id().clone(),
                     stream_ref: expected.stream_ref.clone(),
                     direction: StreamScanDirection::After(Some(expected.stream_position)),

@@ -1,6 +1,6 @@
 //! Same-Applet Service replacement; the Station alone accepts per-actor manager changes.
 use arkret::identity::VerifiedRealmActorMaterial;
-use arkret::{CurrentSelector, RealmActorMaterial, RealmActorMaterialRequest};
+use arkret::{CurrentSelector, RealmActorMaterial, RealmActorMaterialRequestBody};
 
 use super::*;
 use crate::managed_actor_authoring::control::manager::{reference, revision};
@@ -29,7 +29,7 @@ fn row<'a>(
     material: &'a VerifiedRealmActorMaterial,
     selector: &CurrentSelector,
 ) -> Result<(&'a serde_json::Value, &'a arkret::CommittedEventRef)> {
-    let RealmActorMaterial::Current { entries } = &material.material().result else {
+    let RealmActorMaterial::Current { entries } = &material.material().material else {
         return Err(invalid("manager transfer requires a verified current cut"));
     };
     entries
@@ -37,7 +37,7 @@ fn row<'a>(
         .find_map(|entry| match entry {
             arkret::RealmActorMaterialCurrentEntry::Present {
                 row:
-                    arkret::TypedCurrentRow::Value {
+                    arkret::CurrentState::Value {
                         selector: found,
                         value,
                         ..
@@ -136,7 +136,7 @@ impl ManagedDeviceRuntime {
         let route = self.edge.realm_route(&realm.realm_id).await?;
         let current = route
             .material(
-                &RealmActorMaterialRequest::Current {
+                &RealmActorMaterialRequestBody::Current {
                     actor_id: actor.clone(),
                     request_nonce: crate::realm_governance::nonce()?,
                     selectors: selectors(actor),
@@ -240,7 +240,7 @@ impl ManagedDeviceRuntime {
         if self.authoring.retained_manager_event(plan).await?.is_some() {
             return Ok(());
         }
-        let query = RealmActorMaterialRequest::Current {
+        let query = RealmActorMaterialRequestBody::Current {
             actor_id: plan.actor_id.clone(),
             request_nonce: crate::realm_governance::nonce()?,
             selectors: selectors(&plan.actor_id),
@@ -266,7 +266,7 @@ impl ManagedDeviceRuntime {
             .manager_control_material(
                 plan,
                 control_ref,
-                &RealmActorMaterialRequest::Event {
+                &RealmActorMaterialRequestBody::Event {
                     actor_id: plan.actor_id.clone(),
                     request_nonce: crate::realm_governance::nonce()?,
                     target: creation_ref.clone(),
@@ -300,7 +300,7 @@ impl ManagedDeviceRuntime {
         &self,
         plan: &ManagementTransferPlan,
         control_ref: &arkret::CommittedEventRef,
-        request: &RealmActorMaterialRequest,
+        request: &RealmActorMaterialRequestBody,
     ) -> Result<VerifiedRealmActorMaterial> {
         let realm = plan
             .actor_id
@@ -340,10 +340,11 @@ impl ManagedDeviceRuntime {
             .as_realm_actor_id()
             .ok_or_else(|| invalid("Realm actor required"))?;
         let route = self.edge.realm_route(&realm.realm_id).await?;
-        let request =
-            SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(event.event().clone()));
+        let request = SelfAuthoritySubmitRequestBody::Event(EventAdmissionSubmission::new(
+            event.event().clone(),
+        ));
         let digest = arkret::Hash::new(canonical_sha256(&request)?)?;
-        let query = RealmActorMaterialRequest::Outcome {
+        let query = RealmActorMaterialRequestBody::RequestStatus {
             actor_id: plan.actor_id.clone(),
             request_nonce: crate::realm_governance::nonce()?,
             target_request_digest: digest,
@@ -358,22 +359,26 @@ impl ManagedDeviceRuntime {
                     .await?
             }
         };
-        let RealmActorMaterial::Outcome { outcome, .. } = &observed.material().result else {
+        let RealmActorMaterial::RequestStatus {
+            request_status: outcome,
+            ..
+        } = &observed.material().material
+        else {
             return Err(invalid("manager outcome returned another purpose"));
         };
         let accepted = match outcome {
-            arkret::RealmActorOperationOutcome::Submitted(AuthoritySubmitOutcome::Accepted {
+            arkret::RealmActorRequestStatus::Submitted(AuthoritySubmitResponseBody::Accepted {
                 commit,
                 ..
             }) => commit.clone(),
-            arkret::RealmActorOperationOutcome::Status {
+            arkret::RealmActorRequestStatus::Status {
                 status: arkret::RealmActorOperationStatus::Unknown,
             } => {
                 let current = self
                     .manager_control_material(
                         plan,
                         &old_control_ref,
-                        &RealmActorMaterialRequest::Current {
+                        &RealmActorMaterialRequestBody::Current {
                             actor_id: plan.actor_id.clone(),
                             request_nonce: crate::realm_governance::nonce()?,
                             selectors: selectors(&plan.actor_id),
@@ -430,10 +435,9 @@ impl ManagedDeviceRuntime {
                             .idempotency_key(event.event_id().as_str()),
                     )
                     .await?;
-                let SelfAuthoritySubmitOutcome::Ordinary(AuthoritySubmitOutcome::Accepted {
-                    commit,
-                    ..
-                }) = outcome
+                let SelfAuthoritySubmitResponseBody::Ordinary(
+                    AuthoritySubmitResponseBody::Accepted { commit, .. },
+                ) = outcome
                 else {
                     return Err(invalid(
                         "manager transfer has not been accepted; retain its exact original",
@@ -447,7 +451,7 @@ impl ManagedDeviceRuntime {
                 ));
             }
         };
-        let query = RealmActorMaterialRequest::Event {
+        let query = RealmActorMaterialRequestBody::Event {
             actor_id: plan.actor_id.clone(),
             request_nonce: crate::realm_governance::nonce()?,
             target: reference(&accepted),

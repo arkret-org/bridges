@@ -243,7 +243,7 @@ async fn line_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response)
                 },
             )
             .await;
-            retry |= outcome == webhook::SubmitOutcome::Retry;
+            retry |= outcome == webhook::SubmitResponseBody::Retry;
             continue;
         }
 

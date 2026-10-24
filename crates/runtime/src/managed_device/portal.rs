@@ -1,5 +1,5 @@
 //! Portal discovery uses currently admitted originals, never a Service read.
-use arkret::{CommitStreamRef, CurrentSelector, StrandId, TypedCurrentRow};
+use arkret::{CommitStreamRef, CurrentSelector, CurrentState, StrandId};
 use serde_json::Value;
 
 use super::*;
@@ -61,7 +61,7 @@ impl ManagedDeviceRuntime {
         // inaccessible create originals cannot be treated as a negative match.
         let mut earliest: Option<(u64, StrandId)> = None;
         for row in &current.current_state_entries {
-            let TypedCurrentRow::Value {
+            let CurrentState::Value {
                 selector: CurrentSelector::Strand { strand_id },
                 source_stream_ref,
                 ..

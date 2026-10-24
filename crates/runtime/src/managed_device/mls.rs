@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use arkret::mls::{ArkretMlsIdentity, ArkretMlsSigner};
 use arkret::{
-    KeyPackagesUploadOutcome, KeyPackagesUploadRequestBody, LocalMlsKeyPackageInventory,
+    KeyPackagesUploadRequestBody, KeyPackagesUploadResponseBody, LocalMlsKeyPackageInventory,
     LocalMlsKeyPackageInventoryEntry, MlsEndpointIdentity, MlsKeyPackageRecord, MlsKeyPackageState,
 };
 
@@ -35,7 +35,7 @@ struct ScopeInventory {
 struct Publication {
     request: KeyPackagesUploadRequestBody,
     records: Vec<MlsKeyPackageRecord>,
-    outcome: Option<KeyPackagesUploadOutcome>,
+    outcome: Option<KeyPackagesUploadResponseBody>,
 }
 
 fn endpoint(record: &DeviceRecord) -> Result<MlsEndpointIdentity> {
@@ -258,7 +258,7 @@ impl ManagedDeviceRuntime {
             || payload(&record)?.device_id != device.device_id
             || record.authorization.event_id() != &device.authorization_event_id
             || !record.plan.scopes.contains_scope(&device.effective_scope)
-            || !matches!(&record.outcome, Some(AuthoritySubmitOutcome::Accepted { commit, .. }) if commit == &device.authorization_commit)
+            || !matches!(&record.outcome, Some(AuthoritySubmitResponseBody::Accepted { commit, .. }) if commit == &device.authorization_commit)
         {
             return Err(invalid(
                 "MLS state belongs to another original Device instance",
@@ -459,7 +459,7 @@ impl ManagedDeviceRuntime {
     }
 }
 
-fn publication_result(outcome: &KeyPackagesUploadOutcome) -> Result<()> {
+fn publication_result(outcome: &KeyPackagesUploadResponseBody) -> Result<()> {
     if outcome.rejections.is_empty() {
         Ok(())
     } else {

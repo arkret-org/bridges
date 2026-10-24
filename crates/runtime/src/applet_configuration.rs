@@ -6,7 +6,8 @@ use arkret::signatures::Ed25519DetachedJwsVerifier;
 use arkret::{ActorId, AppletManagedActorAuthoringRequest, CommittedEventRef};
 use arkret_models_integration::{
     AppletConfigurationCommand as Command, AppletConfigurationExecutionIntent as Intent,
-    AppletConfigurationExecutionOutcome as Outcome, AppletConfigurationExecutionRequest as Request,
+    AppletConfigurationExecutionRequestBody as Request,
+    AppletConfigurationExecutionResponseBody as Outcome,
     AppletConfigurationExecutionStatus as Status, AppletConfigurationSelection as Selection,
     AppletConfigurationSignature,
 };
@@ -129,7 +130,7 @@ impl AppletConfigurationService {
         };
         let current = route
             .material(
-                &arkret::RealmActorMaterialRequest::Current {
+                &arkret::RealmActorMaterialRequestBody::Current {
                     actor_id: candidate.actor_id.clone(),
                     request_nonce: crate::realm_governance::nonce()?,
                     selectors: vec![selector.clone()],
@@ -137,7 +138,7 @@ impl AppletConfigurationService {
                 &requester,
             )
             .await?;
-        let arkret::RealmActorMaterial::Current { entries } = &current.material().result else {
+        let arkret::RealmActorMaterial::Current { entries } = &current.material().material else {
             return Err(invalid("configuration identity current is unavailable"));
         };
         let target = entries
@@ -145,7 +146,7 @@ impl AppletConfigurationService {
             .find_map(|entry| match entry {
                 arkret::RealmActorMaterialCurrentEntry::Present {
                     row:
-                        arkret::TypedCurrentRow::Value {
+                        arkret::CurrentState::Value {
                             selector: found, ..
                         },
                     source_ref,
@@ -157,7 +158,7 @@ impl AppletConfigurationService {
             .ok_or_else(|| invalid("configuration identity has not been accepted"))?;
         let original = route
             .material(
-                &arkret::RealmActorMaterialRequest::Event {
+                &arkret::RealmActorMaterialRequestBody::Event {
                     actor_id: candidate.actor_id,
                     request_nonce: crate::realm_governance::nonce()?,
                     target,
@@ -167,7 +168,7 @@ impl AppletConfigurationService {
             .await?;
         let arkret::RealmActorMaterial::Event {
             event: accepted, ..
-        } = &original.material().result
+        } = &original.material().material
         else {
             return Err(invalid("configuration original creation is unavailable"));
         };
@@ -382,7 +383,7 @@ impl AppletConfigurationService {
         };
         let material = route
             .material(
-                &arkret::RealmActorMaterialRequest::Current {
+                &arkret::RealmActorMaterialRequestBody::Current {
                     actor_id: actor.clone(),
                     request_nonce: crate::realm_governance::nonce()?,
                     selectors: vec![selector.clone()],
@@ -390,7 +391,7 @@ impl AppletConfigurationService {
                 &ActorId::service(intent.service_id.clone()),
             )
             .await?;
-        let arkret::RealmActorMaterial::Current { entries } = &material.material().result else {
+        let arkret::RealmActorMaterial::Current { entries } = &material.material().material else {
             return Err(invalid("selected identity manager result is unavailable"));
         };
         let manager = entries
@@ -398,7 +399,7 @@ impl AppletConfigurationService {
             .find_map(|entry| match entry {
                 arkret::RealmActorMaterialCurrentEntry::Present {
                     row:
-                        arkret::TypedCurrentRow::Value {
+                        arkret::CurrentState::Value {
                             selector: found,
                             value,
                             ..
@@ -528,7 +529,7 @@ mod tests {
             "applet_id": "ak:applet:01904100-0000-7000-8000-bbbbbbbbbbbb",
             "service_id": core("did:webvh:zservicescid:applet.example"),
             "governance_station_id": core("did:webvh:zstationscid:station.example"),
-            "governance_generation": 0,
+            "governance_generation": "0",
             "effective_scope": {"kind": "realm", "realm_id": realm},
             "registration_ref": {
                 "event_id": event,

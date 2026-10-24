@@ -1,7 +1,7 @@
 //! Original control-signed revoke requests and authenticated terminal outcomes.
 use arkret::{
-    CommittedEventRef, Hash, RealmActorDeviceRevokeState, RealmActorMaterial,
-    RealmActorMaterialOutcome, RealmActorMaterialRequest, RealmActorOperationOutcome,
+    CommittedEventRef, Hash, RealmActorDeviceRevocationState, RealmActorMaterial,
+    RealmActorMaterialRequestBody, RealmActorMaterialResponseBody, RealmActorRequestStatus,
 };
 use arkret_models_collaboration::events_payloads::DeviceRevokePayload;
 
@@ -15,7 +15,7 @@ const RETIRED_PREFIX: &str = "managed-retired-device/v1/";
 struct RetiredDevice {
     authorization: AuthoredEvent,
     authorization_commit: RealmCommit,
-    terminal: RealmActorMaterialOutcome,
+    terminal: RealmActorMaterialResponseBody,
 }
 
 pub(super) fn retirement_key(actor: &ActorId, device_operation: &str) -> Result<String> {
@@ -37,7 +37,7 @@ struct Revocation {
     control_ref: CommittedEventRef,
     controller_key: PublicKeyMaterial,
     proposal: Option<RealmCommit>,
-    material: Option<RealmActorMaterialOutcome>,
+    material: Option<RealmActorMaterialResponseBody>,
 }
 
 fn reference(event: &AuthoredEvent, commit: &RealmCommit) -> CommittedEventRef {
@@ -57,8 +57,10 @@ fn storage_key(actor: &ActorId, operation: &str) -> Result<String> {
 }
 
 impl Revocation {
-    fn request(&self) -> SelfAuthoritySubmitRequest {
-        SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(self.event.event().clone()))
+    fn request(&self) -> SelfAuthoritySubmitRequestBody {
+        SelfAuthoritySubmitRequestBody::Event(EventAdmissionSubmission::new(
+            self.event.event().clone(),
+        ))
     }
 
     fn validate(&self) -> Result<DeviceAuthorizePayload> {
@@ -99,15 +101,15 @@ impl Revocation {
         Ok(authorization)
     }
 
-    fn state(&self) -> Result<Option<RealmActorDeviceRevokeState>> {
+    fn state(&self) -> Result<Option<RealmActorDeviceRevocationState>> {
         let authorization = self.validate()?;
         let Some(material) = &self.material else {
             return Ok(None);
         };
-        let RealmActorMaterial::Outcome {
+        let RealmActorMaterial::RequestStatus {
             target_request_digest,
-            outcome:
-                RealmActorOperationOutcome::DeviceRevoke {
+            request_status:
+                RealmActorRequestStatus::DeviceRevoke {
                     proposal_ref,
                     device_id,
                     authorization_ref,
@@ -115,7 +117,7 @@ impl Revocation {
                     state,
                     ..
                 },
-        } = &material.result
+        } = &material.material
         else {
             return Err(invalid("revoke material has another result branch"));
         };
@@ -147,18 +149,18 @@ impl ManagedDeviceRuntime {
         retired.authorization.verify_identity()?;
         let authorization: DeviceAuthorizePayload =
             serde_json::from_value(serde_json::to_value(&retired.authorization.payload)?)?;
-        let RealmActorMaterial::Outcome {
-            outcome:
-                RealmActorOperationOutcome::DeviceRevoke {
+        let RealmActorMaterial::RequestStatus {
+            request_status:
+                RealmActorRequestStatus::DeviceRevoke {
                     authorization_ref,
                     device_id,
                     authorized_generation_ref,
-                    state: RealmActorDeviceRevokeState::Accepted,
+                    state: RealmActorDeviceRevocationState::Accepted,
                     decided_at: Some(_),
                     ..
                 },
             ..
-        } = &retired.terminal.result
+        } = &retired.terminal.material
         else {
             return Err(invalid("retired Device has no accepted terminal evidence"));
         };
@@ -184,7 +186,7 @@ impl ManagedDeviceRuntime {
         device: &ManagedDevice,
         operation: &str,
         reason: Option<String>,
-    ) -> Result<RealmActorDeviceRevokeState> {
+    ) -> Result<RealmActorDeviceRevocationState> {
         if operation.is_empty() || operation.len() > 128 {
             return Err(invalid(
                 "revoke requires a bounded stable operation identity",
@@ -264,7 +266,7 @@ impl ManagedDeviceRuntime {
         self.resume_revocation(&key).await
     }
 
-    async fn resume_revocation(&self, key: &str) -> Result<RealmActorDeviceRevokeState> {
+    async fn resume_revocation(&self, key: &str) -> Result<RealmActorDeviceRevocationState> {
         for _ in 0..8 {
             let raw = self
                 .read(key)
@@ -278,8 +280,8 @@ impl ManagedDeviceRuntime {
                 ));
             }
             if let Some(
-                state @ (RealmActorDeviceRevokeState::Accepted
-                | RealmActorDeviceRevokeState::Rejected),
+                state @ (RealmActorDeviceRevocationState::Accepted
+                | RealmActorDeviceRevocationState::Rejected),
             ) = saved.state()?
             {
                 return Ok(state);
@@ -292,21 +294,21 @@ impl ManagedDeviceRuntime {
                 // The governor may have accepted the original before the host
                 // persisted its response. Recover through the managing Service,
                 // which does not need the original controller to remain current.
-                let query = RealmActorMaterialRequest::Outcome {
+                let query = RealmActorMaterialRequestBody::RequestStatus {
                     actor_id: saved.event.actor_id.clone(),
                     request_nonce: crate::realm_governance::nonce()?,
                     target_request_digest: Hash::new(canonical_sha256(&saved.request())?)?,
                 };
                 let requester = ActorId::service(self.edge.service_actor_id().clone());
                 let material = route.material(&query, &requester).await?;
-                match &material.material().result {
-                    RealmActorMaterial::Outcome {
-                        outcome: RealmActorOperationOutcome::DeviceRevoke { proposal_ref, .. },
+                match &material.material().material {
+                    RealmActorMaterial::RequestStatus {
+                        request_status: RealmActorRequestStatus::DeviceRevoke { proposal_ref, .. },
                         ..
                     } => {
                         let original = route
                             .material(
-                                &RealmActorMaterialRequest::Event {
+                                &RealmActorMaterialRequestBody::Event {
                                     actor_id: saved.event.actor_id.clone(),
                                     request_nonce: crate::realm_governance::nonce()?,
                                     target: proposal_ref.clone(),
@@ -315,7 +317,7 @@ impl ManagedDeviceRuntime {
                             )
                             .await?;
                         let RealmActorMaterial::Event { event, commit, .. } =
-                            &original.material().result
+                            &original.material().material
                         else {
                             return Err(invalid("revoke recovery has no accepted original"));
                         };
@@ -333,9 +335,9 @@ impl ManagedDeviceRuntime {
                         }
                         continue;
                     }
-                    RealmActorMaterial::Outcome {
-                        outcome:
-                            RealmActorOperationOutcome::Status {
+                    RealmActorMaterial::RequestStatus {
+                        request_status:
+                            RealmActorRequestStatus::Status {
                                 status: arkret::RealmActorOperationStatus::Unknown,
                             },
                         ..
@@ -378,7 +380,7 @@ impl ManagedDeviceRuntime {
                 let request =
                     arkret::VerifiedSubmission::verify(saved.request(), |_| Ok(producer.clone()))
                         .map_err(|error| invalid(error.to_string()))?;
-                let SelfAuthoritySubmitOutcome::Ordinary(outcome) = client
+                let SelfAuthoritySubmitResponseBody::Ordinary(outcome) = client
                     .submit_to_realm_authority(
                         &request,
                         &arkret::ClientRequestOptions::new()
@@ -389,7 +391,7 @@ impl ManagedDeviceRuntime {
                     return Err(invalid("revoke proposal returned an aggregate result"));
                 };
                 crate::authoring::publication_outcome(&saved.event, &outcome)?;
-                let AuthoritySubmitOutcome::Accepted { commit, .. } = outcome else {
+                let AuthoritySubmitResponseBody::Accepted { commit, .. } = outcome else {
                     return Err(invalid("governor did not accept the revoke proposal"));
                 };
                 let keys =
@@ -412,7 +414,7 @@ impl ManagedDeviceRuntime {
                 // Persist proposal acceptance separately from the fresh query.
                 continue;
             }
-            let request = RealmActorMaterialRequest::Outcome {
+            let request = RealmActorMaterialRequestBody::RequestStatus {
                 actor_id: saved.event.actor_id.clone(),
                 request_nonce: crate::realm_governance::nonce()?,
                 target_request_digest: Hash::new(canonical_sha256(&saved.request())?)?,
@@ -447,8 +449,8 @@ impl ManagedDeviceRuntime {
             let saved: Revocation = self.authoring.decrypt_key_material(&key, &raw)?;
             let authorization = saved.validate()?;
             match self.resume_revocation(&key).await {
-                Ok(RealmActorDeviceRevokeState::Rejected) => {}
-                Ok(RealmActorDeviceRevokeState::Accepted) => {
+                Ok(RealmActorDeviceRevocationState::Rejected) => {}
+                Ok(RealmActorDeviceRevocationState::Accepted) => {
                     fenced.push((saved.event.actor_id.clone(), authorization.device_id));
                     // This branch reconstructs only an already accepted original
                     // for cleanup, including after expiry or host restart.
@@ -489,7 +491,7 @@ impl ManagedDeviceRuntime {
         let record: DeviceRecord = self.decrypt_device_record(&key, &raw).await?;
         self.validate(&record)?;
         if record.authorization != saved.authorization
-            || !matches!(&record.outcome, Some(AuthoritySubmitOutcome::Accepted { commit, .. })
+            || !matches!(&record.outcome, Some(AuthoritySubmitResponseBody::Accepted { commit, .. })
                 if commit == &saved.authorization_commit)
         {
             return Err(invalid(
@@ -589,7 +591,7 @@ impl ManagedDeviceRuntime {
             if saved.event.actor_id == device.actor_id
                 && saved.device_operation == device.operation_id
                 && saved.authorization.event_id() == &device.authorization_event_id
-                && saved.state()? == Some(RealmActorDeviceRevokeState::Accepted)
+                && saved.state()? == Some(RealmActorDeviceRevocationState::Accepted)
             {
                 terminal = saved.material;
                 break;

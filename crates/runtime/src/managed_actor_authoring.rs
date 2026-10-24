@@ -15,7 +15,7 @@ use arkret::{
     ResolutionMethodEvidenceBoundary, ResolutionMethodHistoryEvidence, project_did_to_core_id,
 };
 #[cfg(feature = "web")]
-use arkret::{AppletManagedActorAuthorOutcome, AppletManagedActorAuthorRequestBody};
+use arkret::{AppletManagedActorAuthorRequestBody, AppletManagedActorAuthorResponseBody};
 use arkret_wire::DidUrl;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
@@ -520,7 +520,7 @@ impl ManagedActorAuthoringService {
                 controller_public_key: &SigningKey::from_bytes(&controller_seed)
                     .verifying_key()
                     .to_bytes(),
-                version_time: request.issued_at,
+                version_created_at: request.issued_at,
                 root_seed: &root_seed,
                 next_root_public_key_multibase: &next_key,
             },
@@ -866,7 +866,7 @@ fn verify_managed_actor_root(
             "stored managed actor identity must carry exactly its WebVH inception entry".into(),
         ));
     };
-    let version_time = entry
+    let version_created_at = entry
         .get("versionTime")
         .and_then(Value::as_str)
         .ok_or_else(|| {
@@ -878,7 +878,7 @@ fn verify_managed_actor_root(
                 "stored managed actor WebVH inception versionTime is invalid: {error}"
             ))
         })?;
-    let validated = arkret::webvh::validate_webvh_history_at(did, log_entries, version_time)
+    let validated = arkret::webvh::validate_webvh_history_at(did, log_entries, version_created_at)
         .map_err(|error| {
             BridgeError::Database(format!(
                 "stored managed actor WebVH inception proof is invalid: {error}"
@@ -1194,7 +1194,9 @@ impl ManagedActorAuthoringService {
             }
         };
         match self.author(&body.authoring_request).await {
-            Ok(create_event) => res.render(Json(AppletManagedActorAuthorOutcome { create_event })),
+            Ok(create_event) => {
+                res.render(Json(AppletManagedActorAuthorResponseBody { create_event }))
+            }
             Err(error) => {
                 let status = match &error {
                     BridgeError::App(message) if message.contains("expired") => StatusCode::GONE,
@@ -1365,7 +1367,7 @@ mod ghost_bundle_tests {
             controller_public_key: &SigningKey::from_bytes(&[0x55; 32])
                 .verifying_key()
                 .to_bytes(),
-            version_time: issued_at(),
+            version_created_at: issued_at(),
             root_seed: &[0x51; 32],
             next_root_public_key_multibase: &next_key,
         })

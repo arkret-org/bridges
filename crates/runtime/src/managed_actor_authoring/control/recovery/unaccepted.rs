@@ -4,8 +4,8 @@ use super::*;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct UnacceptedRecoveryProof {
-    advanced_current: RealmActorMaterialOutcome,
-    subsequent_unknown: RealmActorMaterialOutcome,
+    advanced_current: RealmActorMaterialResponseBody,
+    subsequent_unknown: RealmActorMaterialResponseBody,
 }
 
 impl ManagedActorAuthoringService {
@@ -48,8 +48,8 @@ impl ManagedActorAuthoringService {
 
 fn validate_closure(
     prepared: &PreparedRecovery,
-    current: &RealmActorMaterialOutcome,
-    outcome: &RealmActorMaterialOutcome,
+    current: &RealmActorMaterialResponseBody,
+    outcome: &RealmActorMaterialResponseBody,
     service: &arkret::DidCoreId,
 ) -> Result<()> {
     if prepared.begin_receipt.is_some()
@@ -64,16 +64,17 @@ fn validate_closure(
             "unaccepted recovery proof has another subject or an accepted begin",
         ));
     }
-    let request = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
-        arkret::EventAdmissionSubmission::new(prepared.begin.event().clone()),
-    );
-    let RealmActorMaterial::Outcome {
+    let request =
+        arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
+            arkret::EventAdmissionSubmission::new(prepared.begin.event().clone()),
+        );
+    let RealmActorMaterial::RequestStatus {
         target_request_digest,
-        outcome:
-            arkret::RealmActorOperationOutcome::Status {
+        request_status:
+            arkret::RealmActorRequestStatus::Status {
                 status: arkret::RealmActorOperationStatus::Unknown,
             },
-    } = &outcome.result
+    } = &outcome.material
     else {
         return Err(invalid(
             "only an exact unknown outcome can close an unaccepted intent",

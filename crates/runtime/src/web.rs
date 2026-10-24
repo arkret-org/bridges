@@ -239,7 +239,7 @@ pub async fn serve(
                 BasicQuota, FixedGuard, MokaStore, RateLimiter, RemoteIpIssuer,
             };
             tracing::info!(
-                max_requests = rate_limit.max_requests,
+                max_request_count = rate_limit.max_request_count,
                 window_secs = rate_limit.window_secs,
                 "webhook plane per-IP rate limit enabled"
             );
@@ -247,7 +247,10 @@ pub async fn serve(
                 FixedGuard::default(),
                 MokaStore::default(),
                 RemoteIpIssuer,
-                BasicQuota::set_seconds(rate_limit.max_requests, rate_limit.window_secs as i64),
+                BasicQuota::set_seconds(
+                    rate_limit.max_request_count,
+                    rate_limit.window_secs as i64,
+                ),
             );
             Router::new().hoop(limiter).push(app_routes)
         } else {
@@ -748,7 +751,7 @@ async fn applet_configuration(req: &mut Request, depot: &mut Depot, res: &mut Re
             return;
         }
     };
-    let body: arkret_models_integration::AppletConfigurationExecutionRequest =
+    let body: arkret_models_integration::AppletConfigurationExecutionRequestBody =
         match serde_json::from_slice(&bytes) {
             Ok(body) => body,
             Err(error) => {
@@ -923,7 +926,7 @@ async fn applet_transactions(req: &mut Request, depot: &mut Depot, res: &mut Res
         }
     };
     let outcome = verified_completion.retained_outcome().cloned().unwrap_or(
-        arkret_models_integration::AppletTransactionOutcome::Accepted {
+        arkret_models_integration::AppletTransactionResponseBody::Accepted {
             committed_event_refs: Vec::new(),
             rejections: Vec::new(),
             retry_after_ms: None,
@@ -999,7 +1002,7 @@ async fn applet_actor(req: &mut Request, depot: &mut Depot, res: &mut Response) 
         };
         let material = route
             .material(
-                &arkret::RealmActorMaterialRequest::Current {
+                &arkret::RealmActorMaterialRequestBody::Current {
                     actor_id: actor.clone(),
                     request_nonce: crate::realm_governance::nonce()?,
                     selectors: vec![selector.clone()],
@@ -1007,7 +1010,7 @@ async fn applet_actor(req: &mut Request, depot: &mut Depot, res: &mut Response) 
                 &arkret::ActorId::service(state.edge.service_actor_id().clone()),
             )
             .await?;
-        let arkret::RealmActorMaterial::Current { entries } = &material.material().result else {
+        let arkret::RealmActorMaterial::Current { entries } = &material.material().material else {
             return Err(BridgeError::App("manager current unavailable".into()));
         };
         let manager = entries
@@ -1015,7 +1018,7 @@ async fn applet_actor(req: &mut Request, depot: &mut Depot, res: &mut Response) 
             .find_map(|entry| match entry {
                 arkret::RealmActorMaterialCurrentEntry::Present {
                     row:
-                        arkret::TypedCurrentRow::Value {
+                        arkret::CurrentState::Value {
                             selector: found,
                             value,
                             ..

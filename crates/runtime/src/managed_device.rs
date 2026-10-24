@@ -13,14 +13,14 @@ use arkret::{
 };
 use arkret_event_draft::TypedEventDraft;
 use arkret_models_collaboration::authority_commit::{
-    SelfAuthoritySubmitOutcome, SelfAuthoritySubmitRequest,
+    SelfAuthoritySubmitRequestBody, SelfAuthoritySubmitResponseBody,
 };
 use arkret_models_collaboration::events_payloads::{
     AppletManagedDeviceScopes, DeviceAuthorizationBindingKind, DeviceAuthorizationScopes,
     DeviceAuthorizePayload, DeviceOrPrincipalRef, SignatureMaterial,
 };
 use arkret_wire::{
-    AuthorityRejectionStatus, AuthoritySubmitOutcome, DetachedSignatureContext, event_spec,
+    AuthorityRejectionStatus, AuthoritySubmitResponseBody, DetachedSignatureContext, event_spec,
 };
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signer as _, SigningKey};
@@ -78,7 +78,7 @@ struct DeviceRecord {
     controller_method: arkret::DidUrl,
     controller_public_key: PublicKeyMaterial,
     creation_commit: RealmCommit,
-    outcome: Option<AuthoritySubmitOutcome>,
+    outcome: Option<AuthoritySubmitResponseBody>,
     accepted_station_key: Option<PublicKeyMaterial>,
     #[serde(default)]
     mls: mls::ManagedMlsState,
@@ -162,7 +162,7 @@ impl ManagedDeviceRuntime {
         let generation_selector = arkret::CurrentSelector::RealmActorDeviceGeneration {
             actor_id: actor.clone(),
         };
-        let request = arkret::RealmActorMaterialRequest::Current {
+        let request = arkret::RealmActorMaterialRequestBody::Current {
             actor_id: actor.clone(),
             request_nonce: crate::realm_governance::nonce()?,
             selectors: vec![
@@ -177,7 +177,7 @@ impl ManagedDeviceRuntime {
                 &ActorId::service(self.edge.service_actor_id().clone()),
             )
             .await?;
-        let arkret::RealmActorMaterial::Current { entries } = &verified.material().result else {
+        let arkret::RealmActorMaterial::Current { entries } = &verified.material().material else {
             return Err(invalid("current control query returned another purpose"));
         };
         let row = |target: &arkret::CurrentSelector| -> Result<(
@@ -190,7 +190,7 @@ impl ManagedDeviceRuntime {
                 .find_map(|entry| match entry {
                     arkret::RealmActorMaterialCurrentEntry::Present {
                         row:
-                            arkret::TypedCurrentRow::Value {
+                            arkret::CurrentState::Value {
                                 selector,
                                 revision,
                                 value,
@@ -497,7 +497,7 @@ impl ManagedDeviceRuntime {
             crate::PRODUCER_DIGEST_SUITE,
         )
         .map_err(|e| invalid(e.to_string()))?;
-        if let Some(AuthoritySubmitOutcome::Accepted { commit, .. }) = &record.outcome {
+        if let Some(AuthoritySubmitResponseBody::Accepted { commit, .. }) = &record.outcome {
             let station_key = record.accepted_station_key.as_ref().ok_or_else(|| {
                 invalid("managed Device accepted outcome lost its original Station key")
             })?;
@@ -722,7 +722,7 @@ impl ManagedDeviceRuntime {
                 .authoring
                 .managed_controller(&plan.actor_id, &record.controller_method)
                 .await?;
-            let request = SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(
+            let request = SelfAuthoritySubmitRequestBody::Event(EventAdmissionSubmission::new(
                 record.authorization.event().clone(),
             ));
             let producer = arkret::ProducerVerificationContext {
@@ -768,11 +768,11 @@ impl ManagedDeviceRuntime {
                 ),
             )?;
             let answer = client.submit_to_realm_authority(&request, &options).await?;
-            let SelfAuthoritySubmitOutcome::Ordinary(outcome) = answer else {
+            let SelfAuthoritySubmitResponseBody::Ordinary(outcome) = answer else {
                 return Err(invalid("Device authorize returned an aggregate outcome"));
             };
             match &outcome {
-                AuthoritySubmitOutcome::Accepted { commit, .. } => {
+                AuthoritySubmitResponseBody::Accepted { commit, .. } => {
                     let keys =
                         garth::historical_station_keys::fetch_historical_station_keys_for_commits(
                             &route.client,
@@ -799,7 +799,7 @@ impl ManagedDeviceRuntime {
                     self.verify_commit(&record, commit, &key)?;
                     record.accepted_station_key = Some(key);
                 }
-                AuthoritySubmitOutcome::Rejected {
+                AuthoritySubmitResponseBody::Rejected {
                     status: AuthorityRejectionStatus::RetryableUnavailable,
                     reason_code,
                 } => {
@@ -807,7 +807,7 @@ impl ManagedDeviceRuntime {
                         "Device authorization remains pending: {reason_code}"
                     )));
                 }
-                AuthoritySubmitOutcome::Rejected { .. } => {}
+                AuthoritySubmitResponseBody::Rejected { .. } => {}
             }
             record.outcome = Some(outcome);
             let next = self
@@ -821,8 +821,8 @@ impl ManagedDeviceRuntime {
                 let winner = self.decode(&operation_key, &winner, &plan).await?;
                 match (&record.outcome, &winner.outcome) {
                     (
-                        Some(AuthoritySubmitOutcome::Accepted { commit: first, .. }),
-                        Some(AuthoritySubmitOutcome::Accepted { commit: second, .. }),
+                        Some(AuthoritySubmitResponseBody::Accepted { commit: first, .. }),
+                        Some(AuthoritySubmitResponseBody::Accepted { commit: second, .. }),
                     ) if first == second => {
                         record = winner;
                     }
@@ -834,7 +834,8 @@ impl ManagedDeviceRuntime {
                 }
             }
         }
-        let Some(AuthoritySubmitOutcome::Accepted { commit, .. }) = record.outcome.clone() else {
+        let Some(AuthoritySubmitResponseBody::Accepted { commit, .. }) = record.outcome.clone()
+        else {
             return Err(BridgeError::App(
                 "initial managed Device authorization was rejected".into(),
             ));

@@ -193,7 +193,7 @@ impl ManagedDeviceRuntime {
             };
             let secret = arkret::mls::derive_attachment_content_key(&group, &context)
                 .map_err(|e| invalid(e.to_string()))?;
-            let params = blob_aead::StreamEncryptParams {
+            let parameters = blob_aead::StreamEncryptParams {
                 key_ref: EncryptedAttachmentKeyRef {
                     algorithm: EncryptedAttachmentKeyAlgorithm::Mls,
                     group_state_ref: EncryptedAttachmentGroupStateRef::Event(
@@ -213,7 +213,7 @@ impl ManagedDeviceRuntime {
                     .map(|_| group.epoch())
             };
             let (ciphertext, descriptor) =
-                blob_aead::encrypt_stream(bytes, &secret, &params, &resolver)
+                blob_aead::encrypt_stream(bytes, &secret, &parameters, &resolver)
                     .map_err(|e| invalid(e.to_string()))?;
             let frozen = FrozenAttachment {
                 input_digest: digest.clone(),

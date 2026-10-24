@@ -523,7 +523,7 @@ fn prepare_successor(
             current_did: current.resolution.did.as_str(),
             target_did: did.as_str(),
             previous_entries: &custody.log_entries,
-            version_time: at,
+            version_created_at: at,
             current_update_seed: &update_seed,
             next_update_public_key_multibase: &next_public,
             state: &state,
@@ -537,7 +537,7 @@ fn prepare_successor(
             state: &state,
             current_update_seed: &update_seed,
             next_update_public_key_multibase: &next_public,
-            version_time: at,
+            version_created_at: at,
         })
         .map_err(|error| invalid(error.to_string()))?;
         (next.log_entry, next.version_id)
@@ -666,7 +666,7 @@ mod tests {
                     .unwrap(),
                 local_id: "control-test",
                 controller_public_key: &control.verifying_key().to_bytes(),
-                version_time: at,
+                version_created_at: at,
                 root_seed: &root,
                 next_root_public_key_multibase: &arkret::ed25519_pubkey_to_did_key_multibase(
                     SigningKey::from_bytes(&next).verifying_key().as_bytes(),

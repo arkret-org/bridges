@@ -600,7 +600,7 @@ fn bearer_token(authorization: Option<&str>) -> std::result::Result<&str, String
 /// stay 2xx (the message is not recoverable by redelivery, and the platform must
 /// not be made to retry it forever).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SubmitOutcome {
+pub enum SubmitResponseBody {
     /// The message was accepted by arkret, or failed deterministically (no
     /// redelivery would help). Respond 2xx.
     Accepted,
@@ -611,22 +611,22 @@ pub enum SubmitOutcome {
 }
 
 /// Forward one inbound app message and classify the result. A retriable error
-/// (arkret unreachable, pool exhausted) yields [`SubmitOutcome::Retry`]; success
-/// and deterministic errors yield [`SubmitOutcome::Accepted`]. On any error a
+/// (arkret unreachable, pool exhausted) yields [`SubmitResponseBody::Retry`]; success
+/// and deterministic errors yield [`SubmitResponseBody::Accepted`]. On any error a
 /// `ak.applet.bridge_error` Event is best-effort emitted so the failure is
 /// auditable rather than silently logged (applet-integration §14/§16).
 pub async fn submit(
     ctx: Arc<MessageContext>,
     label: &str,
     inbound: InboundAppMessage,
-) -> SubmitOutcome {
+) -> SubmitResponseBody {
     match ctx.submit_app_message(inbound.clone()).await {
-        Ok(_) => SubmitOutcome::Accepted,
+        Ok(_) => SubmitResponseBody::Accepted,
         Err(error) => {
             if ctx.report_inbound_failure(label, &inbound, &error).await {
-                SubmitOutcome::Retry
+                SubmitResponseBody::Retry
             } else {
-                SubmitOutcome::Accepted
+                SubmitResponseBody::Accepted
             }
         }
     }
@@ -642,7 +642,7 @@ pub async fn submit_deduped(
     replay: &ReplayWindow,
     replay_key: impl Into<String>,
     inbound: InboundAppMessage,
-) -> SubmitOutcome {
+) -> SubmitResponseBody {
     let replay_key = replay_key.into();
     submit_deduped_with(label, replay, replay_key, || submit(ctx, label, inbound)).await
 }
@@ -652,35 +652,35 @@ async fn submit_deduped_with<F, Fut>(
     replay: &ReplayWindow,
     replay_key: String,
     submit_fresh: F,
-) -> SubmitOutcome
+) -> SubmitResponseBody
 where
     F: FnOnce() -> Fut,
-    Fut: Future<Output = SubmitOutcome>,
+    Fut: Future<Output = SubmitResponseBody>,
 {
     match replay.check_and_record(replay_key.clone()).await {
         Ok(ReplayGuardVerdict::Fresh) => {}
         Ok(ReplayGuardVerdict::Replay) => {
             tracing::debug!(bridge = label, replay_key = %replay_key, "webhook delivery replayed; skipping");
-            return SubmitOutcome::Accepted;
+            return SubmitResponseBody::Accepted;
         }
         Err(error) => {
             tracing::error!(bridge = label, replay_key = %replay_key, %error, "replay guard storage unavailable; requesting webhook redelivery");
-            return SubmitOutcome::Retry;
+            return SubmitResponseBody::Retry;
         }
     }
     let outcome = submit_fresh().await;
-    if outcome == SubmitOutcome::Retry {
+    if outcome == SubmitResponseBody::Retry {
         replay.forget(replay_key).await;
     }
     outcome
 }
 
-/// Render the HTTP response for a [`SubmitOutcome`] in the common (single
+/// Render the HTTP response for a [`SubmitResponseBody`] in the common (single
 /// message, JSON body) case: `{"ok":true}` on accept, 5xx on retry.
-pub fn respond_submit(res: &mut Response, outcome: SubmitOutcome) {
+pub fn respond_submit(res: &mut Response, outcome: SubmitResponseBody) {
     match outcome {
-        SubmitOutcome::Accepted => ok_json(res, json!({ "ok": true })),
-        SubmitOutcome::Retry => submission_retry(res),
+        SubmitResponseBody::Accepted => ok_json(res, json!({ "ok": true })),
+        SubmitResponseBody::Retry => submission_retry(res),
     }
 }
 
@@ -1205,11 +1205,11 @@ OeQdGwud4COtqrs5f1jdPtvd
         let outcome =
             submit_deduped_with("test", &window, "delivery-1".to_owned(), || async move {
                 submitted_in_call.store(true, Ordering::SeqCst);
-                SubmitOutcome::Accepted
+                SubmitResponseBody::Accepted
             })
             .await;
 
-        assert_eq!(outcome, SubmitOutcome::Retry);
+        assert_eq!(outcome, SubmitResponseBody::Retry);
         assert!(!submitted.load(Ordering::SeqCst));
         let mut response = Response::new();
         respond_submit(&mut response, outcome);
@@ -1270,14 +1270,14 @@ OeQdGwud4COtqrs5f1jdPtvd
         // Compute the reference signature via the same primitive.
         let mut mac = HmacSha256::new_from_slice(secret).unwrap();
         mac.update(body);
-        let sig = hex::encode(mac.finalize().into_bytes());
+        let signature = hex::encode(mac.finalize().into_bytes());
         assert!(verify_meta_x_hub_signature_256(
             secret,
             body,
-            &format!("sha256={sig}")
+            &format!("sha256={signature}")
         ));
         // Missing prefix is rejected.
-        assert!(!verify_meta_x_hub_signature_256(secret, body, &sig));
+        assert!(!verify_meta_x_hub_signature_256(secret, body, &signature));
         // Wrong digest is rejected.
         assert!(!verify_meta_x_hub_signature_256(secret, body, "sha256=00"));
     }

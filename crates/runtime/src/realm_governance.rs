@@ -3,7 +3,7 @@
 use arkret::http_client::{Client, HttpMessageSigner};
 use arkret::identity::{RealmAuthorityKeyMap, VerifiedRealmActorMaterial, VerifiedRealmAuthority};
 use arkret::{ActorId, DidUrl, RealmId};
-use arkret_models_integration::{RealmActorMaterialOutcome, RealmActorMaterialRequest};
+use arkret_models_integration::{RealmActorMaterialRequestBody, RealmActorMaterialResponseBody};
 use chrono::{DateTime, Utc};
 
 use crate::{ArkretEdge, BridgeError, Result};
@@ -30,7 +30,7 @@ impl ArkretEdge {
     /// The configured Station is a locator. Only a fresh verified authority
     /// chain selects the destination and its Service signature identity.
     pub(crate) async fn realm_route(&self, realm: &RealmId) -> Result<RealmRoute> {
-        let request = arkret::AuthorityBundleRequest {
+        let request = arkret::RealmAuthorityBundleRequestBody {
             realm_id: realm.clone(),
             nonce: arkret::Base64UrlString::new(nonce()?).map_err(invalid)?,
         };
@@ -140,7 +140,7 @@ impl RealmRoute {
 
     pub async fn material(
         &self,
-        request: &RealmActorMaterialRequest,
+        request: &RealmActorMaterialRequestBody,
         requester: &ActorId,
     ) -> Result<VerifiedRealmActorMaterial> {
         Ok(self
@@ -159,11 +159,11 @@ impl RealmRoute {
     /// historical Commit key. Transport authentication alone cannot install it.
     pub async fn verify_material(
         &self,
-        material: RealmActorMaterialOutcome,
-        request: &RealmActorMaterialRequest,
+        material: RealmActorMaterialResponseBody,
+        request: &RealmActorMaterialRequestBody,
         requester: &ActorId,
     ) -> Result<VerifiedRealmActorMaterial> {
-        let commits = match &material.result {
+        let commits = match &material.material {
             arkret::RealmActorMaterial::Event { commit, .. } => vec![commit],
             _ => vec![],
         };

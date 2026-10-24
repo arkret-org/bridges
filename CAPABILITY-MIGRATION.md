@@ -62,12 +62,12 @@ produce or consume.
 - The CBS effect-plane guard (`classify_intent_execution` /
   `CbsEffectPlane::Control`). CBS is removed; there is no ordinary/control plane
   split for a bridge to enforce.
-- `authoring.rs` frontier machinery: `ScopeJournal`, `Candidate`, the actor-seq
+- `authoring.rs` frontier machinery: `ScopeJournal`, `Candidate`, the actor-sequence
   sibling bounds, `merge_frontier`, `accepted_frontier`, and the head-CAS loop
   (`AuthoringJournal::load` / `cas`). These existed only to position an Event on
   an actor chain and to merge peer-observed frontiers. The journal now stores one
   immutable publication per stable operation id plus its settled answer, and the
-  sibling-bucket test that enforced the actor-seq bounds went with them.
+  sibling-bucket test that enforced the actor-sequence bounds went with them.
 - `ArkretConfig::ordinary_authoring_contexts`. It retained a per-Realm
   `AuthContext` basis for local authoring; authority now comes from the Station's
   commit, so a locally retained basis would be a second, unverifiable source.

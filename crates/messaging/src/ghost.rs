@@ -204,7 +204,7 @@ pub(crate) async fn provision_ghost_actor(
             let payload: arkret::RealmActorCreatePayload =
                 serde_json::from_value(serde_json::to_value(&prepared.create_event.payload)?)?;
             let outcome = edge.submit_managed_creation(prepared).await?;
-            let arkret::AuthoritySubmitOutcome::Accepted { commit, .. } = outcome else {
+            let arkret::AuthoritySubmitResponseBody::Accepted { commit, .. } = outcome else {
                 return Err(BridgeError::Arkret(
                     "Ghost creation has not been accepted".into(),
                 ));

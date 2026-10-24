@@ -1,8 +1,8 @@
 //! Typed source selection/cut regressions; live installation admission remains
 //! covered by the Coland HTTPS runtime drivers, not by this local fixture.
-use arkret_models_collaboration::exact_current_results::{
-    CapabilityGrantExactCurrentRow, CapabilityGrantExactCurrentSelector,
-    CapabilityGrantExactCurrentSelectorKind,
+use arkret_models_collaboration::exact_current_state::{
+    CapabilityGrantExactCurrentSelector, CapabilityGrantExactCurrentSelectorKind,
+    CurrentCapabilityGrant,
 };
 use arkret_models_collaboration::governance::grant_constraint::GrantConstraint;
 use arkret_models_integration::{AppletInstallEffectiveStatus, AppletRegistrationEpochEvidence};
@@ -12,7 +12,7 @@ use serde_json::json;
 
 use super::*;
 
-fn fixture() -> (InstallationHint, AppletAuthorityMaterialOutcome) {
+fn fixture() -> (InstallationHint, AppletAuthorityMaterialResponseBody) {
     let now: DateTime<Utc> = "2026-10-21T01:00:00.000Z".parse().unwrap();
     let applet: arkret::AppletId = "ak:applet:01964137-0000-7000-8000-000000000081"
         .parse()
@@ -61,10 +61,11 @@ fn fixture() -> (InstallationHint, AppletAuthorityMaterialOutcome) {
         rate_limited: false,
         requested_scopes: vec![],
         registration_epoch: epoch.clone(),
-        webhook_auth: arkret_models_integration::WebhookAuth::http_message_signature(
-            arkret::DidUrl::new("did:web:applet.example#admin").unwrap(),
-            vec![arkret_models_integration::HttpMessageSignatureAlgorithm::Ed25519],
-        ),
+        webhook_signature_policy:
+            arkret_models_integration::WebhookSignaturePolicy::http_message_signature(
+                arkret::DidUrl::new("did:web:applet.example#admin").unwrap(),
+                vec![arkret_models_integration::HttpMessageSignatureAlgorithm::Ed25519],
+            ),
         manifest: arkret_models_integration::AppletRegistrationManifest {
             claimed_profiles: vec![],
             limits: Default::default(),
@@ -104,7 +105,7 @@ fn fixture() -> (InstallationHint, AppletAuthorityMaterialOutcome) {
         "actions":["ak.applet.bot.provision"], "resources":[{"kind":"realm","realm_id":realm}],
         "constraints":[GrantConstraint::applet_authority(applet.clone(), service.clone(), epoch.clone())],
         "issued_at":arkret_canonical::format_timestamp_canonical(now),
-        "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":root,"authority_generation":0}],
+        "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":root,"authority_generation":"0"}],
     });
     let grant = SignedEventFixtureBuilder::new(
         "ak.capability.grant",
@@ -132,7 +133,7 @@ fn fixture() -> (InstallationHint, AppletAuthorityMaterialOutcome) {
     value["status"] = json!("active");
     value["authority_depth"] = json!(1);
     value["authority_root_refs"] = value["issuer_authority_refs"].clone();
-    let row = ExactCurrentResultsReadOutcome::Present {
+    let row = ExactCurrentStateReadResponseBody::Present {
         realm_id: realm,
         governance_generation: 0,
         effective_stream_head: arkret::CommitStreamHead {
@@ -140,7 +141,7 @@ fn fixture() -> (InstallationHint, AppletAuthorityMaterialOutcome) {
             stream_position: 1,
             commit_id: commit.commit_id.clone(),
         },
-        entry: ExactCurrentResultEntry::CapabilityGrant(CapabilityGrantExactCurrentRow {
+        entry: ExactCurrentStateEntry::CapabilityGrant(CurrentCapabilityGrant {
             selector: CapabilityGrantExactCurrentSelector {
                 kind: CapabilityGrantExactCurrentSelectorKind::CapabilityGrant,
                 grant_id: id.clone(),
@@ -155,7 +156,7 @@ fn fixture() -> (InstallationHint, AppletAuthorityMaterialOutcome) {
     };
     let hint = InstallationHint {
         effective_scope: scope.clone(),
-        outcome: AppletInstallOutcome {
+        outcome: AppletInstallResponseBody {
             install_id: "actual-install-result".into(),
             applet_id: applet.clone(),
             service_id: "ak:did_core:web:applet.example".parse().unwrap(),
@@ -168,7 +169,7 @@ fn fixture() -> (InstallationHint, AppletAuthorityMaterialOutcome) {
             rejections: vec![],
         },
     };
-    let material = AppletAuthorityMaterialOutcome {
+    let material = AppletAuthorityMaterialResponseBody {
         applet_id: applet,
         service_id: "ak:did_core:web:applet.example".parse().unwrap(),
         effective_scope: scope,
@@ -195,7 +196,7 @@ fn fixture() -> (InstallationHint, AppletAuthorityMaterialOutcome) {
                 producer_device_evidence: None,
             },
         ],
-        current_results: vec![row],
+        current_states: vec![row],
     };
     (hint, material)
 }
@@ -318,7 +319,7 @@ fn inactive_missing_wrong_scope_epoch_or_service_material_fails_closed() {
         grant_ids: hint.outcome.capability_grant_refs.clone(),
     };
     let service = "ak:did_core:web:applet.example".parse().unwrap();
-    let verify = |candidate: &AppletAuthorityMaterialOutcome, epoch: &arkret::Hash| {
+    let verify = |candidate: &AppletAuthorityMaterialResponseBody, epoch: &arkret::Hash| {
         source_grant(
             &hint.outcome.applet_id,
             &service,
@@ -335,7 +336,7 @@ fn inactive_missing_wrong_scope_epoch_or_service_material_fails_closed() {
         match mutation {
             0 => changed.current_binding = AppletInstallationCurrentBinding::Inactive,
             1 => changed.grant_events.clear(),
-            2 => changed.current_results.clear(),
+            2 => changed.current_states.clear(),
             3 => {
                 changed.effective_scope = ScopeRef::Realm {
                     realm_id: arkret::RealmId::from_event_id(&arkret::EventId::from_digest(

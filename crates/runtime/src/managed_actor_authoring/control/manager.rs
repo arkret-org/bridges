@@ -429,7 +429,7 @@ impl ManagedActorAuthoringService {
                     &custody.next_root_seed,
                 )?,
                 next_update_public_key_multibase: &public(&next),
-                version_time: at,
+                version_created_at: at,
             })
             .map_err(|e| invalid(e.to_string()))?;
         entries.push(rotation.log_entry);
@@ -716,7 +716,7 @@ impl ManagedActorAuthoringService {
                     &custody.next_root_seed,
                 )?,
                 next_update_public_key_multibase: &outgoing.offer.update_public,
-                version_time: at,
+                version_created_at: at,
             })
             .map_err(|e| invalid(e.to_string()))?;
         custody.log_entries.push(rotation.log_entry);
@@ -783,7 +783,7 @@ impl ManagedActorAuthoringService {
                     &incoming.update_seed,
                 )?,
                 next_update_public_key_multibase: &incoming.offer.next_update_public,
-                version_time: at,
+                version_created_at: at,
             })
             .map_err(|e| invalid(e.to_string()))?;
         let mut entries = release.to_vec();
@@ -853,7 +853,7 @@ impl ManagedActorAuthoringService {
             event: created,
             commit,
             ..
-        } = &creation.material().result
+        } = &creation.material().material
         else {
             return Err(invalid("management creation original missing"));
         };
@@ -976,7 +976,7 @@ impl ManagedActorAuthoringService {
         verified: &arkret::identity::VerifiedRealmActorMaterial,
     ) -> Result<RealmCommit> {
         let (raw, mut incoming) = self.incoming(plan).await?;
-        let RealmActorMaterial::Event { event, commit, .. } = &verified.material().result else {
+        let RealmActorMaterial::Event { event, commit, .. } = &verified.material().material else {
             return Err(invalid("manager acceptance original missing"));
         };
         if verified.material().actor_id != plan.actor_id

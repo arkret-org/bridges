@@ -9,15 +9,17 @@ use std::collections::BTreeMap;
 use arkret::{Client, ClientRequestOptions, VerifiedSubmission};
 use arkret_identifiers::{DidCoreId, EventId, RealmId};
 use arkret_models_collaboration::authority_commit::{
-    AuthorityHandoffRequest, SelfAuthoritySubmitOutcome, SelfAuthoritySubmitRequest,
+    AuthorityRealmAuthorityHandoffRequestBody, SelfAuthoritySubmitRequestBody,
+    SelfAuthoritySubmitResponseBody,
 };
 use arkret_signatures::{PublicKeyMaterial, verify_ed25519_detached_jws_proof};
 use arkret_wire::{
-    AuthoredEvent, AuthorityBundleRequest, AuthorityCommitStatus, AuthorityRejectionStatus,
-    AuthoritySubmitOutcome, AuthoritySubmitRequest, CommitStreamHead, CommitStreamRef,
-    CommittedEventRef, DetachedSignatureContext, DidUrl, Event, EventAdmissionSubmission,
-    MlsCommitSubmission, MlsWelcomeDelivery, ProducerEventProof, RealmAuthorityBundle, RealmCommit,
-    RealmStateSnapshot, StreamScanDirection, StreamScanOutcome, StreamScanRequest,
+    AuthoredEvent, AuthorityCommitStatus, AuthorityRejectionStatus, AuthoritySubmitRequestBody,
+    AuthoritySubmitResponseBody, CommitStreamHead, CommitStreamRef, CommittedEventRef,
+    DetachedSignatureContext, DidUrl, Event, EventAdmissionSubmission, MlsCommitSubmission,
+    MlsWelcomeDelivery, ProducerEventProof, RealmAuthorityBundle, RealmAuthorityBundleRequestBody,
+    RealmCommit, RealmStateSnapshot, StreamScanDirection, StreamScanRequestBody,
+    StreamScanResponseBody,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -53,36 +55,36 @@ fn protocol<T, E: std::fmt::Display>(result: std::result::Result<T, E>) -> Resul
 pub trait GovernanceStationTransport: Send + Sync {
     async fn submit(
         &self,
-        request: &VerifiedSubmission<AuthoritySubmitRequest>,
+        request: &VerifiedSubmission<AuthoritySubmitRequestBody>,
         options: &ClientRequestOptions,
-    ) -> Result<AuthoritySubmitOutcome>;
+    ) -> Result<AuthoritySubmitResponseBody>;
 
     async fn authority_bundle(
         &self,
-        request: &AuthorityBundleRequest,
+        request: &RealmAuthorityBundleRequestBody,
     ) -> Result<RealmAuthorityBundle>;
 
-    async fn scan_stream(&self, request: &StreamScanRequest) -> Result<StreamScanOutcome>;
+    async fn scan_stream(&self, request: &StreamScanRequestBody) -> Result<StreamScanResponseBody>;
 }
 
 #[async_trait]
 impl GovernanceStationTransport for Client {
     async fn submit(
         &self,
-        request: &VerifiedSubmission<AuthoritySubmitRequest>,
+        request: &VerifiedSubmission<AuthoritySubmitRequestBody>,
         options: &ClientRequestOptions,
-    ) -> Result<AuthoritySubmitOutcome> {
+    ) -> Result<AuthoritySubmitResponseBody> {
         let wire = match request.wire() {
-            AuthoritySubmitRequest::Event(value) => {
-                SelfAuthoritySubmitRequest::Event(value.clone())
+            AuthoritySubmitRequestBody::Event(value) => {
+                SelfAuthoritySubmitRequestBody::Event(value.clone())
             }
-            AuthoritySubmitRequest::MlsCommit(value) => {
-                SelfAuthoritySubmitRequest::MlsCommit(value.clone())
+            AuthoritySubmitRequestBody::MlsCommit(value) => {
+                SelfAuthoritySubmitRequestBody::MlsCommit(value.clone())
             }
         };
         let request = protocol(request.rebind(wire))?;
         match protocol(self.submit_to_realm_authority(&request, options).await)? {
-            SelfAuthoritySubmitOutcome::Ordinary(outcome) => Ok(outcome),
+            SelfAuthoritySubmitResponseBody::Ordinary(outcome) => Ok(outcome),
             _ => Err(BridgeProtocolError::Protocol(
                 "ordinary submission returned an aggregate outcome".to_owned(),
             )),
@@ -91,12 +93,12 @@ impl GovernanceStationTransport for Client {
 
     async fn authority_bundle(
         &self,
-        request: &AuthorityBundleRequest,
+        request: &RealmAuthorityBundleRequestBody,
     ) -> Result<RealmAuthorityBundle> {
         protocol(self.realm_authority_bundle(request).await)
     }
 
-    async fn scan_stream(&self, request: &StreamScanRequest) -> Result<StreamScanOutcome> {
+    async fn scan_stream(&self, request: &StreamScanRequestBody) -> Result<StreamScanResponseBody> {
         protocol(self.scan_commit_stream(request).await)
     }
 }
@@ -124,7 +126,7 @@ impl SubmissionState {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct QueuedSubmission {
-    pub request: AuthoritySubmitRequest,
+    pub request: AuthoritySubmitRequestBody,
     pub state: SubmissionState,
 }
 
@@ -134,10 +136,10 @@ impl QueuedSubmission {
     }
 }
 
-fn request_event_id(request: &AuthoritySubmitRequest) -> &EventId {
+fn request_event_id(request: &AuthoritySubmitRequestBody) -> &EventId {
     match request {
-        AuthoritySubmitRequest::Event(request) => &request.event.event_id,
-        AuthoritySubmitRequest::MlsCommit(request) => &request.commit_event.event_id,
+        AuthoritySubmitRequestBody::Event(request) => &request.event.event_id,
+        AuthoritySubmitRequestBody::MlsCommit(request) => &request.commit_event.event_id,
     }
 }
 
@@ -160,16 +162,16 @@ impl SubmissionQueue {
     }
 
     pub fn enqueue_event(&mut self, event: AuthoredEvent) -> Result<()> {
-        self.enqueue(AuthoritySubmitRequest::Event(
+        self.enqueue(AuthoritySubmitRequestBody::Event(
             EventAdmissionSubmission::new(event.into_event()),
         ))
     }
 
     pub fn enqueue_mls_commit(&mut self, submission: MlsCommitSubmission) -> Result<()> {
-        self.enqueue(AuthoritySubmitRequest::MlsCommit(submission))
+        self.enqueue(AuthoritySubmitRequestBody::MlsCommit(submission))
     }
 
-    fn enqueue(&mut self, request: AuthoritySubmitRequest) -> Result<()> {
+    fn enqueue(&mut self, request: AuthoritySubmitRequestBody) -> Result<()> {
         protocol(request.validate())?;
         let event_id = request_event_id(&request);
         if self
@@ -191,9 +193,9 @@ impl SubmissionQueue {
         &mut self,
         event_id: &EventId,
         station: &T,
-        verified: &VerifiedSubmission<AuthoritySubmitRequest>,
+        verified: &VerifiedSubmission<AuthoritySubmitRequestBody>,
         options: &ClientRequestOptions,
-    ) -> Result<AuthoritySubmitOutcome> {
+    ) -> Result<AuthoritySubmitResponseBody> {
         let index = self
             .submissions
             .iter()
@@ -215,7 +217,7 @@ impl SubmissionQueue {
     pub fn apply_outcome(
         &mut self,
         event_id: &EventId,
-        outcome: &AuthoritySubmitOutcome,
+        outcome: &AuthoritySubmitResponseBody,
     ) -> Result<()> {
         let submission = self
             .submissions
@@ -227,7 +229,7 @@ impl SubmissionQueue {
         }
         protocol(outcome.validate_for_request(&submission.request))?;
         match outcome {
-            AuthoritySubmitOutcome::Accepted { status, commit } => {
+            AuthoritySubmitResponseBody::Accepted { status, commit } => {
                 self.committed.insert(
                     event_id.clone(),
                     CommittedEventRef {
@@ -237,7 +239,7 @@ impl SubmissionQueue {
                         stream_position: commit.stream_position,
                     },
                 );
-                if let AuthoritySubmitRequest::MlsCommit(request) = &submission.request {
+                if let AuthoritySubmitRequestBody::MlsCommit(request) = &submission.request {
                     self.installed_mls_commits.push(event_id.clone());
                     self.welcome_deliveries.extend(request.welcomes.clone());
                 }
@@ -246,7 +248,7 @@ impl SubmissionQueue {
                     commit: Box::new(commit.clone()),
                 };
             }
-            AuthoritySubmitOutcome::Rejected {
+            AuthoritySubmitResponseBody::Rejected {
                 status: AuthorityRejectionStatus::RetryableUnavailable,
                 reason_code,
             } => {
@@ -254,7 +256,7 @@ impl SubmissionQueue {
                     reason_code: reason_code.clone(),
                 };
             }
-            AuthoritySubmitOutcome::Rejected {
+            AuthoritySubmitResponseBody::Rejected {
                 status: AuthorityRejectionStatus::Rejected,
                 reason_code,
             } => {
@@ -286,8 +288,8 @@ impl SubmissionQueue {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct StreamTail {
-    pub request: StreamScanRequest,
-    pub outcome: StreamScanOutcome,
+    pub request: StreamScanRequestBody,
+    pub outcome: StreamScanResponseBody,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -305,7 +307,7 @@ pub trait AuthorityMaterialVerifier {
         snapshot: &RealmStateSnapshot,
         current_service_id: &DidCoreId,
     ) -> Result<()>;
-    fn verify_handoff(&self, request: &AuthorityHandoffRequest) -> Result<()>;
+    fn verify_handoff(&self, request: &AuthorityRealmAuthorityHandoffRequestBody) -> Result<()>;
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -318,7 +320,7 @@ pub struct JoinBootstrap {
 impl JoinBootstrap {
     pub fn validate<V: AuthorityMaterialVerifier>(
         &self,
-        authority_request: &AuthorityBundleRequest,
+        authority_request: &RealmAuthorityBundleRequestBody,
         now: DateTime<Utc>,
         verifier: &V,
     ) -> Result<CurrentAuthority> {
@@ -420,7 +422,7 @@ impl StreamCursorBook {
 }
 
 pub fn validate_handoff<V: AuthorityMaterialVerifier>(
-    request: &AuthorityHandoffRequest,
+    request: &AuthorityRealmAuthorityHandoffRequestBody,
     verifier: &V,
 ) -> Result<()> {
     protocol(request.validate_shape())?;
@@ -890,7 +892,7 @@ mod tests {
                 provider_endpoint: &"https://identity.example/".parse().unwrap(),
                 registration_key: &registration,
                 also_known_as: &[],
-                version_time: registered_at,
+                version_created_at: registered_at,
                 did_key_fragment: None,
             },
         )

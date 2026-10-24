@@ -88,7 +88,7 @@ pub struct WebhookRateLimitConfig {
     /// sustained 10 rps per IP) is far above any legitimate per-tenant webhook
     /// rate while still bounding a single-source flood.
     #[serde(default = "default_rate_limit_requests")]
-    pub max_requests: usize,
+    pub max_request_count: usize,
     /// Window length in seconds.
     #[serde(default = "default_rate_limit_window_secs")]
     pub window_secs: u16,
@@ -98,7 +98,7 @@ impl Default for WebhookRateLimitConfig {
     fn default() -> Self {
         Self {
             enabled: default_rate_limit_enabled(),
-            max_requests: default_rate_limit_requests(),
+            max_request_count: default_rate_limit_requests(),
             window_secs: default_rate_limit_window_secs(),
         }
     }

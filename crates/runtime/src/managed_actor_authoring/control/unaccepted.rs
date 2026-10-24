@@ -1,5 +1,5 @@
 //! Local terminal evidence never invents an accepted or rejected protocol Event.
-use arkret::{CurrentSelector, RealmActorMaterial, RealmActorMaterialOutcome};
+use arkret::{CurrentSelector, RealmActorMaterial, RealmActorMaterialResponseBody};
 
 use super::*;
 
@@ -7,11 +7,11 @@ use super::*;
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum ControlClosure {
     Unaccepted {
-        advanced_current: Box<RealmActorMaterialOutcome>,
-        subsequent_unknown: Box<RealmActorMaterialOutcome>,
+        advanced_current: Box<RealmActorMaterialResponseBody>,
+        subsequent_unknown: Box<RealmActorMaterialResponseBody>,
     },
     Rejected {
-        outcome: Box<RealmActorMaterialOutcome>,
+        outcome: Box<RealmActorMaterialResponseBody>,
     },
 }
 
@@ -47,9 +47,9 @@ impl ManagedActorAuthoringService {
         if current.actor_id != prepared.actor_id
             || current.requester_actor_id != outcome.requester_actor_id
             || !matches!(
-                &outcome.result,
-                RealmActorMaterial::Outcome {
-                    outcome: arkret::RealmActorOperationOutcome::Status {
+                &outcome.material,
+                RealmActorMaterial::RequestStatus {
+                    request_status: arkret::RealmActorRequestStatus::Status {
                         status: arkret::RealmActorOperationStatus::Unknown
                     },
                     ..
@@ -104,10 +104,10 @@ impl ManagedActorAuthoringService {
         let outcome = outcome.material();
         self.require_control_outcome(prepared, outcome)?;
         if !matches!(
-            &outcome.result,
-            RealmActorMaterial::Outcome {
-                outcome: arkret::RealmActorOperationOutcome::Submitted(
-                    arkret::AuthoritySubmitOutcome::Rejected { .. }
+            &outcome.material,
+            RealmActorMaterial::RequestStatus {
+                request_status: arkret::RealmActorRequestStatus::Submitted(
+                    arkret::AuthoritySubmitResponseBody::Rejected { .. }
                 ),
                 ..
             }
@@ -128,16 +128,16 @@ impl ManagedActorAuthoringService {
     fn require_control_outcome(
         &self,
         prepared: &PreparedControlRotation,
-        outcome: &RealmActorMaterialOutcome,
+        outcome: &RealmActorMaterialResponseBody,
     ) -> Result<()> {
         let request =
-            arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
+            arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
                 arkret::EventAdmissionSubmission::new(prepared.event.event().clone()),
             );
         if prepared.outcome.is_some()
             || outcome.actor_id != prepared.actor_id
             || outcome.requester_actor_id != ActorId::service(self.edge.service_actor_id().clone())
-            || !matches!(&outcome.result, RealmActorMaterial::Outcome { target_request_digest, .. }
+            || !matches!(&outcome.material, RealmActorMaterial::RequestStatus { target_request_digest, .. }
                 if target_request_digest.as_str() == canonical_sha256(&request)?)
         {
             return Err(invalid(

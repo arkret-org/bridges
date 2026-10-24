@@ -314,7 +314,7 @@ impl MessageStore {
     }
 
     // The argument list mirrors the user_mappings row shape one-to-one; a
-    // params struct would only restate the same fields.
+    // parameters struct would only restate the same fields.
     #[allow(clippy::too_many_arguments)]
     pub fn upsert_user(
         &self,

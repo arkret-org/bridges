@@ -58,7 +58,7 @@ impl fmt::Debug for InboundMediaReference {
 pub struct InboundMediaFetchPolicy {
     pub max_bytes: usize,
     pub timeout: Duration,
-    pub max_attempts: u32,
+    pub max_attempt_count: u32,
 }
 
 impl Default for InboundMediaFetchPolicy {
@@ -66,7 +66,7 @@ impl Default for InboundMediaFetchPolicy {
         Self {
             max_bytes: MAX_EXTERNAL_MEDIA_BYTES,
             timeout: DEFAULT_MEDIA_FETCH_TIMEOUT,
-            max_attempts: DEFAULT_MEDIA_FETCH_ATTEMPTS,
+            max_attempt_count: DEFAULT_MEDIA_FETCH_ATTEMPTS,
         }
     }
 }
@@ -207,13 +207,13 @@ impl InboundMediaFetcher for HttpInboundMediaFetcher {
         reference: &InboundMediaReference,
         policy: InboundMediaFetchPolicy,
     ) -> Result<DownloadedMedia> {
-        if policy.max_bytes == 0 || policy.max_attempts == 0 || policy.timeout.is_zero() {
+        if policy.max_bytes == 0 || policy.max_attempt_count == 0 || policy.timeout.is_zero() {
             return Err(BridgeError::App(
                 "media fetch policy limits must be non-zero".to_owned(),
             ));
         }
         let mut last_error = None;
-        for attempt in 0..policy.max_attempts {
+        for attempt in 0..policy.max_attempt_count {
             let result =
                 tokio::time::timeout(policy.timeout, self.fetch_once(reference, policy)).await;
             match result {
@@ -222,7 +222,7 @@ impl InboundMediaFetcher for HttpInboundMediaFetcher {
                 Ok(Err(error)) => last_error = Some(error.message),
                 Err(_) => last_error = Some("media download timed out".to_owned()),
             }
-            if attempt + 1 < policy.max_attempts {
+            if attempt + 1 < policy.max_attempt_count {
                 tokio::time::sleep(bridge_retry_delay(attempt)).await;
             }
         }
@@ -301,7 +301,7 @@ mod tests {
         let policy = InboundMediaFetchPolicy::default();
         assert_eq!(policy.max_bytes, MAX_EXTERNAL_MEDIA_BYTES);
         assert_eq!(policy.timeout, Duration::from_secs(30));
-        assert_eq!(policy.max_attempts, 3);
+        assert_eq!(policy.max_attempt_count, 3);
     }
 
     #[test]
@@ -332,7 +332,7 @@ mod tests {
                 InboundMediaFetchPolicy {
                     max_bytes: 16,
                     timeout: Duration::from_secs(2),
-                    max_attempts: 2,
+                    max_attempt_count: 2,
                 },
             )
             .await
@@ -361,7 +361,7 @@ mod tests {
                 InboundMediaFetchPolicy {
                     max_bytes: 3,
                     timeout: Duration::from_secs(2),
-                    max_attempts: 1,
+                    max_attempt_count: 1,
                 },
             )
             .await;
@@ -395,7 +395,7 @@ mod tests {
                 InboundMediaFetchPolicy {
                     max_bytes: 16,
                     timeout: Duration::from_secs(2),
-                    max_attempts: 1,
+                    max_attempt_count: 1,
                 },
             )
             .await

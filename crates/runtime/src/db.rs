@@ -12,7 +12,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use arkret::{IdempotencyIdentity, TransactionClaim, TransactionIdempotencyStore};
-use arkret_models_integration::AppletTransactionOutcome;
+use arkret_models_integration::AppletTransactionResponseBody;
 use diesel::prelude::*;
 use diesel_async::SimpleAsyncConnection;
 #[cfg(feature = "sqlite")]
@@ -391,7 +391,7 @@ struct TransactionIdempotencyRow {
     created_at: i64,
 }
 
-impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdempotencyStore {
+impl TransactionIdempotencyStore<AppletTransactionResponseBody> for DbTransactionIdempotencyStore {
     type Error = BridgeError;
 
     fn claim(
@@ -399,7 +399,7 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
         replay: &IdempotencyIdentity,
         hash: &str,
         delivery_authentication_record_digest: &str,
-    ) -> Result<TransactionClaim<AppletTransactionOutcome>> {
+    ) -> Result<TransactionClaim<AppletTransactionResponseBody>> {
         self.db.block_on(async {
             use idempotency_schema::transaction_idempotency::dsl;
 
@@ -437,8 +437,8 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
                                 "completed idempotency record has no outcome".into(),
                             )
                         })?;
-                        let response: AppletTransactionOutcome = serde_json::from_str(&outcome)
-                            .map_err(|err| {
+                        let response: AppletTransactionResponseBody =
+                            serde_json::from_str(&outcome).map_err(|err| {
                                 BridgeError::Database(format!(
                                     "recorded transaction outcome is unreadable: {err}"
                                 ))
@@ -512,7 +512,7 @@ impl TransactionIdempotencyStore<AppletTransactionOutcome> for DbTransactionIdem
         replay: &IdempotencyIdentity,
         hash: &str,
         delivery_authentication_record_digest: &str,
-        response: &AppletTransactionOutcome,
+        response: &AppletTransactionResponseBody,
     ) -> Result<()> {
         self.db.block_on(async {
             use idempotency_schema::transaction_idempotency::dsl;
@@ -1034,7 +1034,7 @@ mod tests {
             Ok(TransactionClaim::Conflict)
         ));
 
-        let response = AppletTransactionOutcome::Accepted {
+        let response = AppletTransactionResponseBody::Accepted {
             committed_event_refs: Vec::new(),
             rejections: Vec::new(),
             retry_after_ms: None,
@@ -1054,7 +1054,7 @@ mod tests {
     #[test]
     fn db_idempotency_record_requires_the_exact_pending_claim() {
         let store = DbTransactionIdempotencyStore::new(memory_db()).unwrap();
-        let response = AppletTransactionOutcome::Accepted {
+        let response = AppletTransactionResponseBody::Accepted {
             committed_event_refs: Vec::new(),
             rejections: Vec::new(),
             retry_after_ms: None,

@@ -269,7 +269,7 @@ impl DidAuthority {
                 verified_at: now,
                 // A config-pinned anchor never goes stale on its own: it can
                 // only change by an operator editing the config and restarting.
-                refresh_after: None,
+                refresh_at: None,
                 expires_at: None,
                 status: DidBindingStatus::Active,
             },

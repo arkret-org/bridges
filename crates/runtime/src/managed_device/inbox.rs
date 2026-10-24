@@ -4,10 +4,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use arkret::mls::ArkretMlsGroup;
 use arkret::{
-    DeviceMessagesAckRequestBody, DeviceMessagesGetOutcome, KeyPackageClaimRecord,
-    KeyPackagesClaimQueryRequestBody, KeyPackagesConsumeOutcome, KeyPackagesConsumeRequestBody,
-    MlsEndpointIdentity, MlsGroupStateRecord, MlsMemberRosterAuthorityReadRequestBody,
-    MlsWelcomeDelivery, RecipientDelivery, RecipientMlsDurableSigner,
+    DeviceMessagesAcknowledgementRequestBody, DeviceMessagesGetResponseBody, KeyPackageClaimRecord,
+    KeyPackagesClaimQueryRequestBody, KeyPackagesConsumeRequestBody,
+    KeyPackagesConsumeResponseBody, MlsEndpointIdentity, MlsGroupStateRecord,
+    MlsMemberRosterAuthorityReadRequestBody, MlsWelcomeDelivery, RecipientDelivery,
+    RecipientMlsDurableSigner,
 };
 
 use super::*;
@@ -17,8 +18,8 @@ const MAX_ROSTER_PAGES: usize = 4096;
 
 struct ReceivedRoster {
     request: MlsMemberRosterAuthorityReadRequestBody,
-    pages: Vec<arkret::MlsSelfRosterAuthorityReadOutcome>,
-    material: arkret::MlsGroupStateMaterialOutcome,
+    pages: Vec<arkret::MlsSelfRosterAuthorityReadResponseBody>,
+    material: arkret::MlsGroupStateMaterialResponseBody,
 }
 
 impl ReceivedRoster {
@@ -36,7 +37,7 @@ impl ReceivedRoster {
     fn claim_issuer(
         &self,
         delivery: &MlsWelcomeDelivery,
-        outcome: &arkret::KeyPackagesClaimOutcome,
+        outcome: &arkret::KeyPackagesClaimResponseBody,
     ) -> Result<&arkret::AuthenticatedServiceResolution> {
         let mut matches = self
             .pages
@@ -80,7 +81,7 @@ impl ReceivedRoster {
 pub(super) struct ScopeInbox {
     scope: Option<ScopeRef>,
     cursor: Option<String>,
-    page: Option<DeviceMessagesGetOutcome>,
+    page: Option<DeviceMessagesGetResponseBody>,
     group: Option<InstalledGroup>,
     welcomes: BTreeMap<String, DurableWelcome>,
 }
@@ -108,7 +109,7 @@ struct DurableWelcome {
     delivery: MlsWelcomeDelivery,
     claim: KeyPackageClaimRecord,
     consume: KeyPackagesConsumeRequestBody,
-    outcome: Option<KeyPackagesConsumeOutcome>,
+    outcome: Option<KeyPackagesConsumeResponseBody>,
 }
 
 /// One cycle's durable progress. Content items remain in the original page
@@ -152,11 +153,11 @@ fn inbox_mut<'a>(
     Ok(inbox)
 }
 
-fn page_digest(page: &DeviceMessagesGetOutcome) -> Result<String> {
+fn page_digest(page: &DeviceMessagesGetResponseBody) -> Result<String> {
     Ok(canonical_sha256(page)?)
 }
 
-fn check_page(page: &DeviceMessagesGetOutcome, device: &ManagedDevice) -> Result<()> {
+fn check_page(page: &DeviceMessagesGetResponseBody, device: &ManagedDevice) -> Result<()> {
     page.validate_realm_device_recipient(
         &device.actor_id,
         &device.device_id,
@@ -165,7 +166,10 @@ fn check_page(page: &DeviceMessagesGetOutcome, device: &ManagedDevice) -> Result
     if page.deliveries.len() > 100
         || page.lost == Some(true)
         || (!page.deliveries.is_empty()
-            && page.ack_token.as_ref().is_none_or(|token| token.is_empty()))
+            && page
+                .acknowledgement_token
+                .as_ref()
+                .is_none_or(|token| token.is_empty()))
         || (page.has_more
             && page
                 .next_cursor
@@ -206,7 +210,7 @@ impl ManagedDeviceRuntime {
         &self,
         device: &ManagedDevice,
         reader: &ManagedDeviceReader,
-    ) -> Result<DeviceMessagesGetOutcome> {
+    ) -> Result<DeviceMessagesGetResponseBody> {
         reader.check_device(device)?;
         let (_, _, record) = self.accepted_device_record(device).await?;
         if let Some(page) = inbox(&record, device)?.and_then(|inbox| inbox.page.as_ref()) {
@@ -246,7 +250,7 @@ impl ManagedDeviceRuntime {
         let page = response.value()?.clone();
         check_page(&page, device)?;
         if page.deliveries.is_empty()
-            && page.ack_token.is_none()
+            && page.acknowledgement_token.is_none()
             && page.next_cursor.is_none()
             && !page.has_more
         {
@@ -644,8 +648,8 @@ impl ManagedDeviceRuntime {
             }
         }
         self.drain_durable_welcome_consumes(device).await?;
-        progress.acknowledged =
-            self.complete_durable_recipient_page(device).await? && page.ack_token.is_some();
+        progress.acknowledged = self.complete_durable_recipient_page(device).await?
+            && page.acknowledgement_token.is_some();
         Ok(progress)
     }
 }
@@ -778,11 +782,11 @@ impl ManagedDeviceRuntime {
                 return Ok(false);
             }
         }
-        if let Some(token) = &page.ack_token {
+        if let Some(token) = &page.acknowledgement_token {
             device
                 .client()
-                .ack_device_messages(&DeviceMessagesAckRequestBody {
-                    ack_token: token.clone(),
+                .ack_device_messages(&DeviceMessagesAcknowledgementRequestBody {
+                    acknowledgement_token: token.clone(),
                 })
                 .await?;
         }

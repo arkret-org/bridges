@@ -1,8 +1,8 @@
 //! Durable recovery plans remain private until their begin Event is accepted.
 use arkret::{
-    CommittedEventRef, CurrentSelector, RealmActorDeviceGenerationValue, RealmActorManagerValue,
-    RealmActorMaterial, RealmActorMaterialCurrentEntry, RealmActorMaterialOutcome,
-    RealmActorRecoveryState, RealmActorRecoveryValue, TypedCurrentRow,
+    CommittedEventRef, CurrentSelector, CurrentState, RealmActorDeviceGenerationValue,
+    RealmActorManagerValue, RealmActorMaterial, RealmActorMaterialCurrentEntry,
+    RealmActorMaterialResponseBody, RealmActorRecoveryState, RealmActorRecoveryValue,
 };
 
 use super::*;
@@ -23,7 +23,7 @@ pub(crate) struct PreparedRecovery {
     pub(crate) reset: Option<AuthoredEvent>,
     pub(crate) reset_receipt: Option<(RealmCommit, PublicKeyMaterial)>,
     pub(crate) terminal: Option<RealmActorRecoveryState>,
-    terminal_material: Option<RealmActorMaterialOutcome>,
+    terminal_material: Option<RealmActorMaterialResponseBody>,
     unaccepted_proof: Option<UnacceptedRecoveryProof>,
 }
 
@@ -38,10 +38,10 @@ impl PreparedRecovery {
 }
 
 pub(crate) fn row<'a>(
-    cut: &'a RealmActorMaterialOutcome,
+    cut: &'a RealmActorMaterialResponseBody,
     selector: &CurrentSelector,
 ) -> Result<(&'a CurrentRevision, &'a Value, &'a CommittedEventRef)> {
-    let RealmActorMaterial::Current { entries } = &cut.result else {
+    let RealmActorMaterial::Current { entries } = &cut.material else {
         return Err(invalid("recovery requires a verified current cut"));
     };
     entries
@@ -49,7 +49,7 @@ pub(crate) fn row<'a>(
         .find_map(|entry| match entry {
             RealmActorMaterialCurrentEntry::Present {
                 row:
-                    TypedCurrentRow::Value {
+                    CurrentState::Value {
                         selector: found,
                         revision,
                         value,
@@ -256,16 +256,16 @@ impl ManagedActorAuthoringService {
     ) -> Result<()> {
         let material = verified.material();
         let request =
-            arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
+            arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
                 arkret::EventAdmissionSubmission::new(prepared.begin.event().clone()),
             );
-        let arkret::RealmActorMaterial::Outcome {
+        let arkret::RealmActorMaterial::RequestStatus {
             target_request_digest,
-            outcome:
-                arkret::RealmActorOperationOutcome::Recovery {
+            request_status:
+                arkret::RealmActorRequestStatus::Recovery {
                     begin_ref, state, ..
                 },
-        } = &material.result
+        } = &material.material
         else {
             return Err(invalid(
                 "terminal recovery requires the exact signed outcome",
@@ -383,7 +383,7 @@ fn prepare(
     custody: &ControlCustody,
     actor: &ActorId,
     operation: &str,
-    cut: &RealmActorMaterialOutcome,
+    cut: &RealmActorMaterialResponseBody,
     edge: &crate::ArkretEdge,
     replaces: Option<&CommittedEventRef>,
 ) -> Result<PreparedRecovery> {
@@ -484,7 +484,7 @@ fn prepare(
         next_update_public_key_multibase: &arkret::ed25519_pubkey_to_did_key_multibase(
             SigningKey::from_bytes(&next).verifying_key().as_bytes(),
         ),
-        version_time: at,
+        version_created_at: at,
     })
     .map_err(|e| invalid(e.to_string()))?;
     let mut entries = custody.log_entries.clone();

@@ -423,7 +423,7 @@ mod tests {
         let nonce = "nonce-xyz";
         let body = br#"{"encrypt":"..."}"#;
         // Reference digest computed via the same primitive.
-        let sig = {
+        let signature = {
             use sha2::{Digest, Sha256};
             let mut h = Sha256::new();
             h.update(timestamp.as_bytes());
@@ -437,7 +437,7 @@ mod tests {
             timestamp,
             nonce,
             body,
-            &sig
+            &signature
         ));
         assert!(!webhook::verify_lark_signature(
             encrypt_key.as_bytes(),

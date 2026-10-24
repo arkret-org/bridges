@@ -19,7 +19,7 @@ pub(super) struct ManagedPublication {
     input_digest: String,
     device_operation_id: String,
     event: AuthoredEvent,
-    outcome: Option<AuthoritySubmitOutcome>,
+    outcome: Option<AuthoritySubmitResponseBody>,
     commit_key: Option<PublicKeyMaterial>,
 }
 
@@ -213,7 +213,7 @@ impl ManagedDeviceRuntime {
                 garth::own_station_results::consume_own_station_device_snapshot(&response)
                     .map_err(|e| invalid(e.to_string()))?;
             let joined = snapshot.current_state_entries.iter().any(|row| {
-                let arkret::TypedCurrentRow::Value {
+                let arkret::CurrentState::Value {
                     selector, value, ..
                 } = row;
                 matches!(selector, arkret::CurrentSelector::CircleMemberState {
@@ -248,7 +248,7 @@ impl ManagedDeviceRuntime {
                 garth::own_station_results::consume_own_station_device_snapshot(&response)
                     .map_err(|e| invalid(e.to_string()))?;
             let joined = snapshot.current_state_entries.iter().any(|row| {
-                let arkret::TypedCurrentRow::Value { selector, value, .. } = row;
+                let arkret::CurrentState::Value { selector, value, .. } = row;
                 matches!(selector, arkret::CurrentSelector::MemberState { actor_id } if actor_id == &device.actor_id)
                     && serde_json::to_value(value).is_ok_and(|value| value["membership"] == "join")
             });
@@ -330,7 +330,7 @@ impl ManagedDeviceRuntime {
         if Self::accepted_publication(&saved)?.is_none() {
             return Err(invalid("parent membership is not yet accepted"));
         }
-        let Some(AuthoritySubmitOutcome::Accepted { commit, .. }) = saved.outcome else {
+        let Some(AuthoritySubmitResponseBody::Accepted { commit, .. }) = saved.outcome else {
             return Err(invalid("parent membership has no accepted Commit"));
         };
         let revision = arkret::CurrentRevision {
@@ -402,7 +402,7 @@ impl ManagedDeviceRuntime {
     }
 
     fn accepted_publication(saved: &ManagedPublication) -> Result<Option<String>> {
-        let Some(AuthoritySubmitOutcome::Accepted { commit, .. }) = &saved.outcome else {
+        let Some(AuthoritySubmitResponseBody::Accepted { commit, .. }) = &saved.outcome else {
             return Ok(None);
         };
         arkret::signatures::detached_object::verify_detached_object_signature(
@@ -554,7 +554,7 @@ impl ManagedDeviceRuntime {
         if Self::accepted_publication(&saved)?.is_none() {
             return Ok(false);
         }
-        let Some(AuthoritySubmitOutcome::Accepted {
+        let Some(AuthoritySubmitResponseBody::Accepted {
             commit: retained, ..
         }) = &saved.outcome
         else {
@@ -658,11 +658,13 @@ impl ManagedDeviceRuntime {
             digest_suite: crate::PRODUCER_DIGEST_SUITE,
         };
         let request = arkret::VerifiedSubmission::verify(
-            SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(event.event().clone())),
+            SelfAuthoritySubmitRequestBody::Event(EventAdmissionSubmission::new(
+                event.event().clone(),
+            )),
             |_| Ok(producer.clone()),
         )
         .map_err(|e| invalid(e.to_string()))?;
-        let SelfAuthoritySubmitOutcome::Ordinary(outcome) = device
+        let SelfAuthoritySubmitResponseBody::Ordinary(outcome) = device
             .client()
             .submit_to_realm_authority(
                 &request,
@@ -673,7 +675,7 @@ impl ManagedDeviceRuntime {
             return Err(invalid("Device Event returned aggregate result"));
         };
         let mut key = None;
-        if let AuthoritySubmitOutcome::Accepted { commit, .. } = &outcome {
+        if let AuthoritySubmitResponseBody::Accepted { commit, .. } = &outcome {
             let route = self
                 .edge
                 .realm_route(device.effective_scope.realm_id())
@@ -712,7 +714,7 @@ impl ManagedDeviceRuntime {
             if saved.event != event {
                 return Err(invalid("original publication changed"));
             }
-            if let Some(AuthoritySubmitOutcome::Accepted { commit, .. }) = &saved.outcome {
+            if let Some(AuthoritySubmitResponseBody::Accepted { commit, .. }) = &saved.outcome {
                 if committed
                     .as_ref()
                     .is_some_and(|r| r.commit_id != commit.commit_id)

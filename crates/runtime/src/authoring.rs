@@ -11,7 +11,7 @@ use std::sync::Arc;
 use arkret::{ActorId, AuthoredEvent, EventIntent, RealmId};
 use arkret_identifiers::DidCoreId;
 use arkret_wire::{
-    AuthorityCommitStatus, AuthorityRejectionStatus, AuthoritySubmitOutcome, CommittedEventRef,
+    AuthorityCommitStatus, AuthorityRejectionStatus, AuthoritySubmitResponseBody, CommittedEventRef,
 };
 use serde::{Deserialize, Serialize};
 
@@ -57,8 +57,8 @@ pub(crate) struct PublicationRecord {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "result", rename_all = "snake_case")]
 pub(crate) enum StationAnswer {
-    Authority(Box<AuthoritySubmitOutcome>),
-    Applet(arkret::AppletTransactionOutcome),
+    Authority(Box<AuthoritySubmitResponseBody>),
+    Applet(arkret::AppletTransactionResponseBody),
 }
 
 /// One answer observed from one governance Station for this publication.
@@ -189,7 +189,7 @@ impl AuthoringJournal {
         scope: &str,
         operation: &str,
         station: &DidCoreId,
-        outcome: &AuthoritySubmitOutcome,
+        outcome: &AuthoritySubmitResponseBody,
         committed: Option<&CommittedEventRef>,
     ) -> Result<bool> {
         self.record_answer(
@@ -207,7 +207,7 @@ impl AuthoringJournal {
         scope: &str,
         operation: &str,
         station: &DidCoreId,
-        outcome: &arkret::AppletTransactionOutcome,
+        outcome: &arkret::AppletTransactionResponseBody,
         committed: Option<&CommittedEventRef>,
     ) -> Result<bool> {
         self.record_answer(
@@ -413,10 +413,10 @@ impl PublicationRecord {
 /// settles nothing, so the exact signed bytes stay replayable.
 pub(crate) fn publication_outcome(
     event: &AuthoredEvent,
-    outcome: &AuthoritySubmitOutcome,
+    outcome: &AuthoritySubmitResponseBody,
 ) -> Result<Option<CommittedEventRef>> {
     match outcome {
-        AuthoritySubmitOutcome::Accepted { status, commit } => {
+        AuthoritySubmitResponseBody::Accepted { status, commit } => {
             commit
                 .validate_shape()
                 .map_err(|error| BridgeError::Arkret(error.to_string()))?;
@@ -441,11 +441,11 @@ pub(crate) fn publication_outcome(
                 stream_position: commit.stream_position,
             }))
         }
-        AuthoritySubmitOutcome::Rejected {
+        AuthoritySubmitResponseBody::Rejected {
             status: AuthorityRejectionStatus::Rejected,
             ..
         } => Ok(None),
-        AuthoritySubmitOutcome::Rejected {
+        AuthoritySubmitResponseBody::Rejected {
             status: AuthorityRejectionStatus::RetryableUnavailable,
             reason_code,
         } => Err(BridgeError::Runtime(format!(
@@ -458,7 +458,7 @@ pub(crate) fn publication_outcome(
 /// RealmCommit. Preserve its exact registered reference and its original carrier.
 pub(crate) fn applet_publication_outcome(
     event: &AuthoredEvent,
-    outcome: &arkret::AppletTransactionOutcome,
+    outcome: &arkret::AppletTransactionResponseBody,
 ) -> Result<Option<CommittedEventRef>> {
     let refs = outcome.committed_event_refs();
     if outcome.status() == arkret::AppletTransactionStatus::Accepted

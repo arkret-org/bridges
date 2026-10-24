@@ -112,7 +112,10 @@ async fn fetch_service_account_token(
 
     fetch_vendor_token(
         ctx.http.post(&key.token_uri).form(&[
-            ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
+            (
+                "grant_type",
+                "urn:ietf:parameters:oauth:grant-type:jwt-bearer",
+            ),
             ("assertion", &assertion),
         ]),
         "Google token exchange",

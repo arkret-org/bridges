@@ -170,7 +170,7 @@ async fn messenger_delivery(req: &mut Request, depot: &mut Depot, res: &mut Resp
             inbound,
         )
         .await;
-        retry |= outcome == webhook::SubmitOutcome::Retry;
+        retry |= outcome == webhook::SubmitResponseBody::Retry;
     }
     for media in messenger_media(&body) {
         let replay_key = format!("messenger:media:{}", media.message_id);

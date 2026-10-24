@@ -63,18 +63,21 @@ impl ManagedDeviceRuntime {
             return Err(invalid("this recovery operation is permanently terminal"));
         }
         let outcome = self.recovery_outcome(actor, &prepared.begin).await?;
-        let arkret::RealmActorMaterial::Outcome { outcome: state, .. } = &outcome.material().result
+        let arkret::RealmActorMaterial::RequestStatus {
+            request_status: state,
+            ..
+        } = &outcome.material().material
         else {
             return Err(invalid("recovery begin returned another material purpose"));
         };
         let begin_ref =
             match state {
-                arkret::RealmActorOperationOutcome::Recovery {
+                arkret::RealmActorRequestStatus::Recovery {
                     begin_ref,
                     state: arkret::RealmActorRecoveryState::Pending,
                     ..
                 } => begin_ref.clone(),
-                arkret::RealmActorOperationOutcome::Recovery {
+                arkret::RealmActorRequestStatus::Recovery {
                     state:
                         arkret::RealmActorRecoveryState::Cancelled
                         | arkret::RealmActorRecoveryState::Superseded,
@@ -85,7 +88,7 @@ impl ManagedDeviceRuntime {
                         .await?;
                     return Err(invalid("the governance Station terminated this recovery"));
                 }
-                arkret::RealmActorOperationOutcome::Recovery {
+                arkret::RealmActorRequestStatus::Recovery {
                     state: arkret::RealmActorRecoveryState::Completed,
                     terminal_ref: Some(target),
                     ..
@@ -100,14 +103,14 @@ impl ManagedDeviceRuntime {
                     self.reconcile_control_after_recovery(actor).await?;
                     return Ok(commit);
                 }
-                arkret::RealmActorOperationOutcome::Submitted(
-                    AuthoritySubmitOutcome::Accepted { commit, .. },
+                arkret::RealmActorRequestStatus::Submitted(
+                    AuthoritySubmitResponseBody::Accepted { commit, .. },
                 ) => recovery_reference(commit),
-                arkret::RealmActorOperationOutcome::Status {
+                arkret::RealmActorRequestStatus::Status {
                     status: arkret::RealmActorOperationStatus::Unknown,
                 } => {
                     let outcome = self.submit_recovery_original(&prepared.begin).await?;
-                    let AuthoritySubmitOutcome::Accepted { commit, .. } = outcome else {
+                    let AuthoritySubmitResponseBody::Accepted { commit, .. } = outcome else {
                         return Err(invalid(
                             "recovery begin has not been accepted; retain the exact original",
                         ));
@@ -136,19 +139,23 @@ impl ManagedDeviceRuntime {
             .as_ref()
             .ok_or_else(|| invalid("accepted begin did not retain its reset"))?;
         let outcome = self.recovery_outcome(actor, reset).await?;
-        let arkret::RealmActorMaterial::Outcome { outcome, .. } = &outcome.material().result else {
+        let arkret::RealmActorMaterial::RequestStatus {
+            request_status: outcome,
+            ..
+        } = &outcome.material().material
+        else {
             return Err(invalid("recovery reset returned another material purpose"));
         };
         let commit = match outcome {
-            arkret::RealmActorOperationOutcome::Submitted(AuthoritySubmitOutcome::Accepted {
+            arkret::RealmActorRequestStatus::Submitted(AuthoritySubmitResponseBody::Accepted {
                 commit,
                 ..
             }) => commit.clone(),
-            arkret::RealmActorOperationOutcome::Status {
+            arkret::RealmActorRequestStatus::Status {
                 status: arkret::RealmActorOperationStatus::Unknown,
             } => {
                 let outcome = self.submit_recovery_original(reset).await?;
-                let AuthoritySubmitOutcome::Accepted { commit, .. } = outcome else {
+                let AuthoritySubmitResponseBody::Accepted { commit, .. } = outcome else {
                     return Err(invalid(
                         "recovery reset has not been accepted; retain its exact original",
                     ));
@@ -173,16 +180,18 @@ impl ManagedDeviceRuntime {
         for prepared in self.authoring.pending_control_rotations(actor).await? {
             let current = self.recovery_current(actor).await?;
             let outcome = self.recovery_outcome(actor, &prepared.event).await?;
-            let arkret::RealmActorMaterial::Outcome { outcome: state, .. } =
-                &outcome.material().result
+            let arkret::RealmActorMaterial::RequestStatus {
+                request_status: state,
+                ..
+            } = &outcome.material().material
             else {
                 return Err(invalid(
                     "control reconciliation returned another material purpose",
                 ));
             };
             match state {
-                arkret::RealmActorOperationOutcome::Submitted(
-                    AuthoritySubmitOutcome::Accepted { commit, .. },
+                arkret::RealmActorRequestStatus::Submitted(
+                    AuthoritySubmitResponseBody::Accepted { commit, .. },
                 ) => {
                     let (commit, key) = self
                         .recovery_original(actor, &prepared.event, &recovery_reference(commit))
@@ -191,14 +200,14 @@ impl ManagedDeviceRuntime {
                         .accept_control_rotation(&prepared, &commit, &key)
                         .await?;
                 }
-                arkret::RealmActorOperationOutcome::Submitted(
-                    AuthoritySubmitOutcome::Rejected { .. },
+                arkret::RealmActorRequestStatus::Submitted(
+                    AuthoritySubmitResponseBody::Rejected { .. },
                 ) => {
                     self.authoring
                         .record_control_rejection(&prepared, &outcome)
                         .await?;
                 }
-                arkret::RealmActorOperationOutcome::Status {
+                arkret::RealmActorRequestStatus::Status {
                     status: arkret::RealmActorOperationStatus::Unknown,
                 } => {
                     self.authoring
@@ -272,7 +281,7 @@ impl ManagedDeviceRuntime {
         ];
         route
             .material(
-                &arkret::RealmActorMaterialRequest::Current {
+                &arkret::RealmActorMaterialRequestBody::Current {
                     actor_id: actor.clone(),
                     request_nonce: crate::realm_governance::nonce()?,
                     selectors,
@@ -287,12 +296,13 @@ impl ManagedDeviceRuntime {
         actor: &ActorId,
         event: &AuthoredEvent,
     ) -> Result<arkret::identity::VerifiedRealmActorMaterial> {
-        let request =
-            SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(event.event().clone()));
+        let request = SelfAuthoritySubmitRequestBody::Event(EventAdmissionSubmission::new(
+            event.event().clone(),
+        ));
         let route = self.edge.realm_route(&event.realm_id).await?;
         route
             .material(
-                &arkret::RealmActorMaterialRequest::Outcome {
+                &arkret::RealmActorMaterialRequestBody::RequestStatus {
                     actor_id: actor.clone(),
                     request_nonce: crate::realm_governance::nonce()?,
                     target_request_digest: arkret::Hash::new(canonical_sha256(&request)?)?,
@@ -305,7 +315,7 @@ impl ManagedDeviceRuntime {
     async fn submit_recovery_original(
         &self,
         event: &AuthoredEvent,
-    ) -> Result<AuthoritySubmitOutcome> {
+    ) -> Result<AuthoritySubmitResponseBody> {
         if !matches!(
             event.kind,
             arkret::EventKind::RealmActorRecoveryBegin | arkret::EventKind::RealmActorControlReset
@@ -317,8 +327,9 @@ impl ManagedDeviceRuntime {
                 "independent recovery requires the real managing Service original",
             ));
         }
-        let request =
-            SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(event.event().clone()));
+        let request = SelfAuthoritySubmitRequestBody::Event(EventAdmissionSubmission::new(
+            event.event().clone(),
+        ));
         let producer = arkret::ProducerVerificationContext {
             actor: ActorId::service(self.edge.service_actor_id().clone()),
             verification_method: self.edge.service_verification_method()?,
@@ -337,7 +348,7 @@ impl ManagedDeviceRuntime {
                 &arkret::ClientRequestOptions::new().idempotency_key(event.event_id().as_str()),
             )
             .await?;
-        let SelfAuthoritySubmitOutcome::Ordinary(outcome) = result else {
+        let SelfAuthoritySubmitResponseBody::Ordinary(outcome) = result else {
             return Err(invalid("recovery returned an aggregate response"));
         };
         Ok(outcome)
@@ -355,7 +366,7 @@ impl ManagedDeviceRuntime {
         let route = self.edge.realm_route(&expected.realm_id).await?;
         let result = route
             .material(
-                &arkret::RealmActorMaterialRequest::Event {
+                &arkret::RealmActorMaterialRequestBody::Event {
                     actor_id: actor.clone(),
                     request_nonce: crate::realm_governance::nonce()?,
                     target: target.clone(),
@@ -363,7 +374,7 @@ impl ManagedDeviceRuntime {
                 &ActorId::service(self.edge.service_actor_id().clone()),
             )
             .await?;
-        let arkret::RealmActorMaterial::Event { event, commit, .. } = &result.material().result
+        let arkret::RealmActorMaterial::Event { event, commit, .. } = &result.material().material
         else {
             return Err(invalid("recovery original unavailable"));
         };

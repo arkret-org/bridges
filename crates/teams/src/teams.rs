@@ -60,14 +60,14 @@ impl TeamsApp {
                 // The Bot Framework botframework.com multi-tenant login endpoint.
                 const TOKEN_URL: &str =
                     "https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token";
-                let params = [
+                let parameters = [
                     ("grant_type", "client_credentials"),
                     ("client_id", self.app_id.as_str()),
                     ("client_secret", self.app_password.as_str()),
                     ("scope", "https://api.botframework.com/.default"),
                 ];
                 fetch_vendor_token(
-                    ctx.http.post(TOKEN_URL).form(&params),
+                    ctx.http.post(TOKEN_URL).form(&parameters),
                     "Teams token",
                     VendorTokenCheck::HttpStatus,
                     "/access_token",

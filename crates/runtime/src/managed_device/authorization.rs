@@ -9,7 +9,7 @@ impl ManagedDeviceRuntime {
         record: &mut DeviceRecord,
     ) -> Result<()> {
         let actor = &record.plan.actor_id;
-        let request = SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(
+        let request = SelfAuthoritySubmitRequestBody::Event(EventAdmissionSubmission::new(
             record.authorization.event().clone(),
         ));
         let digest = arkret::Hash::new(canonical_sha256(&request)?)?;
@@ -20,7 +20,7 @@ impl ManagedDeviceRuntime {
         let requester = ActorId::service(self.edge.service_actor_id().clone());
         let verified = route
             .material(
-                &arkret::RealmActorMaterialRequest::Outcome {
+                &arkret::RealmActorMaterialRequestBody::RequestStatus {
                     actor_id: actor.clone(),
                     request_nonce: crate::realm_governance::nonce()?,
                     target_request_digest: digest.clone(),
@@ -28,10 +28,10 @@ impl ManagedDeviceRuntime {
                 &requester,
             )
             .await?;
-        let arkret::RealmActorMaterial::Outcome {
+        let arkret::RealmActorMaterial::RequestStatus {
             target_request_digest,
-            outcome,
-        } = &verified.material().result
+            request_status: outcome,
+        } = &verified.material().material
         else {
             return Err(invalid("Device recovery returned another material purpose"));
         };
@@ -39,8 +39,8 @@ impl ManagedDeviceRuntime {
             return Err(invalid("Device recovery returned another request identity"));
         }
         let outcome = match outcome {
-            arkret::RealmActorOperationOutcome::Submitted(outcome) => outcome.clone(),
-            arkret::RealmActorOperationOutcome::Status {
+            arkret::RealmActorRequestStatus::Submitted(outcome) => outcome.clone(),
+            arkret::RealmActorRequestStatus::Status {
                 status: arkret::RealmActorOperationStatus::Unknown,
             } => return Ok(()),
             _ => {
@@ -49,14 +49,14 @@ impl ManagedDeviceRuntime {
                 ));
             }
         };
-        let AuthoritySubmitOutcome::Accepted { commit, .. } = &outcome else {
+        let AuthoritySubmitResponseBody::Accepted { commit, .. } = &outcome else {
             // A refusal must not erase an original or be interpreted as a
             // successful authorization. Unknown retains the same retry unit.
             return Err(invalid("Device authorization is not accepted"));
         };
         let original = route
             .material(
-                &arkret::RealmActorMaterialRequest::Event {
+                &arkret::RealmActorMaterialRequestBody::Event {
                     actor_id: actor.clone(),
                     request_nonce: crate::realm_governance::nonce()?,
                     target: arkret::CommittedEventRef {
@@ -73,7 +73,7 @@ impl ManagedDeviceRuntime {
             event,
             commit: original_commit,
             ..
-        } = &original.material().result
+        } = &original.material().material
         else {
             return Err(invalid("Device recovery has no accepted original"));
         };
@@ -111,10 +111,10 @@ impl ManagedDeviceRuntime {
         let winner = self.decode(storage_key, &raw, &record.plan).await?;
         match (&record.outcome, &winner.outcome) {
             (
-                Some(AuthoritySubmitOutcome::Accepted {
+                Some(AuthoritySubmitResponseBody::Accepted {
                     commit: expected, ..
                 }),
-                Some(AuthoritySubmitOutcome::Accepted { commit: actual, .. }),
+                Some(AuthoritySubmitResponseBody::Accepted { commit: actual, .. }),
             ) if expected == actual => {
                 *record = winner;
                 *previous = raw;

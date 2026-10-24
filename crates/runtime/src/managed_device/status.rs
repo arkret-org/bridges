@@ -1,7 +1,7 @@
 //! Durable owner-gate changes use the existing control-signed Event contract.
 use arkret::{
-    RealmActorMaterial, RealmActorMaterialRequest, RealmActorOperationOutcome,
-    RealmActorOperationStatus, RealmActorStatusSetPayload, RealmActorStatusSetPayloadGate,
+    RealmActorMaterial, RealmActorMaterialRequestBody, RealmActorOperationStatus,
+    RealmActorRequestStatus, RealmActorStatusSetPayload, RealmActorStatusSetPayloadGate,
     RealmActorStatusSetPayloadState,
 };
 
@@ -13,12 +13,14 @@ struct OwnerStatusIntent {
     operation_id: String,
     event: AuthoredEvent,
     controller_key: PublicKeyMaterial,
-    accepted: Option<arkret::RealmActorMaterialOutcome>,
+    accepted: Option<arkret::RealmActorMaterialResponseBody>,
 }
 
 impl OwnerStatusIntent {
-    fn request(&self) -> SelfAuthoritySubmitRequest {
-        SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(self.event.event().clone()))
+    fn request(&self) -> SelfAuthoritySubmitRequestBody {
+        SelfAuthoritySubmitRequestBody::Event(EventAdmissionSubmission::new(
+            self.event.event().clone(),
+        ))
     }
 
     fn verify(
@@ -62,7 +64,7 @@ impl OwnerStatusIntent {
         let Some(material) = &self.accepted else {
             return Ok(None);
         };
-        let RealmActorMaterial::Event { event, commit, .. } = &material.result else {
+        let RealmActorMaterial::Event { event, commit, .. } = &material.material else {
             return Err(invalid("owner receipt has no exact original"));
         };
         if event != self.event.event()
@@ -106,7 +108,7 @@ impl ManagedDeviceRuntime {
             };
             let material = route
                 .material(
-                    &RealmActorMaterialRequest::Current {
+                    &RealmActorMaterialRequestBody::Current {
                         actor_id: actor.clone(),
                         request_nonce: crate::realm_governance::nonce()?,
                         selectors: vec![selector.clone()],
@@ -114,7 +116,7 @@ impl ManagedDeviceRuntime {
                     &ActorId::service(self.edge.service_actor_id().clone()),
                 )
                 .await?;
-            let RealmActorMaterial::Current { entries } = &material.material().result else {
+            let RealmActorMaterial::Current { entries } = &material.material().material else {
                 return Err(invalid("owner status query returned another purpose"));
             };
             let revision = entries
@@ -122,7 +124,7 @@ impl ManagedDeviceRuntime {
                 .find_map(|entry| match entry {
                     arkret::RealmActorMaterialCurrentEntry::Present {
                         row:
-                            arkret::TypedCurrentRow::Value {
+                            arkret::CurrentState::Value {
                                 selector: actual,
                                 revision,
                                 ..
@@ -187,7 +189,7 @@ impl ManagedDeviceRuntime {
             let digest = arkret::Hash::new(canonical_sha256(&intent.request())?)?;
             let outcome = route
                 .material(
-                    &RealmActorMaterialRequest::Outcome {
+                    &RealmActorMaterialRequestBody::RequestStatus {
                         actor_id: actor.clone(),
                         request_nonce: crate::realm_governance::nonce()?,
                         target_request_digest: digest.clone(),
@@ -195,10 +197,10 @@ impl ManagedDeviceRuntime {
                     &requester,
                 )
                 .await?;
-            let RealmActorMaterial::Outcome {
+            let RealmActorMaterial::RequestStatus {
                 target_request_digest,
-                outcome,
-            } = &outcome.material().result
+                request_status: outcome,
+            } = &outcome.material().material
             else {
                 return Err(invalid("owner result has another material purpose"));
             };
@@ -206,8 +208,8 @@ impl ManagedDeviceRuntime {
                 return Err(invalid("owner result has another request digest"));
             }
             let result = match outcome {
-                RealmActorOperationOutcome::Submitted(result) => result.clone(),
-                RealmActorOperationOutcome::Status {
+                RealmActorRequestStatus::Submitted(result) => result.clone(),
+                RealmActorRequestStatus::Status {
                     status: RealmActorOperationStatus::Unknown,
                 } => {
                     let current = self.control_state(actor).await?;
@@ -243,7 +245,7 @@ impl ManagedDeviceRuntime {
                         Ok(producer.clone())
                     })
                     .map_err(|error| invalid(error.to_string()))?;
-                    let SelfAuthoritySubmitOutcome::Ordinary(result) = client
+                    let SelfAuthoritySubmitResponseBody::Ordinary(result) = client
                         .submit_to_realm_authority(
                             &request,
                             &arkret::ClientRequestOptions::new()
@@ -257,14 +259,14 @@ impl ManagedDeviceRuntime {
                 }
                 _ => return Err(invalid("owner original has an unexpected outcome")),
             };
-            let AuthoritySubmitOutcome::Accepted { commit, .. } = result else {
+            let AuthoritySubmitResponseBody::Accepted { commit, .. } = result else {
                 return Err(invalid(
                     "owner operation is not accepted; retain its original",
                 ));
             };
             let material = route
                 .material(
-                    &RealmActorMaterialRequest::Event {
+                    &RealmActorMaterialRequestBody::Event {
                         actor_id: actor.clone(),
                         request_nonce: crate::realm_governance::nonce()?,
                         target: arkret::CommittedEventRef {

@@ -145,10 +145,10 @@ admin 面默认回环绑定隔离,无请求级鉴权;若显式放宽 `admin_bind
 整个 admin 面的可达性。
 
 公网 webhook 面**默认启用每源 IP 速率限制**(`bridge.webhook_rate_limit`,默认
-`enabled: true`、`max_requests: 600`、`window_secs: 60`,即每 IP 持续 10 rps),用于无反代
+`enabled: true`、`max_request_count: 600`、`window_secs: 60`,即每 IP 持续 10 rps),用于无反代
 裸跑时的基本抗泛洪;阈值刻意宽松,正常单租户回调远达不到。注意:部分平台的**重投风暴**
 (如 Meta 对 5xx 的批量重投)可能从少量回调 IP 集中打来,若观察到被限,应按平台回调 IP 段
-放宽 `max_requests` 或置 `enabled: false` 改由反代限流。
+放宽 `max_request_count` 或置 `enabled: false` 改由反代限流。
 
 **重放守卫与 vendor token 缓存均持久化于桥数据库**(`webhook_replay_guard` / `token_cache`
 表):重启后 TTL 内的捕获报文无法重放,且同一桥的多副本共享同一守卫与同一 vendor access token
@@ -206,7 +206,7 @@ Service 管理请求使用 SDK RFC9421 来源／目标签名，不申请 Applet 
 
 Circle 主体可用 `prepare_ghost_in_scope` 发起现有 authoring 流程；创建不自动加入父 Realm 或 Circle。`join_circle_after_realm_join` 使用主体本人已接受的父 Realm 加入 Commit，并由 Circle Device 原签 Circle 加入。两者分别需要现有安装、原签 Device 范围和原有加入授权；父 Realm 设备可只含 `ak.applet.join`，不必取得父 Realm 的上传或内容读取权限。没有获准的父加入来源时保持未就绪，不由管理员代写第三方 join。
 
-创建 scope 内的本人 Realm join 使用原 accepted create 的 `creation_authorization_ref` 作为安装来源，不按业务 grant 排序猜测。公开的跨 scope 加入 API 要求调用者先以 `remember_installation_outcome(&scope, &outcome)` 登记该 scope 真实安装 HTTP 响应的 SDK `AppletInstallOutcome`；没有此输入就保持未就绪。该记录只是本地候选来源，每次使用仍读取正式 authority/material、验证当前 scope／Service／Applet／epoch，最终由 Station 检查 exact installation；不能自行构造一个成功 outcome、复用另一 scope 的 grant 或把 `current_binding=active` 当作授权。现有 portal、消息与附件产品调用均使用 `device_for_actor` 的 creation scope，跨 scope API 不隐式启动额外产品工作流。
+创建 scope 内的本人 Realm join 使用原 accepted create 的 `creation_authorization_ref` 作为安装来源，不按业务 grant 排序猜测。公开的跨 scope 加入 API 要求调用者先以 `remember_installation_outcome(&scope, &outcome)` 登记该 scope 真实安装 HTTP 响应的 SDK `AppletInstallResponseBody`；没有此输入就保持未就绪。该记录只是本地候选来源，每次使用仍读取正式 authority/material、验证当前 scope／Service／Applet／epoch，最终由 Station 检查 exact installation；不能自行构造一个成功 outcome、复用另一 scope 的 grant 或把 `current_binding=active` 当作授权。现有 portal、消息与附件产品调用均使用 `device_for_actor` 的 creation scope，跨 scope API 不隐式启动额外产品工作流。
 
 此 runtime 的 Realm 消息与加密 portal 由主体 Device 原签。协议允许的 Service 自身写入仍须引用覆盖实际 action/resource 的有效安装授权，Service 签名本身不授予权限。完整 MLS 发起端 worker、主体控制轮换／恢复、持续授权与全部消费者仍需独立验收，不声明全部已登记 operation 的 runtime 已交付。
 

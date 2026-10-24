@@ -312,7 +312,7 @@ mod tests {
         ContentDigest, ContentDigestAlgorithm, sign_http_message_for_scenario,
     };
     use arkret::{
-        AppletTransactionOutcome, IdempotencyClaim, IdempotencyDirection, IdempotencyIdentity,
+        AppletTransactionResponseBody, IdempotencyClaim, IdempotencyDirection, IdempotencyIdentity,
         IdempotencyWindow,
     };
     use ed25519_dalek::SigningKey;
@@ -411,7 +411,7 @@ mod tests {
             window.claim(&identity, &body_hash, binding.as_str()),
             IdempotencyClaim::Fresh
         ));
-        let outcome = AppletTransactionOutcome::Accepted {
+        let outcome = AppletTransactionResponseBody::Accepted {
             committed_event_refs: Vec::new(),
             rejections: Vec::new(),
             retry_after_ms: None,

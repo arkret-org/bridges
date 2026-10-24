@@ -1,16 +1,16 @@
 //! Local hints from accepted installation results, never another authority rail.
 
 use arkret_models_collaboration::applet_installation_authority::{
-    AppletAuthorityMaterialOutcome, AppletAuthorityMaterialRequestBody,
+    AppletAuthorityMaterialRequestBody, AppletAuthorityMaterialResponseBody,
     AppletInstallationCurrentBinding,
 };
-use arkret_models_collaboration::exact_current_results::{
-    ExactCurrentResultEntry, ExactCurrentResultsReadOutcome,
+use arkret_models_collaboration::exact_current_state::{
+    ExactCurrentStateEntry, ExactCurrentStateReadResponseBody,
 };
 use arkret_models_collaboration::governance::grant_constraint::{
     CapabilityGrant, CapabilityGrantStatus, GrantConstraintKind, GrantConstraintSubkind,
 };
-use arkret_models_integration::{AppletInstallOutcome, AppletRegistrationPayload};
+use arkret_models_integration::{AppletInstallResponseBody, AppletRegistrationPayload};
 
 use super::*;
 
@@ -18,7 +18,7 @@ use super::*;
 #[serde(deny_unknown_fields)]
 struct InstallationHint {
     effective_scope: ScopeRef,
-    outcome: AppletInstallOutcome,
+    outcome: AppletInstallResponseBody,
 }
 
 fn hint_key(applet: &str, service: &arkret::DidCoreId, scope: &ScopeRef) -> Result<String> {
@@ -87,7 +87,7 @@ fn source_grant(
     applet: &arkret::AppletId,
     service: &arkret::DidCoreId,
     request: &AppletAuthorityMaterialRequestBody,
-    material: &AppletAuthorityMaterialOutcome,
+    material: &AppletAuthorityMaterialResponseBody,
     registration: Option<(&arkret::EventId, &arkret::Hash)>,
 ) -> Result<CapabilityGrant> {
     material.validate_for_request(applet, request)?;
@@ -121,11 +121,11 @@ fn source_grant(
         return Err(invalid("installation source requires one exact grant"));
     };
     let mut rows = material
-        .current_results
+        .current_states
         .iter()
         .filter_map(|entry| match entry {
-            ExactCurrentResultsReadOutcome::Present {
-                entry: ExactCurrentResultEntry::CapabilityGrant(row),
+            ExactCurrentStateReadResponseBody::Present {
+                entry: ExactCurrentStateEntry::CapabilityGrant(row),
                 ..
             } if &row.selector.grant_id == id => Some(row),
             _ => None,
@@ -168,7 +168,7 @@ impl ManagedDeviceRuntime {
     pub async fn remember_installation_outcome(
         &self,
         effective_scope: &ScopeRef,
-        outcome: &AppletInstallOutcome,
+        outcome: &AppletInstallResponseBody,
     ) -> Result<()> {
         let hint = InstallationHint {
             effective_scope: effective_scope.clone(),
@@ -248,7 +248,7 @@ impl ManagedDeviceRuntime {
             let arkret::RealmActorMaterial::Event {
                 producer_signer_fact,
                 ..
-            } = &original.authoring_context.material.result
+            } = &original.authoring_context.material.material
             else {
                 return Err(invalid("creation source lost its original signer fact"));
             };
@@ -309,8 +309,8 @@ impl ManagedDeviceRuntime {
                 )
                 .map_err(|error| invalid(error.to_string()))?;
         }
-        if material.current_results.iter().any(|row| {
-            !matches!(row, ExactCurrentResultsReadOutcome::Present { governance_generation, .. }
+        if material.current_states.iter().any(|row| {
+            !matches!(row, ExactCurrentStateReadResponseBody::Present { governance_generation, .. }
                 if *governance_generation == route.authority.current_generation())
         }) {
             return Err(invalid(
