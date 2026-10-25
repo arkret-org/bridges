@@ -503,16 +503,13 @@ fn applet_routes() -> Router {
                 ))
                 .get(applet_protocol),
         )
-        // The applet edge surface declares eight operations; the third_party
-        // user/location lookups are not backed by a server-side discovery index
-        // here. Per applet-integration Â§15 an unimplemented surface MUST return a
-        // structured `unsupported_feature` rather than fall through to a bare 404.
+        // Exact accepted user mappings share the native manager boundary.
         .push(
             Router::with_path("third_party/users")
                 .hoop(OperationSelector(
                     ServiceOperationId::EDGE_APPLET_THIRD_PARTY_USERS_READ_LIST_V1,
                 ))
-                .get(applet_third_party_unsupported),
+                .get(applet_third_party_user),
         )
         .push(
             Router::with_path("third_party/locations")
@@ -974,19 +971,138 @@ async fn applet_actor(req: &mut Request, depot: &mut Depot, res: &mut Response) 
         );
         return;
     }
-    let result: Result<arkret_models_integration::AppletActorView> = async {
-        let id = actor
-            .as_realm_actor_id()
-            .ok_or_else(|| BridgeError::App("Realm actor required".into()))?;
-        // Resolve only retained originals. Unknown identifiers cannot trigger discovery.
-        let edge = state.edge.clone();
-        let known = actor.clone();
-        let original = run_blocking(move || edge.retained_actor_creation(&known)).await?;
-        let creation = crate::managed_authoring::creation_payload(&original.event)?;
-        if creation.actor_id != actor || creation.applet_id.as_str() != state.edge.applet_id() {
-            return Err(BridgeError::App("unknown managed actor".into()));
+    match managed_actor_view(req, state, &actor).await {
+        Ok(view) => res.render(Json(view)),
+        Err(error) => {
+            tracing::warn!(%error, "Managed actor lookup remains unavailable");
+            applet_error(res, StatusCode::NOT_FOUND, "not_found", "actor not found");
         }
-        let route = state.edge.realm_route(&id.realm_id).await?;
+    }
+}
+
+async fn managed_actor_view(
+    req: &Request,
+    state: &AppletWebState,
+    actor: &arkret::ActorId,
+) -> Result<arkret_models_integration::AppletActorView> {
+    let raw = arkret::canonical::canonical_json_string(actor)?;
+    let id = actor
+        .as_realm_actor_id()
+        .ok_or_else(|| BridgeError::App("Realm actor required".into()))?;
+    // Resolve only retained originals. Unknown identifiers cannot trigger discovery.
+    let edge = state.edge.clone();
+    let known = actor.clone();
+    let original = run_blocking(move || edge.retained_actor_creation(&known)).await?;
+    let creation = crate::managed_authoring::creation_payload(&original.event)?;
+    if &creation.actor_id != actor || creation.applet_id.as_str() != state.edge.applet_id() {
+        return Err(BridgeError::App("unknown managed actor".into()));
+    }
+    let route = state.edge.realm_route(&id.realm_id).await?;
+    verify_http_applet_request(
+        req,
+        &collect_headers(req),
+        &[],
+        &state.config,
+        state.did_authority.bindings(),
+        false,
+        Some(&route),
+    )
+    .map_err(|error| BridgeError::App(error.message))?;
+    let selector = arkret::CurrentSelector::RealmActorManager {
+        actor_id: actor.clone(),
+    };
+    let material = route
+        .material(
+            &arkret::RealmActorMaterialRequestBody::Current {
+                actor_id: actor.clone(),
+                request_nonce: crate::realm_governance::nonce()?,
+                selectors: vec![selector.clone()],
+            },
+            &arkret::ActorId::service(state.edge.service_actor_id().clone()),
+        )
+        .await?;
+    let arkret::RealmActorMaterial::Current { entries } = &material.material().material else {
+        return Err(BridgeError::App("manager current unavailable".into()));
+    };
+    let manager = entries
+        .iter()
+        .find_map(|entry| match entry {
+            arkret::RealmActorMaterialCurrentEntry::Present {
+                current_state:
+                    arkret::CurrentState::Value {
+                        selector: found,
+                        value,
+                        ..
+                    },
+                ..
+            } if *found == selector => Some(value.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| BridgeError::App("manager current unavailable".into()))?;
+    let manager: arkret::RealmActorManagerValue = serde_json::from_value(manager)?;
+    if manager.service_id != *state.edge.service_actor_id() {
+        return Err(BridgeError::App("manager changed".into()));
+    }
+    let handler = state.handler.clone();
+    let view = run_blocking(move || handler.resolve_actor(&raw).map_err(BridgeError::from)).await?;
+    if view.exists {
+        if view.actor_id.as_ref() != Some(actor) {
+            return Err(BridgeError::App(
+                "resolved actor differs from accepted original".into(),
+            ));
+        }
+        Ok(view)
+    } else {
+        Ok(arkret_models_integration::AppletActorView {
+            exists: true,
+            actor_id: Some(actor.clone()),
+            display_name: None,
+            external_ref: None,
+        })
+    }
+}
+
+#[handler]
+async fn applet_third_party_user(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    use arkret_models_integration::{AppletThirdPartyUserLookupResponseBody, ThirdPartyUserQuery};
+    let Some(state) = applet_state(depot, res) else {
+        return;
+    };
+    let pairs = url::form_urlencoded::parse(req.uri().query().unwrap_or("").as_bytes())
+        .into_owned()
+        .collect::<Vec<_>>();
+    let fields = pairs
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    if pairs.len() != 5 || fields.len() != 5 {
+        applet_error(
+            res,
+            StatusCode::BAD_REQUEST,
+            "param_invalid",
+            "five unique exact tuple fields required",
+        );
+        return;
+    }
+    let query: ThirdPartyUserQuery = match serde_json::from_value::<ThirdPartyUserQuery>(
+        serde_json::to_value(fields).expect("query map"),
+    ) {
+        Ok(query) if query.validate().is_ok() => query,
+        _ => {
+            applet_error(
+                res,
+                StatusCode::BAD_REQUEST,
+                "param_invalid",
+                "exact external tuple required",
+            );
+            return;
+        }
+    };
+    let result: Result<AppletThirdPartyUserLookupResponseBody> = async {
+        if query.applet_id.as_str() != state.edge.applet_id() {
+            return Err(BridgeError::App("unknown managed mapping".into()));
+        }
+        let route = state.edge.realm_route(&query.realm_id).await?;
         verify_http_applet_request(
             req,
             &collect_headers(req),
@@ -997,66 +1113,46 @@ async fn applet_actor(req: &mut Request, depot: &mut Depot, res: &mut Response) 
             Some(&route),
         )
         .map_err(|error| BridgeError::App(error.message))?;
-        let selector = arkret::CurrentSelector::RealmActorManager {
-            actor_id: actor.clone(),
-        };
-        let material = route
-            .material(
-                &arkret::RealmActorMaterialRequestBody::Current {
-                    actor_id: actor.clone(),
-                    request_nonce: crate::realm_governance::nonce()?,
-                    selectors: vec![selector.clone()],
-                },
-                &arkret::ActorId::service(state.edge.service_actor_id().clone()),
-            )
-            .await?;
-        let arkret::RealmActorMaterial::Current { entries } = &material.material().material else {
-            return Err(BridgeError::App("manager current unavailable".into()));
-        };
-        let manager = entries
-            .iter()
-            .find_map(|entry| match entry {
-                arkret::RealmActorMaterialCurrentEntry::Present {
-                    current_state:
-                        arkret::CurrentState::Value {
-                            selector: found,
-                            value,
-                            ..
-                        },
-                    ..
-                } if *found == selector => Some(value.clone()),
-                _ => None,
-            })
-            .ok_or_else(|| BridgeError::App("manager current unavailable".into()))?;
-        let manager: arkret::RealmActorManagerValue = serde_json::from_value(manager)?;
-        if manager.service_id != *state.edge.service_actor_id() {
-            return Err(BridgeError::App("manager changed".into()));
-        }
-        let handler = state.handler.clone();
-        let view =
-            run_blocking(move || handler.resolve_actor(&raw).map_err(BridgeError::from)).await?;
-        if view.exists {
-            if view.actor_id.as_ref() != Some(&actor) {
-                return Err(BridgeError::App(
-                    "resolved actor differs from accepted original".into(),
-                ));
+        // Retained identities are verified local custody, never a remote search.
+        let edge = state.edge.clone();
+        let originals = run_blocking(move || {
+            edge.managed_actor_ids()?
+                .into_iter()
+                .map(|actor| edge.retained_actor_creation(&actor))
+                .collect::<Result<Vec<_>>>()
+        })
+        .await?;
+        for original in originals {
+            let creation = crate::managed_authoring::creation_payload(&original.event)?;
+            if creation
+                .actor_id
+                .as_realm_actor_id()
+                .is_some_and(|id| id.realm_id == query.realm_id)
+                && creation.applet_id == query.applet_id
+                && creation.external_ref.as_ref() == Some(&query.external_ref())
+            {
+                managed_actor_view(req, state, &creation.actor_id).await?;
+                let response = AppletThirdPartyUserLookupResponseBody {
+                    exists: true,
+                    actor_id: Some(creation.actor_id),
+                    external_ref: creation.external_ref,
+                };
+                response.validate_for_query(&query)?;
+                return Ok(response);
             }
-            Ok(view)
-        } else {
-            Ok(arkret_models_integration::AppletActorView {
-                exists: true,
-                actor_id: Some(actor),
-                display_name: None,
-                external_ref: None,
-            })
         }
+        Ok(AppletThirdPartyUserLookupResponseBody {
+            exists: false,
+            actor_id: None,
+            external_ref: None,
+        })
     }
     .await;
     match result {
-        Ok(view) => res.render(Json(view)),
+        Ok(response) => res.render(Json(response)),
         Err(error) => {
-            tracing::warn!(%error, "Managed actor lookup remains unavailable");
-            applet_error(res, StatusCode::NOT_FOUND, "not_found", "actor not found");
+            tracing::warn!(%error, "Managed mapping lookup remains unavailable");
+            applet_error(res, StatusCode::NOT_FOUND, "not_found", "mapping not found");
         }
     }
 }
@@ -1153,7 +1249,7 @@ async fn applet_third_party_unsupported(req: &mut Request, depot: &mut Depot, re
     }
     unsupported_feature(
         res,
-        "third_party user/location lookup is not implemented by this bridge",
+        "third-party location lookup is not implemented by this bridge",
     );
 }
 
