@@ -15,7 +15,7 @@ use arkret::identity::{
     ResolverFailMode, ResolverPolicy, VerifiedDidBinding, VerifiedDidBindingDocumentInput,
     VerifiedDidBindingKey, VerifiedDidBindingStore, document_canonical_digest, policy_digest,
 };
-use arkret::{Did, Hash, TrustDomainId};
+use arkret::{Did, DidBindingEvidenceReceiptExt, Hash, TrustDomainId};
 use arkret_wire::DidUrl;
 use chrono::{DateTime, Utc};
 
@@ -576,5 +576,3 @@ mod tests {
         );
     }
 }
-
-use arkret::DidBindingEvidenceReceiptExt;
