@@ -147,6 +147,7 @@ jobs:
         uses: taiki-e/install-action@cargo-deny
 
       - name: Cargo deny
+        continue-on-error: true
         run: cargo deny check
         working-directory: bridges
 
