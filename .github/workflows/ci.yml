@@ -174,8 +174,8 @@ jobs:
           path: garth
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
-      - name: Install Rust 1.98
-        uses: dtolnay/rust-toolchain@1.98
+      - name: Install Rust 1.99
+        uses: dtolnay/rust-toolchain@1.99
 
       - name: Install native dependencies
         run: |
