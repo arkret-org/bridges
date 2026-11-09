@@ -919,6 +919,22 @@ impl ManagedDeviceRuntime {
                 return self.submit_device_original(device, &operation, event).await;
             }
             let (key, previous, mut record) = self.accepted_device_record(device).await?;
+            let intent = TypedEventDraft::<K>::new(
+                scope.clone(),
+                actor.clone(),
+                serde_json::from_value(serde_json::to_value(&content)?)?,
+            )?
+            .with_applet_id(arkret::AppletId::new(
+                self.edge.config().arkret.applet_id.clone(),
+            )?)
+            .with_authorization_ref(child.clone().into())
+            .into_intent(at)?
+            .with_external_ref(
+                external_map
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            );
             let mut value = serde_json::to_value(&content)?;
             if encrypt {
                 let mut group = super::inbox::restore_group(&record, device)?.ok_or_else(|| {
@@ -931,11 +947,82 @@ impl ManagedDeviceRuntime {
                 // coordinates matching the installed private GroupContext.
                 self.verify_current_content_send(device, &reader, &record, &group, &base)
                     .await?;
-                let mut seal = |content_type: &str, bytes: &[u8]| -> Result<_> {
+                let genesis = self
+                    .install_received_roster(device, &reader, &base, &mut group)
+                    .await?;
+                let root_context = self
+                    .content_root_context(device, &reader, &base, &group, &genesis)
+                    .await?;
+                let root = group.export_content_root(&root_context).map_err(invalid)?;
+                let root_ref =
+                    arkret::crypto::content_history::content_root_ref(&root, &root_context)
+                        .map_err(invalid)?;
+                let producer = group.local_content_endpoint().map_err(invalid)?;
+                let protection = arkret_models_crypto::ContentProtection {
+                    root_refs: vec![root_ref.clone()],
+                    blob_refs: vec![],
+                    backup_refs: self
+                        .retained_root_backups(device, &root_context, &root_ref)
+                        .await?,
+                };
+                let store = self.content_root_store(device)?;
+                let endpoint = arkret::MlsWelcomeRecipientEndpoint::Device {
+                    device_id: device.device_id.clone(),
+                };
+                let vault = garth::mls::content_roots::ContentRootVault::new(
+                    &store,
+                    &device.actor_id,
+                    &endpoint,
+                );
+                let mut seal = async |content_type: &str, bytes: &[u8]| -> Result<_> {
+                    let path = if content_type == MESSAGE_CONTENT_BLOCK_MLS_CONTENT_TYPE {
+                        "/payload/encrypted_content"
+                    } else if K::KIND == arkret::EventKind::StrandCreate {
+                        "/payload/object/encrypted_metadata"
+                    } else {
+                        "/payload/encrypted_metadata"
+                    };
+                    let salt = vault
+                        .reserve_salt(
+                            &operation,
+                            path,
+                            &garth::mls::content_roots::ContentSaltBinding {
+                                intent: &intent,
+                                root_context: &root_context,
+                                root_ref: &root_ref,
+                                producer: &producer,
+                                content_type,
+                                protection: &protection,
+                                plaintext: bytes,
+                            },
+                        )
+                        .await
+                        .map_err(invalid)?;
+                    let context = arkret_models_crypto::ContentContext {
+                        root_context: root_context.clone(),
+                        root_ref: root_ref.clone(),
+                        purpose: arkret_models_crypto::ContentPurpose::EventBody,
+                        encryption_scheme: arkret::EncryptedPayloadScheme::EpochContentAead,
+                        encryption_algorithm:
+                            arkret_models_crypto::ContentEncryptionAlgorithm::Aes128Gcm,
+                        producer: producer.clone(),
+                        content_key_salt: salt,
+                    };
+                    let key = arkret::crypto::content_history::derive_content_key(&root, &context)
+                        .map_err(invalid)?;
+                    let material = arkret_models_crypto::EventContentMaterial {
+                        key_commitment: arkret::crypto::content_history::content_key_commitment(
+                            &context, &key,
+                        )
+                        .map_err(invalid)?,
+                        content_context: context,
+                        outer_event: intent.pre_encryption_outer_event()?,
+                        protection: protection.clone(),
+                    };
                     let header = arkret::EventContentPreEncryptionHeader::reconstruct(
                         "1.0",
                         content_type,
-                        arkret::EncryptedPayloadScheme::MlsRfc9420,
+                        arkret::EncryptedPayloadScheme::EpochContentAead,
                         scope.clone(),
                         K::KIND_STR,
                         group.epoch(),
@@ -944,6 +1031,7 @@ impl ManagedDeviceRuntime {
                             .local_content_sender_domain()
                             .map_err(|e| invalid(e.to_string()))?,
                         arkret::EventContentRoutingContext::None,
+                        material,
                     )?;
                     let encrypted = group
                         .encrypt_payload(header, bytes)
@@ -963,15 +1051,21 @@ impl ManagedDeviceRuntime {
                             .content
                             .take()
                             .ok_or_else(|| invalid("message content missing"))?;
-                        message.encrypted_content = Some(seal(
-                            MESSAGE_CONTENT_BLOCK_MLS_CONTENT_TYPE,
-                            &canonical_json_bytes(&plaintext)?,
-                        )?);
+                        message.encrypted_content = Some(
+                            seal(
+                                MESSAGE_CONTENT_BLOCK_MLS_CONTENT_TYPE,
+                                &canonical_json_bytes(&plaintext)?,
+                            )
+                            .await?,
+                        );
                         if let Some(metadata) = message.metadata.take() {
-                            message.encrypted_metadata = Some(seal(
-                                MESSAGE_METADATA_MLS_CONTENT_TYPE,
-                                &canonical_json_bytes(&metadata)?,
-                            )?);
+                            message.encrypted_metadata = Some(
+                                seal(
+                                    MESSAGE_METADATA_MLS_CONTENT_TYPE,
+                                    &canonical_json_bytes(&metadata)?,
+                                )
+                                .await?,
+                            );
                         }
                         serde_json::to_value(message)?
                     }
@@ -988,10 +1082,13 @@ impl ManagedDeviceRuntime {
                             .metadata
                             .take()
                             .ok_or_else(|| invalid("portal metadata missing"))?;
-                        strand.object.encrypted_metadata = Some(seal(
-                            "application/vnd.arkret.strand-metadata+json",
-                            &canonical_json_bytes(&metadata)?,
-                        )?);
+                        strand.object.encrypted_metadata = Some(
+                            seal(
+                                "application/vnd.arkret.strand-metadata+json",
+                                &canonical_json_bytes(&metadata)?,
+                            )
+                            .await?,
+                        );
                         serde_json::to_value(strand)?
                     }
                     _ => return Err(invalid("unsupported native content encryption")),
@@ -1005,18 +1102,7 @@ impl ManagedDeviceRuntime {
                 )?;
             }
             let typed: K::Payload = serde_json::from_value(value)?;
-            let intent = TypedEventDraft::<K>::new(scope.clone(), actor.clone(), typed)?
-                .with_applet_id(arkret::AppletId::new(
-                    self.edge.config().arkret.applet_id.clone(),
-                )?)
-                .with_authorization_ref(child.clone().into())
-                .into_intent(at)?
-                .with_external_ref(
-                    external_map
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect(),
-                );
+            let intent = intent.with_typed_payload::<K>(typed)?;
             let event = self.sign_device_intent(device, intent)?;
             reader.check_device(device)?;
             if self

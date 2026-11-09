@@ -182,6 +182,9 @@ impl ManagedDeviceRuntime {
                 .await?;
             self.retain_attachment_checkpoint(&device, &accepted, &group)
                 .await?;
+            let root_context = self
+                .content_root_context(&device, &reader, &accepted, &group, &genesis)
+                .await?;
             let context = AttachmentContentKeyContext {
                 effective_scope: scope.clone(),
                 genesis_event_ref: genesis,
@@ -190,9 +193,11 @@ impl ManagedDeviceRuntime {
                 encryption_algorithm: blob_aead::ALG_STREAM_XCHACHA.into(),
                 content_key_salt: blob_aead::fresh_content_key_salt()
                     .map_err(|e| invalid(e.to_string()))?,
+                producer: group.local_content_endpoint().map_err(invalid)?,
             };
-            let secret = arkret::mls::derive_attachment_content_key(&group, &context)
-                .map_err(|e| invalid(e.to_string()))?;
+            let secret =
+                arkret::mls::derive_attachment_content_key(&group, &root_context, &context)
+                    .map_err(|e| invalid(e.to_string()))?;
             let parameters = blob_aead::StreamEncryptParams {
                 key_ref: EncryptedAttachmentKeyRef {
                     algorithm: EncryptedAttachmentKeyAlgorithm::Mls,
@@ -200,7 +205,7 @@ impl ManagedDeviceRuntime {
                         accepted.event.event_id.clone(),
                     ),
                 },
-                content_key_salt: context.content_key_salt,
+                content_context: context,
                 digest_suite: crate::PRODUCER_DIGEST_SUITE,
                 media_type: mime.into(),
                 segment_bytes: 64 * 1024,
@@ -210,7 +215,11 @@ impl ManagedDeviceRuntime {
                     .event_id()
                     .ok()
                     .filter(|id| id == &accepted.event.event_id)
-                    .map(|_| group.epoch())
+                    .map(|_| blob_aead::ResolvedAttachmentGroupState {
+                        effective_scope: scope.clone(),
+                        genesis_event_ref: root_context.genesis_event_ref.clone(),
+                        epoch: group.epoch(),
+                    })
             };
             let (ciphertext, descriptor) =
                 blob_aead::encrypt_stream(bytes, &secret, &parameters, &resolver)
@@ -316,18 +325,27 @@ impl ManagedDeviceRuntime {
         let genesis = self
             .install_received_roster(device, reader, &original, &mut group)
             .await?;
-        let context =
-            descriptor.content_key_context(device.effective_scope.clone(), genesis, group.epoch());
-        let secret = arkret::mls::derive_attachment_content_key(&group, &context)
+        let context = descriptor.content_key_context(
+            device.effective_scope.clone(),
+            genesis.clone(),
+            group.epoch(),
+        );
+        let root_context = self
+            .content_root_context(device, reader, &original, &group, &genesis)
+            .await?;
+        let secret = arkret::mls::derive_attachment_content_key(&group, &root_context, &context)
             .map_err(|e| invalid(e.to_string()))?;
         let ciphertext = self
             .read_attachment_ciphertext(device, reader, descriptor)
             .await?;
         let resolver = |r: &EncryptedAttachmentGroupStateRef| {
-            r.event_id()
-                .ok()
-                .filter(|id| id == &reference)
-                .map(|_| group.epoch())
+            r.event_id().ok().filter(|id| id == &reference).map(|_| {
+                blob_aead::ResolvedAttachmentGroupState {
+                    effective_scope: device.effective_scope.clone(),
+                    genesis_event_ref: genesis.clone(),
+                    epoch: group.epoch(),
+                }
+            })
         };
         let plaintext = blob_aead::decrypt_stream(&ciphertext, descriptor, &secret, &resolver)
             .map_err(|e| invalid(e.to_string()))?;

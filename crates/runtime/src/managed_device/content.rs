@@ -111,6 +111,7 @@ impl NativeContent {
         original: &arkret::CommittedEventFullView,
         accepted: &arkret::CommittedEventFullView,
         group: &mut ArkretMlsGroup,
+        root_context: &arkret_models_crypto::ContentRootContext,
     ) -> Result<Option<Self>> {
         let event = &original.event;
         let message = if event.kind == arkret::EventKind::MessageCreate {
@@ -120,8 +121,11 @@ impl NativeContent {
                     "activated MLS stream contains plaintext message data",
                 ));
             }
-            let sender = String::from_utf8(arkret::mls_basic_credential_identity(&event.actor_id)?)
-                .map_err(|e| invalid(e.to_string()))?;
+            let producer = group.original_content_endpoint(event).map_err(invalid)?;
+            let sender = String::from_utf8(arkret::mls_basic_credential_identity(
+                event.actual_signer(),
+            )?)
+            .map_err(|e| invalid(e.to_string()))?;
             let mut open =
                 |envelope: &arkret::EncryptedEnvelope, content_type: &str| -> Result<Vec<u8>> {
                     if envelope.content_type != content_type
@@ -131,11 +135,17 @@ impl NativeContent {
                         return Err(invalid("message differs from its exact accepted MLS base"));
                     }
                     let header = envelope.reconstruct_pre_encryption_header(
-                        arkret::EncryptedPayloadScheme::MlsRfc9420,
+                        arkret::EncryptedPayloadScheme::EpochContentAead,
                         event.scope_ref.clone(),
                         event.kind.as_str(),
                         &sender,
                         None,
+                        arkret_models_crypto::EventContentMaterial::from_original(
+                            event,
+                            envelope,
+                            root_context.clone(),
+                            producer.clone(),
+                        )?,
                     )?;
                     let payload = arkret::mls::encrypted_envelope_to_payload_with_verified_header(
                         envelope, header,

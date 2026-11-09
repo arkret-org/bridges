@@ -33,6 +33,7 @@ mod attachment;
 mod authorization;
 mod business;
 mod content;
+mod content_roots;
 mod control;
 mod inbox;
 mod installation_source;
@@ -124,8 +125,8 @@ struct ManagedControlState {
     generation: u64,
 }
 
-fn invalid(detail: impl Into<String>) -> BridgeError {
-    BridgeError::Database(detail.into())
+fn invalid(detail: impl std::fmt::Display) -> BridgeError {
+    BridgeError::Database(detail.to_string())
 }
 fn key(plan: &InitialManagedDevicePlan) -> Result<String> {
     Ok(format!(

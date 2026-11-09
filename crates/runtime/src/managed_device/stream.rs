@@ -380,7 +380,15 @@ impl ManagedDeviceRuntime {
                     EventKind::MessageCreate | EventKind::MessageRedact
                 ) && !self.is_local_publication(&full.event).await?
                 {
-                    delivery = NativeContent::decrypt(&full, &accepted, &mut group)?;
+                    let genesis = self
+                        .install_received_roster(device, reader, &accepted, &mut group)
+                        .await?;
+                    let context = self
+                        .content_root_context(device, reader, &accepted, &group, &genesis)
+                        .await?;
+                    delivery = NativeContent::decrypt(&full, &accepted, &mut group, &context)?;
+                    self.retain_original_content_roots(device, &full, &context, &group)
+                        .await?;
                     self.retain_attachment_checkpoint(device, &accepted, &group)
                         .await?;
                     if delivery.is_none() {
