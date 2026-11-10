@@ -967,7 +967,9 @@ name = "arkret-test-kit"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "arkret-bootstrap",
  "arkret-canonical",
+ "arkret-crypto",
  "arkret-event-draft",
  "arkret-identifiers",
  "arkret-identity",
