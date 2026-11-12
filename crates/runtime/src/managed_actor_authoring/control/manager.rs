@@ -28,6 +28,18 @@ pub struct ManagementTransferOffer {
     next_content_backup_recipient: arkret_models_crypto::RealmActorContentBackupRecipient,
 }
 
+impl ManagementTransferOffer {
+    pub fn plan(&self) -> &ManagementTransferPlan {
+        &self.plan
+    }
+
+    pub fn next_content_backup_recipient(
+        &self,
+    ) -> &arkret_models_crypto::RealmActorContentBackupRecipient {
+        &self.next_content_backup_recipient
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Incoming {
@@ -322,6 +334,33 @@ impl ManagedActorAuthoringService {
                 return Err(invalid("management operation already binds another intent"));
             }
             return Ok(incoming.offer);
+        }
+        next_content_backup_recipient.validate()?;
+        if next_content_backup_recipient
+            .key_agreement_ref
+            .as_str()
+            .split_once('#')
+            .map(|(id, _)| id)
+            != Some(did.as_str())
+            || next_content_backup_recipient.public_key_base64url
+                == candidate
+                    .recovery
+                    .content_backup_recipient
+                    .public_key_base64url
+        {
+            return Err(invalid(
+                "manager replacement requires a fresh independent recipient for the same DID",
+            ));
+        }
+        let archive_public =
+            arkret::base64url_decode(&next_content_backup_recipient.public_key_base64url)?;
+        arkret::crypto::hpke::validate_x25519_recipient_key(&archive_public).map_err(invalid)?;
+        if arkret::base64url_encode(&archive_public)
+            != next_content_backup_recipient.public_key_base64url
+        {
+            return Err(invalid(
+                "manager archive recipient encoding is not canonical",
+            ));
         }
         let controller = random_seed()?;
         let update = random_seed()?;
@@ -923,10 +962,21 @@ impl ManagedActorAuthoringService {
             .ok_or_else(|| invalid("receiving native custody not finalized"))?;
         let (next_resolution, method_history_evidence) =
             native_material(&incoming.offer.did, entries)?;
+        let (_, recovery, _) = recovery::row(
+            cut,
+            &arkret::CurrentSelector::RealmActorRecovery {
+                actor_id: actor_id.clone(),
+            },
+        )?;
+        let recovery: arkret::RealmActorRecoveryValue = serde_json::from_value(recovery.clone())?;
         if plan.actor_id.as_realm_actor_id() != Some(&archive.realm_actor_id)
             || archive.manager_ref != *manager_ref
             || archive.new_service_id != plan.new_service_id
             || archive.next_content_backup_recipient != incoming.offer.next_content_backup_recipient
+            || archive.next_content_backup_recipient.key_agreement_ref
+                == recovery.content_backup_recipient.key_agreement_ref
+            || archive.next_content_backup_recipient.public_key_base64url
+                == recovery.content_backup_recipient.public_key_base64url
         {
             return Err(invalid(
                 "archive custody proof differs from the exact manager acceptance",

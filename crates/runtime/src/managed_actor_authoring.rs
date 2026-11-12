@@ -56,6 +56,7 @@ struct ManagedActorIdentity {
     method_history_evidence: ResolutionMethodHistoryEvidence,
     root_verification_method: DidUrl,
     root_public_key: PublicKeyMaterial,
+    content_backup_recipient: arkret_models_crypto::RealmActorContentBackupRecipient,
 }
 
 struct VerifiedManagedActorRoot {
@@ -365,14 +366,14 @@ impl ManagedActorAuthoringService {
         identity: &ManagedActorIdentity,
         public: &[u8; 32],
     ) -> Result<arkret_models_crypto::RealmActorContentBackupRecipient> {
-        Ok(arkret_models_crypto::RealmActorContentBackupRecipient {
-            key_agreement_ref: DidUrl::new(format!(
-                "{}#content-backup",
-                identity.initial_resolution.did
-            ))?,
-            hpke_suite: arkret_models_crypto::ContentBackupRecipientHpkeSuite::AkHpkeX25519AeadChacha20poly1305V1,
-            public_key_base64url: arkret::base64url_encode(public),
-        })
+        if identity.content_backup_recipient.public_key_base64url
+            != arkret::base64url_encode(public)
+        {
+            return Err(BridgeError::Database(
+                "manager archive custody differs from the original native recipient".into(),
+            ));
+        }
+        Ok(identity.content_backup_recipient.clone())
     }
 
     fn validate_archive_public(
@@ -673,12 +674,29 @@ impl ManagedActorAuthoringService {
             })?;
         let verified_root =
             verify_managed_actor_root(&did, &method_history_evidence, &key_material)?;
+        let native_evidence = arkret::AppletManagedActorMethodHistoryEvidence::try_from(
+            method_history_evidence.clone(),
+        )?;
+        let original_document: arkret::DidDocument =
+            serde_json::from_value(
+                native_evidence.webvh_material().1.first().ok_or_else(|| {
+                    BridgeError::Database("native inception original missing".into())
+                })?["state"]
+                    .clone(),
+            )?;
+        let content_backup_recipient =
+            arkret::identity::realm_actor_content_backup_recipient_from_document(
+                &original_document,
+                &DidUrl::new(format!("{did}#content-backup"))?,
+            )
+            .map_err(|error| BridgeError::Database(error.to_string()))?;
         let identity = ManagedActorIdentity {
             actor_id,
             initial_resolution,
             method_history_evidence,
             root_verification_method: verified_root.verification_method,
             root_public_key: verified_root.public_key,
+            content_backup_recipient,
         };
         // The three stored columns describe one identity. A row whose actor,
         // resolution commitment and method evidence disagree cannot be used to
