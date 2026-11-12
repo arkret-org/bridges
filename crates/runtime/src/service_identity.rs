@@ -53,6 +53,7 @@ pub(crate) fn validate(config: &Config) -> Result<&arkret::AuthenticatedServiceR
     Ok(resolution)
 }
 
+#[cfg(any(feature = "web", test))]
 pub(crate) fn commitment(config: &Config) -> Result<arkret::ResolutionCommitment> {
     let resolution = validate(config)?;
     let boundary = resolution.method_history_evidence.boundary();

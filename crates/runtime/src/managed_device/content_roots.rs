@@ -220,7 +220,8 @@ impl ManagedDeviceRuntime {
                 created_at,
                 author: arkret::crypto::backup::KeyBackupAuthBinding {
                     device_id: device.device_id.clone(),
-                    verification_method: arkret::DidUrl::new(device.signer.verification_method())?,
+                    verification_method: arkret::DidUrl::new(device.signer.verification_method())
+                        .map_err(invalid)?,
                     signature_algorithm: arkret_models_crypto::KeyBackupSignatureAlgorithm::Ed25519,
                     device_authorize_event_id: device.authorization_event_id.clone(),
                 },
@@ -272,7 +273,8 @@ impl ManagedDeviceRuntime {
             realm,
             response,
         )
-        .await?;
+        .await
+        .map_err(invalid)?;
         let arkret_wire::CommittedEventView::Full(original) = response.value()? else {
             return Err(invalid("Realm Genesis original was not disclosed"));
         };

@@ -36,7 +36,7 @@ use crate::{BridgeError, PreparedGhost, PreparedManagedActor, Result};
 
 pub(crate) mod control;
 pub use control::manager::{ManagementTransferOffer, ManagementTransferPlan};
-mod manager_custody;
+pub(crate) mod manager_custody;
 pub use manager_custody::{ManagedActorManagerService, ManagerArchiveMaintenance};
 
 const AUTHORING_LEASE_SECS: i64 = 30;
@@ -687,7 +687,8 @@ impl ManagedActorAuthoringService {
         let content_backup_recipient =
             arkret::identity::realm_actor_content_backup_recipient_from_document(
                 &original_document,
-                &DidUrl::new(format!("{did}#content-backup"))?,
+                &DidUrl::new(format!("{did}#content-backup"))
+                    .map_err(|error| BridgeError::Database(error.to_owned()))?,
             )
             .map_err(|error| BridgeError::Database(error.to_string()))?;
         let identity = ManagedActorIdentity {

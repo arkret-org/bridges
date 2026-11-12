@@ -92,7 +92,7 @@ fn raw_tables(vault: &ManagerArchiveVault) -> (RawTable, RawTable) {
     vault
         .with_database(|database| {
             let transaction = database.begin_read().map_err(invalid)?;
-            let collect = |definition| -> Result<RawTable> {
+            let collect = |definition: TableDefinition<&str, &[u8]>| -> Result<RawTable> {
                 let table = transaction.open_table(definition).map_err(invalid)?;
                 table
                     .iter()

@@ -354,7 +354,8 @@ impl ManagedActorAuthoringService {
         }
         let archive_public =
             arkret::base64url_decode(&next_content_backup_recipient.public_key_base64url)?;
-        arkret::crypto::hpke::validate_x25519_recipient_key(&archive_public).map_err(invalid)?;
+        arkret::crypto::hpke::validate_x25519_recipient_key(&archive_public)
+            .map_err(|error| invalid(error.to_string()))?;
         if arkret::base64url_encode(&archive_public)
             != next_content_backup_recipient.public_key_base64url
         {

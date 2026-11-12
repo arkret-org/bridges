@@ -727,10 +727,14 @@ dependencies = [
  "arkret-wire",
  "chrono",
  "ed25519-dalek 3.0.0",
+ "getrandom 0.4.3",
+ "hmac 0.13.0",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "subtle",
  "thiserror 2.0.21",
+ "zeroize",
 ]
 
 [[package]]
@@ -810,6 +814,7 @@ dependencies = [
  "arkret-canonical",
  "arkret-wire",
  "chrono",
+ "curve25519-dalek 5.0.0",
  "hex",
  "regex",
  "serde",

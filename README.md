@@ -225,10 +225,15 @@ explicit deployment key. Principal custody alone does not provide the MLS runner
 `ARKRET_MANAGER_ARCHIVE_DATABASE`（独立 redb 文件）与
 `ARKRET_MANAGER_ARCHIVE_KEY_FILE`（独立部署 keystore 中的原始 32-byte wrapping key 文件）。
 该 key 不进入共享 Config，不能与日常 authoring KEK 或 Service signing seed 相同。
-vault 绑定完整 Applet／Service，旧新管理者不得共用同一库。嵌入式 host 可用
+vault 绑定完整 Applet／Service，旧新管理者不得共用同一库。嵌入式 host 在打开新库前应先调用
+`ManagedActorManagerService::validate_archive_wrapping_key(&edge, &key)`，避免错误部署密钥先创建不可用的库；
+此纯预检不授予管理权限，`new` 仍验证真实已持有的 vault 与 owner。嵌入式 host 可用
 `ManagedActorManagerService::new(edge, Arc<ManagerArchiveVault>)` 显式注入，
 再传给 `managed_applet_router_with_manager`／`ManagedAppletHttpHost::with_manager`。
 日常 `ManagedDeviceRuntime`、RootStore 与配置接受重放器不持 vault。
+共享管理路由已启动并持有维护 guard；宿主需要显式退役时，可保留同一个
+`start_maintenance()` guard 并调用其幂等 `stop()`，无需等待所有 in-flight router 引用释放。
+这只停止本地维护任务，不撤销远端已经接纳的原件或事务。
 
 首次创建先耐久归档私钥，再将公钥写入原生 inception 的 keyAgreement 并签候选。
 管理者通过正式 Service maintenance 选择已知 scope 的 series；Device 不选 pointer。

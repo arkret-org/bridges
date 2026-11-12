@@ -289,11 +289,12 @@ impl ManagedActorManagerService {
                 now,
                 self.authoring.edge.service_verification_method()?,
             )?;
-            let record = unsigned
-                .clone()
-                .attach_signature(arkret::Base64UrlString::new(arkret::base64url_encode(
+            let record = unsigned.clone().attach_signature(
+                arkret::Base64UrlString::new(arkret::base64url_encode(
                     signing.sign(&unsigned.signing_payload_bytes()?).to_bytes(),
-                ))?)?;
+                ))
+                .map_err(invalid)?,
+            )?;
             let bytes = canonical_json_bytes(&record)?;
             let vault = self.vault.clone();
             let key = operation.clone();

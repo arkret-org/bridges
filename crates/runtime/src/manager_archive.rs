@@ -171,9 +171,10 @@ impl ManagerArchiveVault {
         getrandom::fill(&mut nonce).map_err(invalid)?;
         let cipher =
             XChaCha20Poly1305::new_from_slice(self.wrapping_key.as_slice()).map_err(invalid)?;
+        let aead_nonce = XNonce::from(nonce);
         let encrypted = cipher
             .encrypt(
-                XNonce::from_slice(&nonce),
+                &aead_nonce,
                 Payload {
                     msg: private,
                     aad: key.as_bytes(),
@@ -199,9 +200,10 @@ impl ManagerArchiveVault {
         }
         let cipher =
             XChaCha20Poly1305::new_from_slice(self.wrapping_key.as_slice()).map_err(invalid)?;
+        let nonce = XNonce::try_from(&record[..24]).map_err(invalid)?;
         cipher
             .decrypt(
-                XNonce::from_slice(&record[..24]),
+                &nonce,
                 Payload {
                     msg: &record[24..],
                     aad: key.as_bytes(),

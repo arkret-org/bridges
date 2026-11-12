@@ -204,7 +204,8 @@ impl ManagedActorManagerService {
         }
         let at = arkret::canonical::normalize_timestamp_canonical(Utc::now());
         let descriptor = arkret_models_crypto::RealmActorContentBackupRecipient {
-            key_agreement_ref: DidUrl::new(format!("{did}#content-backup-{encoded}"))?,
+            key_agreement_ref: DidUrl::new(format!("{did}#content-backup-{encoded}"))
+                .map_err(invalid)?,
             hpke_suite: arkret_models_crypto::ContentBackupRecipientHpkeSuite::AkHpkeX25519AeadChacha20poly1305V1,
             public_key_base64url: encoded,
         };

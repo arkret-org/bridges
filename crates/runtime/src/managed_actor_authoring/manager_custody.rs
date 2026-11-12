@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock, Weak};
 mod handover;
 mod history;
+#[cfg(test)]
+mod maintenance_tests;
 mod series;
 pub(crate) use handover::ArchiveCustodyAcceptance;
 
@@ -27,13 +29,55 @@ pub struct ManagedActorManagerService {
 pub struct ManagerArchiveMaintenance {
     task: tokio::task::JoinHandle<()>,
 }
+impl ManagerArchiveMaintenance {
+    /// Request termination when the host retires, even if a router still holds
+    /// another guard. This does not roll back an already submitted operation.
+    pub fn stop(&self) {
+        self.task.abort();
+    }
+}
 impl Drop for ManagerArchiveMaintenance {
     fn drop(&mut self) {
-        self.task.abort();
+        self.stop();
     }
 }
 
 impl ManagedActorManagerService {
+    /// Validate operator key separation before opening a durable archive. This
+    /// pure preflight does not grant manager authority or bind a vault owner.
+    pub fn validate_archive_wrapping_key(
+        edge: &runtime::ArkretEdge,
+        key: &arkret::KeyBytes,
+    ) -> Result<()> {
+        if key.as_slice().len() != 32 {
+            return Err(BridgeError::Config(
+                "manager archive wrapping key must contain exactly 32 bytes".into(),
+            ));
+        }
+        let config = edge.config();
+        let daily = arkret::KeyBytes::new(
+            config
+                .arkret
+                .managed_actor_authoring
+                .key_encryption_key()?
+                .to_vec(),
+        );
+        let signing = arkret::KeyBytes::new(config.signing_seed()?.to_vec());
+        for existing in [&daily, &signing] {
+            let difference = key
+                .as_slice()
+                .iter()
+                .zip(existing.as_slice())
+                .fold(0u8, |difference, (left, right)| difference | (left ^ right));
+            if difference == 0 {
+                return Err(BridgeError::Config(
+                    "manager archive wrapping key must be independent of daily authoring and Service signing keys".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn new(edge: Arc<runtime::ArkretEdge>, vault: Arc<ManagerArchiveVault>) -> Result<Self> {
         let authoring = Arc::new(ManagedActorAuthoringService::new(edge)?);
         vault.require_distinct_authoring_key(&authoring.key_encryption_key)?;
@@ -95,6 +139,7 @@ impl ManagedActorManagerService {
         let key = arkret::KeyBytes::new(std::fs::read(key_file).map_err(|_| {
             BridgeError::Config("cannot read the separate manager archive key file".into())
         })?);
+        Self::validate_archive_wrapping_key(&edge, &key)?;
         let database = std::path::absolute(database)
             .map_err(|error| BridgeError::Config(error.to_string()))?;
         let parent = database
