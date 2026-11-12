@@ -957,13 +957,39 @@ impl ManagedDeviceRuntime {
                 let root_ref =
                     arkret::crypto::content_history::content_root_ref(&root, &root_context)
                         .map_err(invalid)?;
+                let crypto_operation = format!(
+                    "native-crypto/v1/{}",
+                    canonical_sha256(&(
+                        &device.actor_id,
+                        &device.operation_id,
+                        &operation,
+                        &root_context,
+                        &root_ref,
+                    ))?
+                );
                 let producer = group.local_content_endpoint().map_err(invalid)?;
+                let publication = self
+                    .publish_content_root(
+                        device,
+                        &reader,
+                        &operation,
+                        &arkret_models_crypto::ContentRootBackupEntry {
+                            item_kind: arkret_models_crypto::ContentRootItemKind::ContentEpochRoot,
+                            secret_id: format!(
+                                "root_{}",
+                                root_ref.as_str().trim_start_matches("sha256:")
+                            ),
+                            root_context: root_context.clone(),
+                            root_ref: root_ref.clone(),
+                            root_base64url: root.clone(),
+                        },
+                        at,
+                    )
+                    .await?;
                 let protection = arkret_models_crypto::ContentProtection {
                     root_refs: vec![root_ref.clone()],
                     blob_refs: vec![],
-                    backup_refs: self
-                        .retained_root_backups(device, &root_context, &root_ref)
-                        .await?,
+                    backup_refs: publication.backup_refs().map_err(invalid)?,
                 };
                 let store = self.content_root_store(device)?;
                 let endpoint = arkret::MlsWelcomeRecipientEndpoint::Device {
@@ -984,7 +1010,7 @@ impl ManagedDeviceRuntime {
                     };
                     let salt = vault
                         .reserve_salt(
-                            &operation,
+                            &crypto_operation,
                             path,
                             &garth::mls::content_roots::ContentSaltBinding {
                                 intent: &intent,
@@ -1093,6 +1119,8 @@ impl ManagedDeviceRuntime {
                     }
                     _ => return Err(invalid("unsupported native content encryption")),
                 };
+                publication.backup_refs().map_err(invalid)?;
+                reader.check_device(device)?;
                 super::inbox::refresh_group_private_state(
                     &mut record,
                     device,

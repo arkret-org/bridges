@@ -28,6 +28,9 @@ arkret:
   applet_namespaces:
     realms: []
     handles: []
+  # Manager archive secrets are separate deployment inputs, never Config members.
+  # Set ARKRET_MANAGER_ARCHIVE_DATABASE to its own redb file and
+  # ARKRET_MANAGER_ARCHIVE_KEY_FILE to a distinct raw 32-byte key file.
   managed_actor_authoring:
     principal_endpoint: "https://managed-actors.example/identities/"
     key_encryption_key_hex: "CHANGE_ME_64_HEX_CHARACTERS"

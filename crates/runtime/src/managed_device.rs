@@ -149,6 +149,38 @@ fn payload(record: &DeviceRecord) -> Result<DeviceAuthorizePayload> {
 }
 
 impl ManagedDeviceRuntime {
+    pub(crate) async fn retained_authorized_scopes(
+        &self,
+        actor: &ActorId,
+    ) -> Result<Vec<ScopeRef>> {
+        let store = self.store.clone();
+        let entries = run_blocking(move || store.entries_with_prefix("managed-device/v1/")).await?;
+        let mut scopes = std::collections::BTreeMap::new();
+        for (key, raw) in entries {
+            let record = self.decrypt_device_record(&key, &raw).await?;
+            if record.plan.actor_id != *actor
+                || !matches!(
+                    record.outcome.as_ref(),
+                    Some(AuthoritySubmitResponseBody::Accepted { .. })
+                )
+            {
+                continue;
+            }
+            self.validate(&record)?;
+            let authorized = payload(&record)?;
+            let Some(DeviceAuthorizationScopes::AppletManaged(entries)) = authorized.scopes else {
+                return Err(invalid("accepted native Device lost its exact scopes"));
+            };
+            for entry in entries.entries() {
+                scopes.insert(
+                    canonical_json_bytes(&entry.effective_scope)?,
+                    entry.effective_scope.clone(),
+                );
+            }
+        }
+        Ok(scopes.into_values().collect())
+    }
+
     async fn control_state(&self, actor: &ActorId) -> Result<ManagedControlState> {
         let id = actor
             .as_realm_actor_id()
@@ -178,7 +210,8 @@ impl ManagedDeviceRuntime {
                 &ActorId::service(self.edge.service_actor_id().clone()),
             )
             .await?;
-        let arkret::RealmActorMaterial::Current { entries } = &verified.material().material else {
+        let arkret::RealmActorMaterial::Current { entries, .. } = &verified.material().material
+        else {
             return Err(invalid("current control query returned another purpose"));
         };
         let row = |target: &arkret::CurrentSelector| -> Result<(

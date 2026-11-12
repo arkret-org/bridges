@@ -36,6 +36,8 @@ use crate::{BridgeError, PreparedGhost, PreparedManagedActor, Result};
 
 pub(crate) mod control;
 pub use control::manager::{ManagementTransferOffer, ManagementTransferPlan};
+mod manager_custody;
+pub use manager_custody::{ManagedActorManagerService, ManagerArchiveMaintenance};
 
 const AUTHORING_LEASE_SECS: i64 = 30;
 const AUTHORING_WAIT_ATTEMPTS: usize = 300;
@@ -146,16 +148,6 @@ impl ManagedActorAuthoringService {
     pub fn router(self: &Arc<Self>) -> Router {
         Router::new()
             .push(
-                Router::with_path("_arkret/edge/applet/managed-actors/author")
-                    .hoop(crate::web::OperationSelector(
-                        arkret::ServiceOperationId::EDGE_APPLET_MANAGED_ACTOR_COMMAND_AUTHOR_V1,
-                    ))
-                    .hoop(affix_state::inject(AuthoringWebState {
-                        service: self.clone(),
-                    }))
-                    .post(author_managed_actor),
-            )
-            .push(
                 Router::with_path("webvh/{local_id}/did.json")
                     .hoop(affix_state::inject(AuthoringWebState {
                         service: self.clone(),
@@ -238,7 +230,11 @@ impl ManagedActorAuthoringService {
     }
 
     /// Author or recover the exact Station-signed request using durable private custody.
-    pub async fn author(&self, request: &AppletManagedActorAuthoringRequest) -> Result<Event> {
+    pub(crate) async fn author_with_archive_key(
+        &self,
+        request: &AppletManagedActorAuthoringRequest,
+        content_backup_public_key: &[u8; 32],
+    ) -> Result<Event> {
         self.validate_request(request, false).await?;
         if request
             .basis
@@ -280,11 +276,15 @@ impl ManagedActorAuthoringService {
                     "stored managed actor creation Event is invalid: {error}"
                 ))
             })?;
+            self.validate_archive_public(request, &identity, content_backup_public_key)?;
             self.freeze_creation(request, &bundle, &identity)?;
             return Ok(bundle);
         }
         self.validate_request(request, true).await?;
-        let identity = self.identity_for(&subject_key, request).await?;
+        let identity = self
+            .identity_for(&subject_key, request, content_backup_public_key)
+            .await?;
+        self.validate_archive_public(request, &identity, content_backup_public_key)?;
         let owner_token = random_token(24)?;
 
         for _ in 0..AUTHORING_WAIT_ATTEMPTS {
@@ -313,7 +313,9 @@ impl ManagedActorAuthoringService {
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
                 ManagedActorAuthoringClaim::Acquired => {
-                    let built = self.build_creation_event(request, &identity).await;
+                    let built = self
+                        .build_creation_event(request, &identity, content_backup_public_key)
+                        .await;
                     match built {
                         Ok(bundle) => {
                             let bundle_json = String::from_utf8(canonical_json_bytes(&bundle)?)
@@ -356,6 +358,55 @@ impl ManagedActorAuthoringService {
         Err(BridgeError::Runtime(
             "timed out waiting for the durable managed actor authoring lease".to_owned(),
         ))
+    }
+
+    fn archive_descriptor(
+        &self,
+        identity: &ManagedActorIdentity,
+        public: &[u8; 32],
+    ) -> Result<arkret_models_crypto::RealmActorContentBackupRecipient> {
+        Ok(arkret_models_crypto::RealmActorContentBackupRecipient {
+            key_agreement_ref: DidUrl::new(format!(
+                "{}#content-backup",
+                identity.initial_resolution.did
+            ))?,
+            hpke_suite: arkret_models_crypto::ContentBackupRecipientHpkeSuite::AkHpkeX25519AeadChacha20poly1305V1,
+            public_key_base64url: arkret::base64url_encode(public),
+        })
+    }
+
+    fn validate_archive_public(
+        &self,
+        request: &AppletManagedActorAuthoringRequest,
+        identity: &ManagedActorIdentity,
+        public: &[u8; 32],
+    ) -> Result<()> {
+        let ResolutionMethodHistoryEvidence::WebvhLog { log_entries, .. } =
+            &identity.method_history_evidence
+        else {
+            return Err(BridgeError::Database(
+                "managed inception requires WebVH original".into(),
+            ));
+        };
+        let document: arkret::DidDocument = serde_json::from_value(
+            log_entries
+                .last()
+                .ok_or_else(|| BridgeError::Database("missing inception".into()))?["state"]
+                .clone(),
+        )?;
+        let realm = crate::managed_authoring::authoring_scope(request)
+            .realm_id_opt()
+            .ok_or_else(|| BridgeError::App("creation requires a Realm".into()))?;
+        let actor = arkret::ActorId::realm(arkret::RealmActorId {
+            realm_id: realm.clone(),
+            principal_id: identity.actor_id.clone(),
+        });
+        arkret::identity::validate_realm_actor_content_backup_recipient_for_actor(
+            &actor,
+            &self.archive_descriptor(identity, public)?,
+            &document,
+        )
+        .map_err(|error| BridgeError::App(error.to_string()))
     }
 
     fn freeze_creation(
@@ -467,6 +518,7 @@ impl ManagedActorAuthoringService {
         &self,
         subject_key: &str,
         request: &AppletManagedActorAuthoringRequest,
+        content_backup_public_key: &[u8; 32],
     ) -> Result<ManagedActorIdentity> {
         if let Some(record) = self
             .store
@@ -476,7 +528,7 @@ impl ManagedActorAuthoringService {
         {
             return self.decode_identity(subject_key, record);
         }
-        let candidate = self.generate_identity(subject_key, request)?;
+        let candidate = self.generate_identity(subject_key, request, content_backup_public_key)?;
         let winner = self
             .store
             .clone()
@@ -489,6 +541,7 @@ impl ManagedActorAuthoringService {
         &self,
         subject_key: &str,
         request: &AppletManagedActorAuthoringRequest,
+        content_backup_public_key: &[u8; 32],
     ) -> Result<ManagedActorIdentityRecord> {
         let mut root_seed = [0_u8; 32];
         let mut next_root_seed = [0_u8; 32];
@@ -520,6 +573,7 @@ impl ManagedActorAuthoringService {
                 controller_public_key: &SigningKey::from_bytes(&controller_seed)
                     .verifying_key()
                     .to_bytes(),
+                content_backup_public_key,
                 version_created_at: request.issued_at,
                 root_seed: &root_seed,
                 next_root_public_key_multibase: &next_key,
@@ -779,6 +833,7 @@ impl ManagedActorAuthoringService {
         &self,
         request: &AppletManagedActorAuthoringRequest,
         identity: &ManagedActorIdentity,
+        content_backup_public_key: &[u8; 32],
     ) -> Result<Event> {
         let subject = managed_actor_subject_key(request)?;
         let record = self
@@ -791,7 +846,7 @@ impl ManagedActorAuthoringService {
         let (applet, role, registration, grant, request_id, external) = match &request.basis {
             arkret::AppletManagedActorAuthoringBasis::ProvisionBot(b) => (
                 b.applet_id.clone(),
-                "bot",
+                arkret::RealmActorCreationTranscriptActorRole::Bot,
                 b.registration_event_ref.clone(),
                 b.authorization_ref.clone(),
                 b.request_id.clone(),
@@ -799,11 +854,11 @@ impl ManagedActorAuthoringService {
             ),
             arkret::AppletManagedActorAuthoringBasis::ProvisionGhost(b) => (
                 b.applet_id.clone(),
-                "ghost",
+                arkret::RealmActorCreationTranscriptActorRole::Ghost,
                 b.registration_event_ref.clone(),
                 b.authorization_ref.clone(),
                 random_token(32)?,
-                Some(&b.external_ref),
+                Some(b.external_ref.clone()),
             ),
         };
         let realm = crate::managed_authoring::authoring_scope(request)
@@ -814,34 +869,70 @@ impl ManagedActorAuthoringService {
             identity.initial_resolution.did
         ))
         .map_err(|e| BridgeError::App(e.into()))?;
-        let mut value = json!({
-            "schema": arkret::RealmActorCreatePayload::SCHEMA,
-            "actor_id": arkret::ActorId::realm(arkret::RealmActorId { realm_id: realm.clone(), principal_id: identity.actor_id.clone() }),
-            "applet_id": applet, "service_id": request.basis.service_id(), "actor_role": role,
-            "request_id": request_id, "creation_scope": crate::managed_authoring::authoring_scope(request),
-            "registration_ref": registration, "creation_authorization_ref": grant,
-            "initial_resolution": identity.initial_resolution,
-            "method_history_evidence": identity.method_history_evidence,
-            "control_method_kid": method, "expires_at": arkret::canonical::format_timestamp_canonical(request.expires_at),
-            "recovery": { "kind": "manager_native", "enabled": true }
-        });
-        if let Some(external) = external {
-            value["external_ref"] = serde_json::to_value(external)?;
-        }
-        let transcript: arkret::RealmActorCreationTranscript =
-            serde_json::from_value(value.clone())?;
-        value["control_signature"] = serde_json::to_value(
-            arkret::signatures::detached_object::sign_detached_object(
-                &transcript,
-                arkret::DetachedSignatureContext::RealmActorCreation,
-                method,
-                request.issued_at,
-                &controller,
-            )
-            .map_err(|e| BridgeError::App(e.to_string()))?,
-        )?;
+        let transcript = arkret::RealmActorCreationTranscript {
+            schema: arkret::RealmActorCreatePayload::SCHEMA.to_owned(),
+            actor_id: arkret::ActorId::realm(arkret::RealmActorId {
+                realm_id: realm.clone(),
+                principal_id: identity.actor_id.clone(),
+            }),
+            applet_id: applet,
+            service_id: request.basis.service_id().clone(),
+            actor_role: role,
+            request_id,
+            creation_scope: crate::managed_authoring::authoring_scope(request).clone(),
+            registration_ref: registration,
+            creation_authorization_ref: grant,
+            initial_resolution: identity.initial_resolution.clone(),
+            method_history_evidence: identity.method_history_evidence.clone().try_into()?,
+            control_method_kid: method.clone(),
+            expires_at: request.expires_at,
+            external_ref: external,
+            recovery: arkret::RealmActorCreationTranscriptRecovery {
+                kind: arkret::RealmActorCreationTranscriptRecoveryKind::ManagerNative,
+                enabled: true,
+                content_backup_recipient: self
+                    .archive_descriptor(identity, content_backup_public_key)?,
+            },
+        };
+        let control_signature = arkret::signatures::detached_object::sign_detached_object(
+            &transcript,
+            arkret::DetachedSignatureContext::RealmActorCreation,
+            method,
+            request.issued_at,
+            &controller,
+        )
+        .map_err(|e| BridgeError::App(e.to_string()))?;
+        let payload = arkret::RealmActorCreatePayload {
+            schema: transcript.schema,
+            actor_id: transcript.actor_id,
+            applet_id: transcript.applet_id,
+            service_id: transcript.service_id,
+            actor_role: match transcript.actor_role {
+                arkret::RealmActorCreationTranscriptActorRole::Bot => {
+                    arkret::RealmActorCreatePayloadActorRole::Bot
+                }
+                arkret::RealmActorCreationTranscriptActorRole::Ghost => {
+                    arkret::RealmActorCreatePayloadActorRole::Ghost
+                }
+            },
+            request_id: transcript.request_id,
+            creation_scope: transcript.creation_scope,
+            registration_ref: transcript.registration_ref,
+            creation_authorization_ref: transcript.creation_authorization_ref,
+            initial_resolution: transcript.initial_resolution,
+            method_history_evidence: transcript.method_history_evidence,
+            control_method_kid: transcript.control_method_kid,
+            expires_at: transcript.expires_at,
+            external_ref: transcript.external_ref,
+            control_signature,
+            recovery: arkret::RealmActorCreatePayloadRecovery {
+                kind: arkret::RealmActorCreatePayloadRecoveryKind::ManagerNative,
+                enabled: transcript.recovery.enabled,
+                content_backup_recipient: transcript.recovery.content_backup_recipient,
+            },
+        };
         arkret::author_realm_actor_create(
-            serde_json::from_value(value)?,
+            payload,
             runtime::PRODUCER_DIGEST_SUITE,
             request.issued_at,
             self.edge.signer(),
@@ -1012,7 +1103,9 @@ impl ManagedActorAuthoringService {
         }
         Ok(payload.initial_resolution.did)
     }
+}
 
+impl ManagedActorManagerService {
     pub async fn prepare_ghost(
         &self,
         applet_id: &AppletId,
@@ -1046,7 +1139,7 @@ impl ManagedActorAuthoringService {
                 "Ghost creation requires a Realm or Circle scope".into(),
             ));
         }
-        let route = self.edge.realm_route(scope.realm_id()).await?;
+        let route = self.authoring.edge.realm_route(scope.realm_id()).await?;
         let preview = route
             .client
             .ghost_actor_preview(
@@ -1059,9 +1152,11 @@ impl ManagedActorAuthoringService {
             )
             .await?;
         if let Some(existing) = preview.existing_managed_actor {
-            self.validate_request(&preview.authoring_request, true)
+            self.authoring
+                .validate_request(&preview.authoring_request, true)
                 .await?;
-            self.reused_ghost_did(&preview.authoring_request, &existing)
+            self.authoring
+                .reused_ghost_did(&preview.authoring_request, &existing)
                 .await?;
             return Ok(PreparedGhost::Reuse {
                 authoring_request: Box::new(preview.authoring_request),
@@ -1090,6 +1185,34 @@ fn managed_actor_subject_key(request: &AppletManagedActorAuthoringRequest) -> Re
     Ok(canonical_sha256(&material)?)
 }
 
+fn retained_key_agreement_methods(state: &Value) -> Result<Vec<Value>> {
+    let methods = state["verificationMethod"]
+        .as_array()
+        .ok_or_else(|| BridgeError::Database("native verification methods are missing".into()))?;
+    let mut retained = Vec::new();
+    for relationship in state["keyAgreement"].as_array().into_iter().flatten() {
+        let id = relationship
+            .as_str()
+            .or_else(|| relationship.get("id").and_then(Value::as_str))
+            .ok_or_else(|| {
+                BridgeError::Database("native keyAgreement reference is invalid".into())
+            })?;
+        let matches = methods
+            .iter()
+            .filter(|method| method["id"].as_str() == Some(id))
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return Err(BridgeError::Database(
+                "native keyAgreement must resolve to one original method".into(),
+            ));
+        }
+        if !retained.contains(matches[0]) {
+            retained.push(matches[0].clone());
+        }
+    }
+    Ok(retained)
+}
+
 fn random_token(bytes: usize) -> Result<String> {
     let mut value = vec![0_u8; bytes];
     getrandom::fill(&mut value)
@@ -1101,6 +1224,12 @@ fn random_token(bytes: usize) -> Result<String> {
 #[derive(Clone)]
 struct AuthoringWebState {
     service: Arc<ManagedActorAuthoringService>,
+}
+
+#[cfg(feature = "web")]
+#[derive(Clone)]
+struct ManagerWebState {
+    service: Arc<ManagedActorManagerService>,
 }
 
 #[cfg(feature = "web")]
@@ -1165,7 +1294,7 @@ async fn published_history(req: &mut Request, depot: &mut Depot, res: &mut Respo
 #[cfg(feature = "web")]
 #[handler]
 async fn author_managed_actor(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let Ok(state) = depot.get_typed::<AuthoringWebState>() else {
+    let Ok(state) = depot.get_typed::<ManagerWebState>() else {
         render_author_error(
             res,
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1177,7 +1306,7 @@ async fn author_managed_actor(req: &mut Request, depot: &mut Depot, res: &mut Re
     state.service.serve(req, res).await;
 }
 
-impl ManagedActorAuthoringService {
+impl ManagedActorManagerService {
     /// Serve the canonical author operation after the host selects this exact Applet.
     #[cfg(feature = "web")]
     pub async fn serve(&self, req: &mut Request, res: &mut Response) {
@@ -1367,6 +1496,8 @@ mod ghost_bundle_tests {
             controller_public_key: &SigningKey::from_bytes(&[0x55; 32])
                 .verifying_key()
                 .to_bytes(),
+            content_backup_public_key: &arkret::crypto::hpke::x25519_public_key(&[0x56; 32])
+                .unwrap(),
             version_created_at: issued_at(),
             root_seed: &[0x51; 32],
             next_root_public_key_multibase: &next_key,
@@ -1548,11 +1679,15 @@ mod ghost_bundle_tests {
         let store = Arc::new(RecordingAuthoringStore::default());
         let edge = Arc::new(edge(store.clone()));
         let service = ManagedActorAuthoringService::new(edge.clone()).unwrap();
+        let archive_public = arkret::crypto::hpke::x25519_public_key(&[0x56; 32]).unwrap();
         for request in [ghost_request(), bot_request("abcdefghijklmnopqrstuv")] {
             let subject = managed_actor_subject_key(&request).unwrap();
-            let identity = service.identity_for(&subject, &request).await.unwrap();
+            let identity = service
+                .identity_for(&subject, &request, &archive_public)
+                .await
+                .unwrap();
             let event = service
-                .build_creation_event(&request, &identity)
+                .build_creation_event(&request, &identity, &archive_public)
                 .await
                 .unwrap();
             let payload = crate::managed_authoring::creation_payload(&event).unwrap();
@@ -1597,7 +1732,10 @@ mod ghost_bundle_tests {
             let reopened =
                 ManagedActorAuthoringService::new(Arc::new(edge_from_store(store.clone())))
                     .unwrap();
-            let retained = reopened.identity_for(&subject, &request).await.unwrap();
+            let retained = reopened
+                .identity_for(&subject, &request, &archive_public)
+                .await
+                .unwrap();
             assert_eq!(identity.initial_resolution, retained.initial_resolution);
             assert_eq!(
                 identity.root_verification_method,
@@ -1750,7 +1888,15 @@ mod ghost_bundle_tests {
             unreachable!()
         };
         basis.applet_id = AppletId::new("ak:applet:01904100-0000-7000-8000-bbbbbbbbbbbc").unwrap();
-        assert!(service.author(&request).await.is_err());
+        assert!(
+            service
+                .author_with_archive_key(
+                    &request,
+                    &arkret::crypto::hpke::x25519_public_key(&[0x56; 32]).unwrap()
+                )
+                .await
+                .is_err()
+        );
         assert!(
             service
                 .store

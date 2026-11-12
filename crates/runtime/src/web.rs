@@ -561,15 +561,32 @@ async fn service_describe(depot: &mut Depot, res: &mut Response) {
 /// hosts. Reverse proxies must expose its native DID publication paths too.
 #[cfg(feature = "managed-authoring")]
 pub fn managed_applet_router(edge: Arc<crate::ArkretEdge>) -> Result<Router> {
+    let manager = Arc::new(
+        crate::managed_actor_authoring::ManagedActorManagerService::open_deployment(edge.clone())?,
+    );
+    managed_applet_router_with_manager(edge, manager)
+}
+
+#[cfg(feature = "managed-authoring")]
+pub fn managed_applet_router_with_manager(
+    edge: Arc<crate::ArkretEdge>,
+    author: Arc<crate::managed_actor_authoring::ManagedActorManagerService>,
+) -> Result<Router> {
     let description = service_description_router(&edge)?;
     let completion = managed_completion_router(edge.clone())?;
+    author.require_edge(&edge)?;
+    let maintenance = author.start_maintenance()?;
     let config = edge.config().clone();
     let did_authority = Arc::new(DidAuthority::new(config.arkret.trust_domain.clone())?);
     seed_source_service_bindings(&did_authority, &config)?;
-    let author =
-        Arc::new(crate::managed_actor_authoring::ManagedActorAuthoringService::new(edge.clone())?);
-    let service = Arc::new(crate::applet_configuration::AppletConfigurationService::new(edge)?);
+    let service = Arc::new(
+        crate::applet_configuration::AppletConfigurationService::with_manager(
+            edge,
+            author.clone(),
+        )?,
+    );
     Ok(Router::new()
+        .hoop(affix_state::inject(maintenance))
         .push(description)
         .push(author.router())
         .push(completion)
@@ -597,6 +614,17 @@ pub struct ManagedAppletHttpHost {
 /// Complete embedded Applet surface for hosts that mount Salvo routers directly.
 #[cfg(feature = "managed-authoring")]
 pub fn managed_applet_host_router(edge: Arc<crate::ArkretEdge>) -> Result<Router> {
+    let manager = Arc::new(
+        crate::managed_actor_authoring::ManagedActorManagerService::open_deployment(edge.clone())?,
+    );
+    managed_applet_host_router_with_manager(edge, manager)
+}
+
+#[cfg(feature = "managed-authoring")]
+pub fn managed_applet_host_router_with_manager(
+    edge: Arc<crate::ArkretEdge>,
+    manager: Arc<crate::managed_actor_authoring::ManagedActorManagerService>,
+) -> Result<Router> {
     let config = edge.config().clone();
     let did_authority = Arc::new(DidAuthority::new(config.arkret.trust_domain.clone())?);
     seed_source_service_bindings(&did_authority, &config)?;
@@ -606,7 +634,7 @@ pub fn managed_applet_host_router(edge: Arc<crate::ArkretEdge>) -> Result<Router
         did_authority.clone(),
     )?);
     Ok(Router::new()
-        .push(managed_applet_router(edge.clone())?)
+        .push(managed_applet_router_with_manager(edge.clone(), manager)?)
         .push(applet_router(AppletWebState {
             edge,
             handler,
@@ -620,6 +648,15 @@ impl ManagedAppletHttpHost {
     pub fn new(edge: Arc<crate::ArkretEdge>) -> Result<Self> {
         Ok(Self {
             service: Service::new(managed_applet_host_router(edge)?),
+        })
+    }
+
+    pub fn with_manager(
+        edge: Arc<crate::ArkretEdge>,
+        manager: Arc<crate::managed_actor_authoring::ManagedActorManagerService>,
+    ) -> Result<Self> {
+        Ok(Self {
+            service: Service::new(managed_applet_host_router_with_manager(edge, manager)?),
         })
     }
 
@@ -1021,7 +1058,7 @@ async fn managed_actor_view(
             &arkret::ActorId::service(state.edge.service_actor_id().clone()),
         )
         .await?;
-    let arkret::RealmActorMaterial::Current { entries } = &material.material().material else {
+    let arkret::RealmActorMaterial::Current { entries, .. } = &material.material().material else {
         return Err(BridgeError::App("manager current unavailable".into()));
     };
     let manager = entries

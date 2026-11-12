@@ -29,7 +29,7 @@ fn row<'a>(
     material: &'a VerifiedRealmActorMaterial,
     selector: &CurrentSelector,
 ) -> Result<(&'a serde_json::Value, &'a arkret::CommittedEventRef)> {
-    let RealmActorMaterial::Current { entries } = &material.material().material else {
+    let RealmActorMaterial::Current { entries, .. } = &material.material().material else {
         return Err(invalid("manager transfer requires a verified current cut"));
     };
     entries
@@ -76,57 +76,20 @@ fn paused(material: &VerifiedRealmActorMaterial, actor: &ActorId) -> Result<()> 
 }
 
 impl ManagedDeviceRuntime {
-    /// Coordinate Service replacement after the operator has preserved the Applet's
-    /// complete data and key custody in the receiving deployment. Individual phases
-    /// can run in separate processes against that retained custody.
-    pub async fn prepare_management_transfer_to(
-        &self,
-        receiving: &Self,
-        plan: &ManagementTransferPlan,
-    ) -> Result<()> {
-        if self.edge.applet_id() != receiving.edge.applet_id() {
-            return Err(invalid("management transfer must retain the Applet ID"));
-        }
-        if receiving
-            .authoring
-            .retained_manager_event(plan)
-            .await
-            .is_ok_and(|event| event.is_some())
-        {
-            return Ok(());
-        }
-        let creation = self.authoring.managed_creation(&plan.actor_id).await?;
-        let did = crate::managed_authoring::creation_payload(&creation.event)?
-            .initial_resolution
-            .did;
-        let offer = receiving.management_transfer_offer(plan, &did).await?;
-        let proposal = self.management_control_transcript(&offer).await?;
-        let signature = receiving
-            .sign_management_control_transcript(plan, &proposal)
-            .await?;
-        let commit = self.submit_management_control(plan, &signature).await?;
-        let release = self.release_management_native(plan, &commit).await?;
-        receiving
-            .prepare_management_acceptance(
-                plan,
-                &release,
-                &reference(&commit),
-                &reference(&creation.commit),
-            )
-            .await
-    }
-
     /// Verify retained custody and durably prepare the receiving Service's new keys.
     /// The returned operational offer contains public keys only.
-    pub async fn management_transfer_offer(
+    pub(crate) async fn management_transfer_offer(
         &self,
         plan: &ManagementTransferPlan,
         did: &Did,
+        recipient: &arkret_models_crypto::RealmActorContentBackupRecipient,
     ) -> Result<ManagementTransferOffer> {
-        self.authoring.prepare_manager_offer(plan, did).await
+        self.authoring
+            .prepare_manager_offer(plan, did, recipient)
+            .await
     }
 
-    async fn management_source_current(
+    pub(crate) async fn management_source_current(
         &self,
         actor: &ActorId,
     ) -> Result<VerifiedRealmActorMaterial> {
@@ -165,7 +128,7 @@ impl ManagedDeviceRuntime {
 
     /// Prepare the old holder's exact native proposal after checking the current
     /// owner pause, recovery gate and manager. This does not publish it yet.
-    pub async fn management_control_transcript(
+    pub(crate) async fn management_control_transcript(
         &self,
         offer: &ManagementTransferOffer,
     ) -> Result<arkret::RealmActorControlAcceptanceTranscript> {
@@ -183,7 +146,7 @@ impl ManagedDeviceRuntime {
     }
 
     /// Sign only this receiving host's exact proposal with its new daily key.
-    pub async fn sign_management_control_transcript(
+    pub(crate) async fn sign_management_control_transcript(
         &self,
         plan: &ManagementTransferPlan,
         proposal: &arkret::RealmActorControlAcceptanceTranscript,
@@ -193,7 +156,7 @@ impl ManagedDeviceRuntime {
 
     /// Publish and submit the old controller's frozen Event, or recover its
     /// original receipt. Neither caller can substitute a different Event.
-    pub async fn submit_management_control(
+    pub(crate) async fn submit_management_control(
         &self,
         plan: &ManagementTransferPlan,
         signature: &arkret::DetachedObjectSignature,
@@ -208,7 +171,7 @@ impl ManagedDeviceRuntime {
 
     /// Consume the old native commitment and commit the receiving public update
     /// key. No old private key is returned or copied to the receiving host.
-    pub async fn release_management_native(
+    pub(crate) async fn release_management_native(
         &self,
         plan: &ManagementTransferPlan,
         accepted: &RealmCommit,
@@ -230,12 +193,13 @@ impl ManagedDeviceRuntime {
     /// The receiving controller independently reads verified private originals,
     /// finishes its native update and freezes manager.change. The stable public
     /// DID resource must serve this host's publication before completion.
-    pub async fn prepare_management_acceptance(
+    pub(crate) async fn prepare_management_acceptance(
         &self,
         plan: &ManagementTransferPlan,
         release: &[serde_json::Value],
         control_ref: &arkret::CommittedEventRef,
         creation_ref: &arkret::CommittedEventRef,
+        archive: &crate::managed_actor_authoring::manager_custody::ArchiveCustodyAcceptance,
     ) -> Result<()> {
         if self.authoring.retained_manager_event(plan).await?.is_some() {
             return Ok(());
@@ -274,7 +238,7 @@ impl ManagedDeviceRuntime {
             )
             .await?;
         self.authoring
-            .prepare_manager_event(plan, &current, &created)
+            .prepare_manager_event(plan, &current, &created, archive)
             .await?;
         Ok(())
     }
@@ -323,7 +287,7 @@ impl ManagedDeviceRuntime {
 
     /// Submit or recover the exact manager original. Successful acceptance
     /// installs only new custody; it never resumes the owner or old Devices.
-    pub async fn complete_management_transfer(
+    pub(crate) async fn complete_management_transfer(
         &self,
         plan: &ManagementTransferPlan,
     ) -> Result<RealmCommit> {

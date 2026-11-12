@@ -41,7 +41,7 @@ pub(crate) fn row<'a>(
     cut: &'a RealmActorMaterialResponseBody,
     selector: &CurrentSelector,
 ) -> Result<(&'a CurrentRevision, &'a Value, &'a CommittedEventRef)> {
-    let RealmActorMaterial::Current { entries } = &cut.material else {
+    let RealmActorMaterial::Current { entries, .. } = &cut.material else {
         return Err(invalid("recovery requires a verified current cut"));
     };
     entries
@@ -472,8 +472,10 @@ fn prepare(
     let public = arkret::ed25519_pubkey_to_did_key_multibase(signing.verifying_key().as_bytes());
     let method = DidUrl::new(format!("{did}#control-{public}")).map_err(invalid)?;
     let mut state = previous["state"].clone();
-    state["verificationMethod"] =
-        json!([{"id":method,"type":"Multikey","controller":did,"publicKeyMultibase":public}]);
+    let mut methods = crate::managed_actor_authoring::retained_key_agreement_methods(&state)?;
+    methods
+        .push(json!({"id":method,"type":"Multikey","controller":did,"publicKeyMultibase":public}));
+    state["verificationMethod"] = json!(methods);
     state["assertionMethod"] = json!([method]);
     state["authentication"] = json!([method]);
     let rotation = arkret::webvh::prepare_service_rotation(&arkret::webvh::ServiceRotationInput {

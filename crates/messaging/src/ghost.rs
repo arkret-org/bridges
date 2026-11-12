@@ -395,7 +395,7 @@ pub(crate) fn portal_location_ref(config: &runtime::Config, app_channel: &str) -
 
 #[async_trait::async_trait]
 impl GhostProvisionRequestProvider
-    for runtime::managed_actor_authoring::ManagedActorAuthoringService
+    for runtime::managed_actor_authoring::ManagedActorManagerService
 {
     async fn author_request(
         &self,

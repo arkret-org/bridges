@@ -116,7 +116,7 @@ impl ManagedDeviceRuntime {
                     &ActorId::service(self.edge.service_actor_id().clone()),
                 )
                 .await?;
-            let RealmActorMaterial::Current { entries } = &material.material().material else {
+            let RealmActorMaterial::Current { entries, .. } = &material.material().material else {
                 return Err(invalid("owner status query returned another purpose"));
             };
             let revision = entries

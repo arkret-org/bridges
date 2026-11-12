@@ -214,11 +214,36 @@ Circle 主体可用 `prepare_ghost_in_scope` 发起现有 authoring 流程；创
 
 Managed Principal custody and the canonical Bot/Ghost author operation live in
 `arkret-bridge-runtime` behind `managed-authoring`.
-`ManagedActorAuthoringService` is shared with Savfox; the messaging layer only
+`ManagedActorManagerService` owns candidate authoring and archive management;
+the messaging layer only
 adapts first-seen external users to that same authority. The private identity and
 exact authoring ledger use its existing atomic `AuthoringStore` host port. The root,
 next-root and operational controller seeds remain separate and encrypted with the
 explicit deployment key. Principal custody alone does not provide the MLS runner.
+
+原生归档使用独立的 `ManagerArchiveVault`。部署须设置
+`ARKRET_MANAGER_ARCHIVE_DATABASE`（独立 redb 文件）与
+`ARKRET_MANAGER_ARCHIVE_KEY_FILE`（独立部署 keystore 中的原始 32-byte wrapping key 文件）。
+该 key 不进入共享 Config，不能与日常 authoring KEK 或 Service signing seed 相同。
+vault 绑定完整 Applet／Service，旧新管理者不得共用同一库。嵌入式 host 可用
+`ManagedActorManagerService::new(edge, Arc<ManagerArchiveVault>)` 显式注入，
+再传给 `managed_applet_router_with_manager`／`ManagedAppletHttpHost::with_manager`。
+日常 `ManagedDeviceRuntime`、RootStore 与配置接受重放器不持 vault。
+
+首次创建先耐久归档私钥，再将公钥写入原生 inception 的 keyAgreement 并签候选。
+管理者通过正式 Service maintenance 选择已知 scope 的 series；Device 不选 pointer。
+加密发布重新取得当前 prepare/head，实际 PUT 或当前 head 的 exact unlock 后才引用备份。
+旧 ACK 修复只恢复历史记录，不能替代当前发布资格；未知旧包与原 bytes 会保留。
+可用 `ManagedDeviceRuntime::repair_content_root_publication` 在原 Device 凭证仍有效时
+重投原私有日志中的 exact PUT，冷恢复固定回执；返回历史结果不授予业务发布资格。
+管理者替换使用 `ManagedActorManagerService::prepare_management_transfer_to`／
+`complete_management_transfer`；独立 vault 实际 HPKE 开包、完整来源／原私钥导入与耐久确认
+先于新 Service 的公开 acceptance。管理者变更后仍 paused，不能把新归档密钥或 fresh series
+当成已经完成 MLS 旧 leaf／epoch 的安全收尾。
+
+`ManagedActorManagerService::restore_history_for_event` 先以目标 Device 实际读取历史 Event，
+验证原件、披露权限及完整归档来源，再将解出的根仅写入该 Device 的历史 RootStore。
+恢复后不安装 MLS 私态、leaf 或 ratchet；调用结果为恢复数量，不返回原始根密钥。
 
 The authoring router also publishes the retained Principal's native
 `/webvh/<local_id>/did.json` and `did.jsonl` resources. The publication URL index is
@@ -232,6 +257,12 @@ history installation obligation.
 共享 runtime 在验证原创建 completion 后，先于请求保存加密 Device／HPKE 私钥与
 Principal 原签授权；后台重试与重启沿用同一原件、exact 创建 scope 和期限。
 Device接纳不授予业务权，也不自动加入Realm／Circle。显式device.mls启用独立Welcome worker；消息stream、附件与回复由同一原生设备 runtime 分别核验和处理。
+
+启用 MLS 消息／portal 发布的 host 还须在 Controller 原签的相同 exact scope 中显式配置
+`ak.self.keys.backups.resource.replace.v1`、`ak.self.keys.backups.read.list.v1`、
+`ak.self.keys.backups.command.issue_unlock_challenge.v1`、`ak.self.keys.backups.command.unlock.v1`。
+runtime 不自动扩 scope，也不为这四个 subject-only non-Event 动作铸造业务 Grant。
+这只是高层 publisher 所用操作的配置要求；服务端每次动作仍只检查其自身原签动作上界。
 
 `device.mls = true` 启用耐久原生MLS KeyPackage库存与每个Device独立的Welcome worker，
 `key_package_inventory_target` 默认为 8（1..=1000），每周期最多补 20 个。

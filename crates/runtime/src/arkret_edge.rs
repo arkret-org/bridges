@@ -837,8 +837,20 @@ impl ArkretEdge {
                 return Err(BridgeError::Runtime("publication retry contention".into()));
             }
         }
+        let native_series = if event.kind == arkret::EventKind::KeyBackupActiveSeries
+            && matches!(event.scope_ref, ScopeRef::RealmControl { .. })
+        {
+            let record: arkret_models_collaboration::events_payloads::KeyBackupActiveSeries =
+                serde_json::from_value(serde_json::to_value(&event.payload)?)?;
+            record
+                .actor_id
+                .as_realm_actor_id()
+                .is_some_and(|actor| actor.realm_id == event.realm_id)
+        } else {
+            false
+        };
         if matches!(event.actor_id, ActorId::Service { .. })
-            && !matches!(event.scope_ref, ScopeRef::RealmControl { .. })
+            && (!matches!(event.scope_ref, ScopeRef::RealmControl { .. }) || native_series)
         {
             let route = self.realm_route(&event.realm_id).await?;
             let transaction =

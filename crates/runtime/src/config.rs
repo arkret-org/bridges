@@ -222,6 +222,27 @@ impl ManagedDeviceBootstrapConfig {
                 "MLS inventory target must be 1..=1000".into(),
             ));
         }
+        use arkret_wire::CapabilityActionId as Action;
+        if self.mls
+            && self
+                .actions
+                .iter()
+                .any(|action| matches!(action, Action::MessageCreate | Action::StrandCreate))
+        {
+            for action in [
+                Action::SelfKeysBackupsResourceReplaceV1,
+                Action::SelfKeysBackupsReadListV1,
+                Action::SelfKeysBackupsCommandIssueUnlockChallengeV1,
+                Action::SelfKeysBackupsCommandUnlockV1,
+            ] {
+                if !self.actions.contains(&action) {
+                    return Err(BridgeError::Config(format!(
+                        "native encrypted publishing requires explicit Device scope action {}",
+                        action.as_str()
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -545,6 +566,48 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encrypted_publishers_require_each_explicit_backup_capability() {
+        use arkret_wire::CapabilityActionId as Action;
+        let backup_actions = [
+            Action::SelfKeysBackupsResourceReplaceV1,
+            Action::SelfKeysBackupsReadListV1,
+            Action::SelfKeysBackupsCommandIssueUnlockChallengeV1,
+            Action::SelfKeysBackupsCommandUnlockV1,
+        ];
+        for publisher in [Action::MessageCreate, Action::StrandCreate] {
+            let mut actions = vec![publisher];
+            actions.extend(backup_actions);
+            let config = ManagedDeviceBootstrapConfig {
+                actions,
+                lifetime_seconds: 600,
+                mls: true,
+                key_package_inventory_target: 8,
+            };
+            config.validate().unwrap();
+            for missing in backup_actions {
+                let mut restricted = config.clone();
+                restricted.actions.retain(|action| *action != missing);
+                let before = restricted.actions.clone();
+                let error = restricted.validate().unwrap_err();
+                assert!(error.to_string().contains(missing.as_str()));
+                assert_eq!(restricted.actions, before);
+            }
+        }
+    }
+
+    #[test]
+    fn mls_receivers_do_not_acquire_backup_capabilities() {
+        let config = ManagedDeviceBootstrapConfig {
+            actions: vec![arkret_wire::CapabilityActionId::EventRead],
+            lifetime_seconds: 600,
+            mls: true,
+            key_package_inventory_target: 8,
+        };
+        config.validate().unwrap();
+        assert_eq!(config.actions, [arkret_wire::CapabilityActionId::EventRead]);
+    }
 
     fn minimal_config(extra: &str) -> String {
         format!(

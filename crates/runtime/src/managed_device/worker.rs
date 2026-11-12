@@ -30,7 +30,7 @@ pub struct ManagedDeviceWorkers {
     permits: Arc<Semaphore>,
     workers: BTreeMap<String, Worker>,
     content_sink: Option<Arc<dyn NativeContentSink>>,
-    configurations: Arc<crate::applet_configuration::AppletConfigurationService>,
+    configurations: Arc<crate::applet_configuration::AppletConfigurationRecovery>,
     configuration_recovery: Option<JoinHandle<Result<usize>>>,
 }
 
@@ -46,7 +46,7 @@ impl ManagedDeviceWorkers {
     pub fn new(edge: Arc<ArkretEdge>) -> Result<Self> {
         Ok(Self {
             configurations: Arc::new(
-                crate::applet_configuration::AppletConfigurationService::new(edge.clone())?,
+                crate::applet_configuration::AppletConfigurationRecovery::new(edge.clone())?,
             ),
             configuration_recovery: None,
             runtime: Arc::new(ManagedDeviceRuntime::new(edge)?),

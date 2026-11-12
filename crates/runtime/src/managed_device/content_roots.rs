@@ -6,7 +6,7 @@ use arkret::EventPayloadExt as _;
 use arkret::mls::ArkretMlsGroup;
 use arkret_event_draft::EventContentEnvelopesExt as _;
 use arkret_models_crypto::{ContentRootBackupEntry, ContentRootContext, ContentRootItemKind};
-use arkret_wire::{BackupId, CommittedEventFullView, EventId, Hash, MlsWelcomeRecipientEndpoint};
+use arkret_wire::{CommittedEventFullView, EventId, Hash, MlsWelcomeRecipientEndpoint};
 use garth::{SecureKeyStore, SecureKeyStoreBackendInfo, SecureKeyStoreError, SecureKeyStoreResult};
 
 use super::*;
@@ -111,15 +111,136 @@ impl SecureKeyStore for RootStore {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RootSource {
-    context: ContentRootContext,
-    source: CommittedEventFullView,
-    backups: Vec<BackupId>,
-}
-
 impl ManagedDeviceRuntime {
+    fn root_publication_operation(
+        device: &ManagedDevice,
+        operation: &str,
+        root: &ContentRootBackupEntry,
+    ) -> Result<String> {
+        Ok(format!(
+            "native-root/v1/{}",
+            canonical_sha256(&(
+                &device.actor_id,
+                &device.operation_id,
+                operation,
+                &root.root_context,
+                &root.root_ref,
+            ))?
+        ))
+    }
+
+    /// Repair original unknown ACKs with the original current credential. This
+    /// deliberately returns historical records, never business publication refs.
+    /// No new MLS, prepare, epoch, recipient or business gate is read first.
+    pub async fn repair_content_root_publication(
+        &self,
+        device: &ManagedDevice,
+        business_operation: &str,
+        root_ref: &Hash,
+    ) -> Result<Vec<garth::mls::content_roots::NativeRootPublicationHistory>> {
+        let reader = self.open_reader(device).await?;
+        let store = self.content_root_store(device)?;
+        let endpoint = MlsWelcomeRecipientEndpoint::Device {
+            device_id: device.device_id.clone(),
+        };
+        let vault =
+            garth::mls::content_roots::ContentRootVault::new(&store, &device.actor_id, &endpoint);
+        let root = vault
+            .root(root_ref)
+            .await
+            .map_err(invalid)?
+            .ok_or_else(|| invalid("original durable publication root is unavailable"))?;
+        if root.root_context.effective_scope != device.effective_scope {
+            return Err(invalid(
+                "original publication belongs to another Device scope",
+            ));
+        }
+        let operation = Self::root_publication_operation(device, business_operation, &root)?;
+        let history = garth::mls::content_roots::retry_frozen_native_root_publication(
+            reader.client(),
+            &vault,
+            &operation,
+        )
+        .await
+        .map_err(invalid)?;
+        reader.check_device(device)?;
+        Ok(history)
+    }
+
+    pub(crate) async fn retain_history_root(
+        &self,
+        device: &ManagedDevice,
+        reader: &ManagedDeviceReader,
+        root: &ContentRootBackupEntry,
+    ) -> Result<()> {
+        reader.check_device(device)?;
+        if root.root_context.effective_scope != device.effective_scope {
+            return Err(invalid(
+                "history root belongs to another exact Device scope",
+            ));
+        }
+        let store = self.content_root_store(device)?;
+        let endpoint = MlsWelcomeRecipientEndpoint::Device {
+            device_id: device.device_id.clone(),
+        };
+        let vault =
+            garth::mls::content_roots::ContentRootVault::new(&store, &device.actor_id, &endpoint);
+        vault.retain_root(root).await.map_err(invalid)?;
+        reader.check_device(device)
+    }
+
+    pub(super) async fn publish_content_root(
+        &self,
+        device: &ManagedDevice,
+        reader: &ManagedDeviceReader,
+        operation: &str,
+        root: &ContentRootBackupEntry,
+        created_at: DateTime<Utc>,
+    ) -> Result<garth::mls::content_roots::NativeRootPublicationOutcome> {
+        reader.check_device(device)?;
+        let (_, _, record) = self.accepted_device_record(device).await?;
+        let signing_key = SigningKey::from_bytes(&seed(&record.device_seed)?);
+        let route = self
+            .edge
+            .realm_route(device.effective_scope.realm_id())
+            .await?;
+        let store = self.content_root_store(device)?;
+        let endpoint = MlsWelcomeRecipientEndpoint::Device {
+            device_id: device.device_id.clone(),
+        };
+        let vault =
+            garth::mls::content_roots::ContentRootVault::new(&store, &device.actor_id, &endpoint);
+        let publication_operation = Self::root_publication_operation(device, operation, root)?;
+        let publication = garth::mls::content_roots::publish_native_content_root(
+            reader.client(),
+            &vault,
+            garth::mls::content_roots::NativeRootPublicationParameters {
+                operation: &publication_operation,
+                root,
+                created_at,
+                author: arkret::crypto::backup::KeyBackupAuthBinding {
+                    device_id: device.device_id.clone(),
+                    verification_method: arkret::DidUrl::new(device.signer.verification_method())?,
+                    signature_algorithm: arkret_models_crypto::KeyBackupSignatureAlgorithm::Ed25519,
+                    device_authorize_event_id: device.authorization_event_id.clone(),
+                },
+                domain_separation: arkret_models_crypto::KeyBackupDomainSeparation {
+                    subdomain: "key_backup".into(),
+                    aead_aad_extensions: Default::default(),
+                },
+                authority: &route.authority,
+                station_resolution: &route.resolution,
+                authority_keys: &route.keys,
+            },
+            |bytes| Ok(signing_key.sign(bytes).to_bytes().to_vec()),
+        )
+        .await
+        .map_err(invalid)?;
+        reader.check_device(device)?;
+        publication.backup_refs().map_err(invalid)?;
+        Ok(publication)
+    }
+
     pub(super) fn content_root_store(&self, device: &ManagedDevice) -> Result<RootStore> {
         Ok(RootStore {
             store: self.store.clone(),
@@ -144,24 +265,28 @@ impl ManagedDeviceRuntime {
             realm.digest_suite_code().digest_suite(),
             realm.digest_bytes(),
         );
-        let original = garth::own_station_results::consume_own_station_device_event(
+        reader.check_device(device)?;
+        let response = reader.client().committed_event_get(&create_id).await?;
+        let response = garth::own_station_results::consume_own_station_device_realm_genesis(
             reader.client(),
-            &create_id,
-            reader.client().committed_event_get(&create_id).await?,
+            realm,
+            response,
         )
-        .await
-        .map_err(invalid)?;
-        let original = original.full().map_err(invalid)?;
-        if original.event.kind != arkret::EventKind::RealmCreate
-            || original.event.realm_id != *realm
-            || original.event.event_id != create_id
+        .await?;
+        let arkret_wire::CommittedEventView::Full(original) = response.value()? else {
+            return Err(invalid("Realm Genesis original was not disclosed"));
+        };
+        let original = &original.event;
+        if original.kind != arkret::EventKind::RealmCreate
+            || original.realm_id != *realm
+            || original.event_id != create_id
+            || original.scope_ref != ScopeRef::RealmGenesis
         {
             return Err(invalid(
                 "content strategy is not the Realm's accepted original",
             ));
         }
         let strategy = original
-            .event
             .as_realm_create()?
             .object
             .initial_encryption_backup_strategy;
@@ -175,18 +300,11 @@ impl ManagedDeviceRuntime {
                 .map_err(invalid)?
                 .to_owned(),
             encryption_backup_strategy: strategy,
-            backup_strategy_ref: original.event.event_id.clone(),
+            backup_strategy_ref: original.event_id.clone(),
         };
         context.validate()?;
         reader.check_device(device)?;
         Ok(context)
-    }
-
-    fn root_source_key(device: &ManagedDevice, root: &Hash) -> Result<String> {
-        Ok(format!(
-            "managed-root-source/v1/{}",
-            canonical_sha256(&(&device.actor_id, &device.operation_id, root))?
-        ))
     }
 
     pub(super) async fn retain_original_content_roots(
@@ -237,34 +355,6 @@ impl ManagedDeviceRuntime {
             })
             .await
             .map_err(invalid)?;
-        let key = Self::root_source_key(device, &reference)?;
-        let source = RootSource {
-            context: context.clone(),
-            source: original.clone(),
-            backups: backups.into_iter().collect(),
-        };
-        let encoded = self.authoring.encrypt_key_material(&key, &source)?;
-        self.cas(&key, None, encoded).await?;
         Ok(())
-    }
-
-    pub(super) async fn retained_root_backups(
-        &self,
-        device: &ManagedDevice,
-        context: &ContentRootContext,
-        reference: &Hash,
-    ) -> Result<Vec<BackupId>> {
-        let key = Self::root_source_key(device, reference)?;
-        let raw = self
-            .read(&key)
-            .await?
-            .ok_or_else(|| invalid("content waits for an accepted durable root backup source"))?;
-        let source: RootSource = self.authoring.decrypt_key_material(&key, &raw)?;
-        if source.context != *context || source.backups.is_empty() {
-            return Err(invalid(
-                "retained root backup source differs from the current context",
-            ));
-        }
-        Ok(source.backups)
     }
 }

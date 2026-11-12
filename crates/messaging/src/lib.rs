@@ -49,7 +49,7 @@ pub use media::InboundMediaAuthorization;
 use media::{
     HttpInboundMediaFetcher, InboundMediaFetchPolicy, InboundMediaFetcher, InboundMediaReference,
 };
-use runtime::managed_actor_authoring::ManagedActorAuthoringService;
+use runtime::managed_actor_authoring::ManagedActorManagerService;
 pub use runtime::salvo;
 use serde_json::{Value, json};
 use store::{MessageResolver, MessageStore};
@@ -200,7 +200,7 @@ pub struct MessageContext {
     /// Shared durable store backing every [`TokenCache`] this bridge builds
     /// (one live vendor token across replicas).
     token_store: Arc<dyn TokenStore>,
-    managed_actor_authoring: Arc<ManagedActorAuthoringService>,
+    managed_actor_authoring: Arc<ManagedActorManagerService>,
     ghost_provision_provider: Arc<dyn GhostProvisionRequestProvider>,
     managed_devices: Arc<runtime::managed_device::ManagedDeviceRuntime>,
     pub http: reqwest::Client,
@@ -212,8 +212,9 @@ impl MessageContext {
         let replay_guard: Arc<dyn ReplayGuardStore> =
             Arc::new(DbReplayGuardStore::new(inner.db.clone()));
         let token_store: Arc<dyn TokenStore> = Arc::new(DbTokenStore::new(inner.db.clone()));
-        let managed_actor_authoring =
-            Arc::new(ManagedActorAuthoringService::new(inner.edge.clone())?);
+        let managed_actor_authoring = Arc::new(ManagedActorManagerService::open_deployment(
+            inner.edge.clone(),
+        )?);
         let ghost_provision_provider: Arc<dyn GhostProvisionRequestProvider> =
             managed_actor_authoring.clone();
         let managed_devices = Arc::new(runtime::managed_device::ManagedDeviceRuntime::new(

@@ -666,6 +666,8 @@ mod tests {
                     .unwrap(),
                 local_id: "control-test",
                 controller_public_key: &control.verifying_key().to_bytes(),
+                content_backup_public_key: &arkret::crypto::hpke::x25519_public_key(&[0x56; 32])
+                    .unwrap(),
                 version_created_at: at,
                 root_seed: &root,
                 next_root_public_key_multibase: &arkret::ed25519_pubkey_to_did_key_multibase(
