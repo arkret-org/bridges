@@ -1536,6 +1536,12 @@ mod ghost_bundle_tests {
         let document_digest = arkret::identity::document_canonical_digest(&document).unwrap();
         let witness_records = Vec::<Value>::new();
         let witness_proofs_digest = Hash::new(canonical_sha256(&witness_records).unwrap()).unwrap();
+        let content_backup_recipient =
+            arkret::identity::realm_actor_content_backup_recipient_from_document(
+                &document,
+                &DidUrl::new(format!("{did_value}#content-backup")).unwrap(),
+            )
+            .unwrap();
         ManagedActorIdentity {
             actor_id: project_did_to_core_id(&did_value).unwrap(),
             initial_resolution: ResolutionCommitment {
@@ -1566,6 +1572,7 @@ mod ghost_bundle_tests {
             },
             root_verification_method,
             root_public_key,
+            content_backup_recipient,
         }
     }
 

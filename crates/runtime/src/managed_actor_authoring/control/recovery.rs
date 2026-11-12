@@ -519,6 +519,7 @@ fn prepare(
             witness_records: vec![],
         },
         next_control_method_kid: method.clone(),
+        next_content_backup_recipient: None,
         expires_at: at + chrono::Duration::minutes(5),
     };
     let transcript = arkret::RealmActorRecoveryAcceptanceTranscript {
