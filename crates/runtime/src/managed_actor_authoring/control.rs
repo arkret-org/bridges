@@ -665,6 +665,8 @@ mod tests {
                 principal_endpoint: &url::Url::parse("https://applet.example/actors/slack")
                     .unwrap(),
                 local_id: "control-test",
+                content_backup_public_key: &arkret::crypto::hpke::x25519_public_key(&[14; 32])
+                    .unwrap(),
                 controller_public_key: &control.verifying_key().to_bytes(),
                 version_created_at: at,
                 root_seed: &root,

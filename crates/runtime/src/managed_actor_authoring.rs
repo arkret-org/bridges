@@ -34,6 +34,8 @@ use crate::managed_actor_store::{
 };
 use crate::{BridgeError, PreparedGhost, PreparedManagedActor, Result};
 
+mod archive_custody;
+pub use archive_custody::ManagerArchiveCustody;
 pub(crate) mod control;
 pub use control::manager::{ManagementTransferOffer, ManagementTransferPlan};
 
@@ -54,6 +56,7 @@ struct ManagedActorIdentity {
     method_history_evidence: ResolutionMethodHistoryEvidence,
     root_verification_method: DidUrl,
     root_public_key: PublicKeyMaterial,
+    content_backup_recipient: arkret::RealmActorContentBackupRecipient,
 }
 
 struct VerifiedManagedActorRoot {
@@ -71,6 +74,7 @@ pub struct ManagedActorAuthoringService {
     config: Arc<runtime::Config>,
     principal_endpoint: url::Url,
     key_encryption_key: [u8; 32],
+    manager_archive: Option<Arc<dyn ManagerArchiveCustody>>,
 }
 
 pub(crate) struct ManagedController {
@@ -92,6 +96,22 @@ impl ManagedActorAuthoringService {
             config,
             principal_endpoint,
             key_encryption_key,
+            manager_archive: None,
+        })
+    }
+
+    /// Supply the privileged manager capability without adding its unlock secret
+    /// to the shared runtime config or the ordinary authoring decrypt surface.
+    pub fn with_manager_archive(mut self, archive: Arc<dyn ManagerArchiveCustody>) -> Self {
+        self.manager_archive = Some(archive);
+        self
+    }
+
+    fn manager_archive(&self) -> Result<&Arc<dyn ManagerArchiveCustody>> {
+        self.manager_archive.as_ref().ok_or_else(|| {
+            BridgeError::App(
+                "Realm actor authoring requires an independent manager archive capability".into(),
+            )
         })
     }
 
@@ -468,27 +488,48 @@ impl ManagedActorAuthoringService {
         subject_key: &str,
         request: &AppletManagedActorAuthoringRequest,
     ) -> Result<ManagedActorIdentity> {
+        let archive = self.manager_archive()?;
+        let archive_public = archive.prepare_creation_key(subject_key, request).await?;
+        arkret::crypto::hpke::validate_x25519_recipient_key(&archive_public)
+            .map_err(|error| BridgeError::App(error.to_string()))?;
         if let Some(record) = self
             .store
             .clone()
             .managed_actor_identity_async(subject_key.to_owned())
             .await?
         {
-            return self.decode_identity(subject_key, record);
+            let identity = self.decode_identity(subject_key, record)?;
+            if identity.content_backup_recipient.public_key_base64url
+                != arkret::base64url_encode(archive_public)
+            {
+                return Err(BridgeError::Database(
+                    "manager archive custody differs from original creation recipient".into(),
+                ));
+            }
+            return Ok(identity);
         }
-        let candidate = self.generate_identity(subject_key, request)?;
+        let candidate = self.generate_identity(subject_key, request, &archive_public)?;
         let winner = self
             .store
             .clone()
             .install_managed_actor_identity_async(subject_key.to_owned(), candidate)
             .await?;
-        self.decode_identity(subject_key, winner)
+        let identity = self.decode_identity(subject_key, winner)?;
+        if identity.content_backup_recipient.public_key_base64url
+            != arkret::base64url_encode(archive_public)
+        {
+            return Err(BridgeError::Database(
+                "manager archive custody differs from installed creation recipient".into(),
+            ));
+        }
+        Ok(identity)
     }
 
     fn generate_identity(
         &self,
         subject_key: &str,
         request: &AppletManagedActorAuthoringRequest,
+        archive_public: &[u8; 32],
     ) -> Result<ManagedActorIdentityRecord> {
         let mut root_seed = [0_u8; 32];
         let mut next_root_seed = [0_u8; 32];
@@ -516,6 +557,7 @@ impl ManagedActorAuthoringService {
         let inception = arkret::webvh::prepare_realm_actor_inception(
             &arkret::webvh::RealmActorInceptionInput {
                 principal_endpoint: &self.principal_endpoint,
+                content_backup_public_key: archive_public,
                 local_id: &local_id,
                 controller_public_key: &SigningKey::from_bytes(&controller_seed)
                     .verifying_key()
@@ -619,12 +661,30 @@ impl ManagedActorAuthoringService {
             })?;
         let verified_root =
             verify_managed_actor_root(&did, &method_history_evidence, &key_material)?;
+        let native_evidence = arkret::AppletManagedActorMethodHistoryEvidence::try_from(
+            method_history_evidence.clone(),
+        )?;
+        let original_document: arkret::DidDocument =
+            serde_json::from_value(
+                native_evidence.webvh_material().1.first().ok_or_else(|| {
+                    BridgeError::Database("native inception original missing".into())
+                })?["state"]
+                    .clone(),
+            )?;
+        let content_backup_recipient =
+            arkret::identity::realm_actor_content_backup_recipient_from_document(
+                &original_document,
+                &DidUrl::new(format!("{did}#content-backup"))
+                    .map_err(|error| BridgeError::Database(error.to_string()))?,
+            )
+            .map_err(|error| BridgeError::Database(error.to_string()))?;
         let identity = ManagedActorIdentity {
             actor_id,
             initial_resolution,
             method_history_evidence,
             root_verification_method: verified_root.verification_method,
             root_public_key: verified_root.public_key,
+            content_backup_recipient,
         };
         // The three stored columns describe one identity. A row whose actor,
         // resolution commitment and method evidence disagree cannot be used to
@@ -787,6 +847,19 @@ impl ManagedActorAuthoringService {
             .managed_actor_identity_async(subject.clone())
             .await?
             .ok_or_else(|| BridgeError::Database("authoring identity disappeared".into()))?;
+        let realm = crate::managed_authoring::authoring_scope(request)
+            .realm_id_opt()
+            .ok_or_else(|| BridgeError::App("authoring scope has no Realm".into()))?;
+        self.manager_archive()?
+            .bind_creation_recipient(
+                &subject,
+                &arkret::RealmActorId {
+                    realm_id: realm.clone(),
+                    principal_id: identity.actor_id.clone(),
+                },
+                &identity.content_backup_recipient,
+            )
+            .await?;
         let controller = self.decode_original_controller(&subject, &record, identity)?;
         let (applet, role, registration, grant, request_id, external) = match &request.basis {
             arkret::AppletManagedActorAuthoringBasis::ProvisionBot(b) => (
@@ -823,7 +896,7 @@ impl ManagedActorAuthoringService {
             "initial_resolution": identity.initial_resolution,
             "method_history_evidence": identity.method_history_evidence,
             "control_method_kid": method, "expires_at": arkret::canonical::format_timestamp_canonical(request.expires_at),
-            "recovery": { "kind": "manager_native", "enabled": true }
+            "recovery": { "kind": "manager_native", "enabled": true, "content_backup_recipient": identity.content_backup_recipient }
         });
         if let Some(external) = external {
             value["external_ref"] = serde_json::to_value(external)?;
@@ -1248,6 +1321,98 @@ mod ghost_bundle_tests {
     use crate::AuthoringStore as _;
 
     #[derive(Default)]
+    struct TestManagerArchive(
+        Mutex<BTreeMap<String, (RealmId, arkret::crypto::hpke::X25519HpkeKeyPair)>>,
+    );
+
+    #[async_trait::async_trait]
+    impl ManagerArchiveCustody for TestManagerArchive {
+        async fn prepare_creation_key(
+            &self,
+            subject: &str,
+            request: &AppletManagedActorAuthoringRequest,
+        ) -> Result<[u8; 32]> {
+            if subject != managed_actor_subject_key(request)? {
+                return Err(BridgeError::Database("archive subject mismatch".into()));
+            }
+            let mut keys = self.0.lock().unwrap();
+            if !keys.contains_key(subject) {
+                keys.insert(
+                    subject.into(),
+                    (
+                        crate::managed_authoring::authoring_scope(request)
+                            .realm_id_opt()
+                            .unwrap()
+                            .clone(),
+                        arkret::crypto::hpke::generate_x25519_keypair()
+                            .map_err(|error| BridgeError::Database(error.to_string()))?,
+                    ),
+                );
+            }
+            Ok(*keys[subject].1.public_key())
+        }
+
+        async fn bind_creation_recipient(
+            &self,
+            subject: &str,
+            actor: &arkret::RealmActorId,
+            recipient: &arkret::RealmActorContentBackupRecipient,
+        ) -> Result<()> {
+            let keys = self.0.lock().unwrap();
+            let (realm, key) = keys
+                .get(subject)
+                .ok_or_else(|| BridgeError::Database("archive private key absent".into()))?;
+            let public = arkret::crypto::hpke::x25519_public_key(key.private_key())
+                .map_err(|error| BridgeError::Database(error.to_string()))?;
+            let did = Did::new(
+                recipient
+                    .key_agreement_ref
+                    .as_str()
+                    .split_once('#')
+                    .unwrap()
+                    .0,
+            )?;
+            if realm != &actor.realm_id
+                || project_did_to_core_id(&did)? != actor.principal_id
+                || arkret::base64url_encode(public) != recipient.public_key_base64url
+            {
+                return Err(BridgeError::Database(
+                    "archive private key or complete identity differs".into(),
+                ));
+            }
+            Ok(())
+        }
+
+        async fn prepare_manager_recipient(
+            &self,
+            _: &ManagementTransferPlan,
+            _: &Did,
+        ) -> Result<arkret::RealmActorContentBackupRecipient> {
+            Err(BridgeError::App(
+                "creation fixture has no manager handover capability".into(),
+            ))
+        }
+        async fn confirm_outgoing_handover(&self, _: &ManagementTransferOffer) -> Result<()> {
+            Err(BridgeError::App(
+                "creation fixture has no manager handover capability".into(),
+            ))
+        }
+        async fn accept_manager_handover(
+            &self,
+            _: &ManagementTransferPlan,
+            _: &arkret::RealmActorContentBackupRecipient,
+            _: &arkret::identity::VerifiedRealmActorMaterial,
+            _: &arkret::identity::VerifiedRealmActorMaterial,
+            _: &ResolutionCommitment,
+            _: &arkret::AppletManagedActorMethodHistoryEvidence,
+        ) -> Result<arkret::RealmActorManagerChangePayload> {
+            Err(BridgeError::App(
+                "creation fixture has no manager handover capability".into(),
+            ))
+        }
+    }
+
+    #[derive(Default)]
     pub(super) struct RecordingAuthoringStore(Mutex<BTreeMap<String, String>>);
 
     impl runtime::AuthoringStore for RecordingAuthoringStore {
@@ -1364,6 +1529,8 @@ mod ghost_bundle_tests {
         let inception = prepare_realm_actor_inception(&RealmActorInceptionInput {
             principal_endpoint: &url::Url::parse("https://applet.example/actors/slack").unwrap(),
             local_id: "u123",
+            content_backup_public_key: &arkret::crypto::hpke::x25519_public_key(&[0x56; 32])
+                .unwrap(),
             controller_public_key: &SigningKey::from_bytes(&[0x55; 32])
                 .verifying_key()
                 .to_bytes(),
@@ -1417,6 +1584,12 @@ mod ghost_bundle_tests {
             },
             root_verification_method,
             root_public_key,
+            content_backup_recipient:
+                arkret::identity::realm_actor_content_backup_recipient_from_document(
+                    &document,
+                    &DidUrl::new(format!("{}#content-backup", document.id)).unwrap(),
+                )
+                .unwrap(),
         }
     }
 
@@ -1547,7 +1720,10 @@ mod ghost_bundle_tests {
     async fn realm_creation_preserves_independent_native_custody_and_exact_preparation() {
         let store = Arc::new(RecordingAuthoringStore::default());
         let edge = Arc::new(edge(store.clone()));
-        let service = ManagedActorAuthoringService::new(edge.clone()).unwrap();
+        let archive = Arc::new(TestManagerArchive::default());
+        let service = ManagedActorAuthoringService::new(edge.clone())
+            .unwrap()
+            .with_manager_archive(archive.clone());
         for request in [ghost_request(), bot_request("abcdefghijklmnopqrstuv")] {
             let subject = managed_actor_subject_key(&request).unwrap();
             let identity = service.identity_for(&subject, &request).await.unwrap();
@@ -1596,9 +1772,16 @@ mod ghost_bundle_tests {
             );
             let reopened =
                 ManagedActorAuthoringService::new(Arc::new(edge_from_store(store.clone())))
-                    .unwrap();
+                    .unwrap()
+                    .with_manager_archive(archive.clone());
             let retained = reopened.identity_for(&subject, &request).await.unwrap();
             assert_eq!(identity.initial_resolution, retained.initial_resolution);
+            let device_only = ManagedActorAuthoringService::new(edge.clone()).unwrap();
+            assert!(device_only.identity_for(&subject, &request).await.is_err());
+            let lost_archive = ManagedActorAuthoringService::new(edge.clone())
+                .unwrap()
+                .with_manager_archive(Arc::new(TestManagerArchive::default()));
+            assert!(lost_archive.identity_for(&subject, &request).await.is_err());
             assert_eq!(
                 identity.root_verification_method,
                 retained.root_verification_method

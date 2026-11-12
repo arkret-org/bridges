@@ -472,8 +472,12 @@ fn prepare(
     let public = arkret::ed25519_pubkey_to_did_key_multibase(signing.verifying_key().as_bytes());
     let method = DidUrl::new(format!("{did}#control-{public}")).map_err(invalid)?;
     let mut state = previous["state"].clone();
-    state["verificationMethod"] =
-        json!([{"id":method,"type":"Multikey","controller":did,"publicKeyMultibase":public}]);
+    let methods = state["verificationMethod"]
+        .as_array_mut()
+        .ok_or_else(|| invalid("native recovery DID methods are not an array"))?;
+    methods.retain(|method| method["id"].as_str() != Some(control.control_method_kid.as_str()));
+    methods
+        .push(json!({"id":method,"type":"Multikey","controller":did,"publicKeyMultibase":public}));
     state["assertionMethod"] = json!([method]);
     state["authentication"] = json!([method]);
     let rotation = arkret::webvh::prepare_service_rotation(&arkret::webvh::ServiceRotationInput {
@@ -511,6 +515,7 @@ fn prepare(
             .checked_add(1)
             .ok_or_else(|| invalid("device generation exhausted"))?,
         replaces_recovery_ref: replaces.cloned(),
+        next_content_backup_recipient: None,
         next_resolution: resolution,
         method_history_evidence: arkret::RealmActorWebvhRecoveryPlan {
             log_entries: entries.clone(),

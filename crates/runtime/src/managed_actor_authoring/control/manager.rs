@@ -25,6 +25,16 @@ pub struct ManagementTransferOffer {
     controller_public: String,
     update_public: String,
     next_update_public: String,
+    next_content_backup_recipient: arkret::RealmActorContentBackupRecipient,
+}
+
+impl ManagementTransferOffer {
+    pub fn plan(&self) -> &ManagementTransferPlan {
+        &self.plan
+    }
+    pub fn next_content_backup_recipient(&self) -> &arkret::RealmActorContentBackupRecipient {
+        &self.next_content_backup_recipient
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -297,6 +307,7 @@ impl ManagedActorAuthoringService {
         plan: &ManagementTransferPlan,
         did: &Did,
     ) -> Result<ManagementTransferOffer> {
+        let archive = self.manager_archive()?;
         // The receiver must retain the accepted original and decrypt the original
         // native/controller custody. A public-record-only handover is out of scope.
         let original = self.original_managed_controller(&plan.actor_id).await?;
@@ -318,6 +329,34 @@ impl ManagedActorAuthoringService {
             }
             return Ok(incoming.offer);
         }
+        let next_content_backup_recipient = archive.prepare_manager_recipient(plan, did).await?;
+        if next_content_backup_recipient
+            .key_agreement_ref
+            .as_str()
+            .split_once('#')
+            .map(|(id, _)| id)
+            != Some(did.as_str())
+            || next_content_backup_recipient.public_key_base64url
+                == candidate
+                    .recovery
+                    .content_backup_recipient
+                    .public_key_base64url
+        {
+            return Err(invalid(
+                "manager replacement requires a fresh independent recipient for the same DID",
+            ));
+        }
+        let archive_public =
+            arkret::base64url_decode(&next_content_backup_recipient.public_key_base64url)?;
+        arkret::crypto::hpke::validate_x25519_recipient_key(&archive_public)
+            .map_err(|error| invalid(error.to_string()))?;
+        if arkret::base64url_encode(&archive_public)
+            != next_content_backup_recipient.public_key_base64url
+        {
+            return Err(invalid(
+                "manager archive recipient encoding is not canonical",
+            ));
+        }
         let controller = random_seed()?;
         let update = random_seed()?;
         let next = random_seed()?;
@@ -329,6 +368,7 @@ impl ManagedActorAuthoringService {
             controller_public: public(&controller),
             update_public: public(&update),
             next_update_public: public(&next),
+            next_content_backup_recipient,
         };
         self.transfer_save(
             &key,
@@ -392,6 +432,9 @@ impl ManagedActorAuthoringService {
                 "manager transfer must preserve DID and change Service",
             ));
         }
+        self.manager_archive()?
+            .confirm_outgoing_handover(offer)
+            .await?;
         let subject = self.custody_subject(&plan.actor_id).await?;
         let before = self.control_raw(&subject).await?;
         let custody = self
@@ -412,6 +455,22 @@ impl ManagedActorAuthoringService {
             .clone();
         state["verificationMethod"].as_array_mut().ok_or_else(|| invalid("native methods missing"))?.push(
             json!({"id":offer.method,"type":"Multikey","controller":offer.did,"publicKeyMultibase":offer.controller_public}));
+        let mut archive_key = vec![0xec, 0x01];
+        archive_key.extend(arkret::base64url_decode(
+            &offer.next_content_backup_recipient.public_key_base64url,
+        )?);
+        let archive_method = &offer.next_content_backup_recipient.key_agreement_ref;
+        state["verificationMethod"]
+            .as_array_mut()
+            .ok_or_else(|| invalid("native methods missing"))?
+            .push(
+                json!({"id":archive_method,"type":"Multikey","controller":offer.did,
+                "publicKeyMultibase":arkret::canonical::encode_multibase_base58btc(archive_key)}),
+            );
+        state["keyAgreement"]
+            .as_array_mut()
+            .ok_or_else(|| invalid("native archive agreements missing"))?
+            .push(json!(archive_method));
         for relation in ["assertionMethod", "authentication"] {
             state[relation]
                 .as_array_mut()
@@ -703,7 +762,12 @@ impl ManagedActorAuthoringService {
         state["verificationMethod"]
             .as_array_mut()
             .ok_or_else(|| invalid("native methods missing"))?
-            .retain(|method| method["id"] == json!(outgoing.offer.method));
+            .retain(|method| {
+                method["id"] == json!(outgoing.offer.method)
+                    || method["id"]
+                        .as_str()
+                        .is_none_or(|id| !custody.controllers.contains_key(id))
+            });
         state["assertionMethod"] = json!([outgoing.offer.method]);
         state["authentication"] = json!([outgoing.offer.method]);
         let rotation =
@@ -862,6 +926,7 @@ impl ManagedActorAuthoringService {
         {
             return Err(invalid("management creation differs from actor or Applet"));
         }
+        let applet_id = payload.applet_id.clone();
         let actor_id = plan.actor_id.clone();
         let (_, control, control_ref) = recovery::row(
             cut,
@@ -894,41 +959,79 @@ impl ManagedActorAuthoringService {
             .ok_or_else(|| invalid("receiving native custody not finalized"))?;
         let (next_resolution, method_history_evidence) =
             native_material(&incoming.offer.did, entries)?;
-        let at = arkret::canonical::normalize_timestamp_canonical(Utc::now());
-        let transcript = arkret::RealmActorManagerAcceptanceTranscript {
-            actor_id: actor_id.clone(),
-            applet_id: payload.applet_id,
-            expected_manager_revision: manager_revision.clone(),
-            expected_control_revision: revision(control_ref),
-            expected_device_generation_revision: generation_revision.clone(),
-            expected_generation: generation.current_device_generation_ref,
-            new_generation: generation
-                .current_device_generation_ref
-                .checked_add(1)
-                .ok_or_else(|| invalid("device generation exhausted"))?,
-            new_service_id: plan.new_service_id.clone(),
-            new_registration_ref: plan.new_registration_ref.clone(),
-            management_authorization_ref: plan.management_authorization_ref.clone(),
-            next_resolution,
-            method_history_evidence,
-        };
-        let signature = arkret::signatures::detached_object::sign_detached_object(
-            &transcript,
-            arkret::DetachedSignatureContext::RealmActorManagerAcceptance,
-            self.edge.service_verification_method()?,
-            at,
-            &SigningKey::from_bytes(&self.config.signing_seed()?),
+        let (_, recovery, _) = recovery::row(
+            cut,
+            &arkret::CurrentSelector::RealmActorRecovery {
+                actor_id: actor_id.clone(),
+            },
+        )?;
+        let recovery: arkret::RealmActorRecoveryValue = serde_json::from_value(recovery.clone())?;
+        let payload = self
+            .manager_archive()?
+            .accept_manager_handover(
+                plan,
+                &incoming.offer.next_content_backup_recipient,
+                current,
+                creation,
+                &next_resolution,
+                &method_history_evidence,
+            )
+            .await?;
+        if payload.expected_manager_revision != *manager_revision
+            || payload.expected_control_revision != revision(control_ref)
+            || payload.expected_device_generation_revision != *generation_revision
+            || payload.expected_generation != generation.current_device_generation_ref
+            || Some(payload.new_generation)
+                != generation.current_device_generation_ref.checked_add(1)
+            || payload.new_service_id != plan.new_service_id
+            || payload.new_registration_ref != plan.new_registration_ref
+            || payload.management_authorization_ref != plan.management_authorization_ref
+            || payload.next_resolution != next_resolution
+            || payload.method_history_evidence != method_history_evidence
+            || payload.next_content_backup_recipient != incoming.offer.next_content_backup_recipient
+            || payload.next_content_backup_recipient.key_agreement_ref
+                == recovery.content_backup_recipient.key_agreement_ref
+            || payload.next_content_backup_recipient.public_key_base64url
+                == recovery.content_backup_recipient.public_key_base64url
+            || !payload
+                .content_backup_inventory_digest
+                .as_str()
+                .starts_with("sha256:")
+            || !payload
+                .content_backup_handover_digest
+                .as_str()
+                .starts_with("sha256:")
+            || payload.new_service_signature.verification_method
+                != self.edge.service_verification_method()?
+        {
+            return Err(invalid(
+                "archive custody acceptance differs from the exact native manager candidate",
+            ));
+        }
+        let document: arkret::DidDocument = serde_json::from_value(
+            entries
+                .last()
+                .ok_or_else(|| invalid("receiving native original missing"))?["state"]
+                .clone(),
+        )?;
+        arkret::identity::validate_realm_actor_content_backup_recipient(
+            &document,
+            &payload.next_content_backup_recipient,
         )
-        .map_err(|e| invalid(e.to_string()))?;
-        let mut value = serde_json::to_value(&transcript)?;
-        let object = value.as_object_mut().expect("typed transcript object");
-        object.remove("actor_id");
-        object.remove("applet_id");
-        object.insert(
-            "new_service_signature".into(),
-            serde_json::to_value(signature)?,
-        );
-        let payload: arkret::RealmActorManagerChangePayload = serde_json::from_value(value)?;
+        .map_err(|error| invalid(error.to_string()))?;
+        arkret::signatures::detached_object::verify_detached_object_signature(
+            &payload.new_service_signature,
+            &payload.acceptance_transcript(actor_id.clone(), applet_id.clone()),
+            arkret::DetachedSignatureContext::RealmActorManagerAcceptance,
+            &PublicKeyMaterial::Ed25519Raw {
+                bytes: SigningKey::from_bytes(&self.config.signing_seed()?)
+                    .verifying_key()
+                    .to_bytes()
+                    .to_vec(),
+            },
+        )
+        .map_err(|error| invalid(error.to_string()))?;
+        let at = arkret::canonical::normalize_timestamp_canonical(Utc::now());
         let mut event = arkret_event_draft::TypedEventDraft::<
             arkret_wire::event_spec::RealmActorManagerChange,
         >::new(
@@ -942,7 +1045,7 @@ impl ManagedActorAuthoringService {
             actor_id,
             payload,
         )?
-        .with_applet_id(transcript.applet_id)
+        .with_applet_id(applet_id)
         .into_intent(at)?
         .author_with_digest_suite(crate::PRODUCER_DIGEST_SUITE)?;
         let signer = arkret::Ed25519PayloadSigner::new(
