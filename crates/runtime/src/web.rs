@@ -505,14 +505,14 @@ fn applet_routes() -> Router {
         )
         // Exact accepted user mappings share the native manager boundary.
         .push(
-            Router::with_path("third_party/users")
+            Router::with_path("third-party/users")
                 .hoop(OperationSelector(
                     ServiceOperationId::EDGE_APPLET_THIRD_PARTY_USERS_READ_LIST_V1,
                 ))
                 .get(applet_third_party_user),
         )
         .push(
-            Router::with_path("third_party/locations")
+            Router::with_path("third-party/locations")
                 .hoop(OperationSelector(
                     ServiceOperationId::EDGE_APPLET_THIRD_PARTY_LOCATIONS_READ_LIST_V1,
                 ))
@@ -1754,11 +1754,11 @@ mod tests {
                 ServiceOperationId::EDGE_APPLET_READ_PROTOCOL_METADATA_V1,
             ),
             (
-                "third_party/users",
+                "third-party/users",
                 ServiceOperationId::EDGE_APPLET_THIRD_PARTY_USERS_READ_LIST_V1,
             ),
             (
-                "third_party/locations",
+                "third-party/locations",
                 ServiceOperationId::EDGE_APPLET_THIRD_PARTY_LOCATIONS_READ_LIST_V1,
             ),
         ];
