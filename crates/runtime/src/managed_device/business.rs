@@ -32,24 +32,12 @@ struct ContentIntent<P> {
     encrypt: bool,
 }
 
-/// Reject only resource scopes known to be disjoint. More specific objects
-/// still need the Station's resource/ancestry evaluator; they are not widened
-/// into a Realm or Circle selector here.
+/// Candidate selection for the registered finite terminal-child profile.
+/// Its accepted parent has one exact Realm/Circle resource. This does not
+/// establish the immutable installation source association or business allow;
+/// the governing Station rechecks those against the accepted original parent.
 fn parent_scope_candidate(grant: &CapabilityGrant, scope: &ScopeRef) -> bool {
-    grant.resources.iter().any(|resource| {
-        if resource.realm_id.as_ref() != Some(scope.realm_id()) {
-            return false;
-        }
-        match resource.kind {
-            arkret::ResourceSelectorKind::Circle => matches!(scope,
-                ScopeRef::Circle { circle_id, .. } if resource.circle_id.as_ref() == Some(circle_id)),
-            arkret::ResourceSelectorKind::Realm => {
-                matches!(scope, ScopeRef::Realm { .. })
-                    || resource.match_scope == Some(arkret::ResourceMatchScope::RealmWide)
-            }
-            _ => true,
-        }
-    })
+    matches!(grant.resources.as_slice(), [resource] if resource.is_exact_scope(scope))
 }
 
 impl ManagedDeviceRuntime {
@@ -181,7 +169,9 @@ impl ManagedDeviceRuntime {
             },
         };
         let intent = TypedEventDraft::<event_spec::CapabilityGrant>::new(
-            device.effective_scope.clone(),
+            ScopeRef::Realm {
+                realm_id: device.effective_scope.realm_id().clone(),
+            },
             service,
             body,
         )?

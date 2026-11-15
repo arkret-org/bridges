@@ -63,7 +63,7 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/arkret-rust-sdk
           path: arkret-rust-sdk
-          ref: 819fc97ca2356cd0ed467864babfaca93e0b5494
+          ref: 3dc8b1d1505bd87df5aba806fc317d7a01dfdf89
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
       - name: Checkout Garth
@@ -71,7 +71,7 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/garth
           path: garth
-          ref: 8c35acec7c6d8c79b61c06855367340f0a17da78
+          ref: 0df727f46130ea18673785952846ee250724fdc6
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
       - name: Checkout Arkret Spec fixtures
@@ -79,7 +79,7 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/arkret-spec
           path: arkret-spec
-          ref: 4e46718f83a4fcbedc12ef7409bc68743ec41dc9
+          ref: 66c9261b58fa211505ce8a710c1464bdc4a63dc8
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
       - name: Install Rust
@@ -143,7 +143,7 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/arkret-rust-sdk
           path: arkret-rust-sdk
-          ref: 819fc97ca2356cd0ed467864babfaca93e0b5494
+          ref: 3dc8b1d1505bd87df5aba806fc317d7a01dfdf89
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
       - name: Checkout Garth
@@ -151,7 +151,7 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/garth
           path: garth
-          ref: 8c35acec7c6d8c79b61c06855367340f0a17da78
+          ref: 0df727f46130ea18673785952846ee250724fdc6
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
       - name: Install Rust
@@ -179,7 +179,7 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/arkret-rust-sdk
           path: arkret-rust-sdk
-          ref: 819fc97ca2356cd0ed467864babfaca93e0b5494
+          ref: 3dc8b1d1505bd87df5aba806fc317d7a01dfdf89
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
       - name: Checkout Garth
@@ -187,7 +187,7 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/garth
           path: garth
-          ref: 8c35acec7c6d8c79b61c06855367340f0a17da78
+          ref: 0df727f46130ea18673785952846ee250724fdc6
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
       - name: Install Rust 1.99

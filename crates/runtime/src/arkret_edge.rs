@@ -778,6 +778,56 @@ impl ArkretEdge {
         self.config.arkret.verification_method_for(actor)
     }
 
+    /// Authenticate frozen producer bytes using their original method-native
+    /// public source. Current HTTP authentication remains the configured key.
+    fn publication_producer_context(
+        &self,
+        original: &AuthoredEvent,
+    ) -> Result<arkret::ProducerVerificationContext> {
+        let Some(resolution) = self.config.arkret.service_resolution.as_ref() else {
+            // Outbound-only hosts may publish their Service history separately.
+            // Preserve the existing own-key path; a rotated unmatched original
+            // still fails the SDK's real method/signature verification.
+            return Ok(arkret::ProducerVerificationContext {
+                actor: ActorId::service(self.service_actor_id.clone()),
+                verification_method: self.service_verification_method()?,
+                public_key: PublicKeyMaterial::Ed25519Raw {
+                    bytes: self.signer.verifying_key().to_bytes().to_vec(),
+                },
+                digest_suite: PRODUCER_DIGEST_SUITE,
+            });
+        };
+        let proof = original.producer_proof.as_ref().ok_or_else(|| {
+            BridgeError::Arkret("frozen publication has no producer proof".into())
+        })?;
+        let document = arkret::identity::authenticated_service_document_at(
+            resolution,
+            &self.service_actor_id,
+            proof.created_at,
+        )
+        .map_err(|error| BridgeError::Arkret(error.to_string()))?;
+        // The SDK above authenticates this historical document to the same
+        // stable Service. Its own DID binds the historical method/controller.
+        arkret::identity::validate_verification_method_relationship(
+            &document,
+            &proof.verification_method,
+            &document.id,
+            arkret::identity::DidVerificationRelationship::AssertionMethod,
+        )
+        .map_err(|error| BridgeError::Arkret(error.to_string()))?;
+        let public_key = arkret::identity::public_key_material_from_document(
+            &document,
+            &proof.verification_method,
+        )
+        .map_err(|error| BridgeError::Arkret(error.to_string()))?;
+        Ok(arkret::ProducerVerificationContext {
+            actor: ActorId::service(self.service_actor_id.clone()),
+            verification_method: proof.verification_method.clone(),
+            public_key,
+            digest_suite: PRODUCER_DIGEST_SUITE,
+        })
+    }
+
     /// Hand one exact signed Event to the current governance Station and return
     /// its event id once the Station's authority-signed commit covers it.
     ///
@@ -861,14 +911,7 @@ impl ArkretEdge {
                     committed_events: vec![],
                     signals: vec![],
                 });
-            let producer = arkret::ProducerVerificationContext {
-                actor: ActorId::service(self.service_actor_id.clone()),
-                verification_method: self.service_verification_method()?,
-                public_key: PublicKeyMaterial::Ed25519Raw {
-                    bytes: self.signer.verifying_key().to_bytes().to_vec(),
-                },
-                digest_suite: crate::PRODUCER_DIGEST_SUITE,
-            };
+            let producer = self.publication_producer_context(&original.authored)?;
             let transaction =
                 arkret::VerifiedSubmission::verify(transaction, |_| Ok(producer.clone()))
                     .map_err(|e| BridgeError::Arkret(e.to_string()))?;
@@ -908,14 +951,7 @@ impl ArkretEdge {
         let request = SelfAuthoritySubmitRequestBody::Event(EventAdmissionSubmission::new(
             event.event().clone(),
         ));
-        let producer = arkret::ProducerVerificationContext {
-            actor: arkret::ActorId::service(self.service_actor_id.clone()),
-            verification_method: self.service_verification_method()?,
-            public_key: PublicKeyMaterial::Ed25519Raw {
-                bytes: self.signer.verifying_key().to_bytes().to_vec(),
-            },
-            digest_suite: arkret::DigestSuite::Sha256,
-        };
+        let producer = self.publication_producer_context(&original.authored)?;
         let request = arkret::VerifiedSubmission::verify(request, |_| Ok(producer.clone()))
             .map_err(|error| BridgeError::Arkret(error.to_string()))?;
         let options = ClientRequestOptions::new().idempotency_key(event.event_id().as_str());
@@ -1886,5 +1922,282 @@ mod tests {
                 .contains("Service signer cannot consume")
         );
         assert_eq!(*store.0.lock().unwrap(), snapshot);
+    }
+
+    fn publication_rotation(
+        store: Arc<dyn AuthoringStore>,
+        reuse_method: bool,
+    ) -> (ArkretEdge, ArkretEdge, chrono::DateTime<chrono::Utc>) {
+        use arkret::signatures::webvh::{
+            ServiceInceptionInput, ServiceRotationInput,
+            prepare_applet_service_inception_with_did_key_seed, prepare_service_rotation,
+        };
+        use rand_chacha::rand_core::SeedableRng as _;
+        let at: chrono::DateTime<chrono::Utc> = "2026-09-16T00:00:00.000Z".parse().unwrap();
+        let endpoint = "https://bridge.example/".parse().unwrap();
+        let mut rng = rand_chacha::ChaCha20Rng::from_seed([200; 32]);
+        let inception = prepare_applet_service_inception_with_did_key_seed(
+            &mut rng,
+            &ServiceInceptionInput {
+                principal_endpoint: &endpoint,
+                local_id: "service",
+                also_known_as: &[],
+                version_created_at: at,
+                did_key_fragment: Some("key-a"),
+            },
+            &[201; 32],
+        )
+        .unwrap();
+        let did = Did::new(inception.did.clone()).unwrap();
+        let service = project_did_to_core_id(&did).unwrap();
+        let old_resolution = arkret::identity::build_authenticated_webvh_service_resolution(
+            service.clone(),
+            arkret::ServiceKind::AppletService.as_str().to_owned(),
+            serde_json::from_value(inception.log_entry["state"].clone()).unwrap(),
+            vec![inception.log_entry.clone()],
+            vec![],
+            at + chrono::Duration::seconds(2),
+        )
+        .unwrap();
+        let fragment = if reuse_method { "key-a" } else { "key-b" };
+        let method = DidUrl::new(format!("{did}#{fragment}")).unwrap();
+        let next_key = ed25519_dalek::SigningKey::from_bytes(&[202; 32]);
+        let mut state = inception.log_entry["state"].clone();
+        state["verificationMethod"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|entry| entry["id"] != json!(inception.did_key_id));
+        state["verificationMethod"].as_array_mut().unwrap().push(json!({
+            "id":method,"controller":did,"type":"Multikey",
+            "publicKeyMultibase":arkret::canonical::ed25519_pubkey_to_did_key_multibase(next_key.verifying_key().as_bytes())
+        }));
+        state["assertionMethod"] = json!([method]);
+        state["authentication"] = json!([method]);
+        let rotation = prepare_service_rotation(&ServiceRotationInput {
+            did: did.as_str(),
+            previous_entries: std::slice::from_ref(&inception.log_entry),
+            state: &state,
+            current_update_seed: &inception.next_update_key_seed,
+            next_update_public_key_multibase:
+                &arkret::canonical::ed25519_pubkey_to_did_key_multibase(
+                    ed25519_dalek::SigningKey::from_bytes(&[203; 32])
+                        .verifying_key()
+                        .as_bytes(),
+                ),
+            version_created_at: at + chrono::Duration::seconds(10),
+        })
+        .unwrap();
+        let current_resolution = arkret::identity::build_authenticated_webvh_service_resolution(
+            service,
+            arkret::ServiceKind::AppletService.as_str().to_owned(),
+            serde_json::from_value(state).unwrap(),
+            vec![inception.log_entry.clone(), rotation.log_entry.clone()],
+            vec![],
+            at + chrono::Duration::seconds(20),
+        )
+        .unwrap();
+        let mut old_config = (*test_edge(store.clone()).config).clone();
+        old_config.arkret.service_did = did;
+        old_config.arkret.signing_key_seed_hex = "c9".repeat(32);
+        old_config.arkret.verification_method_fragment = "#key-a".into();
+        old_config.arkret.service_resolution = Some(old_resolution);
+        let mut current_config = old_config.clone();
+        current_config.arkret.signing_key_seed_hex = "ca".repeat(32);
+        current_config.arkret.verification_method_fragment = format!("#{fragment}");
+        current_config.arkret.service_resolution = Some(current_resolution);
+        let (sender, _) = tokio::sync::mpsc::channel(1);
+        let old = ArkretEdge::new(Arc::new(old_config), store.clone(), sender).unwrap();
+        let (sender, _) = tokio::sync::mpsc::channel(1);
+        let current = ArkretEdge::new(Arc::new(current_config), store, sender).unwrap();
+        (old, current, at + chrono::Duration::seconds(1))
+    }
+
+    async fn freeze_publication_at(
+        edge: &ArkretEdge,
+        realm: &RealmId,
+        operation: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> AuthoredEvent {
+        let intent =
+            message_intent(edge, realm, "original response still unobserved").with_created_at(at);
+        let mut authored = intent
+            .clone()
+            .author_with_digest_suite(PRODUCER_DIGEST_SUITE)
+            .unwrap();
+        sign_event(
+            &mut authored,
+            &edge.signer,
+            SignEventOptions::new().with_created_at(at),
+        )
+        .unwrap();
+        let key = scope_key(realm, intent.actor_id()).unwrap();
+        assert!(
+            edge.journal
+                .freeze(
+                    &key,
+                    operation,
+                    &PublicationRecord::new(intent, authored.clone())
+                )
+                .await
+                .unwrap()
+        );
+        authored
+    }
+
+    fn verify_publication_wrappers(edge: &ArkretEdge, authored: &AuthoredEvent) {
+        let context = edge.publication_producer_context(authored).unwrap();
+        let request = SelfAuthoritySubmitRequestBody::Event(EventAdmissionSubmission::new(
+            authored.event().clone(),
+        ));
+        let bytes = arkret::canonical::canonical_json_bytes(&request).unwrap();
+        let verified =
+            arkret::VerifiedSubmission::verify(request, |_| Ok(context.clone())).unwrap();
+        assert_eq!(
+            arkret::canonical::canonical_json_bytes(verified.wire()).unwrap(),
+            bytes
+        );
+        let request =
+            AppletTransactionRequestBody::Events(arkret::AppletEventTransactionRequestBody {
+                applet_id: edge.applet_id.clone(),
+                source_id: edge.service_actor_id.clone(),
+                events: vec![authored.event().clone()],
+                committed_events: vec![],
+                signals: vec![],
+            });
+        let bytes = arkret::canonical::canonical_json_bytes(&request).unwrap();
+        let verified =
+            arkret::VerifiedSubmission::verify(request, |_| Ok(context.clone())).unwrap();
+        assert_eq!(
+            arkret::canonical::canonical_json_bytes(verified.wire()).unwrap(),
+            bytes
+        );
+    }
+
+    #[tokio::test]
+    async fn publication_replay_keeps_original_verified_producer_after_service_key_rotation() {
+        for reuse_method in [false, true] {
+            let store = Arc::new(MemoryAuthoringStore::default());
+            let (old_edge, current_edge, at) = publication_rotation(store, reuse_method);
+            let realm =
+                RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").unwrap();
+            let original =
+                freeze_publication_at(&old_edge, &realm, "response-not-observed", at).await;
+            let original_bytes = serde_json::to_vec(&original).unwrap();
+            let original_key = old_edge.signer.verifying_key().to_bytes();
+            assert_ne!(original_key, current_edge.signer.verifying_key().to_bytes());
+            let current_only = arkret::ProducerVerificationContext {
+                actor: ActorId::service(current_edge.service_actor_id.clone()),
+                verification_method: current_edge.service_verification_method().unwrap(),
+                public_key: PublicKeyMaterial::Ed25519Raw {
+                    bytes: current_edge.signer.verifying_key().to_bytes().to_vec(),
+                },
+                digest_suite: PRODUCER_DIGEST_SUITE,
+            };
+            assert!(
+                arkret::VerifiedProducerEvent::verify(original.event().clone(), &current_only)
+                    .is_err()
+            );
+            drop(old_edge);
+            let restored = current_edge
+                .retained_publication(&realm, &original.actor_id, "response-not-observed")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(serde_json::to_vec(&restored).unwrap(), original_bytes);
+            let historical = current_edge
+                .publication_producer_context(&restored)
+                .unwrap();
+            assert_eq!(historical.public_key.ed25519_bytes().unwrap(), original_key);
+            assert_eq!(
+                historical.verification_method,
+                original
+                    .producer_proof
+                    .as_ref()
+                    .unwrap()
+                    .verification_method
+            );
+            verify_publication_wrappers(&current_edge, &restored);
+            assert_eq!(serde_json::to_vec(&restored).unwrap(), original_bytes);
+            assert_eq!(
+                current_edge.journal.pending_events().await.unwrap(),
+                vec![original]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn publication_replay_rejects_bad_signature_and_non_assertion_method_after_rotation() {
+        let store = Arc::new(MemoryAuthoringStore::default());
+        let (old_edge, current_edge, at) = publication_rotation(store, false);
+        let realm = RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").unwrap();
+        let original = freeze_publication_at(&old_edge, &realm, "unchanged-original", at).await;
+        let before = serde_json::to_vec(&original).unwrap();
+        let mut bad_signature = original.event().clone();
+        let proof = bad_signature.producer_proof.as_mut().unwrap();
+        let index = proof.jws.find("..").unwrap() + 2;
+        let changed = if proof.jws.as_bytes()[index] == b'A' {
+            "B"
+        } else {
+            "A"
+        };
+        proof.jws.replace_range(index..index + 1, changed);
+        let bad_signature =
+            AuthoredEvent::from_verified_with_digest_suite(bad_signature, PRODUCER_DIGEST_SUITE)
+                .unwrap();
+        let context = current_edge
+            .publication_producer_context(&bad_signature)
+            .unwrap();
+        let request = SelfAuthoritySubmitRequestBody::Event(EventAdmissionSubmission::new(
+            bad_signature.into_event(),
+        ));
+        assert!(arkret::VerifiedSubmission::verify(request, |_| Ok(context.clone())).is_err());
+        let mut bad_method = original.event().clone();
+        bad_method
+            .producer_proof
+            .as_mut()
+            .unwrap()
+            .verification_method =
+            DidUrl::new(format!("{}#not-an-assertion", current_edge.service_did)).unwrap();
+        let bad_method =
+            AuthoredEvent::from_verified_with_digest_suite(bad_method, PRODUCER_DIGEST_SUITE)
+                .unwrap();
+        assert!(
+            current_edge
+                .publication_producer_context(&bad_method)
+                .is_err()
+        );
+        let restored = current_edge
+            .retained_publication(&realm, &original.actor_id, "unchanged-original")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(serde_json::to_vec(&restored).unwrap(), before);
+        assert_eq!(
+            current_edge.journal.pending_events().await.unwrap(),
+            vec![original]
+        );
+    }
+
+    #[tokio::test]
+    async fn publication_replay_without_native_history_keeps_own_key_and_fails_closed_on_rotation()
+    {
+        let store = Arc::new(MemoryAuthoringStore::default());
+        let edge = test_edge(store.clone());
+        let realm = RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").unwrap();
+        let original = edge
+            .author_and_sign(
+                &realm,
+                "no-public-history",
+                message_intent(&edge, &realm, "same trusted current key"),
+            )
+            .await
+            .unwrap();
+        verify_publication_wrappers(&edge, &original);
+        let mut config = (*edge.config).clone();
+        config.arkret.signing_key_seed_hex = "cc".repeat(32);
+        let (sender, _) = tokio::sync::mpsc::channel(1);
+        let rotated = ArkretEdge::new(Arc::new(config), store, sender).unwrap();
+        let context = rotated.publication_producer_context(&original).unwrap();
+        assert!(arkret::VerifiedProducerEvent::verify(original.into_event(), &context).is_err());
     }
 }

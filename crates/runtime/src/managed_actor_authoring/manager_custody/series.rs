@@ -405,6 +405,60 @@ impl ManagedActorManagerService {
         Ok((route, material, reference))
     }
 
+    fn inventory_original_commits<'a>(
+        manifest: &'a RealmActorArchiveInventoryManifest,
+        route: &RealmRoute,
+    ) -> Result<Vec<&'a arkret::RealmCommit>> {
+        use arkret_models_integration::RealmActorArchiveInventoryEntry;
+        let mut originals = std::collections::BTreeMap::new();
+        for entry in &manifest.entries {
+            // Backup.native_source verifies its complete portable provenance
+            // independently; those nested foreign histories are not host rows.
+            let commits: Vec<_> = match entry {
+                RealmActorArchiveInventoryEntry::Backup(_) => Vec::new(),
+                RealmActorArchiveInventoryEntry::Series(entry) => vec![&entry.source.commit],
+                RealmActorArchiveInventoryEntry::Recipient(entry) => {
+                    std::iter::once(&entry.declaration.commit)
+                        .chain(entry.recovery_begin.as_ref().map(|begin| &begin.commit))
+                        .collect()
+                }
+            };
+            for commit in commits {
+                commit
+                    .verify_commit_id_matches_content()
+                    .map_err(|error| invalid(error.to_string()))?;
+                let expected = route
+                    .authority
+                    .authority_service_at(commit.governance_generation)
+                    .ok_or_else(|| invalid("inventory original has an unknown governing tenure"))?;
+                let did = arkret::identity::verification_method_did(
+                    commit.signature.verification_method.as_str(),
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                if commit.realm_id != manifest.realm_actor_id.realm_id
+                    || &arkret::project_did_to_core_id(&did)
+                        .map_err(|error| invalid(error.to_string()))?
+                        != expected
+                {
+                    return Err(invalid(
+                        "inventory original locator differs from its actual Realm governor",
+                    ));
+                }
+                let bytes = arkret_canonical::canonical_json_bytes(commit)?;
+                if let Some((original_bytes, _)) = originals.get(&commit.commit_id) {
+                    if original_bytes != &bytes {
+                        return Err(invalid(
+                            "inventory has conflicting complete original Commits",
+                        ));
+                    }
+                } else {
+                    originals.insert(commit.commit_id.clone(), (bytes, commit));
+                }
+            }
+        }
+        Ok(originals.into_values().map(|(_, commit)| commit).collect())
+    }
+
     async fn inventory_on_route(
         &self,
         actor: &ActorId,
@@ -457,12 +511,16 @@ impl ManagedActorManagerService {
         if manifest.inventory_digest()? != expected_digest {
             return Err(invalid("native inventory full-manifest digest differs"));
         }
-        arkret::identity::verify_realm_actor_archive_inventory(
-            &manifest,
-            &route.authority,
-            &route.keys,
+        let commits = Self::inventory_original_commits(&manifest, route)?;
+        let keys = garth::historical_station_keys::fetch_historical_station_keys_for_commits(
+            &route.client,
+            &route.bundle,
+            &commits,
         )
+        .await
         .map_err(|error| invalid(error.to_string()))?;
+        arkret::identity::verify_realm_actor_archive_inventory(&manifest, &route.authority, &keys)
+            .map_err(|error| invalid(error.to_string()))?;
         Ok(manifest)
     }
 

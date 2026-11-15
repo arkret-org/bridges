@@ -638,16 +638,16 @@ mod tests {
             .is_err()
         );
         let now = chrono::Utc::now();
-        let mut identity = arkret_test_kit::service_identity::ServiceIdentityFixture::webvh(
-            &"https://applet.example/".parse().unwrap(),
-            801,
-            [0x22; 32],
-            "key-1",
-            now - chrono::Duration::minutes(1),
-            now,
-        )
-        .unwrap();
-        identity.resolution.service_kind = "applet_service".to_owned();
+        let identity =
+            arkret_test_kit::service_identity::ServiceIdentityFixture::webvh_applet_service(
+                &"https://applet.example/".parse().unwrap(),
+                801,
+                [0x22; 32],
+                "key-1",
+                now - chrono::Duration::minutes(1),
+                now,
+            )
+            .unwrap();
         let mut config = template.config().as_ref().clone();
         config.arkret.service_did = identity.resolution.normalized_did_document.id.clone();
         config.arkret.service_resolution = Some(identity.resolution.clone());
