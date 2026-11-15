@@ -573,10 +573,7 @@ fn prepare_successor(
     };
     let transcript = arkret::RealmActorControlAcceptanceTranscript {
         actor_id: actor.clone(),
-        expected_revision: CurrentRevision {
-            commit_id: reference.commit_id.clone(),
-            stream_position: reference.stream_position,
-        },
+        expected_commit_id: reference.commit_id.clone(),
         next_resolution: ResolutionCommitment {
             did: did.clone(),
             method_history_head: head,
@@ -594,7 +591,7 @@ fn prepare_successor(
     )
     .map_err(|e| invalid(e.to_string()))?;
     let payload = arkret::RealmActorControlUpdatePayload {
-        expected_revision: transcript.expected_revision,
+        expected_commit_id: transcript.expected_commit_id,
         next_resolution: transcript.next_resolution,
         method_history_evidence: transcript.method_history_evidence,
         next_control_method_kid: method.clone(),
@@ -779,7 +776,7 @@ mod tests {
             &payload.next_method_signature,
             &arkret::RealmActorControlAcceptanceTranscript {
                 actor_id: actor.clone(),
-                expected_revision: payload.expected_revision.clone(),
+                expected_commit_id: payload.expected_commit_id.clone(),
                 next_resolution: payload.next_resolution.clone(),
                 method_history_evidence: payload.method_history_evidence.clone(),
                 next_control_method_kid: payload.next_control_method_kid.clone(),

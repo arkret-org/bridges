@@ -90,6 +90,7 @@ fn validate_closure(
         || after.stream_ref != fence.stream_ref
         || after.stream_position < fence.stream_position
         || (after.stream_position == fence.stream_position && after.commit_id != fence.commit_id)
+        || (after.commit_id == fence.commit_id && after.stream_position != fence.stream_position)
         || outcome.governance_generation < current.governance_generation
     {
         return Err(invalid(
@@ -104,59 +105,68 @@ fn validate_closure(
             CurrentSelector::RealmActorControl {
                 actor_id: actor.clone(),
             },
-            begin.expected_control_revision,
+            begin.expected_control_commit_id,
         ),
         (
             CurrentSelector::RealmActorManager {
                 actor_id: actor.clone(),
             },
-            CurrentRevision {
-                commit_id: begin.manager_ref.commit_id,
-                stream_position: begin.manager_ref.stream_position,
-            },
+            begin.manager_ref.commit_id,
         ),
         (
             CurrentSelector::RealmActorRecovery {
                 actor_id: actor.clone(),
             },
-            CurrentRevision {
-                commit_id: begin.recovery_ref.commit_id,
-                stream_position: begin.recovery_ref.stream_position,
-            },
+            begin.recovery_ref.commit_id,
         ),
         (
             CurrentSelector::RealmActorDeviceGeneration {
                 actor_id: actor.clone(),
             },
-            begin.expected_device_generation_revision,
+            begin.expected_device_generation_commit_id,
         ),
         (
             CurrentSelector::RealmActorStatus {
                 actor_id: actor.clone(),
                 gate: arkret::RealmActorStatusGate::Owner,
             },
-            begin.expected_owner_status_revision,
+            begin.expected_owner_status_commit_id,
         ),
         (
             CurrentSelector::RealmActorStatus {
                 actor_id: actor.clone(),
                 gate: arkret::RealmActorStatusGate::Governance,
             },
-            begin.expected_governance_status_revision,
+            begin.expected_governance_status_commit_id,
         ),
     ];
+    if prepared.source_revisions.len() != expected.len() {
+        return Err(invalid(
+            "recovery closure lacks its original verified read coordinates",
+        ));
+    }
     let mut advanced = false;
-    for (selector, before) in expected {
+    for ((selector, expected_commit_id), (source_selector, before)) in
+        expected.into_iter().zip(&prepared.source_revisions)
+    {
+        if &selector != source_selector || before.commit_id != expected_commit_id {
+            return Err(invalid(
+                "recovery read coordinates differ from the signed precondition",
+            ));
+        }
         let (revision, ..) = row(current, &selector)?;
         if revision.stream_position < before.stream_position
             || (revision.stream_position == before.stream_position
                 && revision.commit_id != before.commit_id)
+            || (revision.commit_id == before.commit_id
+                && revision.stream_position != before.stream_position)
         {
             return Err(invalid(
                 "current proof regresses or forks a required recovery revision",
             ));
         }
-        advanced |= revision.stream_position > before.stream_position;
+        advanced |= revision.commit_id != before.commit_id
+            && revision.stream_position > before.stream_position;
     }
     if !advanced {
         return Err(invalid(
@@ -165,3 +175,6 @@ fn validate_closure(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

@@ -16,6 +16,9 @@ pub(crate) struct PreparedRecovery {
     pub(crate) operation_id: String,
     pub(crate) actor_id: ActorId,
     pub(crate) begin: AuthoredEvent,
+    // Local witnessed read coordinates support closure proofs after wire CAS
+    // is reduced to a Commit ID. They are not new Event payload members.
+    source_revisions: Vec<(CurrentSelector, CurrentRevision)>,
     next_root_seed: String,
     controller_seed: String,
     pub(crate) publication: arkret::AppletManagedActorMethodHistoryEvidence,
@@ -35,6 +38,31 @@ impl PreparedRecovery {
     pub(crate) fn is_finished(&self) -> bool {
         self.terminal.is_some() || self.closed_without_acceptance()
     }
+}
+
+fn recovery_read_selectors(actor: &ActorId) -> [CurrentSelector; 6] {
+    [
+        CurrentSelector::RealmActorControl {
+            actor_id: actor.clone(),
+        },
+        CurrentSelector::RealmActorManager {
+            actor_id: actor.clone(),
+        },
+        CurrentSelector::RealmActorRecovery {
+            actor_id: actor.clone(),
+        },
+        CurrentSelector::RealmActorDeviceGeneration {
+            actor_id: actor.clone(),
+        },
+        CurrentSelector::RealmActorStatus {
+            actor_id: actor.clone(),
+            gate: arkret::RealmActorStatusGate::Owner,
+        },
+        CurrentSelector::RealmActorStatus {
+            actor_id: actor.clone(),
+            gate: arkret::RealmActorStatusGate::Governance,
+        },
+    ]
 }
 
 pub(crate) fn row<'a>(
@@ -191,13 +219,10 @@ impl ManagedActorAuthoringService {
         let reset = arkret::RealmActorControlResetPayload {
             target_actor_id: prepared.actor_id.clone(),
             recovery_begin_ref: begin_ref,
-            expected_recovery_revision: revision.clone(),
-            expected_manager_revision: CurrentRevision {
-                commit_id: begin.manager_ref.commit_id.clone(),
-                stream_position: begin.manager_ref.stream_position,
-            },
-            expected_control_revision: begin.expected_control_revision.clone(),
-            expected_device_generation_revision: revision,
+            expected_recovery_commit_id: revision.commit_id.clone(),
+            expected_manager_commit_id: begin.manager_ref.commit_id.clone(),
+            expected_control_commit_id: begin.expected_control_commit_id.clone(),
+            expected_device_generation_commit_id: revision.commit_id,
             published_method_history_evidence: retained.publication.clone(),
         };
         let at = arkret::canonical::normalize_timestamp_canonical(Utc::now());
@@ -503,10 +528,10 @@ fn prepare(
         request_id: crate::realm_governance::nonce()?,
         manager_ref: manager_ref.clone(),
         recovery_ref: recovery_ref.clone(),
-        expected_control_revision: control_revision.clone(),
-        expected_owner_status_revision: owner_revision.clone(),
-        expected_governance_status_revision: governance_revision.clone(),
-        expected_device_generation_revision: generation_revision.clone(),
+        expected_control_commit_id: control_revision.commit_id.clone(),
+        expected_owner_status_commit_id: owner_revision.commit_id.clone(),
+        expected_governance_status_commit_id: governance_revision.commit_id.clone(),
+        expected_device_generation_commit_id: generation_revision.commit_id.clone(),
         expected_generation: generation.current_device_generation_ref,
         new_generation: generation
             .current_device_generation_ref
@@ -595,10 +620,18 @@ fn prepare(
         edge.signer(),
         SignEventOptions::new().with_created_at(at),
     )?;
+    let source_revisions = recovery_read_selectors(actor)
+        .into_iter()
+        .map(|selector| {
+            let (revision, ..) = row(cut, &selector)?;
+            Ok((selector, revision.clone()))
+        })
+        .collect::<Result<Vec<_>>>()?;
     Ok(PreparedRecovery {
         operation_id: operation.to_owned(),
         actor_id: actor.clone(),
         begin,
+        source_revisions,
         next_root_seed: arkret::base64url_encode(next),
         controller_seed: arkret::base64url_encode(controller),
         publication,

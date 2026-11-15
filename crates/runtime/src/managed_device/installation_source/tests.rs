@@ -50,7 +50,7 @@ fn fixture() -> (InstallationHint, AppletAuthorityMaterialResponseBody) {
     let payload = AppletRegistrationPayload {
         applet_id: applet.clone(),
         service_id: service.signing_principal_id().clone(),
-        expected_revision: None,
+        expected_commit_id: None,
         controller_principal_id: service.signing_principal_id().clone(),
         base_url: "https://applet.example".into(),
         claimed_profiles: vec![],
@@ -132,7 +132,7 @@ fn fixture() -> (InstallationHint, AppletAuthorityMaterialResponseBody) {
     value["id"] = json!(id);
     value["status"] = json!("active");
     value["authority_depth"] = json!(1);
-    value["authority_root_refs"] = value["issuer_authority_refs"].clone();
+    value["authority_root_ref"] = value["issuer_authority_refs"][0].clone();
     let row = ExactCurrentStateReadResponseBody::Present {
         realm_id: realm,
         governance_generation: 0,

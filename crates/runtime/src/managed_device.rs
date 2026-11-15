@@ -479,8 +479,8 @@ impl ManagedDeviceRuntime {
             || p.recovery_session_id.is_some()
             || p.pairing_challenge_transcript_digest.is_some()
             || p.authorized_generation_ref == 0
-            || p.expected_control_revision.is_none()
-            || p.expected_device_revision != Some(None)
+            || p.expected_control_commit_id.is_none()
+            || p.expected_device_commit_id != Some(None)
             || p.applet_id.as_ref().map(|id| id.as_str()) != Some(self.edge.applet_id())
             || canonical_json_bytes(scopes)? != canonical_json_bytes(&record.plan.scopes)?
             || p.not_before != record.plan.not_before
@@ -642,8 +642,8 @@ impl ManagedDeviceRuntime {
             expires_at: Some(Some(plan.expires_at)),
             authorization_binding_kind: DeviceAuthorizationBindingKind::RealmManagedDelegation,
             authorized_generation_ref: control.generation,
-            expected_control_revision: Some(control.revision.clone()),
-            expected_device_revision: Some(None),
+            expected_control_commit_id: Some(control.revision.commit_id.clone()),
+            expected_device_commit_id: Some(None),
             device_signature: SignatureMaterial::NonEmptyString(nonempty("AA")?),
             recovery_session_id: None,
             pairing_challenge_transcript_digest: None,
@@ -774,7 +774,7 @@ impl ManagedDeviceRuntime {
                 .map_err(|e| invalid(e.to_string()))?;
             let options = arkret::ClientRequestOptions::new()
                 .idempotency_key(record.authorization.event_id().as_str());
-            if auth_payload.expected_control_revision.as_ref() != Some(&control.revision)
+            if auth_payload.expected_control_commit_id.as_ref() != Some(&control.revision.commit_id)
                 || control.control.control_method_kid.as_str()
                     != controller.signer.verification_method()
             {

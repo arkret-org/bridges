@@ -987,6 +987,8 @@ mod tests {
             },
             attested_at: registered_at + chrono::Duration::seconds(10),
             expires_at: registered_at + chrono::Duration::minutes(5),
+
+            owner_transfer_acceptance_intent_digest: None,
         };
         let evidence = arkret::AccountDeviceSignerEvidence {
             device_projection_attestation: sign_device_projection_attestation(

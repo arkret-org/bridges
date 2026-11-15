@@ -131,12 +131,6 @@ pub(crate) fn continuous_publication(
         previous
     })
 }
-pub(crate) fn revision(reference: &CommittedEventRef) -> CurrentRevision {
-    CurrentRevision {
-        commit_id: reference.commit_id.clone(),
-        stream_position: reference.stream_position,
-    }
-}
 pub(crate) fn reference(commit: &RealmCommit) -> CommittedEventRef {
     CommittedEventRef {
         event_id: commit.event_ref.clone(),
@@ -500,7 +494,7 @@ impl ManagedActorAuthoringService {
         let (next_resolution, method_history_evidence) = native_material(&offer.did, &entries)?;
         let transcript = arkret::RealmActorControlAcceptanceTranscript {
             actor_id: plan.actor_id.clone(),
-            expected_revision: revision(reference),
+            expected_commit_id: reference.commit_id.clone(),
             next_resolution,
             method_history_evidence,
             next_control_method_kid: offer.method.clone(),
@@ -643,7 +637,7 @@ impl ManagedActorAuthoringService {
             .await?;
         let transcript = &outgoing.transcript;
         let payload = arkret::RealmActorControlUpdatePayload {
-            expected_revision: transcript.expected_revision.clone(),
+            expected_commit_id: transcript.expected_commit_id.clone(),
             next_resolution: transcript.next_resolution.clone(),
             method_history_evidence: transcript.method_history_evidence.clone(),
             next_control_method_kid: transcript.next_control_method_kid.clone(),
@@ -996,9 +990,9 @@ impl ManagedActorAuthoringService {
         let transcript = arkret::RealmActorManagerAcceptanceTranscript {
             actor_id: actor_id.clone(),
             applet_id: payload.applet_id,
-            expected_manager_revision: manager_revision.clone(),
-            expected_control_revision: revision(control_ref),
-            expected_device_generation_revision: generation_revision.clone(),
+            expected_manager_commit_id: manager_revision.commit_id.clone(),
+            expected_control_commit_id: control_ref.commit_id.clone(),
+            expected_device_generation_commit_id: generation_revision.commit_id.clone(),
             expected_generation: generation.current_device_generation_ref,
             new_generation: generation
                 .current_device_generation_ref
@@ -1022,9 +1016,9 @@ impl ManagedActorAuthoringService {
         )
         .map_err(|e| invalid(e.to_string()))?;
         let payload = arkret::RealmActorManagerChangePayload {
-            expected_manager_revision: transcript.expected_manager_revision,
-            expected_control_revision: transcript.expected_control_revision,
-            expected_device_generation_revision: transcript.expected_device_generation_revision,
+            expected_manager_commit_id: transcript.expected_manager_commit_id,
+            expected_control_commit_id: transcript.expected_control_commit_id,
+            expected_device_generation_commit_id: transcript.expected_device_generation_commit_id,
             expected_generation: transcript.expected_generation,
             new_generation: transcript.new_generation,
             new_service_id: transcript.new_service_id,

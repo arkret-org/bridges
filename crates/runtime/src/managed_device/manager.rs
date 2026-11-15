@@ -3,7 +3,7 @@ use arkret::identity::VerifiedRealmActorMaterial;
 use arkret::{CurrentSelector, RealmActorMaterial, RealmActorMaterialRequestBody};
 
 use super::*;
-use crate::managed_actor_authoring::control::manager::{reference, revision};
+use crate::managed_actor_authoring::control::manager::reference;
 
 fn selectors(actor: &ActorId) -> Vec<CurrentSelector> {
     vec![
@@ -357,22 +357,22 @@ impl ManagedDeviceRuntime {
                         CurrentSelector::RealmActorControl {
                             actor_id: plan.actor_id.clone(),
                         },
-                        &payload.expected_control_revision,
+                        &payload.expected_control_commit_id,
                     ),
                     (
                         CurrentSelector::RealmActorManager {
                             actor_id: plan.actor_id.clone(),
                         },
-                        &payload.expected_manager_revision,
+                        &payload.expected_manager_commit_id,
                     ),
                     (
                         CurrentSelector::RealmActorDeviceGeneration {
                             actor_id: plan.actor_id.clone(),
                         },
-                        &payload.expected_device_generation_revision,
+                        &payload.expected_device_generation_commit_id,
                     ),
                 ] {
-                    if &revision(row(&current, &selector)?.1) != expected {
+                    if &row(&current, &selector)?.1.commit_id != expected {
                         return Err(invalid(
                             "manager prestate changed; retain the original instead of authoring a replacement",
                         ));

@@ -148,7 +148,7 @@ impl ManagedDeviceRuntime {
                 RealmActorStatusSetPayload {
                     target_actor_id: actor.clone(),
                     gate: RealmActorStatusSetPayloadGate::Owner,
-                    expected_revision: revision,
+                    expected_commit_id: revision.commit_id,
                     state,
                 },
             )?

@@ -43,49 +43,7 @@ impl ManagedActorAuthoringService {
     ) -> Result<()> {
         let current = current.material();
         let outcome = outcome.material();
-        self.require_control_outcome(prepared, outcome)?;
-        if current.actor_id != prepared.actor_id
-            || current.requester_actor_id != outcome.requester_actor_id
-            || !matches!(
-                &outcome.material,
-                RealmActorMaterial::RequestStatus {
-                    request_status: arkret::RealmActorRequestStatus::Status {
-                        status: arkret::RealmActorOperationStatus::Unknown
-                    },
-                    ..
-                }
-            )
-        {
-            return Err(invalid(
-                "unaccepted control requires the same subject and an exact unknown",
-            ));
-        }
-        let selector = CurrentSelector::RealmActorControl {
-            actor_id: prepared.actor_id.clone(),
-        };
-        let (revision, _, source) = recovery::row(current, &selector)?;
-        let before = &prepared.previous_reference;
-        let (Some(fence), Some(after)) =
-            (&current.control_stream_head, &outcome.control_stream_head)
-        else {
-            return Err(invalid(
-                "unaccepted control proof requires both private cut heads",
-            ));
-        };
-        if revision.stream_position <= before.stream_position
-            || source.stream_ref != before.stream_ref
-            || fence.stream_ref != before.stream_ref
-            || fence.stream_position < revision.stream_position
-            || after.stream_ref != fence.stream_ref
-            || after.stream_position < fence.stream_position
-            || (after.stream_position == fence.stream_position
-                && after.commit_id != fence.commit_id)
-            || outcome.governance_generation < current.governance_generation
-        {
-            return Err(invalid(
-                "unknown requires an irreversible control CAS fence and a subsequent cut",
-            ));
-        }
+        validate_closure(prepared, current, outcome, self.edge.service_actor_id())?;
         self.save_control_closure(
             prepared,
             ControlClosure::Unaccepted {
@@ -130,21 +88,7 @@ impl ManagedActorAuthoringService {
         prepared: &PreparedControlRotation,
         outcome: &RealmActorMaterialResponseBody,
     ) -> Result<()> {
-        let request =
-            arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
-                arkret::EventAdmissionSubmission::new(prepared.event.event().clone()),
-            );
-        if prepared.outcome.is_some()
-            || outcome.actor_id != prepared.actor_id
-            || outcome.requester_actor_id != ActorId::service(self.edge.service_actor_id().clone())
-            || !matches!(&outcome.material, RealmActorMaterial::RequestStatus { target_request_digest, .. }
-                if target_request_digest.as_str() == canonical_sha256(&request)?)
-        {
-            return Err(invalid(
-                "control closure differs from the retained original or requester",
-            ));
-        }
-        Ok(())
+        require_outcome(prepared, outcome, self.edge.service_actor_id())
     }
 
     async fn save_control_closure(
@@ -176,4 +120,78 @@ impl ManagedActorAuthoringService {
         retained.closure = Some(proof);
         self.save_control(&subject, Some(raw), &custody).await
     }
+}
+
+fn require_outcome(
+    prepared: &PreparedControlRotation,
+    outcome: &RealmActorMaterialResponseBody,
+    service: &DidCoreId,
+) -> Result<()> {
+    let request =
+        arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
+            arkret::EventAdmissionSubmission::new(prepared.event.event().clone()),
+        );
+    if prepared.outcome.is_some()
+        || outcome.actor_id != prepared.actor_id
+        || outcome.requester_actor_id != ActorId::service(service.clone())
+        || !matches!(&outcome.material, RealmActorMaterial::RequestStatus { target_request_digest, .. }
+            if target_request_digest.as_str() == canonical_sha256(&request)?)
+    {
+        return Err(invalid(
+            "control closure differs from the retained original or requester",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_closure(
+    prepared: &PreparedControlRotation,
+    current: &RealmActorMaterialResponseBody,
+    outcome: &RealmActorMaterialResponseBody,
+    service: &DidCoreId,
+) -> Result<()> {
+    require_outcome(prepared, outcome, service)?;
+    if current.actor_id != prepared.actor_id
+        || current.requester_actor_id != outcome.requester_actor_id
+        || !matches!(
+            &outcome.material,
+            RealmActorMaterial::RequestStatus {
+                request_status: arkret::RealmActorRequestStatus::Status {
+                    status: arkret::RealmActorOperationStatus::Unknown
+                },
+                ..
+            }
+        )
+    {
+        return Err(invalid(
+            "unaccepted control requires the same subject and an exact unknown",
+        ));
+    }
+    let selector = CurrentSelector::RealmActorControl {
+        actor_id: prepared.actor_id.clone(),
+    };
+    let (revision, _, source) = recovery::row(current, &selector)?;
+    let before = &prepared.previous_reference;
+    let (Some(fence), Some(after)) = (&current.control_stream_head, &outcome.control_stream_head)
+    else {
+        return Err(invalid(
+            "unaccepted control proof requires both private cut heads",
+        ));
+    };
+    if revision.stream_position <= before.stream_position
+        || revision.commit_id == before.commit_id
+        || source.stream_ref != before.stream_ref
+        || fence.stream_ref != before.stream_ref
+        || fence.stream_position < revision.stream_position
+        || after.stream_ref != fence.stream_ref
+        || after.stream_position < fence.stream_position
+        || (after.stream_position == fence.stream_position && after.commit_id != fence.commit_id)
+        || (after.commit_id == fence.commit_id && after.stream_position != fence.stream_position)
+        || outcome.governance_generation < current.governance_generation
+    {
+        return Err(invalid(
+            "unknown requires an irreversible control CAS fence and a subsequent cut",
+        ));
+    }
+    Ok(())
 }

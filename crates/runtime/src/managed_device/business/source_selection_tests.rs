@@ -25,7 +25,11 @@ fn terminal_parent_rejects_disjoint_circles_without_rejecting_narrow_or_realm_wi
         "subject":ActorId::service("ak:did_core:web:applet.example".parse().unwrap()),
         "actions":["ak.message.create"], "resources":[WireResourceSelector::circle(realm.clone(),circle(63))],
         "constraints":[], "issued_at":"2026-10-21T01:00:00.000Z", "status":"active",
-        "authority_depth":0, "issuer_authority_refs":[], "authority_root_refs":[],
+        "authority_depth":1,
+        "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_generation":"0",
+            "authority_event_ref":arkret::EventId::from_digest(arkret_canonical::DigestSuite::Sha256,[66;32])}],
+        "authority_root_ref":{"kind":"realm_root","realm_id":realm,"authority_generation":"0",
+            "authority_event_ref":arkret::EventId::from_digest(arkret_canonical::DigestSuite::Sha256,[66;32])},
     })).unwrap();
     assert!(!parent_scope_candidate(&fixture, &scope));
     let mut grants = [fixture.clone(), fixture.clone()];
