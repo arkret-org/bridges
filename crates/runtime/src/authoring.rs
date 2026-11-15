@@ -235,52 +235,74 @@ impl AuthoringJournal {
         let outcome = outcome.clone();
         let committed = committed.cloned();
         crate::run_blocking(move || {
-            let Some(record) = load_operation(store.as_ref(), &scope, &operation)? else {
-                return Err(BridgeError::Database(
-                    "frozen publication disappeared".into(),
-                ));
-            };
-            let result_row = result_key(&scope, &operation)?;
-            let pending_row = pending_key(&scope, &operation)?;
-            let count = record
-                .observation_count
-                .checked_add(1)
-                .ok_or_else(|| BridgeError::Database("observation index exhausted".into()))?;
-            let observation_row = format!(
-                "observation/{}",
-                serde_json::to_string(&(&scope, &operation, count))?
-            );
-            let expected = vec![
-                (result_row.clone(), record.result_raw.clone()),
-                (observation_row.clone(), None),
-            ];
-            let writes = vec![
-                (
-                    result_row,
-                    Some(serde_json::to_string(&RecordedResult {
-                        outcome: Some(outcome.clone()),
-                        committed: committed.clone(),
-                        observation_count: count,
-                    })?),
-                ),
-                (
-                    observation_row,
-                    Some(serde_json::to_string(&StationObservation {
-                        station,
-                        outcome,
-                    })?),
-                ),
-                // A settled publication leaves the restart replay set. Retryable
-                // unavailability is settled by the caller re-opening it.
-                (pending_row, None),
-            ];
-            store.compare_exchange_batch(&expected, &writes)
+            loop {
+                let Some(record) = load_operation(store.as_ref(), &scope, &operation)? else {
+                    return Err(BridgeError::Database(
+                        "frozen publication disappeared".into(),
+                    ));
+                };
+                // Acceptance is immutable. A later transport can report an older
+                // rejection; it cannot erase or replace the durable publication.
+                if let Some(accepted) = &record.committed {
+                    if committed
+                        .as_ref()
+                        .is_some_and(|incoming| incoming != accepted)
+                    {
+                        return Err(BridgeError::Database(
+                            "accepted publication has different committed coordinates".into(),
+                        ));
+                    }
+                    return Ok(true);
+                }
+                let result_row = result_key(&scope, &operation)?;
+                let pending_row = pending_key(&scope, &operation)?;
+                let count = record
+                    .observation_count
+                    .checked_add(1)
+                    .ok_or_else(|| BridgeError::Database("observation index exhausted".into()))?;
+                let observation_row = format!(
+                    "observation/{}",
+                    serde_json::to_string(&(&scope, &operation, count))?
+                );
+                let expected = vec![
+                    (result_row.clone(), record.result_raw.clone()),
+                    (observation_row.clone(), None),
+                ];
+                let writes = vec![
+                    (
+                        result_row,
+                        Some(serde_json::to_string(&RecordedResult {
+                            outcome: Some(outcome.clone()),
+                            committed: committed.clone(),
+                            observation_count: count,
+                        })?),
+                    ),
+                    (
+                        observation_row,
+                        Some(serde_json::to_string(&StationObservation {
+                            station: station.clone(),
+                            outcome: outcome.clone(),
+                        })?),
+                    ),
+                    // A settled publication leaves the restart replay set. Retryable
+                    // unavailability is settled by the caller re-opening it.
+                    (pending_row, None),
+                ];
+                let changed = store.compare_exchange_batch(&expected, &writes)?;
+                if changed || committed.is_none() {
+                    return Ok(changed);
+                }
+                // A verified acceptance must not be lost to a concurrent rejection
+                // or explicit reopen. Re-read and merge this same C, with no network
+                // retry or lock held across attempts. Store errors remain errors.
+            }
         })
         .await
     }
 
-    /// Re-open a publication whose last answer was not an acceptance. The frozen
-    /// bytes stay immutable; only the replay index is restored.
+    /// Re-open a publication whose last answer was not an acceptance. Clear
+    /// its current terminal answer and restore pending in the same result CAS;
+    /// frozen bytes and the original observation history stay immutable.
     pub(crate) async fn reopen(&self, scope: &str, operation: &str) -> Result<bool> {
         let store = self.store.clone();
         let scope = scope.to_owned();
@@ -297,9 +319,23 @@ impl AuthoringJournal {
                 ));
             }
             let pending_row = pending_key(&scope, &operation)?;
+            let result_row = result_key(&scope, &operation)?;
             store.compare_exchange_batch(
-                &[(pending_row.clone(), None)],
-                &[(pending_row, Some(operation.clone()))],
+                &[
+                    (result_row.clone(), record.result_raw),
+                    (pending_row.clone(), None),
+                ],
+                &[
+                    (
+                        result_row,
+                        Some(serde_json::to_string(&RecordedResult {
+                            outcome: None,
+                            committed: None,
+                            observation_count: record.observation_count,
+                        })?),
+                    ),
+                    (pending_row, Some(operation.clone())),
+                ],
             )
         })
         .await
