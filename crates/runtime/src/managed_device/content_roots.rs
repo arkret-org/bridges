@@ -218,7 +218,7 @@ impl ManagedDeviceRuntime {
                 operation: &publication_operation,
                 root,
                 created_at,
-                author: arkret::crypto::backup::KeyBackupAuthBinding {
+                author: arkret::crypto::backup::KeyBackupAuthorizationBinding {
                     device_id: device.device_id.clone(),
                     verification_method: arkret::DidUrl::new(device.signer.verification_method())
                         .map_err(invalid)?,

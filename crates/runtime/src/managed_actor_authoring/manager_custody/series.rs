@@ -511,14 +511,16 @@ impl ManagedActorManagerService {
         if manifest.inventory_digest()? != expected_digest {
             return Err(invalid("native inventory full-manifest digest differs"));
         }
-        let commits = Self::inventory_original_commits(&manifest, route)?;
-        let keys = garth::historical_station_keys::fetch_historical_station_keys_for_commits(
-            &route.client,
-            &route.bundle,
-            &commits,
-        )
-        .await
-        .map_err(|error| invalid(error.to_string()))?;
+        // Preserve the complete-original content/Realm/governor conflict checks
+        // before resolving independently authenticated historical keys.
+        Self::inventory_original_commits(&manifest, route)?;
+        crate::realm_governance::validate_archive_commit_tenures(&manifest, &route.authority)?;
+        let keys = route.historical_key_directory().await?;
+        crate::realm_governance::validate_archive_commit_coordinates(
+            &manifest,
+            &route.authority,
+            &keys,
+        )?;
         arkret::identity::verify_realm_actor_archive_inventory(&manifest, &route.authority, &keys)
             .map_err(|error| invalid(error.to_string()))?;
         Ok(manifest)
