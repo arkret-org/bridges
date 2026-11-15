@@ -272,6 +272,9 @@ impl ManagedActorManagerService {
         })
         .await?;
         let route = self.authoring.edge.realm_route(&owner.realm_id).await?;
+        // The receiving Service independently loads public governor histories.
+        // SDK import selects the actual coordinates only after opening the cut.
+        let history_keys = route.historical_key_directory().await?;
         let offer_document = self.service_document_at(sealed.offer.signature.created_at)?;
         let confirmed_at = arkret::canonical::normalize_timestamp_canonical(Utc::now());
         let confirmation_document = self.service_document_at(confirmed_at)?;
@@ -291,7 +294,7 @@ impl ManagedActorManagerService {
                 &sealed,
                 &private,
                 &route.authority,
-                &route.keys,
+                &history_keys,
                 &context,
                 |identity| {
                     let prior = vault.read_record(&key).map_err(|error| {
@@ -313,6 +316,14 @@ impl ManagedActorManagerService {
                     Ok(Some(prior.imported_at))
                 },
                 |_, plaintext, imported_at| {
+                    crate::realm_governance::validate_archive_commit_coordinates(
+                        &plaintext.inventory_manifest,
+                        &route.authority,
+                        &history_keys,
+                    )
+                    .map_err(|error| {
+                        arkret::identity::IdentityError::Protocol(error.to_string())
+                    })?;
                     let record = ImportedArchive {
                         sealed_digest: sealed_digest.clone(),
                         sealed: sealed.clone(),

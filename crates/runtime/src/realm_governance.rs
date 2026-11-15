@@ -8,6 +8,11 @@ use chrono::{DateTime, Utc};
 
 use crate::{ArkretEdge, BridgeError, Result};
 
+mod historical_keys;
+pub(crate) use historical_keys::{
+    validate_archive_commit_coordinates, validate_archive_commit_tenures,
+};
+
 pub(crate) fn invalid(error: impl std::fmt::Display) -> BridgeError {
     BridgeError::App(error.to_string())
 }

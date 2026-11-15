@@ -235,12 +235,11 @@ impl ManagedActorManagerService {
             matches!(entry, RealmActorArchiveInventoryEntry::Series(entry) if entry.effective_scope == *scope)) {
             return Err(invalid("historical scoped series cannot lose its current pointer"));
         }
-        if let Some(selected) = &selected {
-            if selected.manager_ref == manager_ref
-                && selected.recipient_ref == recovery.content_backup_recipient_ref
-            {
-                return Ok(selected.clone());
-            }
+        if let Some(selected) = &selected
+            && selected.manager_ref == manager_ref
+            && selected.recipient_ref == recovery.content_backup_recipient_ref
+        {
+            return Ok(selected.clone());
         }
         let version = previous.map_or(Ok(1), |record| {
             record
@@ -458,12 +457,15 @@ impl ManagedActorManagerService {
         if manifest.inventory_digest()? != expected_digest {
             return Err(invalid("native inventory full-manifest digest differs"));
         }
-        arkret::identity::verify_realm_actor_archive_inventory(
+        crate::realm_governance::validate_archive_commit_tenures(&manifest, &route.authority)?;
+        let keys = route.historical_key_directory().await?;
+        crate::realm_governance::validate_archive_commit_coordinates(
             &manifest,
             &route.authority,
-            &route.keys,
-        )
-        .map_err(|error| invalid(error.to_string()))?;
+            &keys,
+        )?;
+        arkret::identity::verify_realm_actor_archive_inventory(&manifest, &route.authority, &keys)
+            .map_err(|error| invalid(error.to_string()))?;
         Ok(manifest)
     }
 

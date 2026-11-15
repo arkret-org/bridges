@@ -109,6 +109,382 @@ fn raw_tables(vault: &ManagerArchiveVault) -> (RawTable, RawTable) {
 }
 
 #[test]
+fn real_sdk_handover_rechecks_acceptance_time_before_first_or_cold_vault_write() {
+    use std::cell::Cell;
+
+    use arkret::identity::{RealmAuthorityFreshness, RealmAuthorityKeyMap};
+    use arkret::signatures::detached_object::sign_detached_object;
+    use arkret::{
+        CommitStreamHead, DetachedSignatureContext, RealmAuthorityBundle,
+        RealmAuthorityCurrentAssertion,
+    };
+    use arkret_models_integration::{
+        RealmActorArchiveInventoryEntry, RealmActorArchiveInventoryManifest,
+        RealmActorContentBackupHandoverOfferSignatureInput,
+    };
+
+    // A Series-only formal cut isolates the SDK crypto/HPKE/durable callback
+    // boundary. It does not claim a complete live inventory or PG admission.
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../arkret-spec/spec/v1/artifacts/fixtures/realm-actor-content-backup-fixture.json"
+    )))
+    .unwrap();
+    let mut manifest: RealmActorArchiveInventoryManifest =
+        serde_json::from_value(fixture["archive_inventory"].clone()).unwrap();
+    manifest
+        .entries
+        .retain(|entry| matches!(entry, RealmActorArchiveInventoryEntry::Series(_)));
+    assert_eq!(manifest.entries.len(), 1);
+    let RealmActorArchiveInventoryEntry::Series(series) = &manifest.entries[0] else {
+        unreachable!()
+    };
+    let series_commit = series.source.commit.clone();
+    let genesis = &fixture["native_source"]["governance_history"]["genesis"];
+    let genesis_event: arkret::Event = serde_json::from_value(genesis["event"].clone()).unwrap();
+    let original_commit: arkret::RealmCommit =
+        serde_json::from_value(genesis["commit"].clone()).unwrap();
+    let resolution: arkret::AuthenticatedServiceResolution = serde_json::from_value(
+        fixture["native_source"]["governance_history"]["genesis_resolution"].clone(),
+    )
+    .unwrap();
+    let governor = ed25519_dalek::SigningKey::from_bytes(
+        &hex::decode(
+            fixture["original_authority_reference"]["governor_seed_hex"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap()
+        .try_into()
+        .unwrap(),
+    );
+    let original_offer: arkret_models_integration::RealmActorContentBackupHandoverOffer =
+        serde_json::from_value(fixture["private_handover"]["sealed"]["offer"].clone()).unwrap();
+    let first_at = original_offer.signature.created_at + chrono::Duration::seconds(1);
+    // Rebuild the authenticated carrier from the fixture's unchanged signed
+    // native logs; its older wrapper receipt is not itself a trusted proof.
+    let native = &fixture["native_source"]["governance_history"]["genesis_resolution"]["method_history_evidence"];
+    let mut entries = native["log_entries"].as_array().unwrap().clone();
+    let mut witnesses = native["witness_records"].as_array().unwrap().clone();
+    // The formal actor log publishes control-0 only for authentication.
+    // Add its assertion relationship through a real, witnessed native update
+    // before Genesis; never patch the unverified normalized projection.
+    let history = &fixture["original_authority_reference"]["governor_history"];
+    let seed = |value: &serde_json::Value| -> [u8; 32] {
+        hex::decode(value.as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap()
+    };
+    let did = arkret::Did::new(entries.last().unwrap()["state"]["id"].as_str().unwrap()).unwrap();
+    let mut state = entries.last().unwrap()["state"].clone();
+    state["assertionMethod"] = serde_json::json!([original_commit.signature.verification_method]);
+    let rotated = arkret_signatures::webvh::prepare_service_rotation(
+        &arkret_signatures::webvh::ServiceRotationInput {
+            did: did.as_str(),
+            previous_entries: &entries,
+            state: &state,
+            current_update_seed: &seed(&history["root_test_seeds_hex"][1]),
+            next_update_public_key_multibase:
+                &arkret::canonical::ed25519_pubkey_to_did_key_multibase(
+                    ed25519_dalek::SigningKey::from_bytes(&seed(
+                        &history["root_test_seeds_hex"][2],
+                    ))
+                    .verifying_key()
+                    .as_bytes(),
+                ),
+            version_created_at: original_commit.committed_at - chrono::Duration::days(1),
+        },
+    )
+    .unwrap();
+    let proof = arkret_signatures::webvh::sign_did_webvh_witness_proof(
+        &rotated.version_id,
+        &seed(&history["witness_test_seed_hex"]),
+    );
+    witnesses.push(serde_json::json!({"versionId":rotated.version_id,"proof":[proof]}));
+    entries.push(rotated.log_entry);
+    let resolution = arkret::identity::build_authenticated_webvh_service_resolution(
+        resolution.service_id,
+        resolution.service_kind,
+        serde_json::from_value(entries.last().unwrap()["state"].clone()).unwrap(),
+        entries,
+        witnesses,
+        first_at,
+    )
+    .unwrap();
+    arkret::identity::authenticated_service_document_at(
+        &resolution,
+        &resolution.service_id,
+        series_commit.committed_at,
+    )
+    .unwrap();
+
+    let authorities = |genesis_at| {
+        let mut commit = original_commit.clone();
+        commit.committed_at = genesis_at;
+        commit.commit_id = arkret::RealmCommitId::from_digest(arkret::canonical::sha256_bytes(
+            commit.canonical_id_bytes().unwrap(),
+        ));
+        commit.signature = sign_detached_object(
+            &arkret::canonical::unsigned_value(&commit, &["signature"]).unwrap(),
+            DetachedSignatureContext::RealmCommit,
+            original_commit.signature.verification_method.clone(),
+            genesis_at,
+            &governor,
+        )
+        .unwrap();
+        commit.validate_content_address().unwrap();
+        let head = CommitStreamHead {
+            stream_ref: commit.stream_ref.clone(),
+            stream_position: 0,
+            commit_id: commit.commit_id.clone(),
+        };
+        let nonce = arkret::Base64UrlString::new(arkret::base64url_encode([31; 32])).unwrap();
+        let mut assertion = RealmAuthorityCurrentAssertion {
+            realm_id: genesis_event.realm_id.clone(),
+            current_generation: 0,
+            current_service_id: resolution.service_id.clone(),
+            last_handoff_ref: None,
+            realm_stream_head: head.clone(),
+            nonce: nonce.clone(),
+            expires_at: first_at + chrono::Duration::seconds(60),
+            signature: commit.signature.clone(),
+        };
+        assertion.signature = sign_detached_object(
+            &arkret::canonical::unsigned_value(&assertion, &["signature"]).unwrap(),
+            DetachedSignatureContext::RealmAuthorityCurrentAssertion,
+            original_commit.signature.verification_method.clone(),
+            first_at,
+            &governor,
+        )
+        .unwrap();
+        let bundle = RealmAuthorityBundle {
+            realm_id: genesis_event.realm_id.clone(),
+            genesis_event: genesis_event.clone(),
+            genesis_commit: commit,
+            authority_transitions: vec![],
+            current_generation: 0,
+            current_service_id: resolution.service_id.clone(),
+            current_route_record: serde_json::to_value(&resolution).unwrap(),
+            realm_stream_head: head,
+            bundle_issued_at: first_at,
+            current_assertion: assertion,
+        };
+        let mut keys = RealmAuthorityKeyMap::new();
+        for (method, at) in [
+            (
+                &bundle.genesis_commit.signature.verification_method,
+                bundle.genesis_commit.signature.created_at,
+            ),
+            (
+                &bundle.current_assertion.signature.verification_method,
+                bundle.current_assertion.signature.created_at,
+            ),
+            (
+                &series_commit.signature.verification_method,
+                series_commit.signature.created_at,
+            ),
+            (
+                &series_commit.signature.verification_method,
+                series_commit.committed_at,
+            ),
+        ] {
+            let document = arkret::identity::authenticated_service_document_at(
+                &resolution,
+                &resolution.service_id,
+                at,
+            )
+            .unwrap();
+            arkret::identity::validate_verification_method_relationship(
+                &document,
+                method,
+                &document.id,
+                arkret::identity::DidVerificationRelationship::AssertionMethod,
+            )
+            .unwrap();
+            let key =
+                arkret::identity::public_key_material_from_document(&document, method).unwrap();
+            keys.insert_at(method, at, key);
+        }
+        let authority = arkret::identity::verify_realm_authority_bundle(
+            &bundle,
+            &RealmAuthorityFreshness::new(first_at, nonce),
+            &keys,
+        )
+        .unwrap();
+        // Both variants reach the original SDK's complete Series crypto check.
+        arkret::identity::verify_realm_actor_archive_inventory(&manifest, &authority, &keys)
+            .unwrap();
+        (authority, keys)
+    };
+    let (valid_authority, valid_keys) = authorities(original_commit.committed_at);
+    let (late_authority, late_keys) =
+        authorities(series_commit.committed_at + chrono::Duration::seconds(1));
+    late_authority
+        .verify_commit(&series_commit, &late_keys)
+        .unwrap();
+    assert!(!late_authority.authorizes_issuer_at(
+        &resolution.service_id,
+        Some(&series_commit.authority_ref),
+        series_commit.committed_at
+    ));
+
+    let offer_key = ed25519_dalek::SigningKey::from_bytes(
+        &hex::decode(
+            fixture["handover_offer_case"]["test_seed_hex"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap()
+        .try_into()
+        .unwrap(),
+    );
+    let method = original_offer.signature.verification_method.clone();
+    let did = arkret::verification_method_did(method.as_str()).unwrap();
+    // These leaf relationship inputs have the SDK's existing test boundary;
+    // they do not claim native Service registration or HTTP authentication.
+    let document: arkret::DidDocument = serde_json::from_value(serde_json::json!({
+        "id":did,"verificationMethod":[{"id":method,"controller":did,"type":"Multikey",
+        "publicKeyMultibase":arkret::canonical::ed25519_pubkey_to_did_key_multibase(offer_key.verifying_key().as_bytes())}],
+        "assertionMethod":[method]
+    })).unwrap();
+    let offer = arkret::identity::sign_realm_actor_backup_handover_offer(
+        RealmActorContentBackupHandoverOfferSignatureInput {
+            realm_actor_id: manifest.realm_actor_id.clone(),
+            manager_ref: manifest.manager_ref.clone(),
+            new_service_id: original_offer.new_service_id,
+            next_content_backup_recipient: original_offer.next_content_backup_recipient,
+            inventory_digest: manifest.inventory_digest().unwrap(),
+            archive_revision: manifest.archive_revision,
+            expires_at: original_offer.expires_at,
+            nonce: original_offer.nonce,
+        },
+        method.clone(),
+        original_offer.signature.created_at,
+        &offer_key,
+    )
+    .unwrap();
+    let pending = arkret::identity::seal_realm_actor_backup_handover(
+        offer,
+        &document,
+        manifest,
+        vec![],
+        first_at,
+    )
+    .unwrap();
+    let private = SecretBytes::new(
+        hex::decode(
+            fixture["test_material"]["next_archive_private_hex"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap()
+        .try_into()
+        .unwrap(),
+    );
+    let record_key = "accepted-time-import";
+    let run = |vault: &ManagerArchiveVault,
+               authority: &arkret::identity::VerifiedRealmAuthority,
+               keys: &RealmAuthorityKeyMap,
+               at| {
+        let reached = Cell::new(false);
+        let context = arkret::identity::RealmActorBackupHandoverImportContext {
+            offer_original_document: &document,
+            confirmation_current_document: &document,
+            confirmation_method: method.clone(),
+            confirmation_signing_key: &offer_key,
+            confirmed_at: at,
+        };
+        let result = arkret::identity::import_realm_actor_backup_handover(
+            pending.sealed(),
+            &private,
+            authority,
+            keys,
+            &context,
+            |identity| {
+                let prior = vault.read_record(record_key).map_err(|error| {
+                    arkret::identity::IdentityError::Protocol(error.to_string())
+                })?;
+                let Some(prior) = prior else { return Ok(None) };
+                let prior: serde_json::Value = serde_json::from_slice(prior.as_slice())?;
+                assert_eq!(
+                    prior["sealed_digest"],
+                    serde_json::to_value(&identity.sealed_digest).unwrap()
+                );
+                assert_eq!(
+                    prior["inventory_digest"],
+                    serde_json::to_value(&identity.inventory_digest).unwrap()
+                );
+                Ok(Some(serde_json::from_value(prior["imported_at"].clone())?))
+            },
+            |identity, plaintext, imported_at| {
+                reached.set(true);
+                crate::realm_governance::validate_archive_commit_coordinates(
+                    &plaintext.inventory_manifest,
+                    authority,
+                    keys,
+                )
+                .map_err(|error| arkret::identity::IdentityError::Protocol(error.to_string()))?;
+                let record = arkret::canonical::canonical_json_bytes(&serde_json::json!({
+                    "sealed_digest":identity.sealed_digest,"inventory_digest":identity.inventory_digest,
+                    "imported_at":imported_at,"plaintext":plaintext,
+                }))?;
+                vault
+                    .import_recipient_keys(
+                        &identity.realm_actor_id,
+                        &plaintext.recipient_keys,
+                        record_key,
+                        &record,
+                    )
+                    .map_err(|error| arkret::identity::IdentityError::Protocol(error.to_string()))
+            },
+        );
+        (result, reached.get())
+    };
+    let temporary = TemporaryArchive::new();
+    {
+        let vault = temporary.open();
+        let before = raw_tables(&vault);
+        let (bad, reached) = run(&vault, &late_authority, &late_keys, first_at);
+        assert!(
+            reached,
+            "HPKE and original SDK crypto must reach the durable adapter"
+        );
+        assert!(
+            bad.unwrap_err()
+                .to_string()
+                .contains("outside its verified Realm governance tenure")
+        );
+        assert_eq!(raw_tables(&vault), before);
+        assert!(vault.read_record(record_key).unwrap().is_none());
+        let (valid, reached) = run(&vault, &valid_authority, &valid_keys, first_at);
+        assert!(reached);
+        pending
+            .verify_confirmation(&valid.unwrap(), &document)
+            .unwrap();
+        assert!(vault.read_record(record_key).unwrap().is_some());
+    }
+    let vault = temporary.open();
+    let before = raw_tables(&vault);
+    let (bad, reached) = run(
+        &vault,
+        &late_authority,
+        &late_keys,
+        first_at + chrono::Duration::seconds(2),
+    );
+    assert!(
+        reached,
+        "cold replay still revalidates the original cut before mutation"
+    );
+    assert!(
+        bad.unwrap_err()
+            .to_string()
+            .contains("outside its verified Realm governance tenure")
+    );
+    assert_eq!(raw_tables(&vault), before);
+}
+
+#[test]
 fn manager_private_record_cold_reopen_and_losing_cas_preserve_original_ciphertext() {
     let directory = TemporaryArchive::new();
     let key = ManagerArchiveVault::key(&subject(), "custody-test", &"private-outcome").unwrap();
