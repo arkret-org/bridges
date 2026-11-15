@@ -56,7 +56,12 @@ while IFS='|' read -r name baseline planref pattern; do
   # grep exit codes: 0 = matches, 1 = clean, >=2 = grep itself failed
   # (which must fail the gate loudly, never pass as "no matches").
   set +e
-  matches=$(grep -rn --include='*.rs' -F -- "$pattern" crates/)
+  if [ "$name" = "Seal" ]; then
+    # Seal is a retired identifier, not a substring of sealed crypto carriers.
+    matches=$(grep -rn --include='*.rs' -w -F -- "$pattern" crates/)
+  else
+    matches=$(grep -rn --include='*.rs' -F -- "$pattern" crates/)
+  fi
   rc=$?
   set -e
   if [ "$rc" -ge 2 ]; then

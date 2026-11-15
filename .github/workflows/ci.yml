@@ -63,7 +63,7 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/arkret-rust-sdk
           path: arkret-rust-sdk
-          ref: d5a2ec492b343bfe3a3e1be33e36713ed154fc59
+          ref: 819fc97ca2356cd0ed467864babfaca93e0b5494
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
       - name: Checkout Garth
@@ -71,7 +71,15 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/garth
           path: garth
-          ref: 60b40c9dc27a2c3e9af0946b004bc23777e87803
+          ref: 8c35acec7c6d8c79b61c06855367340f0a17da78
+          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
+
+      - name: Checkout Arkret Spec fixtures
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository_owner }}/arkret-spec
+          path: arkret-spec
+          ref: 4e46718f83a4fcbedc12ef7409bc68743ec41dc9
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
       - name: Install Rust
@@ -101,7 +109,9 @@ jobs:
       # ARC-0002 (重构计划 2026-07-10): legacy patterns must stay at zero.
       - name: Deletion gate
         if: matrix.backend == 'sqlite'
-        run: bash scripts/deletion_gate.sh
+        run: |
+          bash scripts/test_deletion_gate.sh
+          bash scripts/deletion_gate.sh
         working-directory: bridges
 
       - name: Rustfmt
@@ -133,7 +143,7 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/arkret-rust-sdk
           path: arkret-rust-sdk
-          ref: d5a2ec492b343bfe3a3e1be33e36713ed154fc59
+          ref: 819fc97ca2356cd0ed467864babfaca93e0b5494
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
       - name: Checkout Garth
@@ -141,7 +151,7 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/garth
           path: garth
-          ref: 60b40c9dc27a2c3e9af0946b004bc23777e87803
+          ref: 8c35acec7c6d8c79b61c06855367340f0a17da78
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
       - name: Install Rust
@@ -169,7 +179,7 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/arkret-rust-sdk
           path: arkret-rust-sdk
-          ref: d5a2ec492b343bfe3a3e1be33e36713ed154fc59
+          ref: 819fc97ca2356cd0ed467864babfaca93e0b5494
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
       - name: Checkout Garth
@@ -177,7 +187,7 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/garth
           path: garth
-          ref: 60b40c9dc27a2c3e9af0946b004bc23777e87803
+          ref: 8c35acec7c6d8c79b61c06855367340f0a17da78
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
       - name: Install Rust 1.99
