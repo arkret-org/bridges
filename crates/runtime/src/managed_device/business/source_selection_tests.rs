@@ -3,7 +3,7 @@ use arkret::WireResourceSelector;
 use super::*;
 
 #[test]
-fn terminal_parent_rejects_disjoint_circles_without_rejecting_narrow_or_realm_wide_resources() {
+fn terminal_parent_requires_one_exact_registered_scope_resource() {
     let realm = arkret::RealmId::from_event_id(&arkret::EventId::from_digest(
         arkret_canonical::DigestSuite::Sha256,
         [61; 32],
@@ -50,15 +50,21 @@ fn terminal_parent_rejects_disjoint_circles_without_rejecting_narrow_or_realm_wi
         )),
     )];
     assert!(
-        parent_scope_candidate(&narrowed, &scope),
-        "object ancestry stays Station-owned"
+        !parent_scope_candidate(&narrowed, &scope),
+        "the finite terminal-child profile requires a canonical scope, not object ancestry"
     );
     narrowed.resources = vec![WireResourceSelector::realm(realm.clone())];
     assert!(!parent_scope_candidate(&narrowed, &scope));
     narrowed.resources[0].match_scope = Some(arkret::ResourceMatchScope::RealmWide);
-    assert!(parent_scope_candidate(&narrowed, &scope));
-    assert!(!parent_scope_candidate(
-        &fixture,
-        &ScopeRef::Realm { realm_id: realm }
-    ));
+    assert!(!parent_scope_candidate(&narrowed, &scope));
+    let realm_scope = ScopeRef::Realm {
+        realm_id: realm.clone(),
+    };
+    narrowed.resources = vec![WireResourceSelector::realm(realm.clone())];
+    assert!(parent_scope_candidate(&narrowed, &realm_scope));
+    narrowed
+        .resources
+        .push(WireResourceSelector::realm(realm.clone()));
+    assert!(!parent_scope_candidate(&narrowed, &realm_scope));
+    assert!(!parent_scope_candidate(&fixture, &realm_scope));
 }
