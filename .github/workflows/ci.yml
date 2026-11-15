@@ -74,6 +74,14 @@ jobs:
           ref: 8c35acec7c6d8c79b61c06855367340f0a17da78
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
+      - name: Checkout Arkret Spec fixtures
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository_owner }}/arkret-spec
+          path: arkret-spec
+          ref: 4e46718f83a4fcbedc12ef7409bc68743ec41dc9
+          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
