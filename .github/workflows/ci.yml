@@ -71,7 +71,7 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/garth
           path: garth
-          ref: 60b40c9dc27a2c3e9af0946b004bc23777e87803
+          ref: 8c35acec7c6d8c79b61c06855367340f0a17da78
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
       - name: Install Rust
@@ -101,7 +101,9 @@ jobs:
       # ARC-0002 (重构计划 2026-07-10): legacy patterns must stay at zero.
       - name: Deletion gate
         if: matrix.backend == 'sqlite'
-        run: bash scripts/deletion_gate.sh
+        run: |
+          bash scripts/test_deletion_gate.sh
+          bash scripts/deletion_gate.sh
         working-directory: bridges
 
       - name: Rustfmt
@@ -141,7 +143,7 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/garth
           path: garth
-          ref: 60b40c9dc27a2c3e9af0946b004bc23777e87803
+          ref: 8c35acec7c6d8c79b61c06855367340f0a17da78
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
       - name: Install Rust
@@ -177,7 +179,7 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/garth
           path: garth
-          ref: 60b40c9dc27a2c3e9af0946b004bc23777e87803
+          ref: 8c35acec7c6d8c79b61c06855367340f0a17da78
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
       - name: Install Rust 1.99

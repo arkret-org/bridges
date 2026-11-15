@@ -178,7 +178,7 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/garth
           path: arkret-org/garth
-          ref: 60b40c9dc27a2c3e9af0946b004bc23777e87803
+          ref: 8c35acec7c6d8c79b61c06855367340f0a17da78
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
       - uses: actions/setup-python@v6
         with:

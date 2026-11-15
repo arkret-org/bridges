@@ -384,6 +384,146 @@ impl AppletConfigurationService {
     }
 }
 
+/// Acceptance-only replay used by daily Device supervisors. It owns no archive
+/// vault, manager wrapping key or capability to author a new candidate.
+pub struct AppletConfigurationRecovery {
+    edge: Arc<ArkretEdge>,
+    authoring: Arc<ManagedActorAuthoringService>,
+    store: Arc<dyn AuthoringStore>,
+    recovery_cursor: std::sync::atomic::AtomicUsize,
+}
+
+impl AppletConfigurationRecovery {
+    pub fn new(edge: Arc<ArkretEdge>) -> Result<Self> {
+        Ok(Self {
+            authoring: Arc::new(ManagedActorAuthoringService::new(edge.clone())?),
+            store: edge.authoring_store(),
+            edge,
+            recovery_cursor: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    /// Recover acceptance independently of the administrator's response. The
+    /// candidate remains immutable; only verified original Commit material can
+    /// install custody and make the subject available to Device workers.
+    pub async fn recover_accepted_configurations(&self) -> Result<usize> {
+        use std::sync::atomic::Ordering;
+        let entries = self.store.entries_with_prefix("applet-configuration/v1/")?;
+        if entries.is_empty() {
+            return Ok(0);
+        }
+        let start = self.recovery_cursor.load(Ordering::Relaxed) % entries.len();
+        let mut attempted = 0;
+        let mut installed = 0;
+        for offset in 0..entries.len() {
+            let index = (start + offset) % entries.len();
+            self.recovery_cursor
+                .store((index + 1) % entries.len(), Ordering::Relaxed);
+            let (key, raw) = &entries[index];
+            let record: Execution = self.authoring.decrypt_key_material(key, raw)?;
+            if record.outcome.status != Status::Candidate {
+                continue;
+            }
+            record.outcome.validate_for(&record.intent)?;
+            let event = record
+                .outcome
+                .create_event
+                .as_deref()
+                .ok_or_else(|| invalid("configuration candidate is missing"))?;
+            let actor = crate::managed_authoring::creation_payload(event)?.actor_id;
+            if self
+                .edge
+                .installed_managed_authoring(&record.intent.effective_scope, &actor)?
+                .is_some()
+            {
+                continue;
+            }
+            match self.recover_candidate(&record.intent, event).await {
+                Ok(()) => installed += 1,
+                Err(error) => tracing::debug!(%error, request_id = %record.intent.request_id,
+                    "configuration acceptance is not yet available"),
+            }
+            attempted += 1;
+            if attempted == 16 {
+                break;
+            }
+        }
+        Ok(installed)
+    }
+
+    async fn recover_candidate(&self, intent: &Intent, event: &arkret::Event) -> Result<()> {
+        let candidate = crate::managed_authoring::creation_payload(event)?;
+        let route = self
+            .edge
+            .realm_route(intent.effective_scope.realm_id())
+            .await?;
+        let requester = ActorId::service(intent.service_id.clone());
+        let selector = arkret::CurrentSelector::RealmActorIdentity {
+            actor_id: candidate.actor_id.clone(),
+        };
+        let current = route
+            .material(
+                &arkret::RealmActorMaterialRequestBody::Current {
+                    actor_id: candidate.actor_id.clone(),
+                    request_nonce: crate::realm_governance::nonce()?,
+                    selectors: vec![selector.clone()],
+                },
+                &requester,
+            )
+            .await?;
+        let arkret::RealmActorMaterial::Current { entries, .. } = &current.material().material
+        else {
+            return Err(invalid("configuration identity current is unavailable"));
+        };
+        let target = entries
+            .iter()
+            .find_map(|entry| match entry {
+                arkret::RealmActorMaterialCurrentEntry::Present {
+                    current_state:
+                        arkret::CurrentState::Value {
+                            selector: found, ..
+                        },
+                    source_ref,
+                } if found == &selector && source_ref.event_id == event.event_id => {
+                    Some(source_ref.clone())
+                }
+                _ => None,
+            })
+            .ok_or_else(|| invalid("configuration identity has not been accepted"))?;
+        let original = route
+            .material(
+                &arkret::RealmActorMaterialRequestBody::Event {
+                    actor_id: candidate.actor_id,
+                    request_nonce: crate::realm_governance::nonce()?,
+                    target,
+                },
+                &requester,
+            )
+            .await?;
+        let arkret::RealmActorMaterial::Event {
+            event: accepted, ..
+        } = &original.material().material
+        else {
+            return Err(invalid("configuration original creation is unavailable"));
+        };
+        if accepted != event {
+            return Err(invalid(
+                "configuration original differs from the frozen candidate",
+            ));
+        }
+        self.edge
+            .install_managed_authoring_completion(&arkret::AppletAuthoringTransactionRequestBody {
+                applet_id: intent.applet_id.clone(),
+                source_id: route.authority.current_service_id().clone(),
+                authoring_context: arkret::AppletManagedActorAuthoringContext {
+                    material: original.into_material(),
+                },
+            })
+            .await?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use arkret::{Did, EventId, RealmId};
@@ -887,145 +1027,5 @@ mod tests {
             station_id: other.service_id.clone(),
         });
         assert_ne!(author_request_id(&other).unwrap(), id);
-    }
-}
-
-/// Acceptance-only replay used by daily Device supervisors. It owns no archive
-/// vault, manager wrapping key or capability to author a new candidate.
-pub struct AppletConfigurationRecovery {
-    edge: Arc<ArkretEdge>,
-    authoring: Arc<ManagedActorAuthoringService>,
-    store: Arc<dyn AuthoringStore>,
-    recovery_cursor: std::sync::atomic::AtomicUsize,
-}
-
-impl AppletConfigurationRecovery {
-    pub fn new(edge: Arc<ArkretEdge>) -> Result<Self> {
-        Ok(Self {
-            authoring: Arc::new(ManagedActorAuthoringService::new(edge.clone())?),
-            store: edge.authoring_store(),
-            edge,
-            recovery_cursor: std::sync::atomic::AtomicUsize::new(0),
-        })
-    }
-
-    /// Recover acceptance independently of the administrator's response. The
-    /// candidate remains immutable; only verified original Commit material can
-    /// install custody and make the subject available to Device workers.
-    pub async fn recover_accepted_configurations(&self) -> Result<usize> {
-        use std::sync::atomic::Ordering;
-        let entries = self.store.entries_with_prefix("applet-configuration/v1/")?;
-        if entries.is_empty() {
-            return Ok(0);
-        }
-        let start = self.recovery_cursor.load(Ordering::Relaxed) % entries.len();
-        let mut attempted = 0;
-        let mut installed = 0;
-        for offset in 0..entries.len() {
-            let index = (start + offset) % entries.len();
-            self.recovery_cursor
-                .store((index + 1) % entries.len(), Ordering::Relaxed);
-            let (key, raw) = &entries[index];
-            let record: Execution = self.authoring.decrypt_key_material(key, raw)?;
-            if record.outcome.status != Status::Candidate {
-                continue;
-            }
-            record.outcome.validate_for(&record.intent)?;
-            let event = record
-                .outcome
-                .create_event
-                .as_deref()
-                .ok_or_else(|| invalid("configuration candidate is missing"))?;
-            let actor = crate::managed_authoring::creation_payload(event)?.actor_id;
-            if self
-                .edge
-                .installed_managed_authoring(&record.intent.effective_scope, &actor)?
-                .is_some()
-            {
-                continue;
-            }
-            match self.recover_candidate(&record.intent, event).await {
-                Ok(()) => installed += 1,
-                Err(error) => tracing::debug!(%error, request_id = %record.intent.request_id,
-                    "configuration acceptance is not yet available"),
-            }
-            attempted += 1;
-            if attempted == 16 {
-                break;
-            }
-        }
-        Ok(installed)
-    }
-
-    async fn recover_candidate(&self, intent: &Intent, event: &arkret::Event) -> Result<()> {
-        let candidate = crate::managed_authoring::creation_payload(event)?;
-        let route = self
-            .edge
-            .realm_route(intent.effective_scope.realm_id())
-            .await?;
-        let requester = ActorId::service(intent.service_id.clone());
-        let selector = arkret::CurrentSelector::RealmActorIdentity {
-            actor_id: candidate.actor_id.clone(),
-        };
-        let current = route
-            .material(
-                &arkret::RealmActorMaterialRequestBody::Current {
-                    actor_id: candidate.actor_id.clone(),
-                    request_nonce: crate::realm_governance::nonce()?,
-                    selectors: vec![selector.clone()],
-                },
-                &requester,
-            )
-            .await?;
-        let arkret::RealmActorMaterial::Current { entries, .. } = &current.material().material
-        else {
-            return Err(invalid("configuration identity current is unavailable"));
-        };
-        let target = entries
-            .iter()
-            .find_map(|entry| match entry {
-                arkret::RealmActorMaterialCurrentEntry::Present {
-                    current_state:
-                        arkret::CurrentState::Value {
-                            selector: found, ..
-                        },
-                    source_ref,
-                } if found == &selector && source_ref.event_id == event.event_id => {
-                    Some(source_ref.clone())
-                }
-                _ => None,
-            })
-            .ok_or_else(|| invalid("configuration identity has not been accepted"))?;
-        let original = route
-            .material(
-                &arkret::RealmActorMaterialRequestBody::Event {
-                    actor_id: candidate.actor_id,
-                    request_nonce: crate::realm_governance::nonce()?,
-                    target,
-                },
-                &requester,
-            )
-            .await?;
-        let arkret::RealmActorMaterial::Event {
-            event: accepted, ..
-        } = &original.material().material
-        else {
-            return Err(invalid("configuration original creation is unavailable"));
-        };
-        if accepted != event {
-            return Err(invalid(
-                "configuration original differs from the frozen candidate",
-            ));
-        }
-        self.edge
-            .install_managed_authoring_completion(&arkret::AppletAuthoringTransactionRequestBody {
-                applet_id: intent.applet_id.clone(),
-                source_id: route.authority.current_service_id().clone(),
-                authoring_context: arkret::AppletManagedActorAuthoringContext {
-                    material: original.into_material(),
-                },
-            })
-            .await?;
-        Ok(())
     }
 }

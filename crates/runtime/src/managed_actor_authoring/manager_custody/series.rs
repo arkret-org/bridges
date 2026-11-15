@@ -235,12 +235,11 @@ impl ManagedActorManagerService {
             matches!(entry, RealmActorArchiveInventoryEntry::Series(entry) if entry.effective_scope == *scope)) {
             return Err(invalid("historical scoped series cannot lose its current pointer"));
         }
-        if let Some(selected) = &selected {
-            if selected.manager_ref == manager_ref
-                && selected.recipient_ref == recovery.content_backup_recipient_ref
-            {
-                return Ok(selected.clone());
-            }
+        if let Some(selected) = &selected
+            && selected.manager_ref == manager_ref
+            && selected.recipient_ref == recovery.content_backup_recipient_ref
+        {
+            return Ok(selected.clone());
         }
         let version = previous.map_or(Ok(1), |record| {
             record
