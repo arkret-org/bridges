@@ -828,6 +828,29 @@ impl ArkretEdge {
         })
     }
 
+    /// Read the actual durable winner after either a successful answer write
+    /// or a lost result-row CAS. Acceptance cannot be inferred from a bool.
+    async fn accepted_publication_result(
+        &self,
+        scope: &str,
+        operation: &str,
+        incoming: Option<&arkret::CommittedEventRef>,
+    ) -> Result<Option<arkret::CommittedEventRef>> {
+        let durable = self
+            .journal
+            .load_operation(scope, operation)
+            .await?
+            .ok_or_else(|| BridgeError::Database("frozen publication disappeared".into()))?;
+        if let Some(accepted) = &durable.committed
+            && incoming.is_some_and(|candidate| candidate != accepted)
+        {
+            return Err(BridgeError::Database(
+                "accepted publication has different committed coordinates".into(),
+            ));
+        }
+        Ok(durable.committed)
+    }
+
     /// Hand one exact signed Event to the current governance Station and return
     /// its event id once the Station's authority-signed commit covers it.
     ///
@@ -915,17 +938,30 @@ impl ArkretEdge {
             let transaction =
                 arkret::VerifiedSubmission::verify(transaction, |_| Ok(producer.clone()))
                     .map_err(|e| BridgeError::Arkret(e.to_string()))?;
+            // A new explicit publication attempt is a new transport delivery.
+            // HTTP authentication may have rotated since an unobserved accept;
+            // the frozen Event remains the exact business replay identity.
+            // This branch carries only that Event, never non-idempotent Signals.
+            // SDK retries within this call retain this one delivery key/body.
+            let delivery_id = arkret::RequestId::new_v7_at(
+                chrono::Utc::now()
+                    .timestamp_millis()
+                    .try_into()
+                    .map_err(|_| {
+                        BridgeError::Runtime("delivery clock predates Unix epoch".into())
+                    })?,
+            );
             let outcome = route
                 .client
                 .applet_transaction_from_service(
-                    event.event_id().as_str(),
+                    delivery_id.as_str(),
                     &transaction,
                     &self.service_actor_id,
                     route.authority.current_service_id(),
                 )
                 .await?;
             let committed = crate::authoring::applet_publication_outcome(event, &outcome)?;
-            if !self
+            let recorded = self
                 .journal
                 .record_applet_outcome(
                     &key,
@@ -934,8 +970,14 @@ impl ArkretEdge {
                     &outcome,
                     committed.as_ref(),
                 )
+                .await?;
+            if let Some(accepted) = self
+                .accepted_publication_result(&key, &operation, committed.as_ref())
                 .await?
             {
+                return Ok(accepted.event_id.to_string());
+            }
+            if !recorded {
                 return Err(BridgeError::Runtime(
                     "Applet outcome persistence contended; retry original".into(),
                 ));
@@ -981,7 +1023,7 @@ impl ArkretEdge {
                 .map_err(|e| BridgeError::Arkret(e.to_string()))?;
         }
         let committed = publication_outcome(event, &outcome)?;
-        if !self
+        let recorded = self
             .journal
             .record_outcome(
                 &key,
@@ -990,8 +1032,14 @@ impl ArkretEdge {
                 &outcome,
                 committed.as_ref(),
             )
+            .await?;
+        if let Some(accepted) = self
+            .accepted_publication_result(&key, &operation, committed.as_ref())
             .await?
         {
+            return Ok(accepted.event_id.to_string());
+        }
+        if !recorded {
             return Err(BridgeError::Runtime(
                 "answer persistence contention; retry the exact publication".into(),
             ));
@@ -2199,5 +2247,599 @@ mod tests {
         let rotated = ArkretEdge::new(Arc::new(config), store, sender).unwrap();
         let context = rotated.publication_producer_context(&original).unwrap();
         assert!(arkret::VerifiedProducerEvent::verify(original.into_event(), &context).is_err());
+    }
+    #[tokio::test]
+    async fn late_rejected_transport_cannot_erase_an_accepted_publication() {
+        let store = Arc::new(MemoryAuthoringStore::default());
+        let edge = Arc::new(test_edge(store.clone()));
+        let realm = RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").unwrap();
+        let event = edge
+            .author_and_sign(
+                &realm,
+                "late-answer",
+                message_intent(&edge, &realm, "immutable"),
+            )
+            .await
+            .unwrap();
+        let frozen = arkret::canonical::canonical_json_bytes(event.event()).unwrap();
+        let scope = scope_key(&realm, &event.actor_id).unwrap();
+        let commit = accepted(&event, 0);
+        let reference = publication_outcome(&event, &commit).unwrap().unwrap();
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let delayed = {
+            let edge = edge.clone();
+            let scope = scope.clone();
+            tokio::spawn(async move {
+                entered.send(()).unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(5), released)
+                    .await
+                    .expect("journal test release was not delivered")
+                    .unwrap();
+                edge.journal
+                    .record_outcome(
+                        &scope,
+                        "late-answer",
+                        &edge.station_id,
+                        &rejected("capability_denied"),
+                        None,
+                    )
+                    .await
+            })
+        };
+        match tokio::time::timeout(std::time::Duration::from_secs(5), waiting).await {
+            Ok(Ok(())) => {}
+            failure => {
+                // Dropping this sole sender releases a store worker already
+                // waiting in recv_timeout, including on an early test failure.
+                drop(release);
+                panic!("journal test did not reach its actual CAS gate: {failure:?}");
+            }
+        }
+        assert!(
+            edge.journal
+                .record_outcome(
+                    &scope,
+                    "late-answer",
+                    &edge.station_id,
+                    &commit,
+                    Some(&reference)
+                )
+                .await
+                .unwrap()
+        );
+        let durable = store.0.lock().unwrap().clone();
+        release.send(()).unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), delayed)
+                .await
+                .expect("journal test task did not terminate after its gate was released")
+                .unwrap()
+                .unwrap()
+        );
+        assert_eq!(
+            *store.0.lock().unwrap(),
+            durable,
+            "late rejection must not rewrite the durable acceptance or replay index"
+        );
+        assert!(
+            edge.journal
+                .record_outcome(
+                    &scope,
+                    "late-answer",
+                    &edge.station_id,
+                    &commit,
+                    Some(&reference)
+                )
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            *store.0.lock().unwrap(),
+            durable,
+            "same exact Commit is idempotent"
+        );
+        let other = accepted(&event, 1);
+        let other_ref = publication_outcome(&event, &other).unwrap().unwrap();
+        assert_ne!(other_ref, reference);
+        assert!(
+            edge.journal
+                .record_outcome(
+                    &scope,
+                    "late-answer",
+                    &edge.station_id,
+                    &other,
+                    Some(&other_ref)
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            *store.0.lock().unwrap(),
+            durable,
+            "different committed coordinates must fail without writes"
+        );
+        let retained = edge
+            .journal
+            .load_operation(&scope, "late-answer")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            edge.accepted_publication_result(&scope, "late-answer", None)
+                .await
+                .unwrap(),
+            Some(reference.clone()),
+            "the late rejected caller receives the original durable business result"
+        );
+        assert_eq!(retained.committed, Some(reference));
+        assert_eq!(
+            arkret::canonical::canonical_json_bytes(retained.authored.event()).unwrap(),
+            frozen
+        );
+        assert!(edge.journal.pending_events().await.unwrap().is_empty());
+        assert_eq!(
+            edge.submit_event(&event).await.unwrap(),
+            event.event_id().to_string(),
+            "the real API returns its already-durable acceptance without another transport"
+        );
+    }
+
+    struct JournalCasGateStore {
+        inner: MemoryAuthoringStore,
+        prefix: &'static str,
+        armed: std::sync::atomic::AtomicBool,
+        entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+    impl AuthoringStore for JournalCasGateStore {
+        fn load(&self, key: &str) -> Result<Option<String>> {
+            self.inner.load(key)
+        }
+        fn compare_exchange_batch(
+            &self,
+            expected: &[(String, Option<String>)],
+            writes: &[(String, Option<String>)],
+        ) -> Result<bool> {
+            if writes
+                .iter()
+                .any(|(key, value)| key.starts_with(self.prefix) && value.is_some())
+                && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                self.entered
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(())
+                    .unwrap();
+                self.release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("journal test blocking CAS gate was not released");
+            }
+            self.inner.compare_exchange_batch(expected, writes)
+        }
+        fn entries_with_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>> {
+            self.inner.entries_with_prefix(prefix)
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_acceptance_fences_a_reopen_that_read_the_old_rejection() {
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let store = Arc::new(JournalCasGateStore {
+            inner: MemoryAuthoringStore::default(),
+            prefix: "pending/",
+            armed: std::sync::atomic::AtomicBool::new(false),
+            entered: Mutex::new(Some(entered)),
+            release: Mutex::new(released),
+        });
+        let edge = Arc::new(test_edge(store.clone()));
+        let realm = RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").unwrap();
+        let event = edge
+            .author_and_sign(
+                &realm,
+                "reopen-race",
+                message_intent(&edge, &realm, "immutable"),
+            )
+            .await
+            .unwrap();
+        let scope = scope_key(&realm, &event.actor_id).unwrap();
+        assert!(
+            edge.journal
+                .record_outcome(
+                    &scope,
+                    "reopen-race",
+                    &edge.station_id,
+                    &rejected("capability_denied"),
+                    None
+                )
+                .await
+                .unwrap()
+        );
+        store.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let reopening = {
+            let edge = edge.clone();
+            let scope = scope.clone();
+            tokio::spawn(async move { edge.journal.reopen(&scope, "reopen-race").await })
+        };
+        // The writer is blocked after loading the rejected result, immediately
+        // before its actual durable CAS. Acceptance can now win on the same row.
+        match tokio::time::timeout(std::time::Duration::from_secs(5), waiting).await {
+            Ok(Ok(())) => {}
+            failure => {
+                // Dropping this sole sender releases a store worker already
+                // waiting in recv_timeout, including on an early test failure.
+                drop(release);
+                panic!("journal test did not reach its actual CAS gate: {failure:?}");
+            }
+        }
+        let commit = accepted(&event, 0);
+        let reference = publication_outcome(&event, &commit).unwrap().unwrap();
+        assert!(
+            edge.journal
+                .record_outcome(
+                    &scope,
+                    "reopen-race",
+                    &edge.station_id,
+                    &commit,
+                    Some(&reference)
+                )
+                .await
+                .unwrap()
+        );
+        release.send(()).unwrap();
+        assert!(
+            !tokio::time::timeout(std::time::Duration::from_secs(5), reopening)
+                .await
+                .expect("journal test task did not terminate after its gate was released")
+                .unwrap()
+                .unwrap(),
+            "the stale reopen must lose its actual result-row CAS"
+        );
+        assert!(edge.journal.pending_events().await.unwrap().is_empty());
+        let retained = edge
+            .journal
+            .load_operation(&scope, "reopen-race")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.committed, Some(reference));
+        assert_eq!(retained.authored.event(), event.event());
+    }
+
+    #[tokio::test]
+    async fn different_commit_is_refused_after_losing_its_initial_answer_cas() {
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let store = Arc::new(JournalCasGateStore {
+            inner: MemoryAuthoringStore::default(),
+            prefix: "result/",
+            armed: std::sync::atomic::AtomicBool::new(false),
+            entered: Mutex::new(Some(entered)),
+            release: Mutex::new(released),
+        });
+        let edge = Arc::new(test_edge(store.clone()));
+        let realm = RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").unwrap();
+        let event = edge
+            .author_and_sign(
+                &realm,
+                "answer-cas-race",
+                message_intent(&edge, &realm, "immutable"),
+            )
+            .await
+            .unwrap();
+        let scope = scope_key(&realm, &event.actor_id).unwrap();
+        let original = accepted(&event, 0);
+        let original_ref = publication_outcome(&event, &original).unwrap().unwrap();
+        let conflicting = accepted(&event, 1);
+        let conflicting_ref = publication_outcome(&event, &conflicting).unwrap().unwrap();
+        store.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let delayed = {
+            let edge = edge.clone();
+            let scope = scope.clone();
+            let conflicting_ref = conflicting_ref.clone();
+            tokio::spawn(async move {
+                edge.journal
+                    .record_outcome(
+                        &scope,
+                        "answer-cas-race",
+                        &edge.station_id,
+                        &conflicting,
+                        Some(&conflicting_ref),
+                    )
+                    .await
+            })
+        };
+        // Both calls really read pending. The C' writer is stopped at its
+        // actual store CAS while the C writer atomically wins that same row.
+        match tokio::time::timeout(std::time::Duration::from_secs(5), waiting).await {
+            Ok(Ok(())) => {}
+            failure => {
+                // Dropping this sole sender releases a store worker already
+                // waiting in recv_timeout, including on an early test failure.
+                drop(release);
+                panic!("journal test did not reach its actual CAS gate: {failure:?}");
+            }
+        }
+        assert!(
+            edge.journal
+                .record_outcome(
+                    &scope,
+                    "answer-cas-race",
+                    &edge.station_id,
+                    &original,
+                    Some(&original_ref)
+                )
+                .await
+                .unwrap()
+        );
+        release.send(()).unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), delayed)
+                .await
+                .expect("journal test task did not terminate after its gate was released")
+                .unwrap()
+                .is_err()
+        );
+        assert!(
+            edge.accepted_publication_result(&scope, "answer-cas-race", Some(&conflicting_ref))
+                .await
+                .is_err(),
+            "CAS failure cannot turn a different C' into success"
+        );
+        assert_eq!(
+            edge.accepted_publication_result(&scope, "answer-cas-race", Some(&original_ref))
+                .await
+                .unwrap(),
+            Some(original_ref.clone())
+        );
+        assert_eq!(
+            edge.accepted_publication_result(&scope, "answer-cas-race", None)
+                .await
+                .unwrap(),
+            Some(original_ref)
+        );
+        assert!(edge.journal.pending_events().await.unwrap().is_empty());
+        assert_eq!(
+            edge.journal
+                .load_operation(&scope, "answer-cas-race")
+                .await
+                .unwrap()
+                .unwrap()
+                .authored
+                .event(),
+            event.event()
+        );
+    }
+
+    #[tokio::test]
+    async fn verified_acceptance_retries_its_cas_after_a_late_rejection_wins() {
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let store = Arc::new(JournalCasGateStore {
+            inner: MemoryAuthoringStore::default(),
+            prefix: "result/",
+            armed: std::sync::atomic::AtomicBool::new(false),
+            entered: Mutex::new(Some(entered)),
+            release: Mutex::new(released),
+        });
+        let edge = Arc::new(test_edge(store.clone()));
+        let realm = RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").unwrap();
+        let event = edge
+            .author_and_sign(
+                &realm,
+                "acceptance-cas-race",
+                message_intent(&edge, &realm, "immutable"),
+            )
+            .await
+            .unwrap();
+        let scope = scope_key(&realm, &event.actor_id).unwrap();
+        let commit = accepted(&event, 0);
+        let reference = publication_outcome(&event, &commit).unwrap().unwrap();
+        store.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let accepting = {
+            let edge = edge.clone();
+            let scope = scope.clone();
+            let reference = reference.clone();
+            tokio::spawn(async move {
+                edge.journal
+                    .record_outcome(
+                        &scope,
+                        "acceptance-cas-race",
+                        &edge.station_id,
+                        &commit,
+                        Some(&reference),
+                    )
+                    .await
+            })
+        };
+        match tokio::time::timeout(std::time::Duration::from_secs(5), waiting).await {
+            Ok(Ok(())) => {}
+            failure => {
+                // Dropping this sole sender releases a store worker already
+                // waiting in recv_timeout, including on an early test failure.
+                drop(release);
+                panic!("journal test did not reach its actual CAS gate: {failure:?}");
+            }
+        }
+        assert!(
+            edge.journal
+                .record_outcome(
+                    &scope,
+                    "acceptance-cas-race",
+                    &edge.station_id,
+                    &rejected("capability_denied"),
+                    None
+                )
+                .await
+                .unwrap()
+        );
+        release.send(()).unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), accepting)
+                .await
+                .expect("journal test task did not terminate after its gate was released")
+                .unwrap()
+                .unwrap(),
+            "the actual failed C CAS must retry and durably merge C"
+        );
+        let retained = edge
+            .journal
+            .load_operation(&scope, "acceptance-cas-race")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.committed, Some(reference));
+        assert_eq!(
+            retained.observation_count, 2,
+            "only the two successful CAS observations are durable"
+        );
+        assert_eq!(store.entries_with_prefix("observation/").unwrap().len(), 2);
+        assert_eq!(retained.authored.event(), event.event());
+        assert!(edge.journal.pending_events().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn late_rejection_loses_its_cas_and_acknowledges_the_durable_acceptance() {
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let store = Arc::new(JournalCasGateStore {
+            inner: MemoryAuthoringStore::default(),
+            prefix: "result/",
+            armed: std::sync::atomic::AtomicBool::new(false),
+            entered: Mutex::new(Some(entered)),
+            release: Mutex::new(released),
+        });
+        let edge = Arc::new(test_edge(store.clone()));
+        let realm = RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").unwrap();
+        let event = edge
+            .author_and_sign(
+                &realm,
+                "rejection-cas-race",
+                message_intent(&edge, &realm, "immutable"),
+            )
+            .await
+            .unwrap();
+        let scope = scope_key(&realm, &event.actor_id).unwrap();
+        store.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let rejecting = {
+            let edge = edge.clone();
+            let scope = scope.clone();
+            tokio::spawn(async move {
+                edge.journal
+                    .record_outcome(
+                        &scope,
+                        "rejection-cas-race",
+                        &edge.station_id,
+                        &rejected("capability_denied"),
+                        None,
+                    )
+                    .await
+            })
+        };
+        match tokio::time::timeout(std::time::Duration::from_secs(5), waiting).await {
+            Ok(Ok(())) => {}
+            failure => {
+                // Dropping this sole sender releases a store worker already
+                // waiting in recv_timeout, including on an early test failure.
+                drop(release);
+                panic!("journal test did not reach its actual CAS gate: {failure:?}");
+            }
+        }
+        let commit = accepted(&event, 0);
+        let reference = publication_outcome(&event, &commit).unwrap().unwrap();
+        assert!(
+            edge.journal
+                .record_outcome(
+                    &scope,
+                    "rejection-cas-race",
+                    &edge.station_id,
+                    &commit,
+                    Some(&reference)
+                )
+                .await
+                .unwrap()
+        );
+        release.send(()).unwrap();
+        assert!(
+            !tokio::time::timeout(std::time::Duration::from_secs(5), rejecting)
+                .await
+                .expect("journal test task did not terminate after its gate was released")
+                .unwrap()
+                .unwrap(),
+            "None never retries to overwrite a concurrent acceptance"
+        );
+        assert_eq!(
+            edge.accepted_publication_result(&scope, "rejection-cas-race", None)
+                .await
+                .unwrap(),
+            Some(reference)
+        );
+        assert_eq!(store.entries_with_prefix("observation/").unwrap().len(), 1);
+        assert!(edge.journal.pending_events().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn explicit_reopen_clears_only_the_terminal_answer_and_restores_restart_pending() {
+        let store = Arc::new(MemoryAuthoringStore::default());
+        let edge = test_edge(store.clone());
+        let realm = RealmId::new("ak:realm:ATv-vc4S1M4y2UKNOZKUnGUsh_44w_q2QJ5JjDBYjZw5").unwrap();
+        let event = edge
+            .author_and_sign(
+                &realm,
+                "reopen-after-loss",
+                message_intent(&edge, &realm, "immutable"),
+            )
+            .await
+            .unwrap();
+        let scope = scope_key(&realm, &event.actor_id).unwrap();
+        assert!(
+            edge.journal
+                .record_outcome(
+                    &scope,
+                    "reopen-after-loss",
+                    &edge.station_id,
+                    &rejected("capability_denied"),
+                    None
+                )
+                .await
+                .unwrap()
+        );
+        let rejected = edge
+            .journal
+            .load_operation(&scope, "reopen-after-loss")
+            .await
+            .unwrap()
+            .unwrap();
+        let old_observations = store.entries_with_prefix("observation/").unwrap();
+        assert!(
+            edge.journal
+                .reopen(&scope, "reopen-after-loss")
+                .await
+                .unwrap()
+        );
+        drop(edge);
+        let restored = test_edge(store.clone());
+        let pending = restored
+            .journal
+            .load_operation(&scope, "reopen-after-loss")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(pending.outcome.is_none());
+        assert!(pending.committed.is_none());
+        assert_eq!(pending.observation_count, rejected.observation_count);
+        assert_eq!(
+            store.entries_with_prefix("observation/").unwrap(),
+            old_observations
+        );
+        assert_eq!(pending.authored.event(), event.event());
+        let recovered = restored.journal.pending_events().await.unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].event(), event.event());
     }
 }
