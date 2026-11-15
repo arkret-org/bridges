@@ -43,12 +43,9 @@ mod tests {
                 "managed_actor_authoring":{"principal_endpoint":"https://applet.example", "key_encryption_key_hex":"33".repeat(32)}
             }
         })).unwrap();
-        let (sender, _) = tokio::sync::mpsc::channel(1);
         let store = Arc::new(crate::FileAuthoringStore::new(path.to_owned()).unwrap());
-        ManagedDeviceRuntime::new(Arc::new(
-            ArkretEdge::new(Arc::new(config), store, sender).unwrap(),
-        ))
-        .unwrap()
+        ManagedDeviceRuntime::new(Arc::new(ArkretEdge::new(Arc::new(config), store).unwrap()))
+            .unwrap()
     }
 
     #[tokio::test]

@@ -36,17 +36,6 @@ CREATE TABLE IF NOT EXISTS token_cache (
     token_value TEXT NOT NULL,
     expires_at BIGINT NOT NULL);
 
-CREATE TABLE IF NOT EXISTS outbound_dead_letters (
-    event_id VARCHAR(191) PRIMARY KEY,
-    realm_id VARCHAR(191) NOT NULL,
-    kind VARCHAR(191) NOT NULL,
-    attempts INTEGER NOT NULL,
-    retriable BOOLEAN NOT NULL,
-    last_error TEXT NOT NULL,
-    event_json TEXT NOT NULL,
-    first_seen_at BIGINT NOT NULL,
-    updated_at BIGINT NOT NULL);
-
 CREATE INDEX IF NOT EXISTS transaction_idempotency_expires_at_idx
     ON transaction_idempotency (expires_at);
 CREATE INDEX IF NOT EXISTS event_dedup_expires_at_idx
