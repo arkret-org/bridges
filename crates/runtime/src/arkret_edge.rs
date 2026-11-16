@@ -217,13 +217,6 @@ impl ArkretEdge {
 
     /// Submit the single frozen creation Event. Management admission remains
     /// the governance Station's existing grant/review decision.
-    pub async fn provision_bot(
-        &self,
-        body: &PreparedManagedActor,
-    ) -> Result<AuthoritySubmitResponseBody> {
-        self.submit_managed_creation(body).await
-    }
-
     pub async fn submit_managed_creation(
         &self,
         body: &PreparedManagedActor,
@@ -1079,13 +1072,6 @@ impl VerifiedManagedCompletion {
     /// It is exposed only after this request's complete fresh admission.
     pub fn retained_outcome(&self) -> Option<&arkret::AppletTransactionResponseBody> {
         self.retained_outcome.as_ref()
-    }
-
-    /// Full receiver-derived authentication record, including this delivery's times.
-    pub fn delivery_authentication_record(
-        &self,
-    ) -> Option<&arkret::AppletDeliveryAuthenticationRecord> {
-        self.delivery.as_ref()
     }
 }
 
