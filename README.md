@@ -198,7 +198,7 @@ requirement from the publication journal.
 
 ## 正式治理同步（0160）
 
-`AppletConfigurationService` 在已安装 Service 身份下运行 Station preview → HTTPS base_url author，并在持久 authoring store 中保留 creation body；`provision_bot` 使用原 signed request digest 重试提交，不隐式追加业务 grant。
+`AppletConfigurationService` 在已安装 Service 身份下运行 Station preview → HTTPS base_url author，并在持久 authoring store 中保留 creation body；`submit_managed_creation` 使用原 signed request digest 重试提交，不隐式追加业务 grant。
 
 Service 管理请求使用 SDK RFC9421 来源／目标签名，不申请 Applet session。`ManagedDeviceRuntime` 使用完整 Realm ActorId、accepted authorization Event、精确 scope 与独立 Device key。普通 AccountId 与 PCR 不用于 Applet Bot／Ghost 身份。
 
