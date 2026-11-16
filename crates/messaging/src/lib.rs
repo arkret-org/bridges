@@ -33,7 +33,6 @@ use arkret_bridge_runtime::{
 };
 use arkret_event_draft::{AppletBridgeErrorBuilder, EventPayloadExt};
 use arkret_models_integration::AppletBridgeVisibilityScope;
-pub use arkret_wire::SignalEnvelope;
 use async_trait::async_trait;
 use content::{
     extract_attachment, extract_plain_body, extract_strand_id, media_content_block,
@@ -153,13 +152,6 @@ pub fn non_empty_owned(value: Option<String>) -> Option<String> {
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
 }
-
-/// The inbound (arkret → app) event kinds this messaging bridge consumes, used
-/// for capability enforcement (BRG-01-009): the runtime rejects any pushed event
-/// whose kind is not listed. `MessageAdapter::on_arkret_event` handles exactly
-/// message creation and redaction.
-const BRIDGE_HANDLED_EVENT_KINDS: [EventKind; 2] =
-    [EventKind::MessageCreate, EventKind::MessageRedact];
 
 /// The strand track bridged messages write into. Applet-integration §10.1
 /// requires bridge messages to use the `discussion` track; the v1
@@ -1068,7 +1060,7 @@ pub trait MessageBridge: Send + Sync + 'static {
     ) -> Result<AppMessageRef>;
 
     /// Forward a Arkret message redaction as an app-side deletion. The driver
-    /// (`on_arkret_event`) already resolves the target `app_message_id` and
+    /// (`on_native_content`) already resolves the target `app_message_id` and
     /// invokes this with the channel/message pair most app delete APIs require;
     /// the default is a structured rejection so an unsupported adapter can
     /// never acknowledge a deletion it did not perform.
@@ -1080,15 +1072,6 @@ pub trait MessageBridge: Send + Sync + 'static {
     ) -> Result<()> {
         Err(BridgeError::App(
             "outbound deletion is not supported by this adapter".to_owned(),
-        ))
-    }
-
-    /// Handle an encrypted Signal pushed alongside events as the SDK
-    /// [`SignalEnvelope`] wire type. Product kind and payload remain encrypted;
-    /// the default is a structured rejection.
-    async fn on_signal(&self, _ctx: Arc<MessageContext>, _signal: SignalEnvelope) -> Result<()> {
-        Err(BridgeError::App(
-            "encrypted Signal forwarding is not supported by this adapter".to_owned(),
         ))
     }
 
@@ -1367,10 +1350,6 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
         self.user.clone().run(self.ctx.clone()).await
     }
 
-    async fn on_arkret_event(&self, _ctx: Arc<BridgeContext>, event: Event) -> Result<()> {
-        self.handle_content(&event, None, None).await
-    }
-
     async fn on_native_content(
         &self,
         _ctx: Arc<BridgeContext>,
@@ -1378,10 +1357,6 @@ impl<M: MessageBridge> BridgeApp for MessageAdapter<M> {
     ) -> Result<()> {
         self.handle_content(&content.original().event, content.message(), Some(content))
             .await
-    }
-
-    async fn on_signal(&self, _ctx: Arc<BridgeContext>, signal: SignalEnvelope) -> Result<()> {
-        self.user.on_signal(self.ctx.clone(), signal).await
     }
 
     fn expects_webhook_inbound(&self) -> bool {
@@ -1418,10 +1393,6 @@ where
         core_ctx.set_resolver(Arc::new(MessageResolver {
             store: store.clone(),
         }));
-        // Declare the inbound event kinds this messaging bridge consumes so the
-        // applet handler rejects anything else as `capability_denied`
-        // (BRG-01-009). `MessageAdapter::on_arkret_event` handles exactly these.
-        core_ctx.set_handled_event_kinds(BRIDGE_HANDLED_EVENT_KINDS.iter().map(EventKind::as_str));
         let ctx = Arc::new(MessageContext::new(core_ctx, store)?);
         let user = Arc::new(factory(ctx.clone())?);
         Ok(MessageAdapter { user, ctx })

@@ -553,8 +553,7 @@ mod tests {
             }
         }))
         .unwrap();
-        let (sender, _) = tokio::sync::mpsc::channel(1);
-        Arc::new(ArkretEdge::new(Arc::new(config), store, sender).unwrap())
+        Arc::new(ArkretEdge::new(Arc::new(config), store).unwrap())
     }
 
     fn intent() -> Intent {
@@ -674,8 +673,7 @@ mod tests {
             log_entries[0]["state"]["id"] = json!("did:web:unrelated.example");
         }
         assert!(crate::service_identity::validate(&wrong).is_err());
-        let (sender, _) = tokio::sync::mpsc::channel(1);
-        let edge = Arc::new(ArkretEdge::new(Arc::new(config), file.open(), sender).unwrap());
+        let edge = Arc::new(ArkretEdge::new(Arc::new(config), file.open()).unwrap());
         let manager = archive_manager(edge.clone(), &archive);
         let embedded =
             crate::web::ManagedAppletHttpHost::with_manager(edge.clone(), manager.clone()).unwrap();

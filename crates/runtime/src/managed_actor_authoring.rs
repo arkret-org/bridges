@@ -1496,8 +1496,7 @@ mod ghost_bundle_tests {
             }
         }))
         .unwrap();
-        let (sender, _) = tokio::sync::mpsc::channel(1);
-        runtime::ArkretEdge::new(Arc::new(config), store, sender).unwrap()
+        runtime::ArkretEdge::new(Arc::new(config), store).unwrap()
     }
 
     /// A real WebVH inception, prepared exactly the way `generate_identity`
