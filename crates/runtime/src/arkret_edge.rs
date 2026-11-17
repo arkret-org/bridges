@@ -1921,10 +1921,8 @@ mod tests {
         current_config.arkret.signing_key_seed_hex = "ca".repeat(32);
         current_config.arkret.verification_method_fragment = format!("#{fragment}");
         current_config.arkret.service_resolution = Some(current_resolution);
-        let (sender, _) = tokio::sync::mpsc::channel(1);
-        let old = ArkretEdge::new(Arc::new(old_config), store.clone(), sender).unwrap();
-        let (sender, _) = tokio::sync::mpsc::channel(1);
-        let current = ArkretEdge::new(Arc::new(current_config), store, sender).unwrap();
+        let old = ArkretEdge::new(Arc::new(old_config), store.clone()).unwrap();
+        let current = ArkretEdge::new(Arc::new(current_config), store).unwrap();
         (old, current, at + chrono::Duration::seconds(1))
     }
 
@@ -2111,8 +2109,7 @@ mod tests {
         verify_publication_wrappers(&edge, &original);
         let mut config = (*edge.config).clone();
         config.arkret.signing_key_seed_hex = "cc".repeat(32);
-        let (sender, _) = tokio::sync::mpsc::channel(1);
-        let rotated = ArkretEdge::new(Arc::new(config), store, sender).unwrap();
+        let rotated = ArkretEdge::new(Arc::new(config), store).unwrap();
         let context = rotated.publication_producer_context(&original).unwrap();
         assert!(arkret::VerifiedProducerEvent::verify(original.into_event(), &context).is_err());
     }
