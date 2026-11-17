@@ -27,7 +27,7 @@ use arkret::signatures::VerificationMethodDocument;
 use arkret::signatures::{PublicKeyMaterial, SignEventOptions, sign_event};
 use arkret::{
     ActorId, AppletId, AuthoredEvent, ClientRequestOptions, Did, DidCoreId, DigestSuite,
-    Ed25519PayloadSigner, Event, EventIntent, RealmId, ScopeRef, project_did_to_core_id,
+    Ed25519PayloadSigner, EventIntent, RealmId, ScopeRef, project_did_to_core_id,
 };
 use arkret_event_draft::{EventSpec, TypedEventDraft};
 use arkret_models_collaboration::authority_commit::{
@@ -45,11 +45,9 @@ use arkret_models_integration::{
 };
 use arkret_wire::{
     AuthorityRejectionStatus, AuthoritySubmitResponseBody, DidUrl, EventAdmissionSubmission,
-    SignalEnvelope,
 };
 #[cfg(test)]
 use serde_json::json;
-use tokio::sync::mpsc::Sender;
 
 use crate::PreparedManagedActor;
 #[cfg(any(feature = "web", test))]
@@ -65,20 +63,6 @@ use crate::managed_authoring::{
     ManagedAuthoringIdentity, ManagedAuthoringRoots, creation_payload,
     validate_managed_authoring_completion, validate_prepared_ghost_signer,
 };
-
-/// Bound on the inbound (arkret → app) event queue. Past this depth the applet
-/// handler stops accepting events and asks the server to retry (backpressure)
-/// rather than buffering without limit. Sized so a healthy consumer drains it
-/// well within the server's retry window; a persistently full queue means the
-/// app side is wedged, in which case shedding load back to the server (which
-/// will redeliver) is the correct behaviour.
-#[cfg(feature = "runtime")]
-pub const INBOUND_QUEUE_CAPACITY: usize = 1024;
-
-/// Bound on the best-effort Signal queue. When full, new Signal envelopes are
-/// dropped instead of back-pressuring durable transaction delivery.
-#[cfg(feature = "runtime")]
-pub const SIGNAL_QUEUE_CAPACITY: usize = 1024;
 
 /// Digest suite used for producer Event identities authored by this bridge.
 ///
@@ -102,26 +86,11 @@ pub struct ArkretEdge {
     /// Identity of the governance Station this edge submits to. Recorded with
     /// every observed answer so a Station replacement is visible in the journal.
     station_id: DidCoreId,
-    /// Inbound event queue: arkret server push → core consumer loop. Bounded so
-    /// a slow consumer applies backpressure (the handler returns `retry_after_ms`
-    /// when full) instead of buffering without limit. `None` for outbound-only
-    /// edges.
-    inbound_tx: Option<Sender<Event>>,
-    /// Inbound encrypted Signal queue: arkret server push → core consumer loop.
-    /// Product kind and payload stay inside ciphertext; this layer only
-    /// validates and forwards the SDK [`SignalEnvelope`] wire type.
-    /// `None` for outbound-only edges.
-    signal_tx: Option<Sender<SignalEnvelope>>,
 }
 
 impl ArkretEdge {
-    /// Build an inbound-capable edge: signs with the seed from
-    /// [`Config::signing_seed`] and queues inbound events into `inbound_tx`.
-    pub fn new(
-        config: Arc<Config>,
-        store: Arc<dyn AuthoringStore>,
-        inbound_tx: Sender<Event>,
-    ) -> Result<Self> {
+    /// Build an edge using the configured Service signer and a durable authoring store.
+    pub fn new(config: Arc<Config>, store: Arc<dyn AuthoringStore>) -> Result<Self> {
         let service_did = config.arkret.service_did.clone();
         let seed = config.signing_seed()?;
         // The signer's `kid` MUST be the absolute DID URL
@@ -140,7 +109,6 @@ impl ArkretEdge {
             signer,
             service_did,
             AuthoringJournal::new(store),
-            Some(inbound_tx),
         )
     }
 
@@ -148,7 +116,7 @@ impl ArkretEdge {
     /// signing material, and a reusable durable authoring journal.
     ///
     /// This is the integration path for hosts that own authentication and key
-    /// storage. No inbound queues are allocated, and rebuilding an edge can
+    /// storage. Rebuilding an edge can
     /// reuse the same journal without discarding pending signed publications.
     ///
     /// Kept for the out-of-repo consumer `savfox`
@@ -161,7 +129,7 @@ impl ArkretEdge {
         journal: AuthoringJournal,
     ) -> Result<Self> {
         let service_did = config.arkret.service_did.clone();
-        Self::build(config, client, signer, service_did, journal, None)
+        Self::build(config, client, signer, service_did, journal)
     }
 
     fn build(
@@ -170,7 +138,6 @@ impl ArkretEdge {
         signer: Ed25519PayloadSigner,
         service_did: Did,
         journal: AuthoringJournal,
-        inbound_tx: Option<Sender<Event>>,
     ) -> Result<Self> {
         let base = url::Url::parse(&config.arkret.server_url)
             .map_err(|e| BridgeError::Config(format!("server_url: {e}")))?;
@@ -232,15 +199,7 @@ impl ArkretEdge {
             applet_id,
             journal,
             station_id,
-            inbound_tx,
-            signal_tx: None,
         })
-    }
-
-    /// Install the encrypted Signal sender. Used by the `run_bridge` path which
-    /// wires a parallel best-effort queue.
-    pub fn set_signal_sender(&mut self, tx: Sender<SignalEnvelope>) {
-        self.signal_tx = Some(tx);
     }
 
     #[cfg(any(feature = "managed-authoring", feature = "web"))]
@@ -256,57 +215,8 @@ impl ArkretEdge {
         &self.client
     }
 
-    /// Prepare one independent Bot using the installed Service transport identity.
-    /// Retain the returned exact body before admission; retries must reuse its
-    /// request id, signed request and candidate rather than generating another Bot.
-    pub async fn prepare_bot_provision(
-        &self,
-        request: &arkret_models_integration::AppletBotPreviewRequestBody,
-    ) -> Result<PreparedManagedActor> {
-        let realm = request
-            .effective_scope
-            .realm_id_opt()
-            .ok_or_else(|| BridgeError::App("Bot creation requires a Realm".into()))?;
-        let route = self.realm_route(realm).await?;
-        let preview = route
-            .client
-            .applet_bot_preview(&self.config.arkret.applet_id, request)
-            .await?;
-        let base = url::Url::parse(&self.config.arkret.applet_base_url)
-            .map_err(|e| BridgeError::Config(e.to_string()))?;
-        if base.scheme() != "https"
-            || !base.username().is_empty()
-            || base.password().is_some()
-            || base.fragment().is_some()
-        {
-            return Err(BridgeError::Config(
-                "Applet management URL must be HTTPS without credentials or fragment".into(),
-            ));
-        }
-        let authored = self
-            .client
-            .applet_managed_actor_author_at(
-                &base,
-                &arkret::AppletManagedActorAuthorRequestBody {
-                    authoring_request: preview.authoring_request.clone(),
-                },
-            )
-            .await?;
-        Ok(PreparedManagedActor {
-            authoring_request: preview.authoring_request,
-            create_event: authored.create_event,
-        })
-    }
-
     /// Submit the single frozen creation Event. Management admission remains
     /// the governance Station's existing grant/review decision.
-    pub async fn provision_bot(
-        &self,
-        body: &PreparedManagedActor,
-    ) -> Result<AuthoritySubmitResponseBody> {
-        self.submit_managed_creation(body).await
-    }
-
     pub async fn submit_managed_creation(
         &self,
         body: &PreparedManagedActor,
@@ -373,40 +283,6 @@ impl ArkretEdge {
         Ok(outcome)
     }
 
-    /// Compose the SDK's restricted native self-operation transport for an
-    /// already accepted managed Device. It grants no session or group secrets.
-    pub async fn managed_device_client(
-        &self,
-        metadata: arkret_models_integration::AppletManagedDeviceMetadata,
-        device_key: ed25519_dalek::SigningKey,
-    ) -> Result<Client> {
-        metadata.validate()?;
-        if metadata.applet_id != self.applet_id
-            || device_key.verifying_key() == self.signer.verifying_key()
-        {
-            return Err(BridgeError::App(
-                "managed Device transport identity or key is misbound".into(),
-            ));
-        }
-        let fingerprint =
-            arkret::ed25519_pubkey_to_did_key_multibase(device_key.verifying_key().as_bytes());
-        let realm = metadata
-            .actor_id
-            .as_realm_actor_id()
-            .ok_or_else(|| BridgeError::App("managed Device requires a Realm actor".into()))?
-            .realm_id
-            .clone();
-        let route = self.realm_route(&realm).await?;
-        Ok(route.client.with_managed_device_http_signer(
-            metadata,
-            route.authority.current_service_id().clone(),
-            arkret::http_client::HttpMessageSigner::new(
-                format!("did:key:{fingerprint}#{fingerprint}"),
-                device_key,
-            ),
-        )?)
-    }
-
     /// The installed Applet service signing key.
     ///
     /// The Realm actor creation Event is authored by this service
@@ -427,16 +303,6 @@ impl ArkretEdge {
     /// the installed Applet service authority.
     pub fn service_verification_method(&self) -> Result<DidUrl> {
         self.verification_method_for_actor(&self.service_did)
-    }
-
-    /// The inbound event sender (bounded), if this edge was built with one.
-    pub fn inbound_sender(&self) -> Option<Sender<Event>> {
-        self.inbound_tx.clone()
-    }
-
-    /// The Signal sender, if installed.
-    pub fn signal_sender(&self) -> Option<Sender<SignalEnvelope>> {
-        self.signal_tx.clone()
     }
 
     /// Current validated managed-Actor authoring material for one exact Actor
@@ -1207,13 +1073,6 @@ impl VerifiedManagedCompletion {
     pub fn retained_outcome(&self) -> Option<&arkret::AppletTransactionResponseBody> {
         self.retained_outcome.as_ref()
     }
-
-    /// Full receiver-derived authentication record, including this delivery's times.
-    pub fn delivery_authentication_record(
-        &self,
-    ) -> Option<&arkret::AppletDeliveryAuthenticationRecord> {
-        self.delivery.as_ref()
-    }
 }
 
 fn retained_managed_actor(
@@ -1451,8 +1310,7 @@ mod tests {
                 "managed_actor_authoring": {"principal_endpoint":"https://ghost.example", "key_encryption_key_hex":"22".repeat(32)}
             }
         })).unwrap();
-        let (sender, _) = tokio::sync::mpsc::channel(1);
-        ArkretEdge::new(Arc::new(config), store, sender).unwrap()
+        ArkretEdge::new(Arc::new(config), store).unwrap()
     }
 
     #[derive(Default)]
@@ -1511,8 +1369,9 @@ mod tests {
         assert_eq!(description.service_kind, arkret::ServiceKind::AppletService);
     }
 
-    #[tokio::test]
-    async fn managed_device_transport_rejects_service_key_and_other_realm() {
+    #[cfg(feature = "managed-authoring")]
+    #[test]
+    fn native_device_transport_accepts_bound_key_and_rejects_service_key_and_other_realm() {
         let edge = test_edge(Arc::new(MemoryAuthoringStore::default()));
         let metadata: arkret_models_integration::AppletManagedDeviceMetadata = serde_json::from_value(json!({
             "actor_id": {"kind":"realm", "realm_actor_id": {"principal_id":"ak:did_core:webvh:z6mkbot", "realm_id":"ak:realm:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}},
@@ -1522,12 +1381,18 @@ mod tests {
             "effective_scope":{"kind":"realm","realm_id":"ak:realm:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
             "nonce":"AAAAAAAAAAAAAAAAAAAAAA"
         })).unwrap();
+        crate::managed_device::validate_transport_identity(
+            &edge,
+            &metadata,
+            &ed25519_dalek::SigningKey::from_bytes(&[0x23; 32]),
+        )
+        .expect("a bound native Device key must be accepted");
         assert!(
-            edge.managed_device_client(
-                metadata.clone(),
-                ed25519_dalek::SigningKey::from_bytes(&[0x11; 32])
+            crate::managed_device::validate_transport_identity(
+                &edge,
+                &metadata,
+                &ed25519_dalek::SigningKey::from_bytes(&[0x11; 32]),
             )
-            .await
             .is_err()
         );
         let mut wrong = metadata;
@@ -1538,9 +1403,12 @@ mod tests {
             )),
         };
         assert!(
-            edge.managed_device_client(wrong, ed25519_dalek::SigningKey::from_bytes(&[0x23; 32]))
-                .await
-                .is_err()
+            crate::managed_device::validate_transport_identity(
+                &edge,
+                &wrong,
+                &ed25519_dalek::SigningKey::from_bytes(&[0x23; 32]),
+            )
+            .is_err()
         );
     }
 

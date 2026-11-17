@@ -10,14 +10,14 @@ use std::time::Duration;
 
 use arkret_bridge_messaging::runtime::cache::TokenCache;
 use arkret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
-use arkret_bridge_messaging::salvo::prelude::*;
-use arkret_bridge_messaging::salvo::{self, affix_state};
 use arkret_bridge_messaging::{
     AppDeleteReason, AppMessageRef, InboundAppDelete, InboundAppMessage, MessageBridge,
     MessageContext, OutboundAppMessage, SenderRenderStyle, VendorTokenCheck, fetch_vendor_token,
     send_json_expect_status, webhook,
 };
 use async_trait::async_trait;
+use salvo::affix_state;
+use salvo::prelude::*;
 use serde_json::{Value, json};
 
 /// Fallback validity (seconds) when AAD omits `expires_in`.

@@ -700,38 +700,7 @@ pub fn managed_completion_router(edge: Arc<crate::ArkretEdge>) -> Result<Router>
 }
 
 fn completion_state(edge: Arc<crate::ArkretEdge>) -> Result<CompletionWebState> {
-    let config = edge.config().clone();
-    let did_authority = Arc::new(DidAuthority::new(config.arkret.trust_domain.clone())?);
-    seed_source_service_bindings(&did_authority, &config)?;
     Ok(CompletionWebState { edge })
-}
-
-/// HTTP transport adapter for hosts using a different web framework or version.
-/// Signed URI, headers and body are transferred without rewriting or parsing.
-pub async fn receive_managed_completion_http(
-    edge: Arc<crate::ArkretEdge>,
-    method: salvo::http::Method,
-    uri: salvo::http::uri::Uri,
-    headers: salvo::http::HeaderMap,
-    body: Vec<u8>,
-) -> Result<(StatusCode, salvo::http::HeaderMap, Vec<u8>)> {
-    let mut request = Request::new();
-    *request.method_mut() = method;
-    *request.uri_mut() = uri;
-    *request.headers_mut() = headers;
-    *request.body_mut() = body.into();
-    let mut depot = Depot::new();
-    depot.insert_typed(completion_state(edge)?);
-    let mut response = Response::new();
-    let mut flow = FlowCtrl::new(vec![
-        Arc::new(OperationSelector(
-            ServiceOperationId::EDGE_APPLET_COMMAND_TRANSACTION_V1,
-        )),
-        Arc::new(applet_transactions),
-    ]);
-    flow.call_next(&mut request, &mut depot, &mut response)
-        .await;
-    buffered_response(response)
 }
 
 fn buffered_response(

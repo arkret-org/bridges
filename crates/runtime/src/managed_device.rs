@@ -125,6 +125,22 @@ struct ManagedControlState {
     generation: u64,
 }
 
+pub(crate) fn validate_transport_identity(
+    edge: &ArkretEdge,
+    metadata: &AppletManagedDeviceMetadata,
+    device_key: &SigningKey,
+) -> Result<()> {
+    metadata.validate()?;
+    if metadata.applet_id.as_str() != edge.applet_id()
+        || device_key.verifying_key() == edge.signer().verifying_key()
+    {
+        return Err(BridgeError::App(
+            "managed Device transport identity or key is misbound".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn invalid(detail: impl std::fmt::Display) -> BridgeError {
     BridgeError::Database(detail.to_string())
 }
@@ -266,19 +282,6 @@ impl ManagedDeviceRuntime {
             store: edge.authoring_store(),
             edge,
         })
-    }
-
-    pub async fn bootstrap_if_configured(edge: Arc<ArkretEdge>) -> Result<Vec<ManagedDevice>> {
-        if edge
-            .config()
-            .arkret
-            .managed_actor_authoring
-            .device
-            .is_none()
-        {
-            return Ok(Vec::new());
-        }
-        Self::new(edge)?.bootstrap_configured_devices().await
     }
 
     /// Bootstrap only explicitly configured actions in each creation's exact
@@ -908,6 +911,7 @@ impl ManagedDeviceRuntime {
         let fragment = key_method
             .strip_prefix("did:key:")
             .ok_or_else(|| invalid("Device key fingerprint missing"))?;
+        validate_transport_identity(&self.edge, &metadata, &device_key)?;
         let client = route.client.clone().with_managed_device_http_signer(
             metadata,
             route.authority.current_service_id().clone(),

@@ -7,14 +7,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arkret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
-use arkret_bridge_messaging::salvo::prelude::*;
-use arkret_bridge_messaging::salvo::{self, affix_state};
 use arkret_bridge_messaging::{
     AppDeleteReason, AppMessageRef, ExternalMediaRequest, InboundAppDelete, InboundAppMessage,
     InboundMediaAuthorization, MessageBridge, MessageContext, OutboundAppMessage,
-    SenderRenderStyle, SignalEnvelope, webhook,
+    SenderRenderStyle, webhook,
 };
 use async_trait::async_trait;
+use salvo::affix_state;
+use salvo::prelude::*;
 use serde_json::{Value, json};
 
 /// LINE bridge adapter.
@@ -38,13 +38,6 @@ impl LineApp {
 impl MessageBridge for LineApp {
     fn name(&self) -> &str {
         "line"
-    }
-
-    async fn on_signal(&self, _ctx: Arc<MessageContext>, _signal: SignalEnvelope) -> Result<()> {
-        Err(BridgeError::App(
-            "LINE cannot interpret encrypted SignalEnvelope without a caller-supplied decryptor"
-                .to_owned(),
-        ))
     }
 
     async fn send_to_app(

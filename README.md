@@ -66,7 +66,7 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `arkret-bridge-
 - **媒体**:`MessageContext::forward_external_media` 经 Realm Actor Device 加密上传；`Attachment` 中的本地明文由 native runtime 验证后提供；
   discord/telegram 收发双向,whatsapp/line/slack/messenger/zulip 入站已接,余者文本
   (通用能力就绪)。
-- **防回声**:`on_arkret_event` 跳过本桥 `external_ref.source` 自发事件、由本桥
+- **防回声**:`on_native_content` 跳过本桥 `external_ref.source` 自发事件、由本桥
   service actor 署名的事件,以及已在消息映射表记录的 event,避免出站回环。
 
 详见 [`_BRIDGE_CONTRACT.md`](_BRIDGE_CONTRACT.md)(适配器编写契约)。
@@ -198,9 +198,9 @@ requirement from the publication journal.
 
 ## 正式治理同步（0160）
 
-`ArkretEdge::prepare_bot_provision` 在已安装 Service 身份下运行 Station preview → HTTPS base_url author，并返回必须原样持久保存的 creation body；`provision_bot` 使用原 signed request digest 重试提交，不隐式追加业务 grant。
+`AppletConfigurationService` 在已安装 Service 身份下运行 Station preview → HTTPS base_url author，并在持久 authoring store 中保留 creation body；`submit_managed_creation` 使用原 signed request digest 重试提交，不隐式追加业务 grant。
 
-Service 管理请求使用 SDK RFC9421 来源／目标签名，不申请 Applet session。`ArkretEdge::managed_device_client` 使用完整 Realm ActorId、accepted authorization Event、精确 scope 与独立 Device key。普通 AccountId 与 PCR 不用于 Applet Bot／Ghost 身份。
+Service 管理请求使用 SDK RFC9421 来源／目标签名，不申请 Applet session。`ManagedDeviceRuntime` 使用完整 Realm ActorId、accepted authorization Event、精确 scope 与独立 Device key。普通 AccountId 与 PCR 不用于 Applet Bot／Ghost 身份。
 
 已经接通独立身份创建、首 Device、成员加入、Service parent 与 terminal child、原生 Welcome／群状态／consume／ACK、stream 解密、加密消息与附件收发、精确重试及本地存储冷恢复。附件上传不授予消息发布或读取权；读取仍核验 accepted 消息来源及当前设备／安装／内容权限。纯文本消费者不会取得附件明文。Circle 首次上传已按正式裁决使用治理方验证的创建目标和不可变私有绑定，生产联合验证仍在进行。
 

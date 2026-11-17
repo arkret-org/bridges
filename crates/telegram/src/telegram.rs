@@ -127,7 +127,7 @@ async fn process_message(bot: &Bot, ctx: &Arc<MessageContext>, token: &str, msg:
     // this bot's own echoes. Telegram's privacy mode usually hides
     // these, but a group with privacy off (or multiple bots) can
     // surface them. The authoritative loop guard remains in the
-    // shared layer (`on_arkret_event`).
+    // shared layer (`on_native_content`).
     if msg.from.as_ref().map(|user| user.is_bot).unwrap_or(false) {
         return;
     }
