@@ -8,14 +8,14 @@ use std::time::Duration;
 
 use arkret_bridge_messaging::runtime::cache::TokenCache;
 use arkret_bridge_messaging::runtime::{BridgeError, Result};
-use arkret_bridge_messaging::salvo::prelude::*;
-use arkret_bridge_messaging::salvo::{self, affix_state};
 use arkret_bridge_messaging::{
     AppMessageRef, InboundAppMessage, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, VendorTokenCheck, fetch_vendor_token, send_json_expect_status, webhook,
 };
 use async_trait::async_trait;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
+use salvo::affix_state;
+use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 

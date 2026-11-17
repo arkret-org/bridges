@@ -7,14 +7,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arkret_bridge_messaging::runtime::{BridgeError, Result, redact_sensitive_url_values};
-use arkret_bridge_messaging::salvo::prelude::*;
-use arkret_bridge_messaging::salvo::{self, affix_state};
 use arkret_bridge_messaging::{
     AppDeleteReason, AppMessageRef, ExternalMediaRequest, InboundAppDelete, InboundAppMessage,
     InboundMediaAuthorization, MessageBridge, MessageContext, OutboundAppMessage,
     SenderRenderStyle, SignalEnvelope, webhook,
 };
 use async_trait::async_trait;
+use salvo::affix_state;
+use salvo::prelude::*;
 use serde_json::{Value, json};
 
 /// LINE bridge adapter.
