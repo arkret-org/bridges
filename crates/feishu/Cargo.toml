@@ -22,7 +22,6 @@ arkret-bridge-messaging = { workspace = true, default-features = false }
 async-trait = { workspace = true }
 salvo = { workspace = true }
 serde = { workspace = true }
-salvo = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
