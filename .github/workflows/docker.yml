@@ -167,14 +167,14 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/arkret-rust-sdk
           path: arkret-org/arkret-rust-sdk
-          ref: 5a2d1665e1831ff6e6cefe8a0b09a4d37989b611
+          ref: 5b95a6c57605e601a699a11068d30b9c528561bb
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
       - name: Checkout garth
         uses: actions/checkout@v6
         with:
           repository: ${{ github.repository_owner }}/garth
           path: arkret-org/garth
-          ref: 960e007b4905f91b2ffc52ccf91db0b3cf5ca44d
+          ref: 5e73ce767773400b878812579c7980c1c03aceec
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
       - uses: actions/setup-python@v6
         with:
