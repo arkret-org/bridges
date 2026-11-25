@@ -14,129 +14,13 @@ env:
 
 jobs:
   containers:
+    uses: ./.github/workflows/docker.yml
     permissions:
       contents: read
-      id-token: write
       packages: write
-    needs: build
-    name: Container images
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        bridge:
-          - dingtalk
-          - discord
-          - feishu
-          - googlechat
-          - imessage
-          - line
-          - messenger
-          - qq
-          - slack
-          - teams
-          - telegram
-          - wechat
-          - whatsapp
-          - zulip
-
-    steps:
-      - name: Checkout bridges
-        uses: actions/checkout@v6
-        with:
-          path: bridges
-
-      - name: Download verified Linux binary bundles
-        uses: actions/download-artifact@v5
-        with:
-          pattern: release-*-unknown-linux-gnu
-          merge-multiple: true
-          path: native-bundles
-
-      - name: Verify and extract native executables
-        shell: bash
-        run: |
-          set -euo pipefail
-          (cd native-bundles && sha256sum --check ./*.sha256)
-          mkdir -p native-binaries/amd64 native-binaries/arm64
-          tar -xzf native-bundles/bridges-*-x86_64-unknown-linux-gnu.tar.gz --strip-components=1 -C native-binaries/amd64
-          tar -xzf native-bundles/bridges-*-aarch64-unknown-linux-gnu.tar.gz --strip-components=1 -C native-binaries/arm64
-          test -x "native-binaries/amd64/arkret-bridge-${{ matrix.bridge }}"
-          test -x "native-binaries/arm64/arkret-bridge-${{ matrix.bridge }}"
-          mkdir -p image-binaries/amd64 image-binaries/arm64
-          cp "native-binaries/amd64/arkret-bridge-${{ matrix.bridge }}" image-binaries/amd64/arkret-bridge
-          cp "native-binaries/arm64/arkret-bridge-${{ matrix.bridge }}" image-binaries/arm64/arkret-bridge
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository_owner }}/arkret-bridge-${{ matrix.bridge }}
-          tags: |
-            type=ref,event=tag
-            type=sha,prefix=sha-
-
-      - name: Login to GHCR
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build image
-        id: image
-        uses: docker/build-push-action@v6
-        with:
-          context: image-binaries
-          file: bridges/.ci/Dockerfile.release
-          push: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-          labels: ${{ steps.meta.outputs.labels }}
-          tags: ${{ steps.meta.outputs.tags }}
-          platforms: linux/amd64,linux/arm64
-          cache-from: type=gha,scope=${{ matrix.bridge }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.bridge }}
-
-      - name: Generate source SBOM
-        uses: anchore/sbom-action@v0
-        with:
-          path: bridges
-          format: cyclonedx-json
-          output-file: sbom-arkret-bridge-${{ matrix.bridge }}.cyclonedx.json
-          upload-artifact: false
-          upload-release-assets: false
-
-      - name: Checksum SBOM
-        shell: bash
-        run: sha256sum "sbom-arkret-bridge-${{ matrix.bridge }}.cyclonedx.json" > "sbom-arkret-bridge-${{ matrix.bridge }}.cyclonedx.json.sha256"
-
-      - name: Upload SBOM
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-sbom-arkret-bridge-${{ matrix.bridge }}
-          path: |
-            sbom-arkret-bridge-${{ matrix.bridge }}.cyclonedx.json
-            sbom-arkret-bridge-${{ matrix.bridge }}.cyclonedx.json.sha256
-
-      - name: Install cosign
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-        uses: sigstore/cosign-installer@v3
-
-      - name: Sign image
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-        shell: bash
-        env:
-          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
-          IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}/arkret-bridge-${{ matrix.bridge }}
-        run: |
-          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          cosign sign --yes "${IMAGE_REPOSITORY}@${IMAGE_DIGEST}"
+      id-token: write
+    secrets:
+      CI_REPO_TOKEN: ${{ secrets.CI_REPO_TOKEN }}
 
   build:
     name: Build (${{ matrix.target }})
@@ -149,12 +33,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-            platform: linux
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            platform: linux
           - os: windows-2025
             target: x86_64-pc-windows-msvc
             platform: windows

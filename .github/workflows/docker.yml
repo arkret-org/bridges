@@ -1,0 +1,203 @@
+name: Docker Images
+
+on:
+  push:
+    branches: [main]
+  workflow_call:
+    secrets:
+      CI_REPO_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  containers:
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    needs: build
+    name: Container images
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        bridge:
+          - dingtalk
+          - discord
+          - feishu
+          - googlechat
+          - imessage
+          - line
+          - messenger
+          - qq
+          - slack
+          - teams
+          - telegram
+          - wechat
+          - whatsapp
+          - zulip
+
+    steps:
+      - name: Checkout bridges
+        uses: actions/checkout@v6
+        with:
+          path: bridges
+
+      - name: Download verified Linux binary bundles
+        uses: actions/download-artifact@v5
+        with:
+          pattern: release-*-unknown-linux-gnu
+          merge-multiple: true
+          path: native-bundles
+
+      - name: Verify and extract native executables
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd native-bundles && sha256sum --check ./*.sha256)
+          mkdir -p native-binaries/amd64 native-binaries/arm64
+          tar -xzf native-bundles/bridges-*-x86_64-unknown-linux-gnu.tar.gz --strip-components=1 -C native-binaries/amd64
+          tar -xzf native-bundles/bridges-*-aarch64-unknown-linux-gnu.tar.gz --strip-components=1 -C native-binaries/arm64
+          test -x "native-binaries/amd64/arkret-bridge-${{ matrix.bridge }}"
+          test -x "native-binaries/arm64/arkret-bridge-${{ matrix.bridge }}"
+          mkdir -p image-binaries/amd64 image-binaries/arm64
+          cp "native-binaries/amd64/arkret-bridge-${{ matrix.bridge }}" image-binaries/amd64/arkret-bridge
+          cp "native-binaries/arm64/arkret-bridge-${{ matrix.bridge }}" image-binaries/arm64/arkret-bridge
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/arkret-bridge-${{ matrix.bridge }}
+          tags: |
+            type=ref,event=tag
+            type=sha,format=long,prefix=sha-
+
+      - name: Login to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build image
+        id: image
+        uses: docker/build-push-action@v6
+        with:
+          context: image-binaries
+          file: bridges/.ci/Dockerfile.release
+          push: ${{ github.event_name == 'push' }}
+          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta.outputs.tags }}
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha,scope=${{ matrix.bridge }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.bridge }}
+
+      - name: Generate source SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: bridges
+          format: cyclonedx-json
+          output-file: sbom-arkret-bridge-${{ matrix.bridge }}.cyclonedx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Checksum SBOM
+        shell: bash
+        run: sha256sum "sbom-arkret-bridge-${{ matrix.bridge }}.cyclonedx.json" > "sbom-arkret-bridge-${{ matrix.bridge }}.cyclonedx.json.sha256"
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-sbom-arkret-bridge-${{ matrix.bridge }}
+          path: |
+            sbom-arkret-bridge-${{ matrix.bridge }}.cyclonedx.json
+            sbom-arkret-bridge-${{ matrix.bridge }}.cyclonedx.json.sha256
+
+      - name: Install cosign
+        if: github.event_name == 'push'
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}/arkret-bridge-${{ matrix.bridge }}
+        run: |
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          cosign sign --yes "${IMAGE_REPOSITORY}@${IMAGE_DIGEST}"
+
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: arkret-org/bridges
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            platform: linux
+    steps:
+      - name: Checkout bridges
+        uses: actions/checkout@v6
+        with:
+          path: arkret-org/bridges
+      - name: Checkout arkret-rust-sdk
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository_owner }}/arkret-rust-sdk
+          path: arkret-org/arkret-rust-sdk
+          ref: 5a2d1665e1831ff6e6cefe8a0b09a4d37989b611
+          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
+      - name: Checkout garth
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository_owner }}/garth
+          path: arkret-org/garth
+          ref: 960e007b4905f91b2ffc52ccf91db0b3cf5ca44d
+          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev cmake ninja-build nasm
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: arkret-org/bridges
+          key: release-${{ matrix.target }}
+      - name: Build release executables
+        run: cargo build --release --locked --target ${{ matrix.target }} --workspace --bins
+      - name: Package release
+        run: python .ci/package-release.py --target ${{ matrix.target }} --binary arkret-bridge-dingtalk --binary arkret-bridge-discord --binary arkret-bridge-feishu --binary arkret-bridge-googlechat --binary arkret-bridge-imessage --binary arkret-bridge-line --binary arkret-bridge-messenger --binary arkret-bridge-qq --binary arkret-bridge-slack --binary arkret-bridge-teams --binary arkret-bridge-telegram --binary arkret-bridge-wechat --binary arkret-bridge-whatsapp --binary arkret-bridge-zulip --resource crates/dingtalk/config/config.sample.yaml=config/dingtalk.yaml --resource crates/discord/config/config.sample.yaml=config/discord.yaml --resource crates/feishu/config/config.sample.yaml=config/feishu.yaml --resource crates/googlechat/config/config.sample.yaml=config/googlechat.yaml --resource crates/imessage/config/config.sample.yaml=config/imessage.yaml --resource crates/line/config/config.sample.yaml=config/line.yaml --resource crates/messenger/config/config.sample.yaml=config/messenger.yaml --resource crates/qq/config/config.sample.yaml=config/qq.yaml --resource crates/slack/config/config.sample.yaml=config/slack.yaml --resource crates/teams/config/config.sample.yaml=config/teams.yaml --resource crates/telegram/config/config.sample.yaml=config/telegram.yaml --resource crates/wechat/config/config.sample.yaml=config/wechat.yaml --resource crates/whatsapp/config/config.sample.yaml=config/whatsapp.yaml --resource crates/zulip/config/config.sample.yaml=config/zulip.yaml
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: arkret-org/bridges/release-assets/*
+          if-no-files-found: error
