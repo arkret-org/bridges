@@ -195,16 +195,11 @@ async fn qq_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
         webhook::ok_json(res, json!({ "ok": true }));
         return;
     }
-    let user = body
-        .get("user_id")
-        .map(|v| v.to_string())
-        .unwrap_or_default();
-    let channel = if let Some(group_id) = body.get("group_id") {
-        group_id.to_string()
-    } else {
-        format!("private/{user}")
+    let Some((channel, user)) = qq_channel_and_user(&body) else {
+        webhook::bad_request(res, "QQ user_id or group_id missing or malformed");
+        return;
     };
-    let Some(message_id) = body.get("message_id").and_then(json_id_string) else {
+    let Some(message_id) = body.get("message_id").and_then(json_scalar_id_string) else {
         webhook::bad_request(res, "QQ message_id missing");
         return;
     };
@@ -219,7 +214,7 @@ async fn qq_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
         InboundAppMessage {
             app_channel: channel,
             app_user: user,
-            app_message_id: message_id.clone(),
+            app_message_id: message_id,
             body: text,
         },
     )
@@ -231,8 +226,13 @@ fn qq_send_ok(value: &Value) -> bool {
     value.get("retcode").and_then(Value::as_i64) == Some(0)
 }
 
-fn json_id_string(value: &Value) -> Option<String> {
-    json_scalar_id_string(value)
+fn qq_channel_and_user(body: &Value) -> Option<(String, String)> {
+    let user = json_scalar_id_string(body.get("user_id")?)?;
+    let channel = match body.get("group_id") {
+        Some(group) => json_scalar_id_string(group)?,
+        None => format!("private/{user}"),
+    };
+    Some((channel, user))
 }
 
 fn qq_unsupported_media(body: &Value) -> Option<(String, String, String, String)> {
@@ -242,16 +242,8 @@ fn qq_unsupported_media(body: &Value) -> Option<(String, String, String, String)
         .filter_map(|segment| segment.get("type").and_then(Value::as_str))
         .find(|kind| *kind != "text")?
         .to_owned();
-    let user = body
-        .get("user_id")
-        .map(|value| value.to_string())
-        .unwrap_or_default();
-    let channel = if let Some(group_id) = body.get("group_id") {
-        group_id.to_string()
-    } else {
-        format!("private/{user}")
-    };
-    let message_id = body.get("message_id").and_then(json_id_string)?;
+    let (channel, user) = qq_channel_and_user(body)?;
+    let message_id = body.get("message_id").and_then(json_scalar_id_string)?;
     Some((channel, user, message_id, media_kind))
 }
 
@@ -273,13 +265,33 @@ mod tests {
     }
 
     #[test]
-    fn json_id_string_accepts_string_and_integer_ids() {
-        assert_eq!(json_id_string(&json!(" msg-1 ")).as_deref(), Some("msg-1"));
-        assert_eq!(json_id_string(&json!(42)).as_deref(), Some("42"));
+    fn json_scalar_id_string_accepts_string_and_integer_ids() {
         assert_eq!(
-            json_id_string(&json!(9007199254740993u64)).as_deref(),
+            json_scalar_id_string(&json!(" msg-1 ")).as_deref(),
+            Some("msg-1")
+        );
+        assert_eq!(json_scalar_id_string(&json!(42)).as_deref(), Some("42"));
+        assert_eq!(
+            json_scalar_id_string(&json!(9007199254740993u64)).as_deref(),
             Some("9007199254740993")
         );
+    }
+
+    #[test]
+    fn string_ids_round_trip_through_channel_routing() {
+        for (body, expected) in [
+            (
+                json!({"user_id":"456", "group_id":"123"}),
+                QqTarget::Group(123),
+            ),
+            (json!({"user_id":"456"}), QqTarget::Private(456)),
+        ] {
+            let (channel, user) = qq_channel_and_user(&body).unwrap();
+            assert_eq!(user, "456");
+            assert_eq!(qq_target_from_app_channel(&channel).unwrap(), expected);
+        }
+        assert!(qq_channel_and_user(&json!({"group_id":123})).is_none());
+        assert!(qq_channel_and_user(&json!({"user_id":456, "group_id":{}})).is_none());
     }
 
     #[test]
@@ -299,10 +311,10 @@ mod tests {
     }
 
     #[test]
-    fn json_id_string_rejects_empty_or_non_scalar_ids() {
-        assert!(json_id_string(&json!("   ")).is_none());
-        assert!(json_id_string(&json!(null)).is_none());
-        assert!(json_id_string(&json!({"id": "nested"})).is_none());
+    fn json_scalar_id_string_rejects_empty_or_non_scalar_ids() {
+        assert!(json_scalar_id_string(&json!("   ")).is_none());
+        assert!(json_scalar_id_string(&json!(null)).is_none());
+        assert!(json_scalar_id_string(&json!({"id": "nested"})).is_none());
     }
 
     #[test]
