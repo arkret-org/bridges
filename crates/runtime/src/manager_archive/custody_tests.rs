@@ -262,7 +262,7 @@ fn real_sdk_handover_rechecks_acceptance_time_before_first_or_cold_vault_write()
             realm_id: genesis_event.realm_id.clone(),
             genesis_event: genesis_event.clone(),
             genesis_commit: commit,
-            producer_signer_fact: Some(genesis["producer_signer_fact"].clone()),
+            producer_signer_fact: None,
             authority_transitions: vec![],
             current_generation: 0,
             current_service_id: resolution.service_id.clone(),

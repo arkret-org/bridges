@@ -193,7 +193,7 @@ impl ManagedDeviceRuntime {
     async fn read_installation_hint(&self, hint: &InstallationHint) -> Result<CapabilityGrant> {
         if !matches!(
             hint.effective_scope,
-            ScopeRef::Realm { .. } | ScopeRef::Circle { .. }
+            ScopeRef::Realm { .. }
         ) || hint.outcome.applet_id.as_str() != self.edge.applet_id()
             || hint.outcome.service_id != *self.edge.service_actor_id()
         {

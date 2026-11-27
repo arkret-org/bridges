@@ -14,7 +14,7 @@ deleted.
 - [x] `EventCommitSubmission { event }` is the only Event submission DTO on the
   outbound edge.
 - [x] Only `RealmCommit` carries `previous_commit_ref`, and only within one stream.
-- [x] Realm, each Circle and each Sidecar are independent commit streams. Nothing
+- [x] Realm and each Sidecar are independent commit streams. Nothing
   in this repository merges them or compares positions across them.
 - [x] The bridge retains the exact `CommittedEventRef` of an accepted publication
   and never re-derives it.
@@ -90,7 +90,7 @@ produce or consume.
   `AppletManagedActorAuthoringResult::validate_delivery_binding` /
   `validate_bindings` to a local composition of SDK validators
   (`validate_authoring_completion`), which additionally requires that the
-  completion reports a Realm-stream commit rather than a Circle or Sidecar one.
+  completion reports a Realm-stream commit rather than a Sidecar one.
 - `crates/messaging/src/ghost.rs`: portal strand acquisition stayed. Its §10.1
   "earliest effective order" idempotency rule moved from an HLC comparison over a
   history read to the first match in an ascending scan of the Realm's own commit

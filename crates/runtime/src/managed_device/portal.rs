@@ -39,7 +39,7 @@ impl ManagedDeviceRuntime {
         let device = self.device_for_actor(actor).await?;
         let scope = &device.effective_scope;
         if scope.realm_id() != realm
-            || !matches!(scope, ScopeRef::Realm { .. } | ScopeRef::Circle { .. })
+            || !matches!(scope, ScopeRef::Realm { .. })
         {
             return Err(invalid(
                 "portal discovery requires this exact Realm Device scope",

@@ -8,22 +8,14 @@ fn terminal_parent_requires_one_exact_registered_scope_resource() {
         arkret_canonical::DigestSuite::Sha256,
         [61; 32],
     ));
-    let circle = |byte| {
-        arkret::CircleId::from_event_id(&arkret::EventId::from_digest(
-            arkret_canonical::DigestSuite::Sha256,
-            [byte; 32],
-        ))
-    };
-    let scope = ScopeRef::Circle {
-        realm_id: realm.clone(),
-        circle_id: circle(62),
-    };
+    let scope = ScopeRef::Realm { realm_id: realm.clone() };
+    let other = arkret::RealmId::from_event_id(&arkret::EventId::from_digest(arkret_canonical::DigestSuite::Sha256,[63;32]));
     let fixture: CapabilityGrant = serde_json::from_value(serde_json::json!({
         "id":arkret::GrantId::from_event_id(&arkret::EventId::from_digest(arkret_canonical::DigestSuite::Sha256,[64;32])),
         "schema":"ak.schema.capability.v1", "realm_id":realm,
         "issuer_id":ActorId::service("ak:did_core:web:applet.example".parse().unwrap()),
         "subject":ActorId::service("ak:did_core:web:applet.example".parse().unwrap()),
-        "actions":["ak.message.create"], "resources":[WireResourceSelector::circle(realm.clone(),circle(63))],
+        "actions":["ak.message.create"], "resources":[WireResourceSelector::realm(other.clone())],
         "constraints":[], "issued_at":"2026-10-21T01:00:00.000Z", "status":"active",
         "authority_depth":1,
         "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_generation":"0",
@@ -33,7 +25,7 @@ fn terminal_parent_requires_one_exact_registered_scope_resource() {
     })).unwrap();
     assert!(!parent_scope_candidate(&fixture, &scope));
     let mut grants = [fixture.clone(), fixture.clone()];
-    grants[1].resources = vec![WireResourceSelector::circle(realm.clone(), circle(62))];
+    grants[1].resources = vec![WireResourceSelector::realm(realm.clone())];
     assert!(std::ptr::eq(
         grants
             .iter()
@@ -54,7 +46,7 @@ fn terminal_parent_requires_one_exact_registered_scope_resource() {
         "the finite terminal-child profile requires a canonical scope, not object ancestry"
     );
     narrowed.resources = vec![WireResourceSelector::realm(realm.clone())];
-    assert!(!parent_scope_candidate(&narrowed, &scope));
+    assert!(parent_scope_candidate(&narrowed, &scope));
     narrowed.resources[0].match_scope = Some(arkret::ResourceMatchScope::RealmWide);
     assert!(!parent_scope_candidate(&narrowed, &scope));
     let realm_scope = ScopeRef::Realm {

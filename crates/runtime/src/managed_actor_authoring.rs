@@ -1152,10 +1152,10 @@ impl ManagedActorManagerService {
     ) -> Result<PreparedGhost> {
         if !matches!(
             scope,
-            arkret::ScopeRef::Realm { .. } | arkret::ScopeRef::Circle { .. }
+            arkret::ScopeRef::Realm { .. }
         ) {
             return Err(BridgeError::App(
-                "Ghost creation requires a Realm or Circle scope".into(),
+                "Ghost creation requires a Realm scope".into(),
             ));
         }
         let route = self.authoring.edge.realm_route(scope.realm_id()).await?;
@@ -1857,7 +1857,7 @@ mod ghost_bundle_tests {
     }
 
     #[test]
-    fn custody_is_partitioned_by_realm_applet_and_subject_not_governor_or_circle() {
+    fn custody_uses_realm_applet_and_subject_across_governor_changes() {
         let original = ghost_request();
         let original_key = managed_actor_subject_key(&original).unwrap();
         let mut moved = original.clone();
@@ -1866,10 +1866,6 @@ mod ghost_bundle_tests {
             unreachable!()
         };
         basis.target_station_id = core_id("did:webvh:znewstation:new.example");
-        basis.effective_scope = arkret::ScopeRef::Circle {
-            realm_id: realm_id(),
-            circle_id: arkret::CircleId::from_event_id(&event_id(66)),
-        };
         assert_eq!(original_key, managed_actor_subject_key(&moved).unwrap());
         let arkret::AppletManagedActorAuthoringBasis::ProvisionGhost(basis) = &mut moved.basis
         else {

@@ -33,7 +33,7 @@ struct ContentIntent<P> {
 }
 
 /// Candidate selection for the registered finite terminal-child profile.
-/// Its accepted parent has one exact Realm/Circle resource. This does not
+/// Its accepted parent has one exact Realm resource. This does not
 /// establish the immutable installation source association or business allow;
 /// the governing Station rechecks those against the accepted original parent.
 fn parent_scope_candidate(grant: &CapabilityGrant, scope: &ScopeRef) -> bool {
@@ -189,38 +189,9 @@ impl ManagedDeviceRuntime {
     /// Subject-only Realm membership still uses the existing join rules and
     /// management gate. An approval-required outcome remains pending at the host.
     pub async fn ensure_realm_membership(&self, device: &ManagedDevice) -> Result<()> {
-        if let ScopeRef::Circle {
-            realm_id,
-            circle_id,
-        } = &device.effective_scope
-        {
-            // A Circle-only Device cannot author a Realm membership write.
-            // Existing admission is established through the exact scoped
-            // current projection; this read never admits a new member.
-            let reader = self.open_reader(device).await?;
-            let response = reader.client().snapshot_head(realm_id).await?;
-            let snapshot =
-                garth::own_station_results::consume_own_station_device_snapshot(&response)
-                    .map_err(|e| invalid(e.to_string()))?;
-            let joined = snapshot.current_state_entries.iter().any(|row| {
-                let arkret::CurrentState::Value {
-                    selector, value, ..
-                } = row;
-                matches!(selector, arkret::CurrentSelector::CircleMemberState {
-                    circle_id: actual, member_actor_id,
-                } if actual == circle_id && member_actor_id == &device.actor_id)
-                    && serde_json::to_value(value).is_ok_and(|value| value["membership"] == "join")
-            });
-            return if joined {
-                Ok(())
-            } else {
-                Err(BridgeError::App(
-                    "Circle membership admission is not yet accepted".into(),
-                ))
-            };
-        }
+
         if !matches!(device.effective_scope, ScopeRef::Realm { .. }) {
-            return Err(invalid("managed membership requires a Realm or Circle"));
+            return Err(invalid("managed membership requires a Realm"));
         }
         // Membership belongs to the full Realm identity, not to the Device that
         // originally joined. Retained originals survive a manager/generation change.
@@ -279,87 +250,7 @@ impl ManagedDeviceRuntime {
         Ok(())
     }
 
-    /// Join the Circle with the subject's own Device, using the accepted
-    /// parent join as its exact dependency. Both installations and all
-    /// existing membership permissions remain independently required. Before
-    /// joining a parent scope different from the identity's creation scope,
-    /// retain that scope's actual SDK install response with
-    /// [`Self::remember_installation_outcome`]; no grant-list discovery fallback
-    /// can establish membership in an installation aggregate.
-    pub async fn join_circle_after_realm_join(
-        &self,
-        device: &ManagedDevice,
-        parent_device: &ManagedDevice,
-    ) -> Result<()> {
-        let ScopeRef::Circle {
-            realm_id,
-            circle_id,
-        } = &device.effective_scope
-        else {
-            return Err(invalid("Circle membership requires a Circle Device"));
-        };
-        if device.actor_id != parent_device.actor_id
-            || parent_device.effective_scope
-                != (ScopeRef::Realm {
-                    realm_id: realm_id.clone(),
-                })
-        {
-            return Err(invalid(
-                "Circle parent join belongs to another subject or Realm",
-            ));
-        }
-        self.ensure_realm_membership(parent_device).await?;
-        let (_, _, saved) = self
-            .publication(
-                &parent_device.actor_id,
-                &parent_device.effective_scope,
-                "realm-self-join",
-            )
-            .await?
-            .ok_or_else(|| invalid("accepted parent join is unavailable"))?;
-        if Self::accepted_publication(&saved)?.is_none() {
-            return Err(invalid("parent membership is not yet accepted"));
-        }
-        let Some(AuthoritySubmitResponseBody::Accepted { commit, .. }) = saved.outcome else {
-            return Err(invalid("parent membership has no accepted Commit"));
-        };
-        let revision = arkret::CurrentRevision {
-            commit_id: commit.commit_id,
-            stream_position: commit.stream_position,
-        };
-        let digest = canonical_sha256(&(&device.actor_id, &device.effective_scope, &revision))?;
-        if let Some(event) = self
-            .retained_device_publication(device, "circle-self-join", &digest)
-            .await?
-        {
-            self.submit_device_original(device, "circle-self-join", event)
-                .await?;
-            return Ok(());
-        }
-        let child = self
-            .terminal_child(device, arkret_wire::CapabilityActionId::CIRCLE_MEMBER_ADD)
-            .await?;
-        let body = serde_json::from_value(serde_json::json!({
-            "circle_id": circle_id, "member_id": device.actor_id,
-            "membership": "join", "parent_membership_revision": revision,
-        }))?;
-        let intent = TypedEventDraft::<event_spec::CircleMemberState>::new(
-            device.effective_scope.clone(),
-            device.actor_id.clone(),
-            body,
-        )?
-        .with_applet_id(arkret::AppletId::new(
-            self.edge.config().arkret.applet_id.clone(),
-        )?)
-        .with_authorization_ref(child.into())
-        .into_intent(Utc::now())?;
-        let event = self
-            .freeze_device_intent(device, "circle-self-join", &digest, intent)
-            .await?;
-        self.submit_device_original(device, "circle-self-join", event)
-            .await?;
-        Ok(())
-    }
+
 
     fn publication_key(actor: &ActorId, scope: &ScopeRef, operation: &str) -> Result<String> {
         Ok(format!(
@@ -772,9 +663,7 @@ impl ManagedDeviceRuntime {
             title,
             actor.clone(),
         );
-        if let ScopeRef::Circle { circle_id, .. } = scope {
-            object.scope_circle_id = Some(circle_id.clone());
-        }
+
         object.tracks.clear();
         object.tracks.insert(
             "discussion".into(),

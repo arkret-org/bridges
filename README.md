@@ -60,7 +60,7 @@ Cargo workspace,所有 crate 位于 `crates/`(文件夹名去掉 `arkret-bridge-
   同时参与 app→arkret 写侧署名。创建身份不授予消息权限，实际业务必须由有效的 Service parent／terminal child 和 Station 持续准入证明。
 - **提交与定序**:出站 Event 由桥自己 author + 签名,再提交给当前治理 Station;
   Station 返回 authority-signed `RealmCommit`,它才是该 Event 的唯一位置事实。
-  Realm、每个 Circle、每个 Sidecar 各有独立 commit stream,桥不合并、也不比较跨 stream 的位置。
+  Realm 与每个 Sidecar 各有独立 commit stream,桥不合并、也不比较跨 stream 的位置。
   桥侧持久层只保存冻结的签名字节与 accepted 后的 exact `CommittedEventRef`。
 - **消息内容**:使用 SDK `MessageCreatePayload` 与 `ContentBlock`；附件使用 SDK `EncryptedAttachment`，存储站只接收密文和最小加密分类。
 - **媒体**:`MessageContext::forward_external_media` 经 Realm Actor Device 加密上传；`Attachment` 中的本地明文由 native runtime 验证后提供；
@@ -202,15 +202,15 @@ requirement from the publication journal.
 
 Service 管理请求使用 SDK RFC9421 来源／目标签名，不申请 Applet session。`ManagedDeviceRuntime` 使用完整 Realm ActorId、accepted authorization Event、精确 scope 与独立 Device key。普通 AccountId 与 PCR 不用于 Applet Bot／Ghost 身份。
 
-已经接通独立身份创建、首 Device、成员加入、Service parent 与 terminal child、原生 Welcome／群状态／consume／ACK、stream 解密、加密消息与附件收发、精确重试及本地存储冷恢复。附件上传不授予消息发布或读取权；读取仍核验 accepted 消息来源及当前设备／安装／内容权限。纯文本消费者不会取得附件明文。Circle 首次上传已按正式裁决使用治理方验证的创建目标和不可变私有绑定，生产联合验证仍在进行。
+已经接通独立身份创建、首 Device、成员加入、Service parent 与 terminal child、原生 Welcome／群状态／consume／ACK、stream 解密、加密消息与附件收发、精确重试及本地存储冷恢复。附件上传不授予消息发布或读取权；读取仍核验 accepted 消息来源及当前设备／安装／内容权限。纯文本消费者不会取得附件明文。
 
-Circle 主体可用 `prepare_ghost_in_scope` 发起现有 authoring 流程；创建不自动加入父 Realm 或 Circle。`join_circle_after_realm_join` 使用主体本人已接受的父 Realm 加入 Commit，并由 Circle Device 原签 Circle 加入。两者分别需要现有安装、原签 Device 范围和原有加入授权；父 Realm 设备可只含 `ak.applet.join`，不必取得父 Realm 的上传或内容读取权限。没有获准的父加入来源时保持未就绪，不由管理员代写第三方 join。
+桥接主体在 Realm 中加入时，仍须提供现有安装、原签 Device 的范围和已接受的加入授权。
 
 创建 scope 内的本人 Realm join 使用原 accepted create 的 `creation_authorization_ref` 作为安装来源，不按业务 grant 排序猜测。公开的跨 scope 加入 API 要求调用者先以 `remember_installation_outcome(&scope, &outcome)` 登记该 scope 真实安装 HTTP 响应的 SDK `AppletInstallResponseBody`；没有此输入就保持未就绪。该记录只是本地候选来源，每次使用仍读取正式 authority/material、验证当前 scope／Service／Applet／epoch，最终由 Station 检查 exact installation；不能自行构造一个成功 outcome、复用另一 scope 的 grant 或把 `current_binding=active` 当作授权。现有 portal、消息与附件产品调用均使用 `device_for_actor` 的 creation scope，跨 scope API 不隐式启动额外产品工作流。
 
 此 runtime 的 Realm 消息与加密 portal 由主体 Device 原签。协议允许的 Service 自身写入仍须引用覆盖实际 action/resource 的有效安装授权，Service 签名本身不授予权限。完整 MLS 发起端 worker、主体控制轮换／恢复、持续授权与全部消费者仍需独立验收，不声明全部已登记 operation 的 runtime 已交付。
 
-设备撤销使用 `ManagedDeviceRuntime::revoke_device`，以稳定本地操作标识保存 controller 原签申请；重复标识不能改变目标或原因代码。申请的 Commit 只表示登记，必须由私有材料中的 `device_revoke` 结果确认 pending／accepted／rejected。`reconcile_device_revocations` 与 host worker 会冷续跑原申请及结果查询，pending 不删除密钥。若治理站已接受但本地未保存回执，先由管理 Service 读取已签结果及精确原件，核验后恢复，无须重发控制签名申请。永久 accepted 后，已收取的队列工作完成才通过 `erase_revoked_device` 删除设备私钥、MLS 私态和附件私有检查点；保留公开授权原件、最终材料和退役标记，原设备创建操作不能自动换钥重建。拒绝与未知结果不视为永久撤销。Realm／Circle 真实 HTTPS 与 PostgreSQL 联合测试已覆盖丢回执冷恢复、pending 保留密钥、生产终态任务、清理和防重建；其它生命周期与完整 operation 验收仍在进行。
+设备撤销使用 `ManagedDeviceRuntime::revoke_device`，以稳定本地操作标识保存 controller 原签申请；重复标识不能改变目标或原因代码。申请的 Commit 只表示登记，必须由私有材料中的 `device_revoke` 结果确认 pending／accepted／rejected。`reconcile_device_revocations` 与 host worker 会冷续跑原申请及结果查询，pending 不删除密钥。若治理站已接受但本地未保存回执，先由管理 Service 读取已签结果及精确原件，核验后恢复，无须重发控制签名申请。永久 accepted 后，已收取的队列工作完成才通过 `erase_revoked_device` 删除设备私钥、MLS 私态和附件私有检查点；保留公开授权原件、最终材料和退役标记，原设备创建操作不能自动换钥重建。拒绝与未知结果不视为永久撤销。此前真实 HTTPS 与 PostgreSQL 联合测试已覆盖丢回执冷恢复、pending 保留密钥、生产终态任务、清理和防重建；其它生命周期与完整 operation 验收仍在进行。
 
 Managed Principal custody and the canonical Bot/Ghost author operation live in
 `arkret-bridge-runtime` behind `managed-authoring`.
@@ -261,7 +261,7 @@ history installation obligation.
 `actions` 为非空 capability 列表，`lifetime_seconds` 为正数有限时长。默认关闭。
 共享 runtime 在验证原创建 completion 后，先于请求保存加密 Device／HPKE 私钥与
 Principal 原签授权；后台重试与重启沿用同一原件、exact 创建 scope 和期限。
-Device接纳不授予业务权，也不自动加入Realm／Circle。显式device.mls启用独立Welcome worker；消息stream、附件与回复由同一原生设备 runtime 分别核验和处理。
+Device接纳不授予业务权，也不自动加入 Realm。显式device.mls启用独立Welcome worker；消息stream、附件与回复由同一原生设备 runtime 分别核验和处理。
 
 启用 MLS 消息／portal 发布的 host 还须在 Controller 原签的相同 exact scope 中显式配置
 `ak.self.keys.backups.resource.replace.v1`、`ak.self.keys.backups.read.list.v1`、

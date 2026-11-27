@@ -252,15 +252,12 @@ fn same_scope_source_ignores_a_business_parent_that_sorts_first() {
 }
 
 #[test]
-fn another_scope_requires_the_exact_typed_install_outcome() {
+fn installation_hint_is_bound_to_the_actors_realm_and_registration() {
     let (mut hint, _) = fixture();
-    let creation_scope = ScopeRef::Circle {
-        realm_id: hint.effective_scope.realm_id().clone(),
-        circle_id: arkret::CircleId::from_event_id(&arkret::EventId::from_digest(
+    let creation_scope = ScopeRef::Realm { realm_id: arkret::RealmId::from_event_id(&arkret::EventId::from_digest(
             arkret_canonical::DigestSuite::Sha256,
             [51; 32],
-        )),
-    };
+        )) };
     let source = hint.outcome.capability_grant_refs[0].clone();
     let applet = hint.outcome.applet_id.clone();
     assert!(
@@ -273,14 +270,9 @@ fn another_scope_requires_the_exact_typed_install_outcome() {
         )
         .is_err()
     );
-    let (request, registration) = source_request(
-        applet.as_str(),
-        &hint.effective_scope,
-        &creation_scope,
-        Some(&source),
-        Some(&hint),
-    )
-    .unwrap();
+    assert!(source_request(applet.as_str(), &hint.effective_scope, &creation_scope, Some(&source), Some(&hint)).is_err());
+    let scope = hint.effective_scope.clone();
+    let (request, registration) = source_request(applet.as_str(), &scope, &scope, Some(&source), Some(&hint)).unwrap();
     assert_eq!(request.grant_ids, hint.outcome.capability_grant_refs);
     assert_eq!(
         registration,
@@ -289,13 +281,12 @@ fn another_scope_requires_the_exact_typed_install_outcome() {
             hint.outcome.registration_epoch.clone()
         ))
     );
-    let scope = hint.effective_scope.clone();
-    hint.effective_scope = creation_scope.clone();
+    hint.effective_scope = creation_scope;
     assert!(
         source_request(
             applet.as_str(),
             &scope,
-            &creation_scope,
+            &scope,
             Some(&source),
             Some(&hint)
         )
@@ -307,7 +298,7 @@ fn another_scope_requires_the_exact_typed_install_outcome() {
         source_request(
             applet.as_str(),
             &scope,
-            &creation_scope,
+            &scope,
             Some(&source),
             Some(&hint)
         )
