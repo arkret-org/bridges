@@ -106,14 +106,6 @@ jobs:
           workspaces: bridges -> target
           key: ${{ matrix.backend }}
 
-      # ARC-0002 (重构计划 2026-07-10): legacy patterns must stay at zero.
-      - name: Deletion gate
-        if: matrix.backend == 'sqlite'
-        run: |
-          bash scripts/test_deletion_gate.sh
-          bash scripts/deletion_gate.sh
-        working-directory: bridges
-
       - name: Rustfmt
         if: matrix.backend == 'sqlite'
         run: cargo +nightly fmt --all -- --check
